@@ -462,11 +462,6 @@ async fn main() -> anyhow::Result<()> {
         !config.analytics_enabled,
     )?);
 
-    // Non-blocking update check — runs in background, prints banner if outdated
-    tokio::spawn(async {
-        screenpipe_engine::cli_reminder::check_for_updates().await;
-    });
-
     // Periodic terminal nudge to install the desktop app (CLI-only).
     screenpipe_engine::cli_reminder::spawn();
 

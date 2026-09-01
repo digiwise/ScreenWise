@@ -83,6 +83,10 @@ The source and deployed DLLs verified on this machine are both 51,117,073 bytes 
 
 No product functionality, dependencies, or `CONTRIBUTING.md` were modified as part of this documentation pass.
 
+## Local-first hardening
+
+- The standalone CLI no longer queries the NPM registry at startup or during its periodic terminal reminder rotation. Updating is now an explicit user/package-management action; `SCREENPIPE_NO_UPDATE_CHECK` is obsolete.
+
 ## Functional baseline fixes and verification (2026-09-01)
 
 - Root cause of the transcription panic: the locked `ort 2.0.0-rc.10` expects ONNX Runtime 1.22.x. `screenpipe-audio/build.rs` had already downloaded the correct Microsoft CPU package to `apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.22.0`, but bare Cargo builds did not stage its DLL beside `screenpipe.exe`. Windows consequently loaded `C:\Windows\System32\onnxruntime.dll` 1.17.1. The build script now copies the pinned runtime DLL into the active Cargo profile directory. This preserves `Cargo.lock` and dependency versions.

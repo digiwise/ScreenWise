@@ -35,7 +35,7 @@ This inventory distinguishes observed baseline startup behavior from optional co
 
 | Action / destination | Code path and trigger | Runtime need | Control / setup assessment |
 | --- | --- | --- | --- |
-| NPM version query: `https://registry.npmjs.org/screenpipe/latest` | `screenpipe-engine/src/cli_reminder.rs`; automatic CLI startup update check. Observed: version 0.4.41 banner. | Not required. | `SCREENPIPE_NO_UPDATE_CHECK` disables it. Move to explicit setup/remove in first hardening tranche. |
+| NPM version query: `https://registry.npmjs.org/screenpipe/latest` | The baseline automatic CLI startup check was removed after this audit. | Not required. | No version request is made during CLI startup or reminder rotation. Updates are an explicit user/package-management action. |
 | FFmpeg version/download: ffmpeg-sidecar latest check, then `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` | `screenpipe-core/src/ffmpeg.rs`; triggered only when no usable FFmpeg/FFprobe pair is found. Observed failed attempts before the WinGet install was added to `PATH`. | One-time tool acquisition only. | Preinstall and expose FFmpeg on `PATH`; current automatic attempt should become explicit setup. |
 | ONNX Runtime: `https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-*-1.22.0.zip` | `screenpipe-audio/build.rs`; build-time when the pinned runtime package is absent. | Build/setup only; not needed after packaging. | Cache/package the pinned DLL; `CARGO_NET_OFFLINE`, `SCREENPIPE_SKIP_ONNX_DOWNLOAD`, or `ORT_SKIP_DOWNLOAD` suppresses download. |
 | Speaker models: raw GitHub URLs under `screenpipe/screenpipe/.../segmentation-3.0.onnx` and `wespeaker_en_voxceleb_CAM++.onnx` | `screenpipe-audio/src/speaker/models.rs`; missing diarization model cache. Models were already cached in the successful run. | One-time model acquisition. | Pre-stage during explicit setup. Current URLs point at a moving upstream branch and need provenance-safe replacement. |
@@ -45,7 +45,7 @@ This inventory distinguishes observed baseline startup behavior from optional co
 | Screenpipe cloud/API, sync, external model providers and integrations | Cloud proxy/workflow classifier/sync/connections/Deepgram and related optional routes. | Not required for the tested local recorder. | Not triggered with sync off, local Parakeet, and no connection actions. Remove or compile out after the baseline milestone. |
 | mDNS multicast | Server discovery path; only when `--enable-mdns`/environment opt-in is set. | Not required. | Off by default; observed skipped for loopback-only server. |
 
-With FFmpeg and all pinned models pre-staged, update checks disabled, telemetry disabled, sync off, and local transcription selected, the recorder's capture/search path can operate locally. A later network-deny soak test should confirm this at the OS firewall layer after surprise automatic paths are removed.
+With FFmpeg and all pinned models pre-staged, telemetry disabled, sync off, and local transcription selected, the recorder's capture/search path can operate locally. The automatic CLI NPM update check has been removed. A later network-deny soak test should confirm this at the OS firewall layer after the remaining surprise automatic paths are removed.
 
 ## Recommended first removal/hardening tranche
 
