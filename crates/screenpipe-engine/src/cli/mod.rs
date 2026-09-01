@@ -955,7 +955,8 @@ impl RecordArgs {
             prioritize_input_latency: self.prioritize_input_latency,
             extraction_thread_priority: self.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: self.pause_extraction_on_input_ms,
-            analytics_enabled: !self.disable_telemetry,
+            // Retain the CLI flag for compatibility, but never initialize telemetry.
+            analytics_enabled: false,
             ignore_incognito_windows: true,
             pause_on_drm_content: self.pause_on_drm_content,
             disable_clipboard_capture: self.disable_clipboard_capture,

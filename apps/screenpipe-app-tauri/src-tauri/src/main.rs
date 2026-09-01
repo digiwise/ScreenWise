@@ -473,35 +473,8 @@ async fn main() {
         }
     }
 
-    // Check if telemetry is disabled via store setting (analyticsEnabled) or offline mode
-    let store_path = screenpipe_core::paths::default_screenpipe_data_dir().join("store.bin");
-    let store_json = std::fs::read(&store_path).ok().and_then(|data| {
-        if data.len() >= 8 && &data[..8] == b"SPSTORE1" {
-            // Encrypted store — try to decrypt with keychain key
-            // Only attempt if encryption is enabled (file being encrypted is the signal)
-            let key = match secrets::get_key_if_encryption_enabled() {
-                secrets::KeyResult::Found(k) => k,
-                _ => return None,
-            };
-            let plain = screenpipe_vault::crypto::decrypt_small(&data[8..], &key).ok()?;
-            serde_json::from_slice::<serde_json::Value>(&plain).ok()
-        } else {
-            serde_json::from_slice::<serde_json::Value>(&data).ok()
-        }
-    });
-    // Helper: look up a bool key in the store JSON (check both top-level and nested "settings")
-    let store_bool = |key: &str| -> Option<bool> {
-        store_json.as_ref().and_then(|data| {
-            data.get(key).and_then(|v| v.as_bool()).or_else(|| {
-                data.get("settings")
-                    .and_then(|s| s.get(key))
-                    .and_then(|v| v.as_bool())
-            })
-        })
-    };
-    let telemetry_disabled = store_bool("analyticsEnabled")
-        .map(|enabled| !enabled)
-        .unwrap_or(false);
+    // ScreenWise never initializes remote analytics or crash reporting.
+    let telemetry_disabled = true;
     let _posthog_disabled = telemetry_disabled;
 
     let app_version = env!("CARGO_PKG_VERSION");
@@ -1647,7 +1620,7 @@ async fn main() {
                 });
             }
 
-            let is_analytics_enabled = store.recording.analytics_enabled;
+            let is_analytics_enabled = false;
 
             let is_autostart_enabled = store
                 .auto_start_enabled;

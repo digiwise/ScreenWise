@@ -306,7 +306,8 @@ impl RecordingConfig {
             user_name: settings.user_name.clone(),
             video_quality: settings.video_quality.clone(),
             use_chinese_mirror: settings.use_chinese_mirror,
-            analytics_enabled: settings.analytics_enabled,
+            // ScreenWise is local-only: telemetry cannot be enabled from persisted settings.
+            analytics_enabled: false,
             analytics_id: settings.analytics_id.clone(),
             vocabulary: settings
                 .vocabulary
