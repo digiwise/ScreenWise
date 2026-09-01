@@ -6,15 +6,12 @@ use anyhow;
 use dirs;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use vad_rs::{Vad, VadStatus};
 
 use crate::vad::FRAME_HISTORY;
 
-use super::{
-    VadEngine, DOWNLOADING, MODEL_PATH, SILENCE_THRESHOLD, SPEECH_FRAME_THRESHOLD, SPEECH_THRESHOLD,
-};
+use super::{VadEngine, MODEL_PATH, SILENCE_THRESHOLD, SPEECH_FRAME_THRESHOLD, SPEECH_THRESHOLD};
 
 pub struct SileroVad {
     vad: Vad,
@@ -24,37 +21,14 @@ pub struct SileroVad {
 }
 
 impl SileroVad {
-    /// Pre-download the model file without initializing the VAD engine.
-    /// Non-blocking: kicks off the download and returns immediately with an
-    /// error if it isn't ready yet. Uses an atomic flag to prevent duplicate
-    /// downloads. Intended for the production audio loop, which retries on
-    /// every frame anyway.
+    /// Check that the explicitly provisioned model is available.
     pub async fn ensure_model_downloaded() -> anyhow::Result<PathBuf> {
         Self::get_or_download_model().await
     }
 
-    /// Wait until the model is available on disk, downloading if necessary.
-    /// Unlike `ensure_model_downloaded`, this blocks until the file is ready
-    /// — safe to call from parallel tests or anywhere that needs the model
-    /// synchronously. Polls every 200ms while a download is in flight.
+    /// Check that the explicitly provisioned model is available.
     pub async fn ensure_model_available() -> anyhow::Result<PathBuf> {
-        loop {
-            match Self::get_or_download_model().await {
-                Ok(path) => return Ok(path),
-                Err(e) => {
-                    let msg = e.to_string();
-                    // These two errors mean "a download is in flight, come
-                    // back later". Any other error is fatal.
-                    if msg.contains("download already in progress")
-                        || msg.contains("not available yet")
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
+        Self::get_or_download_model().await
     }
 
     pub async fn new() -> anyhow::Result<Self> {
@@ -85,13 +59,6 @@ impl SileroVad {
         let cache_dir = Self::get_cache_dir()?;
         // Use v5 model filename to differentiate from old cached model
         let path = cache_dir.join("silero_vad_v5.onnx");
-        let tmp_path = cache_dir.join("silero_vad_v5.onnx.downloading");
-
-        // Clean up incomplete downloads from previous interrupted runs
-        if tmp_path.exists() {
-            debug!("removing incomplete silero vad download: {:?}", tmp_path);
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-        }
 
         if path.exists() {
             let mut cached = MODEL_PATH.lock().await;
@@ -99,56 +66,10 @@ impl SileroVad {
             return Ok(path);
         }
 
-        if DOWNLOADING
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err(anyhow::anyhow!(
-                "silero vad model download already in progress"
-            ));
-        }
-
-        tokio::spawn(async move {
-            if let Err(e) = Self::download_model().await {
-                warn!("error downloading silero vad model: {}", e);
-            }
-            DOWNLOADING.store(false, Ordering::SeqCst);
-        });
-
         Err(anyhow::anyhow!(
-            "silero vad model not available yet; download started in background"
+            "required local Silero VAD model is missing at {}; provision silero_vad_v5.onnx with SHA-256 1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3 before starting screenpipe",
+            path.display()
         ))
-    }
-
-    async fn download_model() -> anyhow::Result<()> {
-        info!("downloading Silero VAD v5 model...");
-        // Silero VAD v5: 3x faster, 6000+ languages, better accuracy
-        // https://github.com/snakers4/silero-vad/discussions/471
-        let url =
-            "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx";
-        let response = reqwest::get(url).await?;
-        let model_data = response.bytes().await?;
-
-        let cache_dir = Self::get_cache_dir()?;
-        tokio::fs::create_dir_all(&cache_dir).await?;
-
-        // Atomic write: download to temp file, then rename.
-        // If process is killed mid-write, the temp file is cleaned up on next launch.
-        let tmp_path = cache_dir.join("silero_vad_v5.onnx.downloading");
-        let final_path = cache_dir.join("silero_vad_v5.onnx");
-
-        let mut file = tokio::fs::File::create(&tmp_path).await?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &model_data).await?;
-        tokio::io::AsyncWriteExt::flush(&mut file).await?;
-        drop(file);
-
-        tokio::fs::rename(&tmp_path, &final_path).await?;
-        info!(
-            "Silero VAD v5 model downloaded and saved to: {:?}",
-            final_path
-        );
-
-        Ok(())
     }
 
     fn get_cache_dir() -> anyhow::Result<PathBuf> {

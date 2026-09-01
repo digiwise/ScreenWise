@@ -5,11 +5,9 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::models::ModelDownloader;
 use crate::speaker::create_session;
 
 const MAX_RECOVERY_RETRIES: u8 = 1;
@@ -22,9 +20,6 @@ pub struct LoadedModel {
 
 static SEGMENTATION_MODEL_PATH: Mutex<Option<PathBuf>> = Mutex::const_new(None);
 static EMBEDDING_MODEL_PATH: Mutex<Option<PathBuf>> = Mutex::const_new(None);
-
-static SEGMENTATION_DOWNLOADING: AtomicBool = AtomicBool::new(false);
-static EMBEDDING_DOWNLOADING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy)]
 pub enum PyannoteModel {
@@ -42,7 +37,7 @@ async fn get_or_download_model_with_retries(
 ) -> Result<LoadedModel> {
     let mut retry_count = 0;
     loop {
-        let (url, filename, model_path_lock, downloading_flag) = model_state(model_type);
+        let (filename, expected_sha256, model_path_lock) = model_state(model_type);
         let cache_dir = get_cache_dir()?;
 
         {
@@ -50,7 +45,7 @@ async fn get_or_download_model_with_retries(
             if let Some(path) = cached.as_ref() {
                 if !path.exists() {
                     warn!(
-                        "cached {} model at {:?} no longer exists on disk, redownloading",
+                        "cached {} model at {:?} no longer exists on disk",
                         filename, path
                     );
                     *cached = None;
@@ -58,14 +53,19 @@ async fn get_or_download_model_with_retries(
             }
         }
 
-        let downloader = ModelDownloader::new(
-            url.to_string(),
-            filename.to_string(),
-            cache_dir,
-            downloading_flag,
-            model_path_lock,
-        );
-        let path = downloader.ensure_model_available().await?;
+        let path = cache_dir.join(filename);
+        if !path.is_file() {
+            return Err(anyhow!(
+                "required local model {} is missing at {}; provision the MIT-baseline artifact with SHA-256 {} before starting screenpipe",
+                filename,
+                path.display(),
+                expected_sha256
+            ));
+        }
+        {
+            let mut cached = model_path_lock.lock().await;
+            *cached = Some(path.clone());
+        }
 
         match create_session(&path) {
             Ok(session) => return Ok(LoadedModel { path, session }),
@@ -84,30 +84,23 @@ async fn get_or_download_model_with_retries(
 
 fn model_state(
     model_type: PyannoteModel,
-) -> (
-    &'static str,
-    &'static str,
-    &'static Mutex<Option<PathBuf>>,
-    &'static AtomicBool,
-) {
+) -> (&'static str, &'static str, &'static Mutex<Option<PathBuf>>) {
     match model_type {
         PyannoteModel::Segmentation => (
-            "https://github.com/screenpipe/screenpipe/raw/refs/heads/main/crates/screenpipe-audio/models/pyannote/segmentation-3.0.onnx",
             "segmentation-3.0.onnx",
+            "B78FC48113BB46FD247AE6A9AEA737079550C647638DB961DF7E0E1E9F4BA62E",
             &SEGMENTATION_MODEL_PATH,
-            &SEGMENTATION_DOWNLOADING,
         ),
         PyannoteModel::Embedding => (
-            "https://github.com/screenpipe/screenpipe/raw/refs/heads/main/crates/screenpipe-audio/models/pyannote/wespeaker_en_voxceleb_CAM++.onnx",
             "wespeaker_en_voxceleb_CAM++.onnx",
+            "C46FAD10B5F81E1AA4A60C162714208577093655076C5450F8C469E522EC54EF",
             &EMBEDDING_MODEL_PATH,
-            &EMBEDDING_DOWNLOADING,
         ),
     }
 }
 
 async fn clear_model_cache(model_type: PyannoteModel, model_path: &Path) -> Result<()> {
-    let (_, _, model_path_lock, _) = model_state(model_type);
+    let (_, _, model_path_lock) = model_state(model_type);
     let _ = tokio::fs::remove_file(model_path).await;
     let mut cached = model_path_lock.lock().await;
     *cached = None;
@@ -159,13 +152,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_state_uses_expected_paths() {
-        let (seg_url, seg_filename, ..) = model_state(PyannoteModel::Segmentation);
-        let (emb_url, emb_filename, ..) = model_state(PyannoteModel::Embedding);
+    async fn model_state_uses_expected_artifacts() {
+        let (seg_filename, seg_sha256, ..) = model_state(PyannoteModel::Segmentation);
+        let (emb_filename, emb_sha256, ..) = model_state(PyannoteModel::Embedding);
 
         assert_eq!(seg_filename, "segmentation-3.0.onnx");
         assert_eq!(emb_filename, "wespeaker_en_voxceleb_CAM++.onnx");
-        assert!(seg_url.contains("segmentation-3.0.onnx"));
-        assert!(emb_url.contains("wespeaker_en_voxceleb_CAM++.onnx"));
+        assert_eq!(seg_sha256.len(), 64);
+        assert_eq!(emb_sha256.len(), 64);
     }
 }

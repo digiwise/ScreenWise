@@ -8,7 +8,7 @@ pub mod webrtc;
 use anyhow;
 use silero::SileroVad;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::Mutex;
 use vad_rs::VadStatus;
 use webrtc::WebRtcVad;
@@ -70,8 +70,6 @@ const SILENCE_THRESHOLD: f32 = 0.35;
 const SPEECH_FRAME_THRESHOLD: usize = 3; // Minimum number of frames above SPEECH_THRESHOLD to consider as speech
 
 static MODEL_PATH: Mutex<Option<PathBuf>> = Mutex::const_new(None);
-
-static DOWNLOADING: AtomicBool = AtomicBool::new(false);
 
 pub async fn create_vad_engine(engine: VadEngineEnum) -> anyhow::Result<Box<dyn VadEngine>> {
     match engine {
