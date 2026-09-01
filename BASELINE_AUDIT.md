@@ -1,0 +1,52 @@
+# Windows functional and network baseline
+
+Provenance baseline: upstream Screenpipe `892199f742e46d0c5d9e8c06687b35ca7c2b6547` (MIT). No Litepipe code was used for the fixes or audit recorded here. Litepipe remains fixed at reference commit `8969c10723634640ad2e757b8281dca8b0272c2f`.
+
+## Functional audit (2026-09-01)
+
+The release binary was built with `cargo build --release --locked` and exercised on Windows 11 with a fresh, repository-local data directory and API auth enabled.
+
+| Subsystem | Result | Evidence |
+| --- | --- | --- |
+| Screen capture | Pass | WGC started and JPEG snapshots plus frame rows were produced. |
+| Multi-monitor | Pass | Three displays (2560x1600, 1920x1080, 1920x1080) were discovered, captured, and reported healthy. |
+| Windows accessibility/UIA | Pass | Native hooks and UIA worker started; populated trees were captured from Teams and ChatGPT. |
+| OCR | Pass | Windows OCR ran with `en-GB`; search returned captured frame text. |
+| Database creation/writes | Pass | Fresh `db.sqlite`, WAL and SHM files were created; frame and UI-event writes were observed. |
+| Local HTTP API/search | Pass | `/health` returned 200. Authenticated `/search` returned captured content. |
+| Local API authentication | Pass | `auth token --data-dir <recorder-dir>` retrieved the persisted `sp-...` key; bearer search returned 200 and an unauthenticated identical request returned 403. The key is local API protection, not an LLM provider credential. |
+| Audio capture | Pass | Default microphone and loopback output were active and AAC/MP4 chunks were written through FFmpeg. |
+| Transcription | Pass | Parakeet CPU model loaded successfully; authenticated audio search returned local live transcript rows. No ONNX compatibility panic occurred. |
+| Diarization/meeting audio | Pass (smoke) | Segmentation and WeSpeaker sessions initialized, a Teams meeting was detected, and meeting transcript rows were emitted. Speaker-label quality was not benchmarked. |
+| Input/clipboard | Pass (presence) | Native keyboard/mouse hooks ran; health reported UI recorder active, clipboard capture enabled, and UI-event rows inserted. Clipboard contents were not deliberately generated for this privacy-sensitive smoke test. |
+| Pause/resume | Partially audited | Schedule and DRM pause state were reported through health, but an interactive pause/resume cycle was not exercised. |
+| Shutdown | Pass | Ctrl+C stopped audio, UIA, vision, meeting detection, and completed shutdown cleanly. |
+| Restart | Pass | The same smoke data directory had already survived two failed prerequisite launches, then initialized normally; the persisted API key remained retrievable. A second full post-capture restart is still worth a longer soak test. |
+
+Default locations are `%LOCALAPPDATA%\screenpipe` for shared audio models/VAD cache and `%USERPROFILE%\.screenpipe` for the default recorder data directory. `--data-dir` moves the recorder database, media, logs, pipes, and local secret store to the selected directory. The smoke evidence directories are intentionally untracked because they contain captured private data and generated binaries/media.
+
+## ONNX Runtime finding
+
+The locked Rust graph uses `ort`/`ort-sys` `2.0.0-rc.10`, which validates ONNX Runtime `1.22.x`. The audio build script correctly acquired Microsoft's CPU-only `onnxruntime-win-x64-1.22.0`, but did not copy its DLL beside a bare Cargo-built CLI executable. Windows then found `C:\Windows\System32\onnxruntime.dll` version 1.17.1. The build now stages the acquired 1.22 DLL into the Cargo profile directory, where application-directory DLL search precedence makes runtime selection deterministic. No dependency or lockfile change was required.
+
+## Outbound network inventory
+
+This inventory distinguishes observed baseline startup behavior from optional code paths. Telemetry was disabled for the smoke run.
+
+| Action / destination | Code path and trigger | Runtime need | Control / setup assessment |
+| --- | --- | --- | --- |
+| NPM version query: `https://registry.npmjs.org/screenpipe/latest` | `screenpipe-engine/src/cli_reminder.rs`; automatic CLI startup update check. Observed: version 0.4.41 banner. | Not required. | `SCREENPIPE_NO_UPDATE_CHECK` disables it. Move to explicit setup/remove in first hardening tranche. |
+| FFmpeg version/download: ffmpeg-sidecar latest check, then `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` | `screenpipe-core/src/ffmpeg.rs`; triggered only when no usable FFmpeg/FFprobe pair is found. Observed failed attempts before the WinGet install was added to `PATH`. | One-time tool acquisition only. | Preinstall and expose FFmpeg on `PATH`; current automatic attempt should become explicit setup. |
+| ONNX Runtime: `https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-*-1.22.0.zip` | `screenpipe-audio/build.rs`; build-time when the pinned runtime package is absent. | Build/setup only; not needed after packaging. | Cache/package the pinned DLL; `CARGO_NET_OFFLINE`, `SCREENPIPE_SKIP_ONNX_DOWNLOAD`, or `ORT_SKIP_DOWNLOAD` suppresses download. |
+| Speaker models: raw GitHub URLs under `screenpipe/screenpipe/.../segmentation-3.0.onnx` and `wespeaker_en_voxceleb_CAM++.onnx` | `screenpipe-audio/src/speaker/models.rs`; missing diarization model cache. Models were already cached in the successful run. | One-time model acquisition. | Pre-stage during explicit setup. Current URLs point at a moving upstream branch and need provenance-safe replacement. |
+| Silero VAD v5: `https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx` | `screenpipe-audio/src/vad/silero.rs`; missing VAD cache. Cached model was used in the successful run. | One-time model acquisition. | Pre-stage and checksum in explicit setup; moving `master` URL should be pinned. |
+| Parakeet: Hugging Face repo `istupakov/parakeet-tdt-0.6b-v3-onnx` through `audiopipe`/`hf-hub` | transcription model initialization/cache refresh. Successful run loaded the cached model. | One-time model acquisition. | Pre-stage/cache during setup; runtime code first attempts cache-only and background acquisition when unavailable. |
+| PostHog `https://us.i.posthog.com` and Sentry ingest | `analytics.rs`, `resource_monitor.rs`, and engine startup crash reporting. | Not required. | `--disable-telemetry` prevented PostHog transmission in logs. Removal, including Sentry initialization audit, belongs in the first hardening tranche. |
+| Screenpipe cloud/API, sync, external model providers and integrations | Cloud proxy/workflow classifier/sync/connections/Deepgram and related optional routes. | Not required for the tested local recorder. | Not triggered with sync off, local Parakeet, and no connection actions. Remove or compile out after the baseline milestone. |
+| mDNS multicast | Server discovery path; only when `--enable-mdns`/environment opt-in is set. | Not required. | Off by default; observed skipped for loopback-only server. |
+
+With FFmpeg and all pinned models pre-staged, update checks disabled, telemetry disabled, sync off, and local transcription selected, the recorder's capture/search path can operate locally. A later network-deny soak test should confirm this at the OS firewall layer after surprise automatic paths are removed.
+
+## Recommended first removal/hardening tranche
+
+Keep it small: disable/remove the automatic CLI update check and automatic FFmpeg download, replace moving model URLs with explicit pinned setup artifacts and checksums, then remove telemetry/crash-reporting initialization. Build and smoke-test after each change. Cloud sync, external AI gateway, accounts and pipes should follow as separate commits because their reach is broader.

@@ -82,3 +82,13 @@ The source and deployed DLLs verified on this machine are both 51,117,073 bytes 
 - `Cargo.lock` has no diff relative to upstream commit `892199f` or the current `HEAD`.
 
 No product functionality, dependencies, or `CONTRIBUTING.md` were modified as part of this documentation pass.
+
+## Functional baseline fixes and verification (2026-09-01)
+
+- Root cause of the transcription panic: the locked `ort 2.0.0-rc.10` expects ONNX Runtime 1.22.x. `screenpipe-audio/build.rs` had already downloaded the correct Microsoft CPU package to `apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.22.0`, but bare Cargo builds did not stage its DLL beside `screenpipe.exe`. Windows consequently loaded `C:\Windows\System32\onnxruntime.dll` 1.17.1. The build script now copies the pinned runtime DLL into the active Cargo profile directory. This preserves `Cargo.lock` and dependency versions.
+- The earlier untracked `crates\screenpipe-audio\onnxruntime-win-x64-1.22.0.zip` was the build script's temporary download artifact. It is not required after extraction, does not belong in source control, and was absent when this pass began. The extracted package is already ignored. Future work should download into a target/cache location and clean the archive after extraction.
+- `screenpipe auth token` previously searched only the default data directory, while `record --data-dir ...` persisted the server key in the selected directory. `screenpipe auth token --data-dir <same-dir>` now resolves the matching secret store. In the smoke run, unauthenticated `/search` returned 403 and the same request with that token returned 200.
+- The CLI's retention self-request was also receiving 403 after authenticated-localhost behavior was enabled. It now attaches the already resolved local bearer key; this is an internal consistency fix, not a security relaxation.
+- `cargo build --release --locked` completed successfully in 14m 24s. The only warnings remained the existing `unused_mut` in `screenpipe-audio` and unused Windows `CommandExt` import in `screenpipe-engine`. `Cargo.lock` remained unchanged.
+- Live verification used a fresh custom data directory, API authentication, telemetry disabled, local Parakeet, two audio devices, and all three monitors. The Parakeet model loaded successfully, authenticated audio search returned real transcript rows, and no `PANIC`, `panicked`, ONNX mismatch, or transcription error appeared in the run log. Ctrl+C completed a clean shutdown.
+- Full subsystem and outbound-network evidence is recorded in `BASELINE_AUDIT.md`. `CONTRIBUTING.md` remains intentionally unchanged.
