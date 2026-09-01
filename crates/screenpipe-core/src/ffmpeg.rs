@@ -1,10 +1,5 @@
-use ffmpeg_sidecar::{
-    command::ffmpeg_is_installed,
-    download::{check_latest_version, download_ffmpeg_package, ffmpeg_download_url, unpack_ffmpeg},
-    paths::sidecar_dir,
-    version::ffmpeg_version,
-};
-use log::{debug, error, info};
+use ffmpeg_sidecar::paths::sidecar_dir;
+use log::{debug, error};
 use once_cell::sync::Lazy;
 use std::path::PathBuf;
 use which::which;
@@ -90,12 +85,12 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_folder) = exe_path.parent() {
                 let bundled = exe_folder.join(EXECUTABLE_NAME);
-                if bundled.exists() {
+                if bundled.exists() && has_matching_ffprobe(&bundled) {
                     debug!("Found bundled ffmpeg next to executable: {:?}", bundled);
                     return Some(bundled);
                 }
                 let in_resources = exe_folder.join("../Resources").join(EXECUTABLE_NAME);
-                if in_resources.exists() {
+                if in_resources.exists() && has_matching_ffprobe(&in_resources) {
                     debug!("Found bundled ffmpeg in Resources: {:?}", in_resources);
                     return Some(in_resources);
                 }
@@ -110,7 +105,7 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
             if let Some(exe_folder) = exe_path.parent() {
                 debug!("Executable folder: {:?}", exe_folder);
                 let ffmpeg_in_exe_folder = exe_folder.join(EXECUTABLE_NAME);
-                if ffmpeg_in_exe_folder.exists() {
+                if ffmpeg_in_exe_folder.exists() && has_matching_ffprobe(&ffmpeg_in_exe_folder) {
                     debug!(
                         "Found ffmpeg in executable folder: {:?}",
                         ffmpeg_in_exe_folder
@@ -122,7 +117,7 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
                 let lib_folder = exe_folder.join("lib");
                 debug!("Lib folder: {:?}", lib_folder);
                 let ffmpeg_in_lib = lib_folder.join(EXECUTABLE_NAME);
-                if ffmpeg_in_lib.exists() {
+                if ffmpeg_in_lib.exists() && has_matching_ffprobe(&ffmpeg_in_lib) {
                     debug!("Found ffmpeg in lib folder: {:?}", ffmpeg_in_lib);
                     return Some(ffmpeg_in_lib);
                 }
@@ -179,7 +174,8 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         debug!("Current working directory: {:?}", cwd);
         let ffmpeg_in_cwd = cwd.join(EXECUTABLE_NAME);
-        if ffmpeg_in_cwd.is_file() && ffmpeg_in_cwd.exists() {
+        if ffmpeg_in_cwd.is_file() && ffmpeg_in_cwd.exists() && has_matching_ffprobe(&ffmpeg_in_cwd)
+        {
             debug!(
                 "Found ffmpeg in current working directory: {:?}",
                 ffmpeg_in_cwd
@@ -196,7 +192,7 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
             if let Some(exe_folder) = exe_path.parent() {
                 debug!("Executable folder: {:?}", exe_folder);
                 let ffmpeg_in_exe_folder = exe_folder.join(EXECUTABLE_NAME);
-                if ffmpeg_in_exe_folder.exists() {
+                if ffmpeg_in_exe_folder.exists() && has_matching_ffprobe(&ffmpeg_in_exe_folder) {
                     debug!(
                         "Found ffmpeg in executable folder: {:?}",
                         ffmpeg_in_exe_folder
@@ -211,7 +207,7 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
                     let resources_folder = exe_folder.join("../Resources");
                     debug!("Resources folder: {:?}", resources_folder);
                     let ffmpeg_in_resources = resources_folder.join(EXECUTABLE_NAME);
-                    if ffmpeg_in_resources.exists() {
+                    if ffmpeg_in_resources.exists() && has_matching_ffprobe(&ffmpeg_in_resources) {
                         debug!(
                             "Found ffmpeg in Resources folder: {:?}",
                             ffmpeg_in_resources
@@ -224,110 +220,21 @@ fn find_ffmpeg_path_internal() -> Option<PathBuf> {
         }
     }
 
-    debug!("ffmpeg not found. installing...");
-
-    if let Err(error) = handle_ffmpeg_installation() {
-        error!("failed to install ffmpeg: {}", error);
-        return None;
-    }
-
-    if let Ok(path) = which(EXECUTABLE_NAME) {
-        debug!("found ffmpeg after installation: {:?}", path);
-        return Some(path);
-    }
-
-    let installation_dir = sidecar_dir().map_err(|e| e.to_string()).unwrap();
-    let ffmpeg_in_installation = installation_dir.join(EXECUTABLE_NAME);
-    if ffmpeg_in_installation.is_file() {
-        debug!("found ffmpeg in directory: {:?}", ffmpeg_in_installation);
-        return Some(ffmpeg_in_installation);
-    }
-
-    error!("ffmpeg not found even after installation");
-    None // Return None if ffmpeg is not found
-}
-
-fn handle_ffmpeg_installation() -> Result<(), anyhow::Error> {
-    if ffmpeg_is_installed() {
-        debug!("ffmpeg is already installed");
-        return Ok(());
-    }
-
-    info!("ffmpeg not found. installing...");
-    match check_latest_version() {
-        Ok(version) => debug!("latest version: {}", version),
-        Err(e) => debug!("skipping version check due to error: {e}"),
-    }
-
-    let download_url = ffmpeg_download_url()?;
-    let destination = get_ffmpeg_install_dir()?;
-
-    info!("downloading from: {:?}", download_url);
-    let archive_path = download_ffmpeg_package(download_url, &destination)?;
-    debug!("downloaded package: {:?}", archive_path);
-
-    debug!("extracting...");
-    unpack_ffmpeg(&archive_path, &destination)?;
-
-    let version = ffmpeg_version()?;
-
-    info!("done! installed ffmpeg version {}", version);
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn get_ffmpeg_install_dir() -> Result<PathBuf, anyhow::Error> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("couldn't find home directory"))?;
-    let local_bin = home.join(".local").join("bin");
-
-    // Create directory if it doesn't exist
-    if !local_bin.exists() {
-        debug!("creating .local/bin directory");
-        std::fs::create_dir_all(&local_bin)?;
-    }
-
-    // Set directory permissions to 755 (rwxr-xr-x) regardless if it existed or not
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&local_bin, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    // Check both .bashrc and .zshrc
-    let shell_configs = vec![
-        home.join(".bashrc"),
-        home.join(".bash_profile"), // macOS often uses .bash_profile instead of .bashrc
-        home.join(".zshrc"),
-    ];
-
-    for config in shell_configs {
-        if config.exists() {
-            let content = std::fs::read_to_string(&config)?;
-            if !content.contains(".local/bin") {
-                debug!("adding .local/bin to PATH in {:?}", config);
-                std::fs::write(
-                    config,
-                    format!("{}\nexport PATH=\"$HOME/.local/bin:$PATH\"\n", content),
-                )?;
-            }
+    // Keep discovering an already-provisioned ffmpeg-sidecar installation, but
+    // never download or modify the host at runtime.
+    if let Ok(installation_dir) = sidecar_dir() {
+        let ffmpeg_in_installation = installation_dir.join(EXECUTABLE_NAME);
+        if ffmpeg_in_installation.is_file() && has_matching_ffprobe(&ffmpeg_in_installation) {
+            debug!(
+                "found pre-provisioned ffmpeg+ffprobe in directory: {:?}",
+                ffmpeg_in_installation
+            );
+            return Some(ffmpeg_in_installation);
         }
     }
 
-    // Ensure the directory is writable
-    let metadata = std::fs::metadata(&local_bin)?;
-    if !metadata.permissions().readonly() {
-        Ok(local_bin)
-    } else {
-        Err(anyhow::anyhow!(
-            "Directory {} is not writable. Please check permissions",
-            local_bin.display()
-        ))
-    }
-}
-
-// For other platforms, keep your existing installation directory logic
-#[cfg(not(target_os = "macos"))]
-fn get_ffmpeg_install_dir() -> Result<PathBuf, anyhow::Error> {
-    // Your existing logic for other platforms
-    sidecar_dir().map_err(|e| anyhow::anyhow!(e))
+    error!(
+        "ffmpeg and ffprobe were not found; install a matching pair and expose them on PATH, or bundle them beside the screenpipe executable"
+    );
+    None
 }

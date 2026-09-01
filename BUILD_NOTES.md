@@ -86,6 +86,7 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
 ## Local-first hardening
 
 - The standalone CLI no longer queries the NPM registry at startup or during its periodic terminal reminder rotation. Updating is now an explicit user/package-management action; `SCREENPIPE_NO_UPDATE_CHECK` is obsolete.
+- Missing FFmpeg no longer triggers a version query, archive download, extraction, or shell-profile edit. Runtime discovery accepts a preinstalled matching FFmpeg/FFprobe pair on `PATH`, an application-bundled pair, or an existing sidecar installation; otherwise it logs explicit setup guidance and disables dependent functionality.
 
 ## Functional baseline fixes and verification (2026-09-01)
 
