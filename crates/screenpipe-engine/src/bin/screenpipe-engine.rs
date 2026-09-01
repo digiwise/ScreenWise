@@ -1806,6 +1806,7 @@ async fn main() -> anyhow::Result<()> {
         let retention_days = record_args.retention_days;
         let retention_mode = record_args.retention_mode;
         let retention_enabled = retention_days > 0;
+        let api_auth_key = config.api_auth_key.clone();
         tokio::spawn(async move {
             if !retention_enabled {
                 tracing::info!("local retention disabled (--retention-days 0)");
@@ -1814,8 +1815,11 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let client = reqwest::Client::new();
             let url = format!("http://localhost:{}/retention/configure", port);
-            match client
-                .post(&url)
+            let mut request = client.post(&url);
+            if let Some(key) = api_auth_key {
+                request = request.bearer_auth(key);
+            }
+            match request
                 .json(&serde_json::json!({
                     "enabled": true,
                     "retention_days": retention_days,

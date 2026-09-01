@@ -187,7 +187,7 @@ pub struct AppState {
     /// `browser_registry`. Held separately so the desktop shell can attach a
     /// transport handle after the engine has started.
     pub owned_browser: Arc<screenpipe_connect::connections::browser::OwnedBrowser>,
-    /// When true, non-localhost requests require Authorization: Bearer <api_key>
+    /// When true, protected requests require Authorization: Bearer <api_key>
     pub api_auth: bool,
     /// The API key to validate against (from SCREENPIPE_API_KEY or auth.json)
     pub api_auth_key: Option<String>,

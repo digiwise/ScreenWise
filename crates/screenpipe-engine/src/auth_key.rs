@@ -196,7 +196,7 @@ fn read_legacy_auth_json() -> Option<String> {
 /// correct for the server's startup path but would silently produce a key
 /// that doesn't match the running server's in-memory value when called from
 /// a sibling process.
-pub async fn find_api_auth_key() -> Option<String> {
+pub async fn find_api_auth_key(data_dir: Option<&Path>) -> Option<String> {
     if let Ok(k) = std::env::var("SCREENPIPE_API_KEY") {
         if !k.is_empty() {
             return Some(k);
@@ -214,8 +214,15 @@ pub async fn find_api_auth_key() -> Option<String> {
         }
     }
 
-    let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    if let Ok(store) = open_secret_store(&data_dir).await {
+    let default_data_dir;
+    let data_dir = match data_dir {
+        Some(path) => path,
+        None => {
+            default_data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
+            &default_data_dir
+        }
+    };
+    if let Ok(store) = open_secret_store(data_dir).await {
         if let Ok(Some(bytes)) = store.get("api_auth_key").await {
             if let Ok(s) = String::from_utf8(bytes) {
                 if !s.is_empty() {

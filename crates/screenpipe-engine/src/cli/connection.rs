@@ -311,7 +311,7 @@ async fn fetch_running_browsers() -> Vec<BrowserSummaryWire> {
     // and the legacy auth.json. Don't open-code another priority chain
     // here; that's how this query started silently 403'ing in the first
     // place.
-    let auth_token = crate::auth_key::find_api_auth_key().await;
+    let auth_token = crate::auth_key::find_api_auth_key(None).await;
 
     let client = reqwest::Client::new();
     let mut req = client

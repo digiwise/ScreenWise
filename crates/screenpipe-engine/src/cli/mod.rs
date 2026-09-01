@@ -610,9 +610,8 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub disable_keyboard_capture: bool,
 
-    /// Require authentication for remote API access. When enabled, non-localhost
-    /// requests must include Authorization: Bearer <SCREENPIPE_API_KEY>.
-    /// Localhost requests are always allowed.
+    /// Require authentication for local API access. When enabled, protected
+    /// requests must include the token printed by `screenpipe auth token`.
     #[arg(long, default_value_t = true)]
     pub api_auth: bool,
 
@@ -1611,7 +1610,11 @@ pub enum BackupCommand {
 #[derive(Subcommand)]
 pub enum AuthCommand {
     /// Print the current local API authentication token
-    Token,
+    Token {
+        /// Data directory used by the running recorder. Defaults to $HOME/.screenpipe
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: Option<String>,
+    },
 }
 
 // =============================================================================

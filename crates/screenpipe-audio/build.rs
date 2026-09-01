@@ -126,10 +126,6 @@ fn install_onnxruntime() {
     // so we never need `onnxruntime.lib` at link time — the DLL is opened via
     // LoadLibrary at runtime. We still want the runtime DLL on disk, so fall
     // through to the download path if it's missing.
-    if lib_path.exists() {
-        return;
-    }
-
     // Skip download if already present (CI pre-downloads via release-app.yml /
     // release-cli.yml workflow steps; local Windows devs hit the curl path).
     //
@@ -187,5 +183,25 @@ fn install_onnxruntime() {
             "cargo:warning=ONNX Runtime download/install completed but {} is still missing.",
             lib_path.display()
         );
+        return;
     }
+
+    // `load-dynamic` makes Windows search for onnxruntime.dll at runtime.
+    // Stage the version matched to the locked `ort` crate beside Cargo-built
+    // executables so an unrelated system-wide DLL cannot be selected instead.
+    let out_dir = env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR");
+    let profile_dir = Path::new(&out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("unexpected Cargo OUT_DIR layout");
+    let dll_path = target_dir.join("lib").join("onnxruntime.dll");
+    let staged_dll = profile_dir.join("onnxruntime.dll");
+    fs::copy(&dll_path, &staged_dll).unwrap_or_else(|e| {
+        panic!(
+            "failed to stage {} at {}: {}",
+            dll_path.display(),
+            staged_dll.display(),
+            e
+        )
+    });
 }

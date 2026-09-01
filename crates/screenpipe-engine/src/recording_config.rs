@@ -197,9 +197,8 @@ pub struct RecordingConfig {
     /// Skip UIA tree captures within this many ms after the most recent input.
     pub pause_extraction_on_input_ms: u64,
 
-    /// Require authentication for remote (non-localhost) API access.
-    /// When true, requests from other devices must include
-    /// `Authorization: Bearer <SCREENPIPE_API_KEY>`.
+    /// Require authentication for protected local API routes.
+    /// When true, requests must include the locally resolved bearer token.
     pub api_auth: bool,
 
     /// The API key for this instance (from SCREENPIPE_API_KEY env or auth.json).
