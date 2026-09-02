@@ -6,7 +6,6 @@ use screenpipe_audio::audio_manager::builder::TranscriptionMode;
 use screenpipe_audio::audio_manager::AudioManagerBuilder;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 use screenpipe_audio::meeting_streaming::MeetingStreamingConfig;
-use screenpipe_audio::transcription::deepgram::DeepgramTranscriptionConfig;
 use screenpipe_audio::transcription::VocabularyEntry;
 use screenpipe_audio::vad::VadEngineEnum;
 use screenpipe_config::{ChannelConfig, DbConfig};
@@ -95,17 +94,8 @@ pub struct RecordingConfig {
     pub disable_keyboard_capture: bool,
     pub languages: Vec<Language>,
 
-    // Cloud/auth
-    pub deepgram_api_key: Option<String>,
-    pub deepgram_config: Option<DeepgramTranscriptionConfig>,
+    // Compatibility account metadata; it is not used for audio transcription.
     pub user_id: Option<String>,
-
-    // OpenAI Compatible transcription
-    pub openai_compatible_endpoint: Option<String>,
-    pub openai_compatible_api_key: Option<String>,
-    pub openai_compatible_model: Option<String>,
-    pub openai_compatible_headers: Option<std::collections::HashMap<String, String>>,
-    pub openai_compatible_raw_audio: bool,
 
     // Workflow events
     /// Enable AI workflow event detection (cloud, requires subscription).
@@ -130,7 +120,7 @@ pub struct RecordingConfig {
     pub vocabulary: Vec<VocabularyEntry>,
 
     /// User-configurable maximum batch duration in seconds for batch transcription.
-    /// When set, overrides the engine-aware default (Deepgram=3600s, Whisper/OpenAI=600s).
+    /// When set, overrides the local engine-aware default.
     /// None = use engine-aware defaults.
     pub batch_max_duration_secs: Option<u64>,
 
@@ -259,11 +249,8 @@ impl RecordingConfig {
             meeting_streaming: MeetingStreamingConfig::from_settings(
                 settings.meeting_live_transcription_enabled,
                 &settings.meeting_live_transcription_provider,
-                settings.effective_user_id().map(str::to_string),
-                match settings.meeting_live_transcription_provider.as_str() {
-                    "deepgram-live" | "deepgram_live" => Some(settings.deepgram_api_key.clone()),
-                    _ => None,
-                },
+                None,
+                None,
                 single_language_code(&settings.languages),
                 settings.effective_user_name().map(str::to_string),
             ),
@@ -287,22 +274,7 @@ impl RecordingConfig {
                 .filter(|s| s.as_str() != "default")
                 .filter_map(|s| s.parse().ok())
                 .collect(),
-            deepgram_api_key: settings.effective_deepgram_key().map(|s| s.to_string()),
-            deepgram_config: match engine_str {
-                "screenpipe-cloud" => settings
-                    .effective_user_id()
-                    .map(|s| DeepgramTranscriptionConfig::screenpipe_cloud(s.to_string())),
-                "deepgram" => settings
-                    .effective_deepgram_key()
-                    .map(|s| DeepgramTranscriptionConfig::direct(s.to_string())),
-                _ => None,
-            },
             user_id: settings.effective_user_id().map(|s| s.to_string()),
-            openai_compatible_endpoint: settings.openai_compatible_endpoint.clone(),
-            openai_compatible_api_key: settings.openai_compatible_api_key.clone(),
-            openai_compatible_model: settings.openai_compatible_model.clone(),
-            openai_compatible_headers: settings.openai_compatible_headers.clone(),
-            openai_compatible_raw_audio: settings.openai_compatible_raw_audio,
             user_name: settings.user_name.clone(),
             video_quality: settings.video_quality.clone(),
             use_chinese_mirror: settings.use_chinese_mirror,
@@ -427,7 +399,6 @@ impl RecordingConfig {
             .experimental_coreaudio_system_audio(self.experimental_coreaudio_system_audio)
             .windows_input_aec_enabled(self.windows_input_aec_enabled)
             .macos_input_vpio_enabled(self.macos_input_vpio_enabled)
-            .deepgram_config(self.deepgram_config.clone())
             .output_path(output_path)
             .use_pii_removal(self.use_pii_removal)
             .filter_music(self.filter_music)
@@ -467,13 +438,9 @@ impl RecordingConfig {
     }
 }
 
-/// Picks the single language to force on the live meeting transcription
-/// websocket. Deepgram's streaming API either forces one language
-/// (`language=<code>`) or code-switches across many (`language=multi`); unlike
-/// the batch API there is no per-stream allow-list. So we force a language only
-/// when the user selected exactly one, and otherwise return `None` to let the
-/// live path fall back to multilingual auto-detection. Strings are canonicalized
-/// through `Language` so a settings value of either "spanish" or "es" yields "es".
+/// Picks the single language for the local live-meeting engine. Returning
+/// `None` leaves local multilingual detection unconstrained. Strings are
+/// canonicalized through `Language` so either "spanish" or "es" yields "es".
 fn single_language_code(languages: &[String]) -> Option<String> {
     let mut selected = languages
         .iter()
@@ -683,8 +650,7 @@ mod tests {
 
     #[test]
     fn multiple_languages_mean_multilingual() {
-        // Deepgram streaming has no per-stream allow-list, so 2+ picks fall
-        // back to multilingual rather than arbitrarily forcing the first.
+        // Multiple selections leave multilingual local detection unconstrained.
         assert_eq!(
             single_language_code(&langs(&["spanish", "portuguese"])),
             None

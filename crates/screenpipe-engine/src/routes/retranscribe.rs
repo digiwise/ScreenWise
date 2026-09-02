@@ -37,7 +37,7 @@ pub struct RetranscribeRequest {
         deserialize_with = "super::time::deserialize_flexible_datetime_option"
     )]
     pub end: Option<DateTime<Utc>>,
-    /// Optional engine override: "whisper-large-v3", "deepgram", etc.
+    /// Optional local engine override, such as "whisper-large-v3".
     pub engine: Option<String>,
     /// Custom vocabulary for this re-transcription
     pub vocabulary: Option<Vec<VocabularyEntry>>,
@@ -66,7 +66,7 @@ pub struct MeetingRetranscribeVocabularyEntry {
 
 #[derive(Debug, Deserialize, Default, OaSchema)]
 pub struct MeetingRetranscribeRequest {
-    /// Optional engine override: "deepgram", "screenpipe-cloud", "parakeet", etc.
+    /// Optional local engine override, such as "parakeet".
     pub engine: Option<String>,
     /// Custom vocabulary for this re-transcription.
     pub vocabulary: Option<Vec<MeetingRetranscribeVocabularyEntry>>,
@@ -325,8 +325,6 @@ pub async fn retranscribe_handler(
         audio_manager.transcription_engine().await
     };
 
-    let deepgram_config = audio_manager.deepgram_config().await;
-    let openai_compatible_config = audio_manager.openai_compatible_config().await;
     let languages = audio_manager.languages().await;
 
     // Build effective vocabulary: user-provided + prompt words as bias entries
@@ -344,27 +342,20 @@ pub async fn retranscribe_handler(
     }
 
     // 3. Build unified TranscriptionEngine for this retranscription request
-    let transcription_engine = match TranscriptionEngine::new(
-        engine.clone(),
-        deepgram_config,
-        openai_compatible_config,
-        languages,
-        effective_vocabulary,
-    )
-    .await
-    {
-        Ok(e) => e,
-        Err(e) => {
-            error!(
-                "failed to create transcription engine for retranscribe: {}",
-                e
-            );
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to initialize transcription engine: {}", e),
-            );
-        }
-    };
+    let transcription_engine =
+        match TranscriptionEngine::new(engine.clone(), languages, effective_vocabulary).await {
+            Ok(e) => e,
+            Err(e) => {
+                error!(
+                    "failed to create transcription engine for retranscribe: {}",
+                    e
+                );
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to initialize transcription engine: {}", e),
+                );
+            }
+        };
 
     // 4. Process each chunk
     let mut results = Vec::new();
@@ -549,27 +540,18 @@ pub async fn retranscribe_meeting_handler(
         request.prompt,
     );
 
-    let deepgram_config = state.audio_manager.deepgram_config().await;
-    let openai_compatible_config = state.audio_manager.openai_compatible_config().await;
     let languages = state.audio_manager.languages().await;
-    let transcription_engine = match TranscriptionEngine::new(
-        engine.clone(),
-        deepgram_config,
-        openai_compatible_config,
-        languages,
-        vocabulary,
-    )
-    .await
-    {
-        Ok(engine) => engine,
-        Err(e) => {
-            error!("meeting retranscribe: failed to initialize engine: {}", e);
-            return Err(json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to initialize transcription engine: {}", e),
-            ));
-        }
-    };
+    let transcription_engine =
+        match TranscriptionEngine::new(engine.clone(), languages, vocabulary).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                error!("meeting retranscribe: failed to initialize engine: {}", e);
+                return Err(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to initialize transcription engine: {}", e),
+                ));
+            }
+        };
 
     let batches = group_meeting_chunks(&chunks, max_batch_duration);
     let mut pending = Vec::new();
@@ -794,8 +776,6 @@ fn dedupe_audio_chunks(chunks: Vec<AudioChunkInfo>) -> Vec<AudioChunkInfo> {
 
 fn meeting_retranscribe_max_batch_duration_secs(engine: &AudioTranscriptionEngine) -> u64 {
     match engine {
-        AudioTranscriptionEngine::Deepgram => 5000,
-        AudioTranscriptionEngine::OpenAICompatible => 3000,
         AudioTranscriptionEngine::Parakeet | AudioTranscriptionEngine::ParakeetMlx => 30,
         _ => 600,
     }

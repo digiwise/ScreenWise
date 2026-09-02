@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use screenpipe_config::ChannelConfig;
-use std::{collections::HashSet, env, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use screenpipe_core::Language;
 use screenpipe_db::DatabaseManager;
@@ -16,9 +16,7 @@ use crate::{
     },
     meeting_detector::MeetingDetector,
     meeting_streaming::MeetingStreamingConfig,
-    transcription::{
-        deepgram::DeepgramTranscriptionConfig, stt::OpenAICompatibleConfig, VocabularyEntry,
-    },
+    transcription::VocabularyEntry,
     vad::VadEngineEnum,
 };
 
@@ -82,17 +80,12 @@ pub struct AudioManagerOptions {
     pub transcription_engine: Arc<AudioTranscriptionEngine>,
     pub vad_engine: VadEngineEnum,
     pub languages: Vec<Language>,
-    pub deepgram_api_key: Option<String>,
-    pub deepgram_config: Option<DeepgramTranscriptionConfig>,
-    /// Configuration for OpenAI Compatible transcription engine
-    pub openai_compatible_config: Option<OpenAICompatibleConfig>,
     pub enable_diarization: bool,
     pub audio_chunk_duration: Duration,
     pub health_check_grace_period: u64,
     pub enabled_devices: HashSet<String>,
     pub use_all_devices: bool,
     pub db_path: Option<String>,
-    pub deepgram_url: Option<String>,
     pub output_path: Option<PathBuf>,
     /// Enable PII removal from audio transcriptions
     pub use_pii_removal: bool,
@@ -131,25 +124,18 @@ pub struct AudioManagerOptions {
 
 impl Default for AudioManagerOptions {
     fn default() -> Self {
-        let deepgram_api_key = env::var("DEEPGRAM_API_KEY").ok();
         let enabled_devices = HashSet::new();
         Self {
             output_path: None,
             transcription_engine: Arc::new(AudioTranscriptionEngine::default()),
             vad_engine: VadEngineEnum::Silero,
             languages: vec![],
-            deepgram_config: deepgram_api_key
-                .clone()
-                .map(DeepgramTranscriptionConfig::direct),
-            deepgram_api_key,
-            openai_compatible_config: None,
             enable_diarization: true,
             audio_chunk_duration: Duration::from_secs(30),
             health_check_grace_period: 15,
             enabled_devices,
             use_all_devices: false,
             db_path: None,
-            deepgram_url: None,
             use_pii_removal: false,
             filter_music: false,
             use_system_default_audio: true,
@@ -194,23 +180,6 @@ impl AudioManagerBuilder {
         self
     }
 
-    pub fn deepgram_api_key(mut self, deepgram_api_key: Option<String>) -> Self {
-        self.options.deepgram_api_key = deepgram_api_key;
-        self
-    }
-
-    pub fn deepgram_config(mut self, config: Option<DeepgramTranscriptionConfig>) -> Self {
-        self.options.deepgram_api_key = config.as_ref().map(|c| c.auth_token.clone());
-        self.options.deepgram_config = config;
-        self
-    }
-
-    /// Set OpenAI Compatible transcription configuration
-    pub fn openai_compatible_config(mut self, config: Option<OpenAICompatibleConfig>) -> Self {
-        self.options.openai_compatible_config = config;
-        self
-    }
-
     pub fn diarization(mut self, enable_diarization: bool) -> Self {
         self.options.enable_diarization = enable_diarization;
         self
@@ -233,11 +202,6 @@ impl AudioManagerBuilder {
 
     pub fn use_all_devices(mut self, use_all_devices: bool) -> Self {
         self.options.use_all_devices = use_all_devices;
-        self
-    }
-
-    pub fn deepgram_url(mut self, deepgram_url: Option<String>) -> Self {
-        self.options.deepgram_url = deepgram_url;
         self
     }
 
@@ -345,18 +309,6 @@ impl AudioManagerBuilder {
 
     // TODO: Make sure the custom urls work
     pub fn validate_options(&self) -> Result<()> {
-        if self.options.transcription_engine == Arc::new(AudioTranscriptionEngine::Deepgram)
-            && !self
-                .options
-                .deepgram_config
-                .as_ref()
-                .is_some_and(DeepgramTranscriptionConfig::is_ready)
-        {
-            return Err(anyhow::anyhow!(
-                "Deepgram API key is required for Deepgram transcription engine"
-            ));
-        }
-
         if self.options.output_path.is_none() {
             return Err(anyhow::anyhow!("Output path is required for audio manager"));
         }

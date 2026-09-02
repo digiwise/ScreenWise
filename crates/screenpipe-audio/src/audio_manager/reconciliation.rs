@@ -65,17 +65,8 @@ struct PendingTranscription {
 }
 
 /// Maximum batch duration in seconds per engine.
-/// Audio is encoded as MP3 (64 kbps mono 16 kHz) before upload, so durations
-/// are bounded by the compressed size, not raw WAV.
+/// Local models process bounded batches to control resource use.
 ///
-/// - Deepgram via Cloudflare: cap at 480 s (8 min). Bounded by Deepgram's own
-///   10-minute hard ceiling — requests exceeding it return 504 Gateway Timeout
-///   on Nova models (https://github.com/orgs/deepgram/discussions/585). Bigger
-///   batches also blow past our worker's AbortSignal because Deepgram's
-///   documented minimum latency isn't sub-20s. Diarization quality plateaus
-///   above ~3 min audio per Deepgram's docs, so 8 min keeps the quality win
-///   without flirting with the 10-min cliff.
-/// - OpenAI-compatible: user-configurable (unknown engine limits), default 3000 s (~50 min)
 /// - Parakeet: ONNX int8 encoder handles up to ~52s but quality degrades past 30s.
 ///   Benchmarked: full audio = 33.1% WER, 30s chunks = 33.9% WER (best chunked).
 ///   Cap at 45s — the engine layer safety-chunks at 30s if exceeded.
@@ -83,8 +74,6 @@ struct PendingTranscription {
 /// - Qwen3-ASR: similar to Whisper architecture → cap at 600 s (10 min)
 pub fn default_max_batch_duration_secs(engine: &AudioTranscriptionEngine) -> u64 {
     match engine {
-        AudioTranscriptionEngine::Deepgram => 480,
-        AudioTranscriptionEngine::OpenAICompatible => 3000,
         AudioTranscriptionEngine::Parakeet => 45,
         _ => 600,
     }
@@ -199,13 +188,8 @@ pub async fn reconcile_untranscribed(
     );
 
     // Group consecutive chunks by device for batched transcription.
-    // User override only applies to OpenAI-compatible (unknown engine limits).
-    // All other engines use hardcoded optimal defaults.
-    let max_duration = match *audio_engine {
-        AudioTranscriptionEngine::OpenAICompatible => batch_max_duration_secs
-            .unwrap_or_else(|| default_max_batch_duration_secs(&audio_engine)),
-        _ => default_max_batch_duration_secs(&audio_engine),
-    };
+    let max_duration =
+        batch_max_duration_secs.unwrap_or_else(|| default_max_batch_duration_secs(&audio_engine));
     let batches = group_chunks_by_device(&chunks, max_duration);
     debug!(
         "reconciliation: grouped into {} batches (max {}s each)",
@@ -329,7 +313,6 @@ pub async fn reconcile_untranscribed(
         };
 
         // Transcribe the concatenated audio in one shot using session.
-        // Providers like Deepgram can return diarization turns alongside text;
         // local ASR engines return plain text and use the local diarization path.
         let transcription_output = match session
             .transcribe_detailed(&combined_samples, sample_rate, &device_name)
@@ -430,7 +413,6 @@ pub async fn reconcile_untranscribed(
         }
 
         // Extract local diarization for ASR engines that do not return provider
-        // speaker turns. Deepgram already provides word-level speaker labels.
         let mut speaker_id = None;
         let mut diarization_segments = transcription_output.diarization_segments;
         if diarization_segments.is_empty() {
@@ -1340,13 +1322,13 @@ mod tests {
         PendingTranscription {
             audio_chunk_id: 1,
             transcription: "hello there yes".to_string(),
-            engine: "deepgram".to_string(),
+            engine: "local".to_string(),
             device: "Display".to_string(),
             is_input: false,
             timestamp: chrono::Utc::now(),
             duration_secs: 3.0,
             speaker_id: Some(42),
-            diarization_provider: Some("deepgram".to_string()),
+            diarization_provider: Some("local".to_string()),
             diarization_segments,
             secondary_chunk_ids: Vec::new(),
             file_path: "/tmp/audio.mp4".to_string(),
@@ -1354,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn deepgram_background_turns_become_transcript_rows_without_durable_speaker() {
+    fn background_turns_become_transcript_rows_without_durable_speaker() {
         let pending = pending_with_diarization(vec![
             TranscriptionDiarizationSegment {
                 provider_speaker_label: "SPEAKER_00".to_string(),
@@ -1386,7 +1368,7 @@ mod tests {
     }
 
     #[test]
-    fn single_deepgram_background_turn_can_keep_clean_batch_speaker_id() {
+    fn single_background_turn_can_keep_clean_batch_speaker_id() {
         let pending = pending_with_diarization(vec![TranscriptionDiarizationSegment {
             provider_speaker_label: "SPEAKER_00".to_string(),
             speaker_id: None,

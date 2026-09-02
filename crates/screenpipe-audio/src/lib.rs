@@ -7,14 +7,9 @@ pub mod models;
 pub mod utils;
 pub mod vad;
 pub use transcription::engine::TranscriptionEngine;
-pub use transcription::stt::stt;
 pub use transcription::{AudioInput, TranscriptionResult};
 pub mod speaker;
 pub mod transcription;
-pub use transcription::stt::{
-    OpenAICompatibleConfig, DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, DEFAULT_OPENAI_COMPATIBLE_MODEL,
-    OPENAI_COMPATIBLE_TIMEOUT_SECS,
-};
 pub use utils::audio::filter_music_frames;
 pub use utils::audio::pcm_decode;
 pub use utils::audio::resample;

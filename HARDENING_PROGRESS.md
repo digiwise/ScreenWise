@@ -201,8 +201,112 @@ configuration is unchanged. `cargo check -p screenpipe-engine --locked` has
 completed after the edit; desktop account UI and commands remain for their
 separate desktop increment.
 
-The engine product-account increment is ready to commit. The scoped locked
+The engine product-account increment was committed in `d5f04e890`. The scoped locked
 engine check passed, no root-lock change is present, and `git diff --check`
 passed. The desktop account/entitlement surface remains intentionally
 uncommitted alongside the previously staged desktop telemetry work so its
 Tauri-specific validation can be completed in one desktop review.
+
+Desktop follow-up mapping: `RecordingState` and `ServerCore::start` share an
+`ArcSwap` cloud-token cell with the engine cloud proxy and Pi executor, while
+`recording.rs` invokes `require_app_entitlement` before local recording starts.
+The safe desktop sequence is to remove that entitlement gate and token handoff
+first (local API bearer authentication is independent), then remove the
+frontend account UI/commands and persisted entitlement fields. Do not delete
+third-party OAuth/integration state as part of this product-account increment.
+
+The entitlement compatibility gate now always permits local recording; it no
+longer changes recording status or returns a subscription error. Its callers
+remain temporarily while the desktop cloud-token handoff is removed in
+compiler-guided steps. The local bearer-auth path is unaffected.
+
+Desktop recorder/server progress: `RecordingState` no longer carries a cloud
+JWT, `ServerCore::start` no longer accepts or seeds one, and Pi is constructed
+without a product-cloud credential. The `get_cloud_token` and
+`set_cloud_token` Tauri commands were removed. The same desktop change still
+needs its locked Tauri validation, which remains blocked at the pre-existing
+missing Bun sidecar before Rust application source compilation.
+
+The desktop `open_login_window` command has also been removed, eliminating the
+remaining native product-login browser launch. Its generated frontend binding
+and UI callers must be removed as part of the same desktop account cleanup;
+third-party OAuth window commands remain outside this scope.
+
+The desktop provider tree no longer mounts `AuthGuard` or
+`AppEntitlementGate`, so ordinary UI startup and recording no longer depend on
+periodic Screenpipe-session validation or account entitlement. The deep-link
+handler remains because it also supports the separate third-party OAuth
+subsystem.
+
+The active settings lifecycle no longer invokes `set_cloud_token`, and the
+enterprise-policy hook no longer invokes `get_cloud_token`. Product-account
+tokens are therefore no longer handed to the native recorder or used as a
+fallback for enterprise policy; the latter remains an independent enterprise
+surface for its own removal pass.
+
+On the latest check, Cargo stops even earlier because the uncommitted desktop
+lockfile has incidental resolver drift from the earlier approved cache fetch
+and no longer satisfies `--locked`. Do not commit that 800-line lockfile
+rewrite or regenerate it without first restoring a minimal, reviewed removal
+graph. This is a desktop-validation blocker, not a reason to relax `--locked`.
+
+The desktop manifest's broad formatting check also reports pre-existing style
+drift in unrelated desktop and enterprise files. Those formatting-only diffs
+are not part of any hardening commit; use changed-file formatting and staged
+diff review until a dedicated formatting cleanup is authorized.
+
+### Next subsystem audit: external transcription and AI providers
+
+The local Parakeet path is retained. Deepgram and OpenAI-compatible
+transcription span `screenpipe-audio` engine selection, audio-manager options,
+batch/realtime workers, and meeting streaming; simple CLI-flag removal would
+not remove their reachable network clients. Treat all of those as one audio
+subsystem commit after the pending desktop account work, then separately
+handle general AI gateways and workflow classification.
+
+The CLI boundary now omits Deepgram and OpenAI-compatible audio engine choices;
+`cargo check -p screenpipe-engine --locked` completed after that change. This
+is deliberately not committed separately: the provider transport remains in
+the audio crate, so the CLI edit stays with the eventual external-transcription
+removal commit to avoid a misleading partial hardening claim.
+
+Provider-transport mapping is now complete: `transcription::engine` and
+`transcription::stt` instantiate the Deepgram/OpenAI-compatible clients for
+live and batch work, while engine retranscription routes pass their configs
+through the audio manager. The audio manager and those routes must be changed
+together with deletion of the provider modules; otherwise retranscription
+would retain a reachable outbound path.
+
+### External-transcription removal in progress
+
+- The audio crate no longer exposes Deepgram or OpenAI-compatible transcription
+  engine variants, clients, API-key environment discovery, or model-config
+  transport. The provider source modules have been deleted.
+- Meeting streaming now permits only the selected local engine or an explicit
+  disabled state; its former Screenpipe Cloud and Deepgram WebSocket transports
+  and endpoint configuration have been deleted. Local meeting lifecycle and
+  persisted-final controls remain.
+- `cargo check -p screenpipe-audio --locked` passed after this checkpoint. The
+  only new warnings are mechanical unused imports/arguments in the local
+  engine and will be corrected before the commit; the established `unused_mut`
+  in `core/stream.rs` remains outside this change.
+- Next: remove the engine recording/retranscription provider configuration,
+  then run locked engine/audio validation and inspect the lockfile for a
+  dependency reduction only.
+
+### External-transcription removal complete — pending commit
+
+- Removed Deepgram and OpenAI-compatible batch transcription engines, request
+  clients, CLI API-key option, and their engine/audio-manager/retranscription
+  configuration paths. Local Whisper, Qwen, and Parakeet paths remain.
+- Removed the Screenpipe Cloud and Deepgram live-meeting WebSocket transports.
+  Meeting streaming now uses only the selected local engine or is disabled;
+  its retained compatibility token/endpoint fields are forcibly empty and do
+  not initiate network activity.
+- The intentional root `Cargo.lock` delta removes `tokio-tungstenite` and its
+  native-TLS transport edges from `screenpipe-audio`; no packages were upgraded.
+- `cargo check -p screenpipe-engine --locked`, `cargo fmt --all -- --check`,
+  and `git diff --check` passed. The focused audio test build remains blocked:
+  `cargo test -p screenpipe-audio --lib --locked --offline --no-run` cannot
+  use the existing uncached `infer v0.15.0` dev dependency. No network fetch
+  or dependency update was used to bypass that prerequisite.

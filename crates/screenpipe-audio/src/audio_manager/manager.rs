@@ -227,34 +227,17 @@ impl AudioManager {
     /// Apply fresh capture/audio options without rebuilding the long-lived server.
     ///
     /// This is intended to run while capture is stopped, before `start()`.
-    /// It lets settings such as transcription engine, cloud credentials,
-    /// live-meeting provider, devices, language, vocabulary, and batch mode
+    /// It lets settings such as transcription engine, local-meeting settings,
+    /// devices, language, vocabulary, and batch mode
     /// update on a capture-level restart.
     pub async fn apply_options(&self, options: AudioManagerOptions) -> Result<()> {
         if self.status().await == AudioManagerStatus::Running {
             self.stop_internal().await?;
         }
 
-        let deepgram_status = match &options.deepgram_config {
-            Some(c) if c.is_ready() => format!(
-                "provider={} host={}",
-                c.provider_slug_for_log(),
-                crate::transcription::deepgram::transcription_endpoint_host_for_log(&c.endpoint)
-            ),
-            Some(_) => "credentials_incomplete".to_string(),
-            None => {
-                if *options.transcription_engine == AudioTranscriptionEngine::Deepgram {
-                    "missing_deepgram_config".to_string()
-                } else {
-                    "n/a".to_string()
-                }
-            }
-        };
         info!(
-            "audio_manager apply_options: background_engine={} transcription_mode={:?} deepgram[{}]",
-            options.transcription_engine,
-            options.transcription_mode,
-            deepgram_status
+            "audio_manager apply_options: background_engine={} transcription_mode={:?}",
+            options.transcription_engine, options.transcription_mode
         );
 
         self.device_manager.configure_backend_flags(
@@ -716,8 +699,6 @@ impl AudioManager {
         let options = self.options.read().await;
         let output_path = options.output_path.clone();
         let languages = options.languages.clone();
-        let deepgram_config = options.deepgram_config.clone();
-        let openai_compatible_config = options.openai_compatible_config.clone();
         let audio_transcription_engine = options.transcription_engine.clone();
         let vocabulary = options.vocabulary.clone();
         let is_batch_mode = options.transcription_mode == TranscriptionMode::Batch;
@@ -735,8 +716,6 @@ impl AudioManager {
         // Build unified transcription engine — only loads the needed model
         let engine = TranscriptionEngine::new(
             audio_transcription_engine.clone(),
-            deepgram_config.clone(),
-            openai_compatible_config.clone(),
             languages.clone(),
             vocabulary.clone(),
         )
@@ -756,19 +735,9 @@ impl AudioManager {
             // (i.e. the 45s output-speech window expires between deliveries).
             let mut had_deferred_segments = false;
 
-            // Max deferral cap: hardcoded per engine (user override only for OpenAI-compatible).
-            // This lets meetings accumulate audio up to the engine's optimal capacity.
-            let max_deferral_secs = match *audio_transcription_engine {
-                AudioTranscriptionEngine::OpenAICompatible => batch_max_duration_secs
-                    .unwrap_or_else(|| {
-                        super::reconciliation::default_max_batch_duration_secs(
-                            &audio_transcription_engine,
-                        )
-                    }),
-                _ => super::reconciliation::default_max_batch_duration_secs(
-                    &audio_transcription_engine,
-                ),
-            };
+            let max_deferral_secs = batch_max_duration_secs.unwrap_or_else(|| {
+                super::reconciliation::default_max_batch_duration_secs(&audio_transcription_engine)
+            });
             let mut deferral_started: Option<std::time::Instant> = None;
 
             while let Ok(audio) = whisper_receiver.recv() {
@@ -1176,22 +1145,6 @@ impl AudioManager {
         self.options.read().await.transcription_engine.clone()
     }
 
-    /// Returns the current deepgram API key.
-    pub async fn deepgram_api_key(&self) -> Option<String> {
-        self.options.read().await.deepgram_api_key.clone()
-    }
-
-    pub async fn deepgram_config(
-        &self,
-    ) -> Option<crate::transcription::deepgram::DeepgramTranscriptionConfig> {
-        self.options.read().await.deepgram_config.clone()
-    }
-
-    /// Returns the current OpenAI Compatible config.
-    pub async fn openai_compatible_config(&self) -> Option<crate::OpenAICompatibleConfig> {
-        self.options.read().await.openai_compatible_config.clone()
-    }
-
     /// Returns the current languages.
     pub async fn languages(&self) -> Vec<screenpipe_core::Language> {
         self.options.read().await.languages.clone()
@@ -1207,8 +1160,6 @@ impl AudioManager {
     pub async fn refresh_model_capabilities(&self) -> bool {
         let options = self.options.read().await;
         let audio_transcription_engine = options.transcription_engine.clone();
-        let deepgram_config = options.deepgram_config.clone();
-        let openai_compatible_config = options.openai_compatible_config.clone();
         let languages = options.languages.clone();
         let vocabulary = options.vocabulary.clone();
         drop(options);
@@ -1235,8 +1186,6 @@ impl AudioManager {
             {
                 match TranscriptionEngine::new(
                     audio_transcription_engine.clone(),
-                    deepgram_config.clone(),
-                    openai_compatible_config.clone(),
                     languages.clone(),
                     vocabulary.clone(),
                 )
@@ -1275,8 +1224,6 @@ impl AudioManager {
                 {
                     match TranscriptionEngine::new(
                         audio_transcription_engine.clone(),
-                        deepgram_config.clone(),
-                        openai_compatible_config.clone(),
                         languages.clone(),
                         vocabulary.clone(),
                     )

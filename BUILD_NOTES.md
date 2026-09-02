@@ -113,6 +113,11 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   commands and no longer proxies local `/v1/chat/completions` requests to the
   Screenpipe service. This does not alter the separate local bearer token used
   to protect the loopback API.
+- Deepgram and OpenAI-compatible audio transcription clients, their CLI key
+  input, and the Screenpipe Cloud/Deepgram live-meeting WebSocket transports
+  have been removed. The retained audio paths are local models only. The
+  root lockfile reduction removes the audio crate's `tokio-tungstenite` and
+  native-TLS transport edges without upgrading any dependency versions.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

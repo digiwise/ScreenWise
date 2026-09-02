@@ -33,8 +33,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, ValueEnum, PartialEq)]
 pub enum CliAudioTranscriptionEngine {
-    #[clap(name = "deepgram")]
-    Deepgram,
     #[clap(name = "whisper-tiny")]
     WhisperTiny,
     #[clap(name = "whisper-tiny-quantized")]
@@ -47,8 +45,6 @@ pub enum CliAudioTranscriptionEngine {
     WhisperLargeV3Turbo,
     #[clap(name = "whisper-large-v3-turbo-quantized")]
     WhisperLargeV3TurboQuantized,
-    #[clap(name = "openai-compatible")]
-    OpenAICompatible,
     #[clap(name = "qwen3-asr")]
     Qwen3Asr,
     #[clap(name = "parakeet")]
@@ -73,7 +69,6 @@ fn default_audio_engine() -> CliAudioTranscriptionEngine {
 
 fn cli_engine_to_str(engine: &CliAudioTranscriptionEngine) -> &'static str {
     match engine {
-        CliAudioTranscriptionEngine::Deepgram => "deepgram",
         CliAudioTranscriptionEngine::WhisperTiny => "whisper-tiny",
         CliAudioTranscriptionEngine::WhisperTinyQuantized => "whisper-tiny-quantized",
         CliAudioTranscriptionEngine::WhisperLargeV3 => "whisper-large",
@@ -82,7 +77,6 @@ fn cli_engine_to_str(engine: &CliAudioTranscriptionEngine) -> &'static str {
         CliAudioTranscriptionEngine::WhisperLargeV3TurboQuantized => {
             "whisper-large-v3-turbo-quantized"
         }
-        CliAudioTranscriptionEngine::OpenAICompatible => "openai-compatible",
         CliAudioTranscriptionEngine::Qwen3Asr => "qwen3-asr",
         CliAudioTranscriptionEngine::Parakeet => "parakeet",
         CliAudioTranscriptionEngine::Disabled => "disabled",
@@ -92,7 +86,6 @@ fn cli_engine_to_str(engine: &CliAudioTranscriptionEngine) -> &'static str {
 impl From<CliAudioTranscriptionEngine> for CoreAudioTranscriptionEngine {
     fn from(cli_engine: CliAudioTranscriptionEngine) -> Self {
         match cli_engine {
-            CliAudioTranscriptionEngine::Deepgram => CoreAudioTranscriptionEngine::Deepgram,
             CliAudioTranscriptionEngine::WhisperTiny => CoreAudioTranscriptionEngine::WhisperTiny,
             CliAudioTranscriptionEngine::WhisperTinyQuantized => {
                 CoreAudioTranscriptionEngine::WhisperTinyQuantized
@@ -108,9 +101,6 @@ impl From<CliAudioTranscriptionEngine> for CoreAudioTranscriptionEngine {
             }
             CliAudioTranscriptionEngine::WhisperLargeV3TurboQuantized => {
                 CoreAudioTranscriptionEngine::WhisperLargeV3TurboQuantized
-            }
-            CliAudioTranscriptionEngine::OpenAICompatible => {
-                CoreAudioTranscriptionEngine::OpenAICompatible
             }
             CliAudioTranscriptionEngine::Qwen3Asr => CoreAudioTranscriptionEngine::Qwen3Asr,
             CliAudioTranscriptionEngine::Parakeet => CoreAudioTranscriptionEngine::Parakeet,
@@ -460,10 +450,6 @@ pub struct RecordArgs {
     #[arg(long)]
     pub ignored_meeting_apps: Vec<String>,
 
-    /// Deepgram API Key for audio transcription
-    #[arg(long = "deepgram-api-key")]
-    pub deepgram_api_key: Option<String>,
-
     /// PID to watch for auto-destruction
     #[arg(long, hide = true)]
     pub auto_destruct_pid: Option<u32>,
@@ -658,7 +644,6 @@ pub struct RecordArgSources {
     pub included_windows: bool,
     pub ignored_urls: bool,
     pub ignored_meeting_apps: bool,
-    pub deepgram_api_key: bool,
     pub transcription_mode: bool,
     pub disable_telemetry: bool,
     pub video_quality: bool,
@@ -707,7 +692,6 @@ impl RecordArgSources {
             included_windows: from_command_line(record, "included_windows"),
             ignored_urls: from_command_line(record, "ignored_urls"),
             ignored_meeting_apps: from_command_line(record, "ignored_meeting_apps"),
-            deepgram_api_key: from_command_line(record, "deepgram_api_key"),
             transcription_mode: from_command_line(record, "transcription_mode"),
             disable_telemetry: from_command_line(record, "disable_telemetry"),
             video_quality: from_command_line(record, "video_quality"),
@@ -748,7 +732,6 @@ impl RecordArgSources {
             || self.included_windows
             || self.ignored_urls
             || self.ignored_meeting_apps
-            || self.deepgram_api_key
             || self.transcription_mode
             || self.disable_telemetry
             || self.video_quality
@@ -904,7 +887,6 @@ impl RecordArgs {
                 .iter()
                 .map(|l| l.as_lang_code().to_string())
                 .collect(),
-            deepgram_api_key: self.deepgram_api_key.clone().unwrap_or_default(),
             video_quality: self.video_quality.clone(),
             disable_snapshot_compaction: self.disable_snapshot_compaction,
             disable_meeting_detector: self.disable_meeting_detector,
@@ -1174,9 +1156,6 @@ impl RecordArgs {
         }
         if sources.ignored_meeting_apps {
             settings.ignored_meeting_apps = self.ignored_meeting_apps.clone();
-        }
-        if sources.deepgram_api_key {
-            settings.deepgram_api_key = self.deepgram_api_key.clone().unwrap_or_default();
         }
         if sources.transcription_mode {
             settings.transcription_mode = match self.transcription_mode {

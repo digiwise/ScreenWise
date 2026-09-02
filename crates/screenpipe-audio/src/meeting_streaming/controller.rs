@@ -17,7 +17,6 @@ use tracing::{debug, info, warn};
 use crate::{core::engine::AudioTranscriptionEngine, transcription::engine::TranscriptionEngine};
 
 use super::{
-    deepgram_live,
     events::{
         MeetingAudioFrame, MeetingAudioTap, MeetingLifecycleEvent, MeetingStreamingError,
         MeetingStreamingSessionEnded, MeetingStreamingSessionStarted,
@@ -542,16 +541,6 @@ fn route_frame_to_provider(
                 );
                 session.device_senders.insert(key.clone(), tx);
             }
-            MeetingStreamingProvider::ScreenpipeCloud | MeetingStreamingProvider::DeepgramLive => {
-                deepgram_live::spawn_deepgram_live_stream(
-                    config.clone(),
-                    session.meeting_id,
-                    frame.device_name.clone(),
-                    frame.device_type.clone(),
-                    rx,
-                );
-                session.device_senders.insert(key.clone(), tx);
-            }
             MeetingStreamingProvider::Disabled => {
                 return;
             }
@@ -752,39 +741,7 @@ async fn effective_streaming_config(
     config: &MeetingStreamingConfig,
     transcription_engine: &Arc<RwLock<Option<TranscriptionEngine>>>,
 ) -> MeetingStreamingConfig {
-    if config.provider != MeetingStreamingProvider::SelectedEngine {
-        return config.clone();
-    }
-
-    let selected_engine = transcription_engine
-        .read()
-        .await
-        .as_ref()
-        .map(TranscriptionEngine::config);
-    if selected_engine != Some(AudioTranscriptionEngine::Deepgram) {
-        return config.clone();
-    }
-
-    let cloud_config = config
-        .clone()
-        .with_provider(MeetingStreamingProvider::ScreenpipeCloud);
-    if cloud_config.live_transcription_ready() {
-        info!(
-            "meeting streaming: selected-engine resolved to screenpipe-cloud live because the selected transcription engine is screenpipe cloud"
-        );
-        return cloud_config;
-    }
-
-    let direct_deepgram_config = config
-        .clone()
-        .with_provider(MeetingStreamingProvider::DeepgramLive);
-    if direct_deepgram_config.live_transcription_ready() {
-        info!(
-            "meeting streaming: selected-engine resolved to direct Deepgram live because the selected transcription engine is Deepgram"
-        );
-        return direct_deepgram_config;
-    }
-
+    let _ = transcription_engine;
     config.clone()
 }
 
@@ -803,15 +760,6 @@ async fn readiness_error(
             Some(_) => None,
             None => Some("Selected transcription engine is still loading".to_string()),
         },
-        MeetingStreamingProvider::ScreenpipeCloud if config.live_transcription_ready() => None,
-        MeetingStreamingProvider::ScreenpipeCloud => Some(
-            "Log in to ScreenPipe Cloud to enable live meeting transcription".to_string(),
-        ),
-        MeetingStreamingProvider::DeepgramLive if config.live_transcription_ready() => None,
-        MeetingStreamingProvider::DeepgramLive => Some(
-            "Direct Deepgram live transcription needs a Deepgram API key; ScreenPipe Cloud does not"
-                .to_string(),
-        ),
     }
 }
 
@@ -836,7 +784,6 @@ fn emit_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcription::deepgram::DeepgramTranscriptionConfig;
 
     fn test_session(now: Instant, live: bool) -> ActiveMeetingStream {
         ActiveMeetingStream {
@@ -1056,61 +1003,5 @@ mod tests {
         assert!(!session.live_transcript_seen);
         assert!(session.last_live_transcript_at.is_none());
         assert!(!audio_tap.background_suppressed());
-    }
-
-    #[tokio::test]
-    async fn selected_deepgram_uses_cloud_live_when_token_available() {
-        let engine = TranscriptionEngine::new(
-            Arc::new(AudioTranscriptionEngine::Deepgram),
-            Some(DeepgramTranscriptionConfig::direct(
-                "unused-personal-key".to_string(),
-            )),
-            None,
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
-        .expect("deepgram engine");
-        let engine_ref = Arc::new(RwLock::new(Some(engine)));
-        let config = MeetingStreamingConfig::from_settings(
-            true,
-            "selected-engine",
-            Some("cloud-token".to_string()),
-            None,
-            None,
-            None,
-        );
-
-        let effective = effective_streaming_config(&config, &engine_ref).await;
-
-        assert_eq!(
-            effective.provider,
-            MeetingStreamingProvider::ScreenpipeCloud
-        );
-        assert!(effective.live_transcription_ready());
-        assert_eq!(effective.model.as_deref(), Some("nova-3"));
-        assert!(effective.endpoint.starts_with("wss://"));
-    }
-
-    #[tokio::test]
-    async fn selected_deepgram_without_live_credentials_stays_selected_engine() {
-        let engine = TranscriptionEngine::new(
-            Arc::new(AudioTranscriptionEngine::Deepgram),
-            Some(DeepgramTranscriptionConfig::direct(
-                "unused-personal-key".to_string(),
-            )),
-            None,
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
-        .expect("deepgram engine");
-        let engine_ref = Arc::new(RwLock::new(Some(engine)));
-        let config =
-            MeetingStreamingConfig::from_settings(true, "selected-engine", None, None, None, None);
-
-        let effective = effective_streaming_config(&config, &engine_ref).await;
-
-        assert_eq!(effective.provider, MeetingStreamingProvider::SelectedEngine);
     }
 }

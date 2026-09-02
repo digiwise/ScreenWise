@@ -5,7 +5,7 @@
 //! OpenAI-compatible audio transcription endpoint (`POST /v1/audio/transcriptions`).
 //!
 //! Accepts a multipart file upload and transcribes it using the user's configured
-//! transcription engine (whisper, deepgram, screenpipe-cloud, etc.).
+//! local transcription engine (Whisper, Parakeet, or another compiled local model).
 //!
 //! Compatible with:
 //!   curl http://localhost:3030/v1/audio/transcriptions \
@@ -48,7 +48,7 @@ fn error_response(status: StatusCode, message: String) -> Response {
 /// OpenAI-compatible multipart upload. Fields:
 ///   - `file` (required): audio file (any format ffmpeg can decode)
 ///   - `model` (optional): ignored, uses user's configured engine
-///   - `engine` (optional): override engine e.g. "whisper-large-v3", "deepgram"
+///   - `engine` (optional): override with a local engine, e.g. "whisper-large-v3"
 ///   - `language` (optional): hint language code
 pub async fn transcribe_handler(
     State(state): State<Arc<AppState>>,
@@ -180,18 +180,8 @@ pub async fn transcribe_handler(
                 );
             }
         };
-        let deepgram_config = audio_manager.deepgram_config().await;
-        let openai_compatible_config = audio_manager.openai_compatible_config().await;
         let languages = audio_manager.languages().await;
-        match TranscriptionEngine::new(
-            engine,
-            deepgram_config,
-            openai_compatible_config,
-            languages,
-            vec![],
-        )
-        .await
-        {
+        match TranscriptionEngine::new(engine, languages, vec![]).await {
             Ok(e) => e,
             Err(e) => {
                 error!("failed to create transcription engine: {}", e);
