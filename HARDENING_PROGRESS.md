@@ -417,9 +417,10 @@ external tools and transports. No MCP source has been changed in this audit.
   externally executable MCP setup directory.
 - The separate user-defined MCP proxy has not been changed; its future
   read-only/local capability boundary remains an explicit design decision.
-- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
-  and `git diff --check` passed with only the established unrelated warnings;
-  no lockfile change is required.
+- Initial validation exposed one missed `mod browser;` declaration after the
+  helper deletion; it was corrected immediately. `cargo fmt --all -- --check`,
+  `cargo check -p screenpipe-engine --locked`, and `git diff --check` now pass
+  with only the established unrelated warnings; no lockfile change is required.
 
 ### Hosted survey command removal in progress
 

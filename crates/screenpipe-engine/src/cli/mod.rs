@@ -5,7 +5,6 @@
 pub mod audio;
 pub mod auth;
 pub mod backup;
-mod browser;
 pub mod connection;
 pub mod db;
 pub mod export;
