@@ -435,3 +435,27 @@ dispatch arm, and parser test are being removed as one source-only subsystem.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` passed with only the established unrelated warnings;
   no lockfile change is required.
+
+### External AI provider preset audit
+
+The CLI preset subsystem still accepts OpenAI, Anthropic, custom HTTP,
+Screenpipe Cloud, and ChatGPT OAuth providers, alongside local Ollama. The
+same provider vocabulary is consumed by the currently dirty desktop settings
+and Pi-agent integration. Removing only the CLI choices would leave the
+external AI gateway reachable through the desktop, while removing all but
+local inference is a material retained-capability decision. No provider source
+has changed in this audit.
+
+### CLI hosted-onboarding prompt removal in progress
+
+The standalone recorder printed a hosted Screenpipe onboarding URL after every
+startup. This promotional prompt is unrelated to local capture and is being
+removed as a source-only CLI cleanup.
+
+### CLI hosted-onboarding prompt removal complete — pending commit
+
+- Removed the standalone recorder's hosted onboarding advertisement. Startup
+  now reports only local recorder/API state.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed with only the established unrelated warnings;
+  no lockfile change is required.
