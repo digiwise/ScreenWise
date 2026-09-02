@@ -526,3 +526,16 @@ are no longer exempt from local API authentication.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` pass with only the established unrelated warnings; no
   root lockfile change is required.
+
+### Dead connections API facade removal complete
+
+With the runtime `/connections` mount gone, the remaining `connections_api`
+module was unreachable. Deleted that credential-management, WhatsApp, OAuth,
+and browser-pairing API facade and its crate export only. Browser bridge state,
+desktop integration, and `screenpipe-connect` remain intentionally untouched
+for their later coordinated cleanup.
+
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` pass with no root lockfile change. The sole remaining
+  `connections_api` text match is an intentionally untouched stale server
+  comment, not a module reference.
