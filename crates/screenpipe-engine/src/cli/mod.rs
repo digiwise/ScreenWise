@@ -10,7 +10,6 @@ pub mod connection;
 pub mod db;
 pub mod export;
 pub mod install;
-pub mod login;
 pub mod mcp;
 pub mod pipe;
 pub mod presets;
@@ -243,15 +242,6 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         allow_untrusted: bool,
     },
-
-    /// Authenticate with screenpipe cloud
-    Login,
-
-    /// Sign out of screenpipe cloud (clears the auth token from store.bin)
-    Logout,
-
-    /// Show current auth status
-    Whoami,
 
     /// Open the screenpipe survey in your browser
     Survey,

@@ -63,7 +63,6 @@ use crate::{
     },
     video_cache::FrameCache,
 };
-use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use lru::LruCache;
 use moka::future::Cache as MokaCache;
@@ -181,12 +180,6 @@ pub struct AppState {
     pub api_auth: bool,
     /// The API key to validate against (from SCREENPIPE_API_KEY or auth.json)
     pub api_auth_key: Option<String>,
-    /// Cloud JWT (Clerk) used to authenticate proxied requests to api.screenpipe.com.
-    /// Held in ArcSwap so the desktop shell can refresh it after login/logout
-    /// without rebuilding the server. The pi-agent's bash deliberately can't see
-    /// this token — agent calls localhost/v1/chat/completions and the server
-    /// signs the upstream request here. See routes/cloud_proxy.rs.
-    pub cloud_token: Arc<ArcSwap<Option<String>>>,
     /// Unified credential store for OAuth tokens, API keys, etc.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
     /// Runtime control for the high-FPS screen-capture override. Shared
@@ -227,8 +220,6 @@ pub struct SCServer {
     pub api_auth: bool,
     /// API key for remote auth validation
     pub api_auth_key: Option<String>,
-    /// Cloud JWT for proxied /v1/chat/completions calls. See AppState::cloud_token.
-    pub cloud_token: Arc<ArcSwap<Option<String>>>,
     /// Unified credential store for OAuth tokens, API keys, etc.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
     /// Background OAuth refresh scheduler. Owned here so its JoinHandle
@@ -290,7 +281,6 @@ impl SCServer {
             owned_browser: None,
             api_auth: false,
             api_auth_key: None,
-            cloud_token: Arc::new(ArcSwap::new(Arc::new(None))),
             secret_store: None,
             oauth_refresher: None,
             external_memory_sync: None,
@@ -308,21 +298,6 @@ impl SCServer {
     ) -> Self {
         self.high_fps_controller = Some(controller);
         self
-    }
-
-    /// Set the cloud JWT used to authenticate proxied chat-completion calls
-    /// to api.screenpipe.com. Safe to call before or after `start()` — the route
-    /// reads the inner Arc on each request. Callers can also clone the Arc
-    /// directly (see `cloud_token_handle`) to update it from elsewhere.
-    pub fn with_cloud_token(self, token: Option<String>) -> Self {
-        self.cloud_token.store(Arc::new(token));
-        self
-    }
-
-    /// Clone the cloud-token handle so the desktop shell can refresh it
-    /// after the server has started (e.g. when settings.user.token changes).
-    pub fn cloud_token_handle(&self) -> Arc<ArcSwap<Option<String>>> {
-        self.cloud_token.clone()
     }
 
     /// Set the pipe manager
@@ -562,7 +537,6 @@ impl SCServer {
             ),
             api_auth: self.api_auth,
             api_auth_key: self.api_auth_key.clone(),
-            cloud_token: self.cloud_token.clone(),
             secret_store: self.secret_store.clone(),
             high_fps_controller: self.high_fps_controller.clone(),
         });
@@ -735,15 +709,6 @@ impl SCServer {
                 "/v1/audio/transcriptions",
                 axum::routing::post(crate::routes::transcribe::transcribe_handler)
                     .layer(axum::extract::DefaultBodyLimit::max(250 * 1024 * 1024)), // 250MB
-            )
-            // Local proxy → api.screenpipe.com/v1/chat/completions. Lets the
-            // pi-agent's bash do cloud media analysis without ever seeing the
-            // cloud JWT (which the wrapper unsets). Body limit bumped because
-            // requests embed base64'd audio/images.
-            .route(
-                "/v1/chat/completions",
-                axum::routing::post(crate::routes::cloud_proxy::chat_completions)
-                    .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB
             );
 
         // Apple Intelligence — generic OpenAI-compatible endpoint (macOS only)

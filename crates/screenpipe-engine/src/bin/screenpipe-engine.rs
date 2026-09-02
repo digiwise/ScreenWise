@@ -347,18 +347,6 @@ async fn main() -> anyhow::Result<()> {
             screenpipe_engine::cli::install::handle_install(url, allow_untrusted).await?;
             return Ok(());
         }
-        Command::Login => {
-            screenpipe_engine::cli::login::handle_login_command().await?;
-            return Ok(());
-        }
-        Command::Logout => {
-            screenpipe_engine::cli::login::handle_logout_command().await?;
-            return Ok(());
-        }
-        Command::Whoami => {
-            screenpipe_engine::cli::login::handle_whoami_command().await?;
-            return Ok(());
-        }
         Command::Survey => {
             screenpipe_engine::cli::survey::handle_survey_command().await?;
             return Ok(());
@@ -1209,15 +1197,6 @@ async fn main() -> anyhow::Result<()> {
     server.manual_meeting = Some(manual_meeting.clone());
     server.api_auth = config.api_auth;
     server.api_auth_key = config.api_auth_key.clone();
-    // Cloud JWT for the /v1/chat/completions proxy. CLI/binary path reads
-    // SCREENPIPE_API_KEY directly; desktop path overrides via
-    // SCServer::cloud_token_handle after spawn.
-    if let Ok(t) = std::env::var("SCREENPIPE_API_KEY") {
-        if !t.is_empty() {
-            server.cloud_token.store(std::sync::Arc::new(Some(t)));
-        }
-    }
-
     // Initialize secret store for unified credential management
     let encryption_requested =
         config.encrypt_secrets || screenpipe_secrets::is_encryption_requested(&local_data_dir);

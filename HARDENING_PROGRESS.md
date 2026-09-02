@@ -169,7 +169,7 @@ startup, routes, and client transport while retaining local retention cleanup;
 then compile the engine and inspect any now-unreachable core sync dependency
 graph separately.
 
-### Cloud-sync removal ready to commit
+### Cloud-sync removal complete — `22a71dc3f`
 
 - Removed the `sync` CLI command, record-time sync flags and service startup,
   cloud search metadata, sync/archive API routes, and memory-delete tombstone
@@ -182,3 +182,27 @@ graph separately.
   engine still compiles `screenpipe-sync` through broader core dependencies;
   dependency-graph pruning is a separate reviewed change, not an excuse to
   alter locked versions.
+
+### Next subsystem audit: product accounts, login, and cloud proxy
+
+Initial mapping separates Screenpipe-product account code from the later
+third-party connections/integrations removal. The engine CLI `Login`/`Logout`/
+`Whoami` commands and `cli/login.rs`, desktop login/entitlement components and
+commands, server cloud-JWT state, and the `/v1/chat/completions` proxy are one
+product-account subsystem. Remove those as one commit while preserving the
+authenticated local API and local configuration. Do not include Google,
+calendar, MCP, browser, or other third-party OAuth connections in that commit;
+they are their own planned subsystem.
+
+The engine-side product-account increment is now in progress: the `login`,
+`logout`, and `whoami` CLI commands, the cloud JWT state, and the localhost
+`/v1/chat/completions` cloud proxy have been removed. The local API bearer-key
+configuration is unchanged. `cargo check -p screenpipe-engine --locked` has
+completed after the edit; desktop account UI and commands remain for their
+separate desktop increment.
+
+The engine product-account increment is ready to commit. The scoped locked
+engine check passed, no root-lock change is present, and `git diff --check`
+passed. The desktop account/entitlement surface remains intentionally
+uncommitted alongside the previously staged desktop telemetry work so its
+Tauri-specific validation can be completed in one desktop review.

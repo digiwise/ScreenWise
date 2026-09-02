@@ -109,6 +109,10 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   SFTP remote-sync CLI paths have been removed from the engine. The
   authenticated localhost API retains its independent local retention routes;
   nothing now uploads captured data before retention cleanup.
+- The engine no longer offers Screenpipe-cloud `login`, `logout`, or `whoami`
+  commands and no longer proxies local `/v1/chat/completions` requests to the
+  Screenpipe service. This does not alter the separate local bearer token used
+  to protect the loopback API.
 
 ## Functional baseline fixes and verification (2026-09-01)
 
