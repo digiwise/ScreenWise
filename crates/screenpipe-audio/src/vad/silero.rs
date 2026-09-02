@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use tracing::debug;
 use vad_rs::{Vad, VadStatus};
 
+use crate::speaker::models::verify_file_sha256;
 use crate::vad::FRAME_HISTORY;
 
 use super::{VadEngine, MODEL_PATH, SILENCE_THRESHOLD, SPEECH_FRAME_THRESHOLD, SPEECH_THRESHOLD};
@@ -48,10 +49,13 @@ impl SileroVad {
     }
 
     async fn get_or_download_model() -> anyhow::Result<PathBuf> {
+        const SILERO_V5_SHA256: &str =
+            "1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3";
         // Check in-memory cache
         {
             let cached = MODEL_PATH.lock().await;
             if let Some(path) = cached.as_ref() {
+                verify_file_sha256(path, SILERO_V5_SHA256)?;
                 return Ok(path.clone());
             }
         }
@@ -61,14 +65,16 @@ impl SileroVad {
         let path = cache_dir.join("silero_vad_v5.onnx");
 
         if path.exists() {
+            verify_file_sha256(&path, SILERO_V5_SHA256)?;
             let mut cached = MODEL_PATH.lock().await;
             *cached = Some(path.clone());
             return Ok(path);
         }
 
         Err(anyhow::anyhow!(
-            "required local Silero VAD model is missing at {}; provision silero_vad_v5.onnx with SHA-256 1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3 before starting screenpipe",
-            path.display()
+            "required local Silero VAD model is missing at {}; provision silero_vad_v5.onnx with SHA-256 {} before starting screenpipe",
+            path.display(),
+            SILERO_V5_SHA256
         ))
     }
 

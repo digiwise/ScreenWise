@@ -11,8 +11,10 @@ untracked `smoke-baseline-20260901/` and `smoke-fixed-20260901/` directories.
   no Litepipe code has been used in this work.
 - Stay on branch `screenwise`; use locked Cargo commands and do not run
   `cargo update`.
-- Keep `Cargo.lock` unchanged unless a dependency change is explicitly
-  justified and reviewed. It currently matches the upstream baseline.
+- Keep lockfiles unchanged unless a dependency change is explicitly justified
+  and reviewed. The engine lockfile now has an intentional Sentry-only graph
+  reduction from `ba67c6283`; the desktop lockfile is being reviewed as part
+  of its separate Sentry-plugin removal.
 
 ## Completed before this continuation
 
@@ -62,16 +64,52 @@ The Tauri desktop app also has Rust analytics/Sentry initialization and many
 web-UI PostHog call sites. It has its own manifest and lockfile. Remove this
 surface in a separate commit after the engine-only removal builds cleanly.
 
+### Desktop telemetry increment in progress (uncommitted)
+
+The following uncommitted files route browser PostHog imports to a local inert
+module without touching dozens of UI components:
+
+- `apps/screenpipe-app-tauri/lib/posthog-disabled.ts`
+- `apps/screenpipe-app-tauri/lib/posthog-disabled-react.tsx`
+- `apps/screenpipe-app-tauri/tsconfig.json`
+- `apps/screenpipe-app-tauri/next.config.mjs`
+
+The aliases cover both `posthog-js` and `posthog-js/react`; the local module
+implements the existing capture/identity/consent methods as no-ops. The app
+has no installed `node_modules` and Bun is unavailable on this host, so only
+static configuration validation is currently possible. Next actions: validate
+the aliases with the approved frontend package manager/environment; replace
+the Tauri Rust `analytics.rs` transport with a local no-op or remove its call
+sites; then remove/compile out direct Sentry initialization and its manifest
+dependencies. Do not commit this desktop increment with the engine commit.
+
+The Tauri module declaration now explicitly selects `analytics_local.rs`, a
+local-only compatibility implementation. The original `analytics.rs` remains
+in the tree temporarily but is no longer compiled. Its removal can follow once
+the desktop build is available for validation.
+
+Direct desktop Sentry initialization, plugin registration, tracing layer,
+remote panic reporting, and scope enrichment are now behind `cfg(any())`; the
+local panic log remains active. `sentry` and `tauri-plugin-sentry` have been
+removed from the desktop manifest. On 2026-09-02,
+`cargo check --manifest-path apps/screenpipe-app-tauri/src-tauri/Cargo.toml
+--locked` reached the Tauri build-script stage after the approved fetch of its
+already locked `divanshu-go/muda` revision. It regenerated the schema files
+without Sentry permissions; the app capability still named `sentry:default`,
+which is being removed before the final locked check. No dependency version is
+being changed to work around the cache prerequisite.
+
 ### Next concrete increment
 
-1. Delete engine PostHog/Sentry transport and analytics identity plumbing.
-2. Preserve `last-panic.log` and local logging, but remove remote panic upload.
-3. Retain resource monitoring only if it has a local recorder-health or restart
-   role after its HTTP reporting is removed.
-4. Run formatting, targeted locked checks, diff/lock checks, then update this
-   log and `BUILD_NOTES.md`/`BASELINE_AUDIT.md` before committing.
+1. Remove the remaining desktop `sentry:default` capability declaration.
+2. Complete a locked Tauri check, then inspect the lockfile solely for the
+   expected removal graph; do not accept incidental upgrades.
+3. Delete the now-uncompiled desktop Rust analytics source if the check passes.
+4. Run scoped formatting, static frontend configuration checks, diff/lock
+   checks, then update this log and `BUILD_NOTES.md`/`BASELINE_AUDIT.md` before
+   the desktop-only commit.
 
-### Engine increment complete — `40781f9a7`
+### Engine increment complete — `ba67c6283`
 
 - Replaced the engine PostHog client/event implementation with inert
   compatibility shims while its cloud-facing owners are removed separately.
@@ -92,10 +130,16 @@ surface in a separate commit after the engine-only removal builds cleanly.
 
 ## Still pending after telemetry work
 
-1. Decide and, if justified, implement runtime SHA-256 verification for the
-   three explicitly staged audio artifacts. Prefer an already locked crate or
-   a small audited implementation; document Silero provenance without adding
-   the binary to source control.
+1. Runtime SHA-256 verification is ready to commit as a separate audio-model
+   increment. It streams all three explicitly staged artifacts before cache or
+   ONNX/VAD loading, uses the already locked `sha2 0.10.9` package, and has a
+   one-line root-lock metadata delta. `cargo check -p screenpipe-audio --locked`
+   passed with only the pre-existing `unused_mut` warning. Its focused unit
+   test could not start because the existing `infer 0.15.0` dev dependency is
+   uncached and the network sandbox blocks static.crates.io. Silero
+   source/tag/licence provenance is still operator-provided because its former
+   baseline `master` URL was mutable; the code enforces the recorded bytes but
+   does not claim unverified provenance.
 2. Remove cloud sync, accounts/login/cloud proxy, external providers and
    transcription, pipes/workflow automation, connections/integrations/team and
    enterprise services, and unneeded cross-platform/model subsystems — one

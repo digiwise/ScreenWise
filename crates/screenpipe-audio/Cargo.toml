@@ -38,6 +38,7 @@ chrono = { version = "0.4.31", features = ["serde"] }
 # v5/v6: 3x faster, 6000+ languages, better accuracy
 vad-rs = { git = "https://github.com/divanshu-go/vad-rs-1.git", rev = "b14b26ec7093f5398ef6658020259cd7c130ea6c", default-features = false }
 anyhow = "1.0.86"
+sha2 = "0.10.9"
 hf-hub = { workspace = true }
 # https://github.com/pdeljanov/Symphonia/tree/master?tab=readme-ov-file#optimizations
 symphonia = { version = "0.5.4", features = ["aac", "isomp4", "opt-simd"] }
