@@ -418,9 +418,6 @@ async fn main() -> anyhow::Result<()> {
         !config.analytics_enabled,
     )?);
 
-    // Periodic terminal nudge to install the desktop app (CLI-only).
-    screenpipe_engine::cli_reminder::spawn();
-
     // Kept temporarily behind an always-false cfg while remaining cloud
     // call-sites are removed. This avoids compiling any Sentry transport.
     #[cfg(any())]

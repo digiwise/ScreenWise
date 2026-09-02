@@ -382,3 +382,20 @@ integration subsystem; preserve the ordinary local memories database/API.
   and `git diff --check` passed. The desktop crate cannot yet be checked under
   `--locked` because its pre-existing lockfile drift is independent of this
   source-only removal.
+
+### Next subsystem audit: CLI promotional reminders
+
+The standalone engine binary starts a five-minute terminal reminder loop. Its
+rotating prompts direct users to Screenpipe's hosted desktop site, an `npx`
+MCP download, a remote pipe bundle, login/cloud sync, and a hosted survey.
+None is required for local recording, so remove the loop and its CLI startup
+hook as one source-only subsystem.
+
+### CLI promotional-reminder removal complete — pending commit
+
+- Removed the periodic standalone-CLI reminder task and all of its hosted,
+  external-package, pipe, login/cloud-sync, and survey prompts. Recording and
+  the ordinary command-line interface do not emit promotional actions.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed with only the established unrelated warnings.
+  No lockfile change is required.

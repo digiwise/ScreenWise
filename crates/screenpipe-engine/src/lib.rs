@@ -9,7 +9,6 @@ pub mod auth_key;
 mod auto_destruct;
 pub mod calendar_speaker_id;
 pub mod cli;
-pub mod cli_reminder;
 pub mod connections_api;
 pub mod core;
 pub mod crash_log;
