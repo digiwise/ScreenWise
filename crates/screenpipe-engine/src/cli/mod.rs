@@ -9,9 +9,7 @@ mod browser;
 pub mod connection;
 pub mod db;
 pub mod export;
-pub mod install;
 pub mod mcp;
-pub mod pipe;
 pub mod presets;
 pub mod search;
 pub mod status;
@@ -187,12 +185,6 @@ pub enum Command {
         subcommand: TeamCommand,
     },
 
-    /// Manage pipes (scheduled agents on screen data)
-    Pipe {
-        #[command(subcommand)]
-        subcommand: PipeCommand,
-    },
-
     /// Audio device management commands
     Audio {
         #[command(subcommand)]
@@ -221,16 +213,6 @@ pub enum Command {
     Vault {
         #[command(subcommand)]
         subcommand: VaultCommand,
-    },
-
-    /// Install a bundle of pipes from a manifest URL
-    Install {
-        /// Manifest URL (HTTPS, JSON). Defaults to the screenpipe starter bundle.
-        #[arg(default_value = "https://screenpi.pe/start.json")]
-        url: String,
-        /// Allow manifests hosted outside the trusted host list
-        #[arg(long, default_value_t = false)]
-        allow_untrusted: bool,
     },
 
     /// Open the screenpipe survey in your browser
@@ -1266,86 +1248,6 @@ fn persist_recording_settings_to_store(
             data_dir.display()
         ))
     })
-}
-
-// =============================================================================
-// Pipe commands
-// =============================================================================
-
-#[derive(Subcommand)]
-pub enum PipeCommand {
-    /// List all pipes
-    List {
-        /// Output format
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Install a pipe from a local path or URL
-    Install {
-        /// Source: local file/dir path or URL
-        source: String,
-    },
-    /// Enable a pipe
-    Enable {
-        /// Pipe name
-        name: String,
-    },
-    /// Disable a pipe
-    Disable {
-        /// Pipe name
-        name: String,
-    },
-    /// Run a pipe once immediately
-    Run {
-        /// Pipe name
-        name: String,
-    },
-    /// Show pipe logs
-    Logs {
-        /// Pipe name
-        name: String,
-        /// Follow log output
-        #[arg(short, long, default_value_t = false)]
-        follow: bool,
-    },
-    /// Delete a pipe
-    Delete {
-        /// Pipe name
-        name: String,
-    },
-    /// Manage AI model presets
-    Models {
-        #[command(subcommand)]
-        subcommand: ModelCommand,
-    },
-    /// Publish a local pipe to the registry
-    Publish {
-        /// Pipe name (directory name under ~/.screenpipe/pipes/)
-        name: String,
-    },
-    /// Search the pipe registry
-    Search {
-        /// Search query
-        query: String,
-    },
-    /// Show pipe detail from the registry
-    Info {
-        /// Pipe slug (registry identifier)
-        slug: String,
-    },
-    /// Check publish/review status of a pipe you own
-    Status {
-        /// Pipe slug (registry identifier)
-        slug: String,
-    },
-    /// Set which AI preset(s) a pipe uses (overrides inline model/provider)
-    SetPreset {
-        /// Pipe name
-        name: String,
-        /// Preset id(s) — multiple ids form a fallback chain (first works wins)
-        #[arg(required = true, num_args = 1..)]
-        preset: Vec<String>,
-    },
 }
 
 #[derive(Subcommand)]

@@ -121,6 +121,9 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
 - The cloud workflow-classifier polling task and Screenpipe gateway client have
   been removed. Local capture does not send recent activity to derive workflow
   events.
+- The pipe automation subsystem has been removed: no recorder startup task,
+  CLI command, local API route, registry client, or scheduled agent execution
+  remains. This does not alter the authenticated local capture and search API.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

@@ -13,7 +13,6 @@ pub mod frames;
 pub mod health;
 pub mod meetings;
 pub mod memories;
-pub mod pipe_store;
 pub mod power;
 pub mod retranscribe;
 pub mod search;

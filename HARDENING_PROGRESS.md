@@ -319,3 +319,24 @@ would retain a reachable outbound path.
   events.
 - `cargo check -p screenpipe-engine --locked` and `git diff --check` passed;
   no lockfile change is required for this source-only removal.
+
+### Next subsystem audit: pipes and pipe store
+
+The recorder currently constructs a `PipeManager` at startup, installs built-in
+pipes, restores/schedules execution, registers pipe-specific bearer permissions,
+and mounts local `/pipes` plus remote pipe-registry routes. The standalone CLI
+also installs, runs, publishes, and searches pipes. This is one automation
+subsystem: remove its startup, API, CLI, persistence, permissions middleware,
+and registry routes together while retaining the ordinary authenticated local
+capture/search API. No pipe source has been changed in this audit checkpoint.
+
+### Pipes and pipe store removal complete — pending commit
+
+- Removed PipeManager startup, Pi-agent installation, scheduled execution,
+  built-in pipe installation, pipe-specific permissions, `/pipes` routes,
+  registry routes, SQLite pipe persistence, and standalone pipe/install CLI
+  commands.
+- The ordinary authenticated local recorder, search API, and non-pipe local
+  routes remain. `cargo check -p screenpipe-engine --locked` passed with only
+  the established unrelated warnings; this source-only removal does not change
+  the lockfile.
