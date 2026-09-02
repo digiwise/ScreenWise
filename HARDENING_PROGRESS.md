@@ -513,3 +513,16 @@ integration routes remain unchanged.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` pass with only the established unrelated warnings; no
   lockfile change is required.
+
+### Runtime connections HTTP surface removal complete
+
+The engine no longer creates the credential-backed connection manager or
+WhatsApp gateway, reconnects a previously paired WhatsApp session, or mounts
+the `/connections` HTTP API. The standalone `connections_api` module and
+browser bridge state remain deliberately intact for a later coordinated
+desktop/browser cleanup. The now-unreachable OAuth and browser-pairing paths
+are no longer exempt from local API authentication.
+
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` pass with only the established unrelated warnings; no
+  root lockfile change is required.

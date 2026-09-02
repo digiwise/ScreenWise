@@ -686,43 +686,6 @@ impl SCServer {
                 axum::routing::post(crate::apple_intelligence_api::chat_completions),
             );
 
-        // Connections routes.
-        let cm: crate::connections_api::SharedConnectionManager = Arc::new(Mutex::new(
-            screenpipe_connect::connections::ConnectionManager::new(
-                self.screenpipe_dir.clone(),
-                self.secret_store.clone(),
-            ),
-        ));
-        let wa: crate::connections_api::SharedWhatsAppGateway = Arc::new(Mutex::new(
-            screenpipe_connect::whatsapp::WhatsAppGateway::new(self.screenpipe_dir.clone()),
-        ));
-
-        // Auto-reconnect WhatsApp if a previous session exists on disk.
-        // We pass an empty hint so `start_pairing` runs its full resolver
-        // (bundled sidecar → install dirs → PATH).
-        {
-            let wa_lock = wa.lock().await;
-            if wa_lock.has_session() {
-                tracing::info!("whatsapp: found existing session, auto-reconnecting...");
-                if let Err(e) = wa_lock.start_pairing("").await {
-                    tracing::warn!("whatsapp: auto-reconnect failed: {:?}", e);
-                }
-            }
-        }
-
-        let router = router.nest(
-            "/connections",
-            crate::connections_api::router(
-                cm,
-                wa,
-                self.screenpipe_dir.clone(),
-                self.secret_store.clone(),
-                app_state.browser_bridge.clone(),
-                app_state.browser_registry.clone(),
-                self.api_auth_key.clone(),
-            ),
-        );
-
         // Power management routes (if power manager is available)
         let router = if let Some(ref pm) = self.power_manager {
             let power_routes = Router::new()
@@ -816,15 +779,10 @@ impl SCServer {
                             // Allow specific endpoints without auth:
                             // - /health: device monitor, tray status, startup polling
                             //   (called before frontend loads API key via IPC)
-                            // - /connections/oauth/callback: browser redirect from an OAuth
-                            //   provider (no bearer token in redirect)
                             let path = req.uri().path();
                             if path == "/health"
                                 || path == "/ws/health"
                                 || path == "/audio/device/status"
-                                || path == "/connections/oauth/callback"
-                                || path == "/connections/browser/pair/start"
-                                || path == "/connections/browser/pair/status"
                                 || path.starts_with("/frames/")
                                 || path == "/notify"
                             {
