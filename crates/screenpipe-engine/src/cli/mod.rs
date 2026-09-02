@@ -13,7 +13,6 @@ pub mod presets;
 pub mod search;
 pub mod status;
 mod store_file;
-pub mod survey;
 pub mod vault;
 pub mod vision;
 
@@ -198,10 +197,6 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: VaultCommand,
     },
-
-    /// Open the screenpipe survey in your browser
-    Survey,
-
     /// Check system readiness (permissions, ffmpeg, etc.)
     Doctor,
 
@@ -1734,16 +1729,6 @@ mod tests {
             _ => panic!("expected Record command"),
         }
     }
-
-    #[test]
-    fn test_survey_command_parses() {
-        let cli = Cli::try_parse_from(["screenpipe", "survey"]).unwrap();
-        match cli.command {
-            Command::Survey => {}
-            _ => panic!("expected Survey command"),
-        }
-    }
-
     /// `--monitor-id` must override the `--use-all-monitors=true` default so
     /// that users restricting capture for privacy actually get only the
     /// monitors they listed. Regression test for Francesco's report

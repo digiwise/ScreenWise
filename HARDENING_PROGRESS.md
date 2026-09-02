@@ -420,3 +420,17 @@ external tools and transports. No MCP source has been changed in this audit.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` passed with only the established unrelated warnings;
   no lockfile change is required.
+
+### Hosted survey command removal in progress
+
+The standalone `screenpipe survey` command opens the hosted Screenpipe survey
+in a browser. It is not part of the local recorder, so its CLI module, command,
+dispatch arm, and parser test are being removed as one source-only subsystem.
+
+### Hosted survey command removal complete — pending commit
+
+- Removed the hosted survey command, its browser-launch helper, and parser
+  test. The standalone recorder CLI no longer opens a Screenpipe web page.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed with only the established unrelated warnings;
+  no lockfile change is required.
