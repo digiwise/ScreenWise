@@ -22,7 +22,6 @@ pub mod hd_recorder;
 pub mod high_fps_controller;
 pub mod hot_frame_cache;
 pub mod logging;
-pub mod mcp_servers_api;
 pub mod meeting_detector;
 pub mod meeting_export;
 pub mod meeting_persister;

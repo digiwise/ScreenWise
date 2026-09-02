@@ -497,3 +497,19 @@ removal.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` pass with only the established unrelated warnings; no
   lockfile change is required.
+
+### User-supplied MCP server API removal complete
+
+The separate `/mcp-servers` API accepted arbitrary user-defined HTTP and stdio
+MCP endpoints, persisted their credentials, performed OAuth redirects, and
+proxied tool calls. It is unrelated to a future constrained read-only local
+MCP interface, so its engine module, runtime store/mount, and callback auth
+exemption are being removed as one isolated subsystem. Connections and browser
+integration routes remain unchanged.
+
+- Deleted the `/mcp-servers` HTTP/stdio proxy API and stopped creating its
+  credential-backed store at server startup. The removed OAuth callback
+  exemption can no longer admit unauthenticated MCP redirect requests.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` pass with only the established unrelated warnings; no
+  lockfile change is required.
