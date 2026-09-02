@@ -483,3 +483,17 @@ independent and still persists local `last-panic.log` diagnostics.
 
 `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`, and
 `git diff --check` passed. No lockfile change is required.
+
+### Standalone connection CLI removal complete — pending commit
+
+The `screenpipe connection` command manages third-party integration credentials
+and probes a local WhatsApp gateway/browser registry. It is separate from the
+runtime connections API, which remains unchanged in this narrowly scoped CLI
+removal.
+
+- Removed the `screenpipe connection` parser, its command dispatcher, and the
+  direct credential-management implementation. The runtime connections API and
+  desktop integration surfaces are untouched.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` pass with only the established unrelated warnings; no
+  lockfile change is required.

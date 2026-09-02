@@ -317,10 +317,6 @@ async fn main() -> anyhow::Result<()> {
             handle_vision_command(subcommand).await?;
             return Ok(());
         }
-        Command::Connection { ref subcommand } => {
-            screenpipe_engine::cli::connection::handle_connection_command(subcommand).await?;
-            return Ok(());
-        }
         Command::Vault { ref subcommand } => {
             screenpipe_engine::cli::vault::handle_vault_command(subcommand).await?;
             return Ok(());

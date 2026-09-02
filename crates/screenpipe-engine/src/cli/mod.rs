@@ -5,7 +5,6 @@
 pub mod audio;
 pub mod auth;
 pub mod backup;
-pub mod connection;
 pub mod db;
 pub mod export;
 pub mod presets;
@@ -183,12 +182,6 @@ pub enum Command {
     Vision {
         #[command(subcommand)]
         subcommand: VisionCommand,
-    },
-
-    /// Manage connected integrations (Telegram, Slack, Discord, etc.)
-    Connection {
-        #[command(subcommand)]
-        subcommand: ConnectionCommand,
     },
 
     /// Vault: encrypt/lock all screenpipe data at rest
@@ -1313,46 +1306,6 @@ pub enum ModelCommand {
         /// Delete even if pipes reference it (those pipes will fall back to default)
         #[arg(long, default_value_t = false)]
         force: bool,
-    },
-}
-
-// =============================================================================
-// Connection subcommands
-// =============================================================================
-
-#[derive(Subcommand)]
-pub enum ConnectionCommand {
-    /// List all available integrations and their connection status
-    List {
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Get saved credentials for a connection
-    Get {
-        /// Integration ID (e.g. telegram, slack, discord)
-        id: String,
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Save credentials for a connection (key=value pairs)
-    Set {
-        /// Integration ID (e.g. telegram, slack, discord)
-        id: String,
-        /// Credentials as key=value pairs (e.g. bot_token=123 chat_id=456)
-        #[arg(required = true)]
-        credentials: Vec<String>,
-    },
-    /// Test saved credentials for a connection
-    Test {
-        /// Integration ID (e.g. telegram, slack, discord)
-        id: String,
-    },
-    /// Remove saved credentials for a connection
-    Remove {
-        /// Integration ID (e.g. telegram, slack, discord)
-        id: String,
     },
 }
 
