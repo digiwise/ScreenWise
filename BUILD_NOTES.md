@@ -89,6 +89,14 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
 - Missing FFmpeg no longer triggers a version query, archive download, extraction, or shell-profile edit. Runtime discovery accepts a preinstalled matching FFmpeg/FFprobe pair on `PATH`, an application-bundled pair, or an existing sidecar installation; otherwise it logs explicit setup guidance and disables dependent functionality.
 - Engine and desktop-app recording configurations now force analytics off. Persisted settings and the legacy CLI flag cannot initialize PostHog or Sentry; the compatibility fields remain temporarily while the wider cloud-facing surface is removed in reviewable steps.
 - Diarization and Silero VAD models must now be explicitly pre-staged; missing files produce their exact cache path and expected SHA-256 instead of starting background downloads. Verified artifacts: `segmentation-3.0.onnx` = `B78FC48113BB46FD247AE6A9AEA737079550C647638DB961DF7E0E1E9F4BA62E`, `wespeaker_en_voxceleb_CAM++.onnx` = `C46FAD10B5F81E1AA4A60C162714208577093655076C5450F8C469E522EC54EF`, and `silero_vad_v5.onnx` = `1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3`.
+- Engine telemetry hardening now removes the compiled PostHog transport and
+  direct Sentry dependency. The local resource monitor retains optional local
+  diagnostics only, and panic diagnostics remain in `last-panic.log` without
+  remote reporting. The intentional dependency removal prunes the related
+  Sentry packages from `Cargo.lock`; no package versions were upgraded.
+  `cargo test -p screenpipe-engine --lib --locked` remains blocked on this host
+  by the pre-existing native `libsamplerate-sys` requirement for a `samplerate`
+  static library; the locked engine check succeeds.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

@@ -1,31 +1,23 @@
 use chrono::Local;
-use reqwest::Client;
-use serde_json::{json, Map};
+use serde_json::json;
 use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use sysinfo::{CpuExt, PidExt, ProcessExt, System, SystemExt};
+use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 use tracing::debug;
-use tracing::trace;
-use tracing::{error, info, warn};
-
-use crate::telemetry_context::TelemetryContext;
+use tracing::{error, info};
 
 pub struct ResourceMonitor {
     start_time: Instant,
     resource_log_file: Option<String>, // analyse output here: https://colab.research.google.com/drive/1zELlGdzGdjChWKikSqZTHekm5XRxY-1r?usp=sharing
-    posthog_client: Option<Client>,
-    posthog_enabled: bool,
-    distinct_id: String,
-    /// Cached hardware info (collected once at startup, never changes)
-    hw_info: HardwareInfo,
 }
 
 /// Static hardware info collected once at startup.
 /// Only contains general model names — no serial numbers, UUIDs, or PII.
+#[cfg(any())]
 #[derive(Clone, Debug)]
 struct HardwareInfo {
     cpu_brand: String,
@@ -33,6 +25,7 @@ struct HardwareInfo {
     gpu_names: Vec<String>,
 }
 
+#[cfg(any())]
 impl HardwareInfo {
     fn collect() -> Self {
         let mut sys = System::new();
@@ -60,6 +53,7 @@ impl HardwareInfo {
 /// Returns a list of GPU model names (e.g. ["Apple M2 Pro", "AMD Radeon RX 7900"]).
 /// Never panics — returns an empty vec on any failure.
 /// Capped at 8 entries to avoid bloating the analytics payload.
+#[cfg(any())]
 fn detect_gpus() -> Vec<String> {
     let gpus = detect_gpus_platform();
     // Cap to 8 GPUs (more than enough) and truncate long names
@@ -75,6 +69,7 @@ fn detect_gpus() -> Vec<String> {
         .collect()
 }
 
+#[cfg(any())]
 fn detect_gpus_platform() -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
@@ -95,6 +90,7 @@ fn detect_gpus_platform() -> Vec<String> {
 }
 
 /// Run a command with a timeout to avoid blocking startup if a tool hangs.
+#[cfg(any())]
 fn run_cmd_with_timeout(cmd: &str, args: &[&str], timeout_secs: u64) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut command = Command::new(cmd);
@@ -136,7 +132,7 @@ fn run_cmd_with_timeout(cmd: &str, args: &[&str], timeout_secs: u64) -> Option<S
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(any(), target_os = "macos"))]
 fn detect_gpus_macos() -> Vec<String> {
     let output = match run_cmd_with_timeout(
         "system_profiler",
@@ -161,7 +157,7 @@ fn detect_gpus_macos() -> Vec<String> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(any(), target_os = "linux"))]
 fn detect_gpus_linux() -> Vec<String> {
     let mut gpus = Vec::new();
 
@@ -190,7 +186,7 @@ fn detect_gpus_linux() -> Vec<String> {
     gpus
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(any(), target_os = "windows"))]
 fn detect_gpus_windows() -> Vec<String> {
     // Try PowerShell first (wmic is deprecated on Windows 11+)
     if let Some(output) = run_cmd_with_timeout(
@@ -233,7 +229,7 @@ pub enum RestartSignal {
 }
 
 impl ResourceMonitor {
-    pub fn new(telemetry_enabled: bool) -> Arc<Self> {
+    pub fn new(_: bool) -> Arc<Self> {
         let resource_log_file = if env::var("SAVE_RESOURCE_USAGE").is_ok() {
             let now = Local::now();
             let filename = format!("resource_usage_{}.json", now.format("%Y%m%d_%H%M%S"));
@@ -253,36 +249,13 @@ impl ResourceMonitor {
             None
         };
 
-        // Create client once and reuse instead of Option
-        let posthog_client = telemetry_enabled.then(Client::new);
-
-        if telemetry_enabled {
-            debug!("Telemetry enabled, will send performance data to PostHog");
-        } else {
-            debug!("Telemetry disabled, will not send performance data to PostHog");
-        }
-
-        // Use env-provided analytics/support IDs or generate a random UUID.
-        let distinct_id = TelemetryContext::distinct_id_from_env()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        // Collect hardware info once (CPU brand, GPU names) — never panics
-        let hw_info = HardwareInfo::collect();
-        debug!(
-            "hardware: cpu={:?} arch={} gpus={:?}",
-            hw_info.cpu_brand, hw_info.cpu_arch, hw_info.gpu_names
-        );
-
         Arc::new(Self {
             start_time: Instant::now(),
             resource_log_file,
-            posthog_client,
-            posthog_enabled: telemetry_enabled,
-            distinct_id,
-            hw_info,
         })
     }
 
+    #[cfg(any())]
     async fn send_to_posthog(
         &self,
         total_memory_gb: f64,
@@ -465,26 +438,10 @@ impl ResourceMonitor {
 
         // Log to file
         self.log_to_file(metrics).await;
-
-        // Send to PostHog if enabled
-        if self.posthog_enabled {
-            tokio::select! {
-                _ = self.send_to_posthog(total_memory_gb, system_total_memory, total_cpu) => {},
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    warn!("PostHog request timed out");
-                }
-            }
-        }
     }
 
-    pub fn start_monitoring(
-        self: &Arc<Self>,
-        interval: Duration,
-        posthog_interval: Option<Duration>,
-    ) {
+    pub fn start_monitoring(self: &Arc<Self>, interval: Duration, _: Option<Duration>) {
         let monitor = Arc::clone(self);
-        let posthog_interval = posthog_interval.unwrap_or(interval);
-        let mut last_posthog_update = Instant::now();
 
         tokio::spawn(async move {
             // Only load process + CPU info — skip disks, networks, components.
@@ -528,48 +485,11 @@ impl ResourceMonitor {
                             }
                             unsafe { malloc_trim(0) };
                         }
-                        let now = Instant::now();
-                        let should_send_to_posthog = now.duration_since(last_posthog_update) >= posthog_interval;
-
-                        if should_send_to_posthog {
-                            last_posthog_update = now;
-                            monitor.log_status(&sys).await;
-                        } else {
-                            // Log status without sending to PostHog
-                            monitor.log_status_local(&sys).await;
-                        }
+                        monitor.log_status(&sys).await;
                     }
                 }
             }
         });
-    }
-
-    // New method for logging without PostHog
-    async fn log_status_local(&self, sys: &System) {
-        let metrics = self.collect_metrics(sys).await;
-        let (
-            total_memory_gb,
-            system_total_memory,
-            memory_usage_percent,
-            total_cpu,
-            total_virtual_memory_gb,
-            runtime,
-        ) = metrics;
-
-        // Log to console with virtual memory
-        let log_message = format!(
-            "Runtime: {}s, Memory: {:.0}% ({:.2} GB / {:.2} GB), Virtual: {:.2} GB, CPU: {:.0}%",
-            runtime.as_secs(),
-            memory_usage_percent,
-            total_memory_gb,
-            system_total_memory,
-            total_virtual_memory_gb,
-            total_cpu
-        );
-        debug!("{}", log_message);
-
-        // Log to file
-        self.log_to_file(metrics).await;
     }
 
     pub async fn shutdown(&self) {
@@ -577,10 +497,6 @@ impl ResourceMonitor {
             if let Ok(mut f) = OpenOptions::new().write(true).open(file) {
                 let _ = f.flush();
             }
-        }
-
-        if self.posthog_client.is_some() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }

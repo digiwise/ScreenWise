@@ -45,7 +45,6 @@ use screenpipe_engine::{
     watch_pid, ResourceMonitor, SCServer,
 };
 use screenpipe_screen::monitor::list_monitors;
-use serde_json::json;
 use std::{
     env, fs,
     net::{IpAddr, SocketAddr},
@@ -184,7 +183,7 @@ fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
 fn setup_logging(
     local_data_dir: &PathBuf,
     debug: bool,
-    disable_telemetry: bool,
+    _disable_telemetry: bool,
 ) -> anyhow::Result<WorkerGuard> {
     let file_appender = screenpipe_engine::logging::SizedRollingWriter::builder()
         .directory(local_data_dir)
@@ -279,14 +278,9 @@ fn setup_logging(
         ),
     );
 
-    // Build the final registry with conditional Sentry layer
-    if !disable_telemetry {
-        tracing_registry
-            .with(sentry::integrations::tracing::layer())
-            .init();
-    } else {
-        tracing_registry.init();
-    };
+    // Local logs are the only diagnostics sink. Remote Sentry tracing is not
+    // compiled into ScreenWise builds.
+    tracing_registry.init();
 
     Ok(guard)
 }
@@ -465,7 +459,9 @@ async fn main() -> anyhow::Result<()> {
     // Periodic terminal nudge to install the desktop app (CLI-only).
     screenpipe_engine::cli_reminder::spawn();
 
-    // Initialize Sentry only if telemetry is enabled
+    // Kept temporarily behind an always-false cfg while remaining cloud
+    // call-sites are removed. This avoids compiling any Sentry transport.
+    #[cfg(any())]
     let _sentry_guard = if config.analytics_enabled {
         let sentry_release_name_append = env::var("SENTRY_RELEASE_NAME_APPEND").unwrap_or_default();
         let release_name = format!(
@@ -706,21 +702,6 @@ async fn main() -> anyhow::Result<()> {
 
             eprintln!("{}", record);
             crash_log::write_panic_log(&panic_dir, &record);
-
-            // Best-effort Sentry report. No-op when telemetry is disabled; and
-            // the CLI sample_rate (0.1) applies here, so last-panic.log is the
-            // reliable record while Sentry is the convenience copy.
-            sentry::capture_message(
-                &format!(
-                    "panic on thread '{}' at {}: {}",
-                    thread_name, location, payload
-                ),
-                sentry::Level::Fatal,
-            );
-            // Flush so the event leaves before the process dies.
-            if let Some(client) = sentry::Hub::current().client() {
-                client.flush(Some(std::time::Duration::from_secs(2)));
-            }
 
             // Default hook last (prints the standard panic output).
             default_hook(info);
