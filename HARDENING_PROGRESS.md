@@ -399,3 +399,24 @@ hook as one source-only subsystem.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` passed with only the established unrelated warnings.
   No lockfile change is required.
+
+### MCP subsystem audit
+
+The legacy `screenpipe mcp` CLI downloads an unpinned package tree from GitHub's
+moving `main` branch and directs execution through `uv`. Separately, the newer
+`/mcp-servers` API persists user-defined HTTP/stdio server configurations,
+OAuth credentials, and proxy-tool execution for the Pi agent. These are not a
+single safe deletion: retaining a future read-only local MCP interface requires
+an explicit capability boundary, while the current proxy supports arbitrary
+external tools and transports. No MCP source has been changed in this audit.
+
+### Legacy MCP downloader removal complete — pending commit
+
+- Removed the `screenpipe mcp` CLI command and its GitHub/`uv` downloader. It
+  can no longer fetch moving `main`-branch MCP package content or create an
+  externally executable MCP setup directory.
+- The separate user-defined MCP proxy has not been changed; its future
+  read-only/local capability boundary remains an explicit design decision.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed with only the established unrelated warnings;
+  no lockfile change is required.
