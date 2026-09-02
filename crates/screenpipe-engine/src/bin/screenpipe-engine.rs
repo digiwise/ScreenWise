@@ -1445,14 +1445,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Add changelog link
-    println!(
-        "\n{}",
-        "check latest changes here: https://github.com/screenpipe/screenpipe/releases"
-            .bright_blue()
-            .italic()
-    );
-
     // start recording after all this text
     if !config.disable_audio {
         let audio_manager_clone = audio_manager.clone();

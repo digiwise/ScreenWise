@@ -452,6 +452,20 @@ The standalone recorder printed a hosted Screenpipe onboarding URL after every
 startup. This promotional prompt is unrelated to local capture and is being
 removed as a source-only CLI cleanup.
 
+### CLI hosted-release prompt removal in progress
+
+The recorder also prints a GitHub releases link at startup. It is a
+non-functional hosted prompt and is being removed independently of local
+recording behavior.
+
+### CLI hosted-release prompt removal complete — pending commit
+
+- Removed the GitHub releases prompt from recorder startup. Local recorder/API
+  startup output remains intact.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed with only the established unrelated warnings;
+  no lockfile change is required.
+
 ### CLI hosted-onboarding prompt removal complete — pending commit
 
 - Removed the standalone recorder's hosted onboarding advertisement. Startup
