@@ -408,166 +408,11 @@ async fn main() -> anyhow::Result<()> {
         !config.analytics_enabled,
     )?);
 
-    // Kept temporarily behind an always-false cfg while remaining cloud
-    // call-sites are removed. This avoids compiling any Sentry transport.
-    #[cfg(any())]
-    let _sentry_guard = if config.analytics_enabled {
-        let sentry_release_name_append = env::var("SENTRY_RELEASE_NAME_APPEND").unwrap_or_default();
-        let release_name = format!(
-            "{}{}",
-            sentry::release_name!().unwrap_or_default(),
-            sentry_release_name_append
-        );
-        let guard = sentry::init((
-            "https://123656092b01a72b0417355ebbfb471f@o4505591122886656.ingest.us.sentry.io/4510761360949248",
-            sentry::ClientOptions {
-                release: Some(release_name.into()),
-                sample_rate: 0.1,
-                traces_sample_rate: 0.01,
-                send_default_pii: false,
-                server_name: Some("screenpipe-cli".into()),
-                before_send: Some(std::sync::Arc::new(|mut event| {
-                    // Strip file paths containing usernames from error messages
-                    fn strip_user_paths(s: &str) -> String {
-                        let re_unix = regex::Regex::new(r"/Users/[^/\s]+").unwrap();
-                        let re_win = regex::Regex::new(r"(?i)C:\\Users\\[^\\\s]+").unwrap();
-                        let s = re_unix.replace_all(s, "~").to_string();
-                        re_win.replace_all(&s, "~").to_string()
-                    }
-
-                    // Noise filter: drop events whose root cause is a user
-                    // environment problem we can't fix from code. Mirrors the
-                    // Tauri-app filter in apps/screenpipe-app-tauri/src-tauri/
-                    // src/main.rs — the CLI binary was missing the same
-                    // suppression so the events kept flowing in (CLI-49
-                    // alone hit 744 users on stale builds).
-                    static USER_ENV_PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> =
-                        std::sync::OnceLock::new();
-                    let env_patterns = USER_ENV_PATTERNS.get_or_init(|| {
-                        [
-                            // User hasn't granted screen recording permission (CLI-49)
-                            r"Screen recording permission denied",
-                            // Local DB corruption — user dropped/restored part of their db.sqlite
-                            r"no such table: main\.speaker_embeddings",
-                            // Concurrent DB access / user ran CLI while app was running
-                            r"database is locked",
-                            // Port conflict — another screenpipe instance is already bound
-                            // (CLI-2J: 659 events / 649 users — user environment, not a bug)
-                            r"you're likely already running screenpipe instance",
-                            // Broken Homebrew install — external dylib missing
-                            r"Library not loaded.*libx265\.",
-                            // Linux system library missing — distro-local, not our bug
-                            r"Failed to load ayatana-appindicator3 or appindicator3 dynamic library",
-                            // Deepgram DNS / connectivity blips — already logged locally
-                            r"deepgram transcription failed: Cannot resolve audio transcription server",
-                        ]
-                        .into_iter()
-                        .filter_map(|p| regex::Regex::new(p).ok())
-                        .collect()
-                    });
-                    let matches_noise = |text: &str| env_patterns.iter().any(|re| re.is_match(text));
-                    if event.message.as_deref().map(matches_noise).unwrap_or(false) {
-                        return None;
-                    }
-                    for val in event.exception.values.iter() {
-                        if let Some(ref v) = val.value {
-                            if matches_noise(v) {
-                                return None;
-                            }
-                        }
-                    }
-
-                    if let Some(ref mut msg) = event.message {
-                        *msg = strip_user_paths(msg);
-                    }
-                    for val in event.exception.values.iter_mut() {
-                        if let Some(ref mut v) = val.value {
-                            *v = strip_user_paths(v);
-                        }
-                    }
-                    Some(event)
-                })),
-                ..Default::default()
-            }
-        ));
-
-        // Attach non-sensitive CLI settings to all future Sentry events
-        sentry::configure_scope(|scope| {
-            // Set user.id to the same analytics ID used by PostHog. Embedded
-            // customers can set SCREENPIPE_SUPPORT_ID to make standalone CLI
-            // events searchable by customer without using email.
-            scope.set_user(Some(sentry::protocol::User {
-                id: Some(analytics::get_distinct_id().to_string()),
-                ..Default::default()
-            }));
-            let telemetry_context =
-                screenpipe_engine::telemetry_context::TelemetryContext::from_env();
-            for (key, value) in telemetry_context.pairs() {
-                scope.set_tag(key, value);
-            }
-            if !telemetry_context.is_empty() {
-                scope.set_context(
-                    "screenpipe_support",
-                    sentry::protocol::Context::Other(telemetry_context.to_json_map()),
-                );
-            }
-            scope.set_context(
-                "cli_settings",
-                sentry::protocol::Context::Other({
-                    let mut map = std::collections::BTreeMap::new();
-                    map.insert(
-                        "audio_chunk_duration".into(),
-                        json!(config.audio_chunk_duration),
-                    );
-                    map.insert("port".into(), json!(config.port));
-                    map.insert("disable_audio".into(), json!(config.disable_audio));
-                    map.insert(
-                        "audio_transcription_engine".into(),
-                        json!(format!("{:?}", config.audio_transcription_engine)),
-                    );
-                    map.insert("monitor_ids".into(), json!(config.monitor_ids));
-                    map.insert("use_all_monitors".into(), json!(config.use_all_monitors));
-                    map.insert("languages".into(), json!(config.languages));
-                    map.insert("use_pii_removal".into(), json!(config.use_pii_removal));
-                    map.insert("disable_vision".into(), json!(config.disable_vision));
-                    map.insert("vad_engine".into(), json!("Silero"));
-                    map.insert("debug".into(), json!(record_args.debug));
-                    map.insert("api_auth".into(), json!(config.api_auth));
-                    map.insert("encrypt_secrets".into(), json!(config.encrypt_secrets));
-                    map.insert("retention_days".into(), json!(record_args.retention_days));
-                    map.insert("retention_mode".into(), json!(record_args.retention_mode));
-                    // Only send counts for privacy-sensitive lists (not actual values)
-                    map.insert(
-                        "audio_device_count".into(),
-                        json!(config.audio_devices.len()),
-                    );
-                    map.insert(
-                        "ignored_windows_count".into(),
-                        json!(config.ignored_windows.len()),
-                    );
-                    map.insert(
-                        "included_windows_count".into(),
-                        json!(config.included_windows.len()),
-                    );
-                    map.insert(
-                        "ignored_urls_count".into(),
-                        json!(config.ignored_urls.len()),
-                    );
-                    map
-                }),
-            );
-        });
-
-        Some(guard)
-    } else {
-        None
-    };
-
     // Crash diagnostics. Integrators embed this binary as a child process
     // inside their own wrapper (e.g. an Electron app) and, when it dies, see
     // only the exit code — never *why*. Install a panic hook that writes the
-    // message + backtrace to last-panic.log so the parent (and we, via Sentry)
-    // can read the cause after the process exits. Installed only on the Record
+    // message + backtrace to last-panic.log so the parent can read the cause
+    // after the process exits. Installed only on the Record
     // path (the long-running server; subcommands return earlier) and written
     // regardless of telemetry, so analytics-disabled customers still get a
     // local crash record. Mirrors the desktop app's hook in
@@ -585,9 +430,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Reuse the existing embedder attribution (SCREENPIPE_EMBEDDER /
         // SCREENPIPE_CUSTOMER_ID / ...) so the local crash record is identifiable
-        // even when telemetry is off. When telemetry is on, the Sentry scope is
-        // already tagged with the same context above, so panic events inherit it
-        // and no per-event tagging is needed here.
+        // even when telemetry is off.
         let attribution = {
             use screenpipe_engine::telemetry_context::TelemetryContext;
             let joined = TelemetryContext::from_env()

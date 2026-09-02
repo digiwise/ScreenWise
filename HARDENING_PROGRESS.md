@@ -473,3 +473,13 @@ recording behavior.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` passed with only the established unrelated warnings;
   no lockfile change is required.
+
+### Dead engine Sentry initialization removal complete — pending validation
+
+The standalone engine binary still contains an always-false `#[cfg(any())]`
+Sentry initialization block, including the retired remote DSN and scope
+enrichment. That block has been removed. The following panic hook is
+independent and still persists local `last-panic.log` diagnostics.
+
+`cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`, and
+`git diff --check` passed. No lockfile change is required.
