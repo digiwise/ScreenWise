@@ -348,3 +348,37 @@ capture/search API. No pipe source has been changed in this audit checkpoint.
   its bearer-protected loopback API.
 - `cargo check -p screenpipe-engine --locked` and `git diff --check` passed;
   no lockfile change is required.
+
+### Desktop Bun sidecar environment repair
+
+- Restored the ignored Windows Tauri sidecar at
+  `apps/screenpipe-app-tauri/src-tauri/binaries/bun-x86_64-pc-windows-msvc.exe`
+  by copying the already-installed local Bun 1.4.0. Its SHA-256 matches the
+  source binary: `627D2E4775C24BDEDEE2CD7CCC18DCADAE061E5345274AB6E3C4C797927BFB8F`.
+  No download, dependency update, or tracked source change was made.
+- Tauri's prior missing-sidecar prerequisite is therefore satisfied. A direct
+  Tauri bundle validation remains blocked earlier because this checkout has no
+  locally resolvable Tauri CLI executable; the independent desktop Cargo check
+  remains blocked by the existing uncommitted desktop `Cargo.lock` drift under
+  `--locked`.
+
+### Next subsystem audit: external memory export
+
+`external_memory_sync` is an enabled-integration scheduler, not recorder
+storage: it reads the local `memories` table every five minutes and writes a
+digest into Claude Code's `CLAUDE.md` and Codex's `AGENTS.md`. It is exposed by
+the memories API, retains an engine scheduler field, and is started by the
+desktop server. Remove those engine, API, and desktop-startup references as one
+integration subsystem; preserve the ordinary local memories database/API.
+
+### External memory export removal complete — pending commit
+
+- Removed the external-memory scheduler, the authenticated
+  `/memories/sync-external` trigger, and the desktop server startup hook. The
+  recorder no longer copies captured-memory content into Claude Code or Codex
+  instruction files.
+- Local memories persistence and ordinary authenticated CRUD endpoints remain.
+  `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed. The desktop crate cannot yet be checked under
+  `--locked` because its pre-existing lockfile drift is independent of this
+  source-only removal.
