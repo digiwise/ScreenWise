@@ -124,6 +124,8 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
 - The pipe automation subsystem has been removed: no recorder startup task,
   CLI command, local API route, registry client, or scheduled agent execution
   remains. This does not alter the authenticated local capture and search API.
+- The enterprise/team cloud CLI has been removed; local recording does not
+  query teammates' captured data through Screenpipe enterprise endpoints.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

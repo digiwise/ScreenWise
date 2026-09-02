@@ -340,3 +340,11 @@ capture/search API. No pipe source has been changed in this audit checkpoint.
   routes remain. `cargo check -p screenpipe-engine --locked` passed with only
   the established unrelated warnings; this source-only removal does not change
   the lockfile.
+
+### Enterprise/team CLI removal complete — pending commit
+
+- Removed the `screenpipe team` command and its direct Screenpipe enterprise
+  API client. This source-only change does not affect the local recorder or
+  its bearer-protected loopback API.
+- `cargo check -p screenpipe-engine --locked` and `git diff --check` passed;
+  no lockfile change is required.

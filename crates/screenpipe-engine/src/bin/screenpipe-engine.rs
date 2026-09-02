@@ -26,8 +26,8 @@ use screenpipe_engine::{
     analytics,
     cli::{
         audio::handle_audio_command, mcp::handle_mcp_command, search::handle_search_command,
-        status::handle_status_command, team::handle_team_command, vision::handle_vision_command,
-        Cli, Command, RecordArgSources,
+        status::handle_status_command, vision::handle_vision_command, Cli, Command,
+        RecordArgSources,
     },
     crash_log,
     high_fps_controller::HighFpsController,
@@ -308,10 +308,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Search(ref args) => {
             handle_search_command(args).await?;
-            return Ok(());
-        }
-        Command::Team { ref subcommand } => {
-            handle_team_command(subcommand).await?;
             return Ok(());
         }
         Command::Audio { ref subcommand } => {
