@@ -118,6 +118,9 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   have been removed. The retained audio paths are local models only. The
   root lockfile reduction removes the audio crate's `tokio-tungstenite` and
   native-TLS transport edges without upgrading any dependency versions.
+- The cloud workflow-classifier polling task and Screenpipe gateway client have
+  been removed. Local capture does not send recent activity to derive workflow
+  events.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

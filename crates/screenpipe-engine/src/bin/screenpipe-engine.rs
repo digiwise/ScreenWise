@@ -1277,28 +1277,6 @@ async fn main() -> anyhow::Result<()> {
             .with_api_auth_key(config.api_auth_key.clone()),
     );
 
-    // Workflow event classifier — opt-in cloud feature. Polls recent activity
-    // and emits `WorkflowEvent`s on the bus so pipes with `trigger.events`
-    // frontmatter can run. Routed through the gateway by default; self-host
-    // can override with SCREENPIPE_EVENT_CLASSIFIER_URL.
-    if config.enable_workflow_events {
-        let classifier_url =
-            std::env::var("SCREENPIPE_EVENT_CLASSIFIER_URL").unwrap_or_else(|_| {
-                screenpipe_engine::workflow_classifier::DEFAULT_CLASSIFIER_URL.to_string()
-            });
-        let token = user_token.clone().unwrap_or_default();
-        let port = config.port;
-        tokio::spawn(async move {
-            screenpipe_engine::workflow_classifier::start_workflow_classifier(
-                classifier_url,
-                token,
-                port,
-                std::time::Duration::from_secs(30),
-            )
-            .await;
-        });
-    }
-
     let mut agent_executors: std::collections::HashMap<
         String,
         std::sync::Arc<dyn screenpipe_core::agents::AgentExecutor>,

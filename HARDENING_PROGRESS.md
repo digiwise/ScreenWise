@@ -310,3 +310,12 @@ would retain a reachable outbound path.
   `cargo test -p screenpipe-audio --lib --locked --offline --no-run` cannot
   use the existing uncached `infer v0.15.0` dev dependency. No network fetch
   or dependency update was used to bypass that prerequisite.
+
+### Cloud workflow classifier removal complete — pending commit
+
+- Removed the opt-in cloud workflow-classifier module, its Screenpipe gateway
+  endpoint/token handling, and its recorder startup task. Captured activity is
+  no longer sent to a classifier service or used to emit cloud-derived workflow
+  events.
+- `cargo check -p screenpipe-engine --locked` and `git diff --check` passed;
+  no lockfile change is required for this source-only removal.

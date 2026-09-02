@@ -97,10 +97,6 @@ pub struct RecordingConfig {
     // Compatibility account metadata; it is not used for audio transcription.
     pub user_id: Option<String>,
 
-    // Workflow events
-    /// Enable AI workflow event detection (cloud, requires subscription).
-    pub enable_workflow_events: bool,
-
     // Speaker identification
     /// User's display name for calendar-assisted speaker ID.
     /// Fallback chain: settings userName → cloud auth name → cloud auth email.
@@ -238,7 +234,6 @@ impl RecordingConfig {
             pii_backend: settings.pii_backend.clone(),
             pii_redaction_labels: settings.pii_redaction_labels.clone(),
             filter_music: settings.filter_music,
-            enable_workflow_events: settings.enable_workflow_events,
             audio_transcription_engine: engine_str
                 .parse()
                 .unwrap_or(AudioTranscriptionEngine::WhisperLargeV3Turbo),
