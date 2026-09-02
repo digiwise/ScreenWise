@@ -5,13 +5,11 @@
 pub mod analytics;
 #[cfg(feature = "apple-intelligence")]
 mod apple_intelligence_api;
-pub mod archive;
 pub mod auth_key;
 mod auto_destruct;
 pub mod calendar_speaker_id;
 pub mod cli;
 pub mod cli_reminder;
-pub mod cloud_search;
 pub mod connections_api;
 pub mod core;
 pub mod crash_log;
@@ -46,8 +44,6 @@ pub mod schedule_monitor;
 pub mod server;
 pub mod sleep_monitor;
 pub mod snapshot_compaction;
-mod sync_api;
-pub mod sync_provider;
 pub mod telemetry_context;
 pub mod ui_recorder;
 // Exposed publicly so the commercial `screenpipe-sdk` (screenpipe/sdk repo)
@@ -64,7 +60,6 @@ pub use cli::Cli;
 pub use recording_config::RecordingConfig;
 
 pub use calendar_speaker_id::start_speaker_identification;
-pub use cloud_search::{CloudSearchClient, CloudSearchMetadata, CloudStatus};
 pub use meeting_watcher::start_meeting_watcher;
 pub use power::{start_power_manager, start_power_manager_with_pref, PowerManagerHandle};
 pub use resource_monitor::{ResourceMonitor, RestartSignal};

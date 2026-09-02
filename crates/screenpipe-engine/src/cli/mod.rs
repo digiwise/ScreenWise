@@ -18,7 +18,6 @@ pub mod search;
 pub mod status;
 mod store_file;
 pub mod survey;
-pub mod sync;
 pub mod team;
 pub mod vault;
 pub mod vision;
@@ -215,12 +214,6 @@ pub enum Command {
     Vision {
         #[command(subcommand)]
         subcommand: VisionCommand,
-    },
-
-    /// Cloud sync management commands
-    Sync {
-        #[command(subcommand)]
-        subcommand: SyncCommand,
     },
 
     /// MCP Server management commands
@@ -563,31 +556,11 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = 150)]
     pub pause_extraction_on_input_ms: u64,
 
-    /// Enable cloud sync
-    #[arg(long, default_value_t = false)]
-    pub enable_sync: bool,
-
     /// Enable mDNS LAN discovery (advertise this instance + browse for peers).
     /// Off by default: it opens a multicast socket, which triggers the macOS
     /// "Local Network" permission prompt. Opt in for multi-device sync.
     #[arg(long, env = "SCREENPIPE_ENABLE_MDNS", default_value_t = false)]
     pub enable_mdns: bool,
-
-    /// API token for cloud sync
-    #[arg(long, env = "SCREENPIPE_SYNC_TOKEN")]
-    pub sync_token: Option<String>,
-
-    /// Password for encrypting synced data
-    #[arg(long, env = "SCREENPIPE_SYNC_PASSWORD")]
-    pub sync_password: Option<String>,
-
-    /// Interval between sync cycles in seconds
-    #[arg(long, default_value_t = 300)]
-    pub sync_interval_secs: u64,
-
-    /// Override the machine ID for this device
-    #[arg(long)]
-    pub sync_machine_id: Option<String>,
 
     /// Pause screen and audio capture when a DRM-protected streaming app
     /// (Netflix, Disney+, etc.) or a remote-desktop client (Omnissa/VMware
@@ -1853,102 +1826,9 @@ pub enum McpCommand {
     },
 }
 
-#[derive(Subcommand)]
-pub enum SyncCommand {
-    /// Show sync status
-    Status {
-        /// Output format
-        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
-        output: OutputFormat,
-        /// Server port
-        #[arg(short = 'p', long, default_value_t = 3030)]
-        port: u16,
-    },
-    /// Trigger an immediate sync
-    Now {
-        /// Server port
-        #[arg(short = 'p', long, default_value_t = 3030)]
-        port: u16,
-    },
-    /// Download data from other devices
-    Download {
-        /// Time range in hours to download (default: 24)
-        #[arg(long, default_value_t = 24)]
-        hours: u32,
-        /// Server port
-        #[arg(short = 'p', long, default_value_t = 3030)]
-        port: u16,
-    },
-    /// Sync ~/.screenpipe to a remote SSH server (SFTP, no cloud account)
-    Remote {
-        #[command(subcommand)]
-        subcommand: RemoteSyncCommand,
-    },
-}
-
-/// SSH/SFTP-based sync of `~/.screenpipe` to a remote server.
-///
-/// No cloud account or screenpipe-cloud dependency — pushes the entire data
-/// directory over SFTP using a private key from `~/.ssh/`. Use this to
-/// centralize multiple machines onto a server you control (home box, VPS).
-#[derive(Subcommand)]
-pub enum RemoteSyncCommand {
-    /// Test SSH connectivity (dry-run, no upload)
-    Test {
-        #[command(flatten)]
-        cfg: RemoteSyncArgs,
-    },
-    /// Push `~/.screenpipe/` to the remote once
-    Now {
-        #[command(flatten)]
-        cfg: RemoteSyncArgs,
-        /// Override the local data directory (default: $HOME/.screenpipe)
-        #[arg(long)]
-        data_dir: Option<String>,
-    },
-    /// Scan ~/.ssh/config and ~/.ssh/known_hosts for candidate hosts
-    Discover {
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-}
-
-/// Shared connection flags for `screenpipe sync remote {test,now}`.
-///
-/// All values can also come from env vars: SCREENPIPE_REMOTE_HOST,
-/// SCREENPIPE_REMOTE_USER, SCREENPIPE_REMOTE_KEY, SCREENPIPE_REMOTE_PATH.
-#[derive(clap::Args, Debug)]
-pub struct RemoteSyncArgs {
-    /// Remote host (IP or DNS, e.g. "myserver.tail-scale.ts.net")
-    #[arg(long, env = "SCREENPIPE_REMOTE_HOST")]
-    pub host: String,
-    /// SSH user
-    #[arg(long, env = "SCREENPIPE_REMOTE_USER")]
-    pub user: String,
-    /// Path to SSH private key (e.g. ~/.ssh/id_ed25519)
-    #[arg(long, env = "SCREENPIPE_REMOTE_KEY")]
-    pub key_path: String,
-    /// Absolute path on the remote where ~/.screenpipe/ should land
-    #[arg(long, env = "SCREENPIPE_REMOTE_PATH")]
-    pub remote_path: String,
-    /// SSH port
-    #[arg(long, default_value_t = 22)]
-    pub port: u16,
-}
-
 // =============================================================================
 // Helpers
 // =============================================================================
-
-/// Get or create a persistent machine ID for sync
-pub fn get_or_create_machine_id(override_id: Option<String>) -> String {
-    if let Some(id) = override_id {
-        return id;
-    }
-
-    screenpipe_core::sync::get_or_create_machine_id()
-}
 
 #[cfg(test)]
 mod tests {

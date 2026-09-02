@@ -99,6 +99,14 @@ without Sentry permissions; the app capability still named `sentry:default`,
 which is being removed before the final locked check. No dependency version is
 being changed to work around the cache prerequisite.
 
+The final locked Tauri check now reaches the existing packaging prerequisite
+and fails before Rust application source compilation because
+`bun-x86_64-pc-windows-msvc.exe` is absent. This is not a telemetry error and
+must be supplied through the approved desktop build setup; the missing Bun
+sidecar should not be downloaded implicitly by this hardening pass. The check
+did successfully regenerate the Tauri schemas without Sentry permissions, and
+the stale `sentry:default` application capability has been removed.
+
 ### Next concrete increment
 
 1. Remove the remaining desktop `sentry:default` capability declaration.
@@ -130,8 +138,8 @@ being changed to work around the cache prerequisite.
 
 ## Still pending after telemetry work
 
-1. Runtime SHA-256 verification is ready to commit as a separate audio-model
-   increment. It streams all three explicitly staged artifacts before cache or
+1. Runtime SHA-256 verification was committed in `2f7801e9b` as a separate
+   audio-model increment. It streams all three explicitly staged artifacts before cache or
    ONNX/VAD loading, uses the already locked `sha2 0.10.9` package, and has a
    one-line root-lock metadata delta. `cargo check -p screenpipe-audio --locked`
    passed with only the pre-existing `unused_mut` warning. Its focused unit
@@ -147,3 +155,30 @@ being changed to work around the cache prerequisite.
    SQLite search, and bearer-protected loopback API.
 3. Run pause/resume, restart/soak, and diarization-quality assessments. Record
    only aggregate/non-sensitive evidence.
+
+### Next subsystem audit: cloud sync
+
+Initial source mapping is complete but no cloud-sync source has been changed.
+The engine owns the CLI command and service startup in
+`crates/screenpipe-engine/src/bin/screenpipe-engine.rs`, with supporting cloud
+search, archive/upload, and provider modules under `crates/screenpipe-engine`.
+The archive implementation also performs data deletion after sync and must be
+handled deliberately rather than removed by a broad file deletion. The next
+commit should disable/remove only the externally connected sync command,
+startup, routes, and client transport while retaining local retention cleanup;
+then compile the engine and inspect any now-unreachable core sync dependency
+graph separately.
+
+### Cloud-sync removal ready to commit
+
+- Removed the `sync` CLI command, record-time sync flags and service startup,
+  cloud search metadata, sync/archive API routes, and memory-delete tombstone
+  path.
+- Deleted the unreferenced cloud-search, cloud archive, sync API/provider, and
+  SFTP-sync implementation files. The independent local retention routes and
+  cleanup module remain compiled.
+- `cargo check -p screenpipe-engine --locked` passed after the route and state
+  removal (only the established audio `unused_mut` warning appeared). The
+  engine still compiles `screenpipe-sync` through broader core dependencies;
+  dependency-graph pruning is a separate reviewed change, not an excuse to
+  alter locked versions.

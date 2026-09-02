@@ -203,9 +203,6 @@ fn parse_flexible_bool(s: &str) -> Result<bool, String> {
 pub struct SearchResponse {
     pub data: Vec<ContentItem>,
     pub pagination: PaginationInfo,
-    /// Metadata about cloud search availability (only present when cloud sync is available)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cloud: Option<crate::cloud_search::CloudSearchMetadata>,
 }
 
 /// Middle-truncate a string to at most `max_chars` characters.
@@ -661,20 +658,6 @@ pub(crate) async fn search(
         }),
     );
 
-    // Get cloud search metadata
-    let time_range = match (query.start_time, query.end_time) {
-        (Some(start), Some(end)) => Some(crate::cloud_search::TimeRange { start, end }),
-        _ => None,
-    };
-    let cloud_metadata = state.cloud_search.get_metadata(query_str, time_range).await;
-
-    // Only include cloud metadata if cloud search is available or was requested
-    let cloud = if cloud_metadata.cloud_search_available || query.include_cloud {
-        Some(cloud_metadata)
-    } else {
-        None
-    };
-
     let response = SearchResponse {
         data: content_items,
         pagination: PaginationInfo {
@@ -682,7 +665,6 @@ pub(crate) async fn search(
             offset: query.pagination.offset,
             total: total as i64,
         },
-        cloud,
     };
 
     // Cache the result (only for queries without frame extraction)

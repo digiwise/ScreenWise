@@ -26,15 +26,9 @@ use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{
     analytics,
     cli::{
-        audio::handle_audio_command,
-        mcp::handle_mcp_command,
-        pipe::handle_pipe_command,
-        search::handle_search_command,
-        status::handle_status_command,
-        sync::{handle_sync_command, start_sync_service},
-        team::handle_team_command,
-        vision::handle_vision_command,
-        Cli, Command, RecordArgSources,
+        audio::handle_audio_command, mcp::handle_mcp_command, pipe::handle_pipe_command,
+        search::handle_search_command, status::handle_status_command, team::handle_team_command,
+        vision::handle_vision_command, Cli, Command, RecordArgSources,
     },
     crash_log,
     high_fps_controller::HighFpsController,
@@ -338,10 +332,6 @@ async fn main() -> anyhow::Result<()> {
             handle_mcp_command(subcommand, &local_data_dir).await?;
             return Ok(());
         }
-        Command::Sync { ref subcommand } => {
-            handle_sync_command(subcommand).await?;
-            return Ok(());
-        }
         Command::Connection { ref subcommand } => {
             screenpipe_engine::cli::connection::handle_connection_command(subcommand).await?;
             return Ok(());
@@ -582,11 +572,6 @@ async fn main() -> anyhow::Result<()> {
                     map.insert("use_pii_removal".into(), json!(config.use_pii_removal));
                     map.insert("disable_vision".into(), json!(config.disable_vision));
                     map.insert("vad_engine".into(), json!("Silero"));
-                    map.insert("enable_sync".into(), json!(record_args.enable_sync));
-                    map.insert(
-                        "sync_interval_secs".into(),
-                        json!(record_args.sync_interval_secs),
-                    );
                     map.insert("debug".into(), json!(record_args.debug));
                     map.insert("api_auth".into(), json!(config.api_auth));
                     map.insert("encrypt_secrets".into(), json!(config.encrypt_secrets));
@@ -890,22 +875,6 @@ async fn main() -> anyhow::Result<()> {
     // Capture modules emit loss events eagerly on OS errors; this task covers
     // accessibility transitions and confirms restorations across all three.
     let _permission_monitor_handle = screenpipe_engine::permission_monitor::start();
-
-    // Start cloud sync service if enabled
-    let sync_service_handle = if record_args.enable_sync {
-        match start_sync_service(&record_args, db.clone()).await {
-            Ok(handle) => {
-                info!("cloud sync service started");
-                Some(handle)
-            }
-            Err(e) => {
-                error!("failed to start sync service: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     let db_server = db.clone();
 
@@ -1319,13 +1288,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Attach sync handle if sync is enabled
-    let server = if let Some(ref handle) = sync_service_handle {
-        server.with_sync_handle_arc(handle.clone())
-    } else {
-        server
-    };
-
     // Initialize pipe manager
     let pipes_dir = local_data_dir.join("pipes");
     std::fs::create_dir_all(&pipes_dir).ok();
@@ -1505,20 +1467,6 @@ async fn main() -> anyhow::Result<()> {
         "│ included windows       │ {:<34} │",
         format_cell(&format!("{:?}", &included_windows_clone), VALUE_WIDTH)
     );
-    println!(
-        "│ cloud sync             │ {:<34} │",
-        if record_args.enable_sync {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    if record_args.enable_sync {
-        println!(
-            "│ sync interval          │ {:<34} │",
-            format!("{} seconds", record_args.sync_interval_secs)
-        );
-    }
     println!(
         "│ auto-destruct pid      │ {:<34} │",
         record_args.auto_destruct_pid.unwrap_or(0)
@@ -2090,11 +2038,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ref handle) = ui_recorder_handle {
                 info!("stopping UI event capture");
                 handle.stop();
-            }
-            // Stop sync service if running
-            if let Some(ref handle) = sync_service_handle {
-                info!("stopping sync service");
-                let _ = handle.stop().await;
             }
             let _ = shutdown_tx.send(());
         }

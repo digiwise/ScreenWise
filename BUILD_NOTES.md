@@ -105,6 +105,10 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   `cargo test -p screenpipe-engine --lib --locked` remains blocked on this host
   by the pre-existing native `libsamplerate-sys` requirement for a `samplerate`
   static library; the locked engine check succeeds.
+- Cloud synchronization, cloud-search metadata, cloud archive upload, and
+  SFTP remote-sync CLI paths have been removed from the engine. The
+  authenticated localhost API retains its independent local retention routes;
+  nothing now uploads captured data before retention cleanup.
 
 ## Functional baseline fixes and verification (2026-09-01)
 
