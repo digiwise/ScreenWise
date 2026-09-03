@@ -674,9 +674,18 @@ The remaining engine `telemetry_context` module no longer drives a live
 transport. Its only compiled use collects `SCREENPIPE_*` support/customer/
 deployment/embedder identifiers into the local `last-panic.log` record. The
 next engine-only privacy increment removes that attribution collection and the
-  unused telemetry module while retaining the local crash log and panic hook.
+unused telemetry module while retaining the local crash log and panic hook.
 
-### Dead resource-monitor telemetry sender removal complete — pending commit
+- Removed the account/deployment/embedder attribution string from local panic
+  records and deleted the now-unused telemetry-context module. Crash message,
+  source location, backtrace, rotation, and local-only persistence remain.
+- `cargo fmt --all -- --check`,
+  `cargo check -p screenpipe-engine --bin screenpipe --locked` in VS Developer
+  PowerShell with Ninja, and `git diff --check` passed. The only compiler
+  warnings are the established audio `unused_mut` and Windows `CommandExt`
+  import.
+
+### Dead resource-monitor telemetry sender removal complete — `c32c72148`
 
 The active resource monitor only samples local process CPU/memory and can
 optionally write a local JSON file. Its former PostHog transport, hardware
@@ -690,12 +699,3 @@ remote telemetry code while retaining local diagnostics.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`
   in VS Developer PowerShell with Ninja, and `git diff --check` passed with
   only the established audio `unused_mut` and Windows `CommandExt` warnings.
-
-- Removed the account/deployment/embedder attribution string from local panic
-  records and deleted the now-unused telemetry-context module. Crash message,
-  source location, backtrace, rotation, and local-only persistence remain.
-- `cargo fmt --all -- --check`,
-  `cargo check -p screenpipe-engine --bin screenpipe --locked` in VS Developer
-  PowerShell with Ninja, and `git diff --check` passed. The only compiler
-  warnings are the established audio `unused_mut` and Windows `CommandExt`
-  import.
