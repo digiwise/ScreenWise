@@ -766,7 +766,7 @@ making the hardening boundary incomplete and breaking the build.
 - `cargo build -p screenpipe-audio-eval --release --locked` completed
   successfully in Visual Studio Developer PowerShell with Ninja Multi-Config.
 
-### Cloud OCR fallback removal — pending commit
+### Cloud OCR fallback removal — `b912bea5b`
 
 `screenpipe-screen` still routed the legacy `unstructured` OCR engine through
 the hosted Unstructured API, sending captured frames when its credential was
@@ -785,3 +785,16 @@ engines, so the historical configuration value can safely fall back locally.
 - The full `cargo build --release --locked --offline` workspace build passed
   in 7m 42s with only the established audio `unused_mut` and Windows
   `CommandExt` warnings.
+
+### Dead hosted OCR helper removal — pending commit
+
+After the screen crate stopped calling the hosted Unstructured OCR path, its
+`screenpipe-connect` module had no remaining callers. The helper still read
+`UNSTRUCTURED_API_KEY` and could upload captured-frame bytes if reused.
+
+- Deleted the unreachable hosted OCR module and its public export. No local
+  OCR implementation or configuration compatibility behavior changed.
+- `cargo fmt --all -- --check`, `git diff --check`, and locked offline checks
+  of both `screenpipe-connect` and `screenpipe-engine` passed in Visual Studio
+  Developer PowerShell. The established audio `unused_mut` and Windows
+  `CommandExt` warnings remain.
