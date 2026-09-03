@@ -765,3 +765,23 @@ making the hardening boundary incomplete and breaking the build.
   `TranscriptionEngine::new` API.
 - `cargo build -p screenpipe-audio-eval --release --locked` completed
   successfully in Visual Studio Developer PowerShell with Ninja Multi-Config.
+
+### Cloud OCR fallback removal — pending commit
+
+`screenpipe-screen` still routed the legacy `unstructured` OCR engine through
+the hosted Unstructured API, sending captured frames when its credential was
+present. The local recorder already has platform-native and Tesseract OCR
+engines, so the historical configuration value can safely fall back locally.
+
+- Removed the direct `screenpipe-connect` dependency and changed the legacy
+  `unstructured` selection to execute the platform-default local OCR engine.
+  Existing serialized configurations remain readable; no captured frame is
+  sent to an external OCR service.
+- `cargo fmt --all -- --check`, `git diff --check`, and
+  `cargo check -p screenpipe-screen --locked --offline` in Visual Studio
+  Developer PowerShell passed. The release test target could not be linked in
+  this offline environment because its uncached `memory-stats` dev dependency
+  would require a crates.io download; no dependency fetch was attempted.
+- The full `cargo build --release --locked --offline` workspace build passed
+  in 7m 42s with only the established audio `unused_mut` and Windows
+  `CommandExt` warnings.

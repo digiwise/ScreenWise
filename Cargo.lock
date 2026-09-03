@@ -8487,7 +8487,6 @@ dependencies = [
  "rusty-tesseract",
  "sck-rs",
  "screenpipe-a11y",
- "screenpipe-connect",
  "screenpipe-core",
  "screenpipe-db",
  "serde",

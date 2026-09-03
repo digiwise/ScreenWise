@@ -22,7 +22,6 @@ use chrono::{DateTime, Utc};
 use image::codecs::jpeg::JpegEncoder;
 use image::DynamicImage;
 use image::GenericImageView;
-use screenpipe_connect::unstructured_ocr::perform_ocr_cloud;
 use screenpipe_core::Language;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -550,9 +549,19 @@ async fn perform_ocr_with_engine(
     languages: Vec<Language>,
 ) -> Result<(String, String, Option<f64>), ContinuousCaptureError> {
     match ocr_engine {
-        OcrEngine::Unstructured => perform_ocr_cloud(image, languages)
+        // Keep accepting the historical `unstructured` setting so existing
+        // local configs do not fail to deserialize, but never send captured
+        // frames to its hosted OCR service.
+        #[cfg(target_os = "windows")]
+        OcrEngine::Unstructured => perform_ocr_windows(image, &languages)
             .await
             .map_err(|e| ContinuousCaptureError::ErrorProcessingOcr(e.to_string())),
+        #[cfg(target_os = "macos")]
+        OcrEngine::Unstructured => perform_ocr_apple(image, &languages)
+            .await
+            .map_err(|e| ContinuousCaptureError::ErrorProcessingOcr(e.to_string())),
+        #[cfg(target_os = "linux")]
+        OcrEngine::Unstructured => Ok(perform_ocr_tesseract(image, languages)),
         OcrEngine::Tesseract => Ok(perform_ocr_tesseract(image, languages)),
         #[cfg(target_os = "windows")]
         OcrEngine::WindowsNative => perform_ocr_windows(image, &languages)
