@@ -294,7 +294,7 @@ would retain a reachable outbound path.
   then run locked engine/audio validation and inspect the lockfile for a
   dependency reduction only.
 
-### External-transcription removal complete — pending commit
+### External-transcription removal complete — `a879dbebe`
 
 - Removed Deepgram and OpenAI-compatible batch transcription engines, request
   clients, CLI API-key option, and their engine/audio-manager/retranscription
@@ -311,7 +311,7 @@ would retain a reachable outbound path.
   use the existing uncached `infer v0.15.0` dev dependency. No network fetch
   or dependency update was used to bypass that prerequisite.
 
-### Cloud workflow classifier removal complete — pending commit
+### Cloud workflow classifier removal complete — `ee07c467b`
 
 - Removed the opt-in cloud workflow-classifier module, its Screenpipe gateway
   endpoint/token handling, and its recorder startup task. Captured activity is
@@ -330,7 +330,7 @@ subsystem: remove its startup, API, CLI, persistence, permissions middleware,
 and registry routes together while retaining the ordinary authenticated local
 capture/search API. No pipe source has been changed in this audit checkpoint.
 
-### Pipes and pipe store removal complete — pending commit
+### Pipes and pipe store removal complete — `79f8f2d57`
 
 - Removed PipeManager startup, Pi-agent installation, scheduled execution,
   built-in pipe installation, pipe-specific permissions, `/pipes` routes,
@@ -341,7 +341,7 @@ capture/search API. No pipe source has been changed in this audit checkpoint.
   the established unrelated warnings; this source-only removal does not change
   the lockfile.
 
-### Enterprise/team CLI removal complete — pending commit
+### Enterprise/team CLI removal complete — `515363355`
 
 - Removed the `screenpipe team` command and its direct Screenpipe enterprise
   API client. This source-only change does not affect the local recorder or
@@ -371,7 +371,7 @@ the memories API, retains an engine scheduler field, and is started by the
 desktop server. Remove those engine, API, and desktop-startup references as one
 integration subsystem; preserve the ordinary local memories database/API.
 
-### External memory export removal complete — pending commit
+### External memory export removal complete — `90c17a3bf`
 
 - Removed the external-memory scheduler, the authenticated
   `/memories/sync-external` trigger, and the desktop server startup hook. The
@@ -391,7 +391,7 @@ MCP download, a remote pipe bundle, login/cloud sync, and a hosted survey.
 None is required for local recording, so remove the loop and its CLI startup
 hook as one source-only subsystem.
 
-### CLI promotional-reminder removal complete — pending commit
+### CLI promotional-reminder removal complete — `31d4352bb`
 
 - Removed the periodic standalone-CLI reminder task and all of its hosted,
   external-package, pipe, login/cloud-sync, and survey prompts. Recording and
@@ -410,7 +410,7 @@ single safe deletion: retaining a future read-only local MCP interface requires
 an explicit capability boundary, while the current proxy supports arbitrary
 external tools and transports. No MCP source has been changed in this audit.
 
-### Legacy MCP downloader removal complete — pending commit
+### Legacy MCP downloader removal complete — `6094f5eed`
 
 - Removed the `screenpipe mcp` CLI command and its GitHub/`uv` downloader. It
   can no longer fetch moving `main`-branch MCP package content or create an
@@ -428,7 +428,7 @@ The standalone `screenpipe survey` command opens the hosted Screenpipe survey
 in a browser. It is not part of the local recorder, so its CLI module, command,
 dispatch arm, and parser test are being removed as one source-only subsystem.
 
-### Hosted survey command removal complete — pending commit
+### Hosted survey command removal complete — `182f0768a`
 
 - Removed the hosted survey command, its browser-launch helper, and parser
   test. The standalone recorder CLI no longer opens a Screenpipe web page.
@@ -466,7 +466,7 @@ The recorder also prints a GitHub releases link at startup. It is a
 non-functional hosted prompt and is being removed independently of local
 recording behavior.
 
-### CLI hosted-release prompt removal complete — pending commit
+### CLI hosted-release prompt removal complete — `95d05d7c0`
 
 - Removed the GitHub releases prompt from recorder startup. Local recorder/API
   startup output remains intact.
@@ -474,7 +474,7 @@ recording behavior.
   and `git diff --check` passed with only the established unrelated warnings;
   no lockfile change is required.
 
-### CLI hosted-onboarding prompt removal complete — pending commit
+### CLI hosted-onboarding prompt removal complete — `8fdf39faf`
 
 - Removed the standalone recorder's hosted onboarding advertisement. Startup
   now reports only local recorder/API state.
@@ -482,7 +482,7 @@ recording behavior.
   and `git diff --check` passed with only the established unrelated warnings;
   no lockfile change is required.
 
-### Dead engine Sentry initialization removal complete — pending validation
+### Dead engine Sentry initialization removal complete — `3f1e7692b`
 
 The standalone engine binary still contains an always-false `#[cfg(any())]`
 Sentry initialization block, including the retired remote DSN and scope
@@ -492,7 +492,7 @@ independent and still persists local `last-panic.log` diagnostics.
 `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`, and
 `git diff --check` passed. No lockfile change is required.
 
-### Standalone connection CLI removal complete — pending commit
+### Standalone connection CLI removal complete — `e94afe749`
 
 The `screenpipe connection` command manages third-party integration credentials
 and probes a local WhatsApp gateway/browser registry. It is separate from the
@@ -566,7 +566,7 @@ pipeline metrics remain live for health, WebSocket, and `/vision/metrics` and
 analytics shim. Its detector and meeting-route calls have been removed while
 preserving meeting detection, lifecycle mutations, events, and persistence.
 
-### No-op meeting telemetry removal complete — pending commit
+### No-op meeting telemetry removal complete — `734161a7b`
 
 - Removed the disabled-analytics meeting telemetry adapter and all of its
   detector/meeting-route call sites. Local meeting capture, controls, events,
@@ -580,7 +580,7 @@ Removed the remaining no-op analytics compatibility module and its startup,
 search, and macOS sleep/wake call sites. Local search and sleep monitoring
 behavior remains; only discarded telemetry metadata was removed.
 
-### No-op analytics shim removal complete — pending commit
+### No-op analytics shim removal complete — `3caaaa73a`
 
 - Removed the no-op analytics shim and all remaining engine call sites. Local
   search, sleep/wake monitoring, and resource monitoring remain intact.
@@ -750,7 +750,7 @@ Deepgram transcription module and calls the former five-argument
 or removes those obsolete evaluation-only paths; the local recorder runtime
 was not implicated.
 
-### Local audio evaluation cleanup — pending commit
+### Local audio evaluation cleanup — `5d6ccc459`
 
 The audio evaluation binaries are not recorder runtime dependencies, but the
 workspace build compiles them. The pipeline replay tool retained a paid
