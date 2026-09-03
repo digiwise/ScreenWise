@@ -95,10 +95,8 @@ pub(crate) struct SearchQuery {
     /// Filter results by machine identifier (UUID)
     #[serde(default)]
     machine_id: Option<String>,
-    /// Redact PII from text-bearing fields (ocr `text`, audio `transcription`,
-    /// ui `text`, input `text_content`, memory `content`) before returning.
-    /// Routed through the attested Tinfoil enclave; adds latency so leave it
-    /// off unless the caller will forward these results to an LLM.
+    /// Reserved for the retired hosted search-time PII filter. A request that
+    /// enables it is rejected before any recorded content is returned.
     #[serde(default, deserialize_with = "deserialize_flexible_bool")]
     filter_pii: bool,
     /// Restrict results to items carrying ALL of these tags. Comma-separated,
@@ -340,6 +338,16 @@ pub(crate) async fn search(
     Query(query): Query<SearchQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<JsonResponse<SearchResponse>, (StatusCode, JsonResponse<serde_json::Value>)> {
+    if query.filter_pii {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            JsonResponse(json!({
+                "error": "privacy_filter_unavailable",
+                "message": "remote search-time PII filtering is unavailable in local-only ScreenWise; enable local pre-persistence redaction instead",
+            })),
+        ));
+    }
+
     debug!(
         "received search request: query='{}', content_type={:?}, limit={}, offset={}, start_time={:?}, end_time={:?}, app_name={:?}, window_name={:?}, min_length={:?}, max_length={:?}, speaker_ids={:?}, frame_name={:?}, browser_url={:?}, focused={:?}",
         query.q.as_deref().unwrap_or(""),
@@ -497,74 +505,6 @@ pub(crate) async fn search(
         ui_indices_to_remove.sort_unstable();
         for idx in ui_indices_to_remove.into_iter().rev() {
             content_items.remove(idx);
-        }
-    }
-
-    // Redact PII on the final item set (post-dedup, pre-frame-extract) so we
-    // don't pay for Tinfoil calls on entries we're about to discard or on
-    // binary frame data. Fail closed — return 503 rather than leak raw text.
-    if query.filter_pii {
-        let filter = crate::privacy_filter::global();
-
-        // Collect the text to filter, along with (index, kind) back-pointers
-        // so we can splice the redacted strings into the right fields.
-        #[derive(Clone, Copy)]
-        enum Field {
-            Ocr,
-            Audio,
-            Ui,
-            Input,
-            Memory,
-        }
-        let mut targets: Vec<(usize, Field)> = Vec::with_capacity(content_items.len());
-        let mut texts: Vec<String> = Vec::with_capacity(content_items.len());
-        for (i, item) in content_items.iter().enumerate() {
-            match item {
-                ContentItem::OCR(c) => {
-                    targets.push((i, Field::Ocr));
-                    texts.push(c.text.clone());
-                }
-                ContentItem::Audio(c) => {
-                    targets.push((i, Field::Audio));
-                    texts.push(c.transcription.clone());
-                }
-                ContentItem::UI(c) => {
-                    targets.push((i, Field::Ui));
-                    texts.push(c.text.clone());
-                }
-                ContentItem::Input(c) => {
-                    if let Some(t) = &c.text_content {
-                        targets.push((i, Field::Input));
-                        texts.push(t.clone());
-                    }
-                }
-                ContentItem::Memory(c) => {
-                    targets.push((i, Field::Memory));
-                    texts.push(c.content.clone());
-                }
-            }
-        }
-
-        let redacted = filter.filter_batch(texts).await.map_err(|e| {
-            error!("privacy filter failed: {}", e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                JsonResponse(json!({
-                    "error": "privacy_filter_unavailable",
-                    "message": format!("{}", e),
-                })),
-            )
-        })?;
-
-        for ((idx, field), new_text) in targets.into_iter().zip(redacted.into_iter()) {
-            match (field, &mut content_items[idx]) {
-                (Field::Ocr, ContentItem::OCR(c)) => c.text = new_text,
-                (Field::Audio, ContentItem::Audio(c)) => c.transcription = new_text,
-                (Field::Ui, ContentItem::UI(c)) => c.text = new_text,
-                (Field::Input, ContentItem::Input(c)) => c.text_content = Some(new_text),
-                (Field::Memory, ContentItem::Memory(c)) => c.content = new_text,
-                _ => {}
-            }
         }
     }
 

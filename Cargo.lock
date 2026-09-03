@@ -8375,7 +8375,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tikv-jemallocator",
- "tinfoil",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",

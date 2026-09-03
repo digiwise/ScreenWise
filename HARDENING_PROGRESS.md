@@ -588,3 +588,32 @@ behavior remains; only discarded telemetry metadata was removed.
   telemetry removal. `cargo fmt --all -- --check`,
   `cargo check -p screenpipe-engine --locked`, and `git diff --check` passed;
   no lockfile change is required.
+
+### Remote search-time PII filter removal complete — pending commit
+
+The engine's optional `/search?filter_pii=true` path sends OCR,
+transcriptions, UI text, input text, and memory content to a
+Screenpipe-hosted Tinfoil enclave. Although it is attested and fail-closed on
+transport failures, it is not a local redactor and therefore contradicts the
+local-only runtime target. The separate pre-persistence local redaction worker
+is retained. The immediate engine increment will remove only the remote
+search-time client and make an explicit `filter_pii=true` request fail closed
+before any search data is returned. The selectable desktop enclave worker is
+in dirty desktop files and remains a separate follow-up subsystem.
+
+- Deleted the engine's hosted search-time filter client and direct Tinfoil
+  dependency. `filter_pii=true` now returns `501` before search retrieval, so
+  it cannot silently return unredacted data or transmit recorded text.
+- Regenerated the root lockfile offline solely to remove the one
+  `screenpipe-engine -> tinfoil` dependency edge; the package remains locked
+  for `screenpipe-redact`, with no package/version update.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`
+  in VS Developer PowerShell with Ninja, and `git diff --check` passed. The
+  only warnings are the established audio `unused_mut` and Windows
+  `CommandExt` import warnings. A non-Developer-PowerShell check first failed
+  native bindgen/CMake discovery and was corrected by rerunning in the
+  documented build environment.
+- The strongest scoped test build, `cargo test -p screenpipe-engine --lib
+  --locked --no-run`, again reaches the existing `libsamplerate-sys` link
+  blocker because the machine lacks the native static `samplerate` library.
+  No dependency or native-library acquisition was attempted.
