@@ -6,24 +6,20 @@
 //!
 //! This binary fills the gap between pure diarization scoring and full manual
 //! hardware testing. It replays deterministic screenpipe-shaped WAV/RTTM
-//! fixtures through the local diarization chain or Deepgram batch output, then
+//! fixtures through the local diarization chain, then
 //! materializes the result into a fresh screenpipe SQLite DB and scores the
 //! final DB/search-shaped rows. That catches regressions where model output is
 //! fine but speaker labels disappear in storage or search.
 
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use screenpipe_audio::speaker::{
     embedding::EmbeddingExtractor, embedding_manager::EmbeddingManager, prepare_segments,
-};
-use screenpipe_audio::transcription::deepgram::{
-    batch::transcribe_with_deepgram_detailed, DeepgramTranscriptionConfig,
 };
 use screenpipe_audio::vad::{silero::SileroVad, VadEngine};
 use screenpipe_audio::{pcm_decode, resample};
 use screenpipe_audio_eval::{load_rttm, score_pipeline, RttmSegment};
-use screenpipe_core::Language;
 use screenpipe_db::{DatabaseManager, NewDiarizationSegment, ReplacementAudioTranscription};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
@@ -51,25 +47,9 @@ struct Args {
     #[arg(long, default_value = "input,output")]
     devices: String,
 
-    /// Deepgram behavior. `auto` runs only when DEEPGRAM_API_KEY or
-    /// CUSTOM_DEEPGRAM_API_TOKEN is present.
-    #[arg(long, value_enum, default_value_t = DeepgramMode::Auto)]
-    deepgram: DeepgramMode,
-
-    /// Fixture stem to use for the real Deepgram smoke test.
-    #[arg(long, default_value = "screenpipe_meeting_rapid_handoffs")]
-    deepgram_fixture: String,
-
     /// Optional JSON report path.
     #[arg(long)]
     out: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
-enum DeepgramMode {
-    Off,
-    Auto,
-    Required,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -102,8 +82,6 @@ struct PredictionSet {
     segments: Vec<PredictedTurn>,
     total_samples: usize,
     wall_clock_seconds: f64,
-    skipped: bool,
-    skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +114,6 @@ struct ReplayScenarioReport {
     missing_speaker_labels: usize,
     source_mismatches: usize,
     speaker_filter_rows: usize,
-    all_unknown_provider_labels: bool,
     db_path: String,
     wall_clock_seconds: f64,
 }
@@ -149,7 +126,6 @@ struct ReplaySummary {
     skipped: usize,
     avg_background_der: Option<f64>,
     avg_background_speaker_error: Option<f64>,
-    deepgram_status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,20 +153,6 @@ async fn main() -> Result<()> {
     }
 
     let local_predictions = run_local_predictions(&fixtures).await?;
-    let deepgram_prediction = run_deepgram_prediction(&args, &fixtures)
-        .await
-        .unwrap_or_else(|err| PredictionSet {
-            provider: "deepgram".to_string(),
-            model: Some("nova-3".to_string()),
-            source: "provider".to_string(),
-            engine: "deepgram".to_string(),
-            segments: Vec::new(),
-            total_samples: 0,
-            wall_clock_seconds: 0.0,
-            skipped: true,
-            skip_reason: Some(err.to_string()),
-        });
-
     let mut reports = Vec::new();
     let mut scenario_index = 0usize;
     for fixture in &fixtures {
@@ -221,28 +183,6 @@ async fn main() -> Result<()> {
                 }
             }
         }
-    }
-
-    if deepgram_prediction.skipped {
-        reports.push(skipped_deepgram_report(
-            &args.deepgram_fixture,
-            &deepgram_prediction,
-        ));
-    } else if let Some(fixture) = fixtures.iter().find(|f| f.stem == args.deepgram_fixture) {
-        let reference = load_rttm(&fixture.rttm)
-            .with_context(|| format!("load rttm {}", fixture.rttm.display()))?;
-        scenario_index += 1;
-        reports.push(
-            materialize_and_score(
-                scenario_index,
-                fixture,
-                &reference,
-                &deepgram_prediction,
-                ReplayMode::Background,
-                DeviceProfile::Output,
-            )
-            .await?,
-        );
     }
 
     let report = build_report(reports);
@@ -402,99 +342,10 @@ async fn run_local_predictions(fixtures: &[Fixture]) -> Result<HashMap<String, P
                 segments: turns,
                 total_samples,
                 wall_clock_seconds: started.elapsed().as_secs_f64(),
-                skipped: false,
-                skip_reason: None,
             },
         );
     }
     Ok(out)
-}
-
-async fn run_deepgram_prediction(args: &Args, fixtures: &[Fixture]) -> Result<PredictionSet> {
-    if args.deepgram == DeepgramMode::Off {
-        bail!("deepgram disabled");
-    }
-    let has_direct = std::env::var("DEEPGRAM_API_KEY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty());
-    let has_custom = std::env::var("CUSTOM_DEEPGRAM_API_TOKEN")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty());
-    if !has_direct && !has_custom {
-        if args.deepgram == DeepgramMode::Required {
-            bail!("deepgram required but neither DEEPGRAM_API_KEY nor CUSTOM_DEEPGRAM_API_TOKEN is set");
-        }
-        bail!("deepgram skipped: no DEEPGRAM_API_KEY or CUSTOM_DEEPGRAM_API_TOKEN");
-    }
-
-    let fixture = fixtures
-        .iter()
-        .find(|f| f.stem == args.deepgram_fixture)
-        .with_context(|| format!("deepgram fixture `{}` not found", args.deepgram_fixture))?;
-    eprintln!("deepgram replay smoke: {}", fixture.stem);
-    let (samples, source_rate) = pcm_decode(&fixture.audio)
-        .with_context(|| format!("decode audio {}", fixture.audio.display()))?;
-    let samples = if source_rate != 16_000 {
-        resample(&samples, source_rate, 16_000)?
-    } else {
-        samples
-    };
-    let total_samples = samples.len();
-    let started = Instant::now();
-    let mut deepgram_config = std::env::var("CUSTOM_DEEPGRAM_API_TOKEN")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(DeepgramTranscriptionConfig::screenpipe_cloud)
-        .or_else(|| {
-            std::env::var("DEEPGRAM_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .map(DeepgramTranscriptionConfig::direct)
-        })
-        .context("deepgram config missing after readiness check")?;
-    if let Ok(endpoint) = std::env::var("DEEPGRAM_API_URL") {
-        if !endpoint.trim().is_empty() {
-            deepgram_config.endpoint = endpoint;
-        }
-    }
-    let output = transcribe_with_deepgram_detailed(
-        &deepgram_config,
-        &samples,
-        "pipeline-replay-deepgram",
-        16_000,
-        Vec::<Language>::new(),
-        &[],
-    )
-    .await?;
-
-    let turns = output
-        .diarization_segments
-        .into_iter()
-        .map(|segment| PredictedTurn {
-            label: segment.provider_speaker_label,
-            text: if segment.transcription.trim().is_empty() {
-                "deepgram segment".to_string()
-            } else {
-                segment.transcription
-            },
-            start: segment.start_time,
-            end: segment.end_time,
-            confidence: segment.confidence,
-            overlap: segment.overlap,
-        })
-        .collect();
-
-    Ok(PredictionSet {
-        provider: "deepgram".to_string(),
-        model: Some("nova-3".to_string()),
-        source: "provider".to_string(),
-        engine: "deepgram".to_string(),
-        segments: turns,
-        total_samples,
-        wall_clock_seconds: started.elapsed().as_secs_f64(),
-        skipped: false,
-        skip_reason: None,
-    })
 }
 
 async fn materialize_and_score(
@@ -605,15 +456,6 @@ async fn materialize_and_score(
         .iter()
         .filter_map(|row| row.speaker_label.clone())
         .collect();
-    let all_unknown_provider_labels = prediction.provider == "deepgram"
-        && !rows.is_empty()
-        && rows.iter().all(|row| {
-            row.speaker_label
-                .as_deref()
-                .unwrap_or("")
-                .contains("UNKNOWN")
-        });
-
     let mut failure_reasons = Vec::new();
     if rows.is_empty() {
         failure_reasons.push("search returned no audio rows".to_string());
@@ -635,10 +477,6 @@ async fn materialize_and_score(
         failure_reasons
             .push("speaker_name filter did not find the first speaker label".to_string());
     }
-    if all_unknown_provider_labels {
-        failure_reasons.push("provider returned only UNKNOWN speaker labels".to_string());
-    }
-
     Ok(ReplayScenarioReport {
         fixture: fixture.stem.clone(),
         engine: prediction.engine.clone(),
@@ -662,7 +500,6 @@ async fn materialize_and_score(
         missing_speaker_labels,
         source_mismatches,
         speaker_filter_rows,
-        all_unknown_provider_labels,
         db_path: db_path.display().to_string(),
         wall_clock_seconds: prediction.wall_clock_seconds,
     })
@@ -821,11 +658,7 @@ fn build_report(scenarios: Vec<ReplayScenarioReport>) -> ReplayReport {
         .count();
     let background_scores: Vec<&ReplayScenarioReport> = scenarios
         .iter()
-        .filter(|scenario| {
-            scenario.status == "pass"
-                && scenario.mode == ReplayMode::Background
-                && scenario.provider != "deepgram"
-        })
+        .filter(|scenario| scenario.status == "pass" && scenario.mode == ReplayMode::Background)
         .collect();
     let avg_background_der = mean(background_scores.iter().filter_map(|s| s.der));
     let avg_background_speaker_error = mean(
@@ -833,12 +666,6 @@ fn build_report(scenarios: Vec<ReplayScenarioReport>) -> ReplayReport {
             .iter()
             .filter_map(|s| s.speaker_error_rate),
     );
-    let deepgram_status = scenarios
-        .iter()
-        .find(|scenario| scenario.provider == "deepgram")
-        .map(|scenario| scenario.status.clone())
-        .unwrap_or_else(|| "not_requested".to_string());
-
     ReplayReport {
         summary: ReplaySummary {
             scenario_count: scenarios.len(),
@@ -847,7 +674,6 @@ fn build_report(scenarios: Vec<ReplayScenarioReport>) -> ReplayReport {
             skipped,
             avg_background_der,
             avg_background_speaker_error,
-            deepgram_status,
         },
         scenarios,
     }
@@ -861,36 +687,6 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
         sum += value;
     }
     (count > 0).then_some(sum / count as f64)
-}
-
-fn skipped_deepgram_report(fixture: &str, prediction: &PredictionSet) -> ReplayScenarioReport {
-    ReplayScenarioReport {
-        fixture: fixture.to_string(),
-        engine: "deepgram".to_string(),
-        provider: "deepgram".to_string(),
-        mode: ReplayMode::Background,
-        device: DeviceProfile::Output,
-        status: "skip".to_string(),
-        failure_reasons: prediction
-            .skip_reason
-            .clone()
-            .map(|reason| vec![reason])
-            .unwrap_or_default(),
-        der: None,
-        speaker_error_rate: None,
-        speaker_continuity_score: None,
-        predicted_speakers: 0,
-        true_speakers: 0,
-        predicted_segments: 0,
-        reference_segments: 0,
-        search_rows: 0,
-        missing_speaker_labels: 0,
-        source_mismatches: 0,
-        speaker_filter_rows: 0,
-        all_unknown_provider_labels: false,
-        db_path: String::new(),
-        wall_clock_seconds: 0.0,
-    }
 }
 
 fn finite_or_none(value: f64) -> Option<f64> {

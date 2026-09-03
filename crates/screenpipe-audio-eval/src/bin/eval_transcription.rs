@@ -177,15 +177,9 @@ async fn run_model(
     );
     prime_model(&spec.engine).await?;
 
-    let engine = TranscriptionEngine::new(
-        Arc::new(spec.engine.clone()),
-        None,
-        None,
-        Vec::new(),
-        Vec::new(),
-    )
-    .await
-    .with_context(|| format!("construct TranscriptionEngine for {}", spec.name))?;
+    let engine = TranscriptionEngine::new(Arc::new(spec.engine.clone()), Vec::new(), Vec::new())
+        .await
+        .with_context(|| format!("construct TranscriptionEngine for {}", spec.name))?;
 
     if matches!(engine, TranscriptionEngine::Disabled) {
         anyhow::bail!("TranscriptionEngine resolved to Disabled for {}", spec.name);

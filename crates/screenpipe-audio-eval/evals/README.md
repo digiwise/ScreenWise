@@ -113,7 +113,6 @@ cargo run -p screenpipe-audio-eval --bin screenpipe-eval-pipeline-replay -- \
   --engines parakeet-local,whisper-local \
   --modes background,live \
   --devices input,output \
-  --deepgram off \
   --out /tmp/screenpipe-speaker-suite/pipeline-replay.json
 ```
 
@@ -125,26 +124,6 @@ The no-secret matrix checks:
 - Parakeet/Whisper local-engine labels that share the local diarization path
 - `search_audio` speaker labels, speaker source, speaker-name filtering, and
   collapsed-speaker failures
-
-When a direct Deepgram key or screenpipe cloud token is available, run a paid
-provider smoke test explicitly:
-
-```bash
-DEEPGRAM_API_KEY="$DEEPGRAM_API_KEY" \
-cargo run -p screenpipe-audio-eval --bin screenpipe-eval-pipeline-replay -- \
-  --suite-dir /tmp/screenpipe-speaker-suite \
-  --engines parakeet-local \
-  --modes background \
-  --devices output \
-  --deepgram required \
-  --deepgram-fixture screenpipe_meeting_rapid_handoffs \
-  --out /tmp/screenpipe-speaker-suite/pipeline-replay-deepgram.json
-```
-
-For screenpipe cloud, set `CUSTOM_DEEPGRAM_API_TOKEN` and `DEEPGRAM_API_URL`
-instead of a direct Deepgram key. The smoke should fail if provider speaker
-labels collapse to `SPEAKER_UNKNOWN`, which is exactly the gateway regression
-this PR is meant to catch after deployment.
 
 These fixtures are synthetic, but the failure modes are screenpipe-specific:
 live meeting handoffs, background 24/7 silence, duplicated mic/system capture,

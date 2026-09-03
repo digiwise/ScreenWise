@@ -709,7 +709,7 @@ Removing only cloud presets would leave an incoherent partially supported
 assistant configuration surface; retain-vs-remove local Ollama/Pi is a
 coordinated product capability decision for the later desktop provider pass.
 
-### Cloud search flag removal complete — pending commit
+### Cloud search flag removal complete — `ff1168bf1`
 
 The `include_cloud` search parameter survived the cloud-sync runtime removal
 but no longer has an implementation. The next engine-only increment makes an
@@ -721,3 +721,47 @@ a clear local-only API contract rather than silently ignoring the request.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`
   in VS Developer PowerShell with Ninja, and `git diff --check` passed with
   only the established audio `unused_mut` and Windows `CommandExt` warnings.
+
+### Windows native samplerate validation — 2026-09-04
+
+The debug engine test build had previously failed because `libsamplerate-sys`
+could not find its vendored `samplerate.lib` when CMake used single-config
+Ninja. Rebuilding that crate under `Ninja Multi-Config` produced the expected
+`out\\build\\Release\\samplerate.lib`, and the engine test linker consumed it.
+
+- `cargo clean -p libsamplerate-sys` and
+  `cargo test -p screenpipe-engine --lib --locked --no-run` were run in Visual
+  Studio Developer PowerShell with `CMAKE_GENERATOR=Ninja Multi-Config`.
+  The samplerate missing-library error is resolved.
+- The debug test executable still fails later for an unrelated existing native
+  configuration mismatch: `knf-rs-sys` supplies debug-CRT objects while
+  `whisper-rs-sys` supplies release-CRT objects (`LNK2038` and
+  `CrtDbgReport`). `cargo test -p screenpipe-engine --lib --release --locked
+  --no-run` completed successfully in 3m 44s, which validates the documented
+  optimized Windows profile. No source or dependency changes were made.
+
+### Release workspace validation follow-up — 2026-09-04
+
+`cargo build --release --locked` with `CMAKE_GENERATOR=Ninja Multi-Config`
+advanced past the samplerate build and engine compilation, but stopped in the
+separate `screenpipe-audio-eval` tooling. It still imports the removed
+Deepgram transcription module and calls the former five-argument
+`TranscriptionEngine::new` constructor. The next isolated increment repairs
+or removes those obsolete evaluation-only paths; the local recorder runtime
+was not implicated.
+
+### Local audio evaluation cleanup — pending commit
+
+The audio evaluation binaries are not recorder runtime dependencies, but the
+workspace build compiles them. The pipeline replay tool retained a paid
+Deepgram/Screenpipe Cloud smoke path after external transcription removal,
+making the hardening boundary incomplete and breaking the build.
+
+- Removed the provider replay CLI, credential lookup, cloud endpoint override,
+  and provider-only report fields. The replay harness now exercises only the
+  local diarization and SQLite/search path; its documentation no longer
+  advertises provider credentials or outbound smoke tests.
+- Updated the transcription evaluation binary to the current three-argument
+  `TranscriptionEngine::new` API.
+- `cargo build -p screenpipe-audio-eval --release --locked` completed
+  successfully in Visual Studio Developer PowerShell with Ninja Multi-Config.
