@@ -3032,7 +3032,7 @@ pub async fn run_meeting_detection_loop(
                         other => other,
                     };
 
-                    let (meeting_id, decision_trigger) = match merge_candidate {
+                    let (meeting_id, _decision_trigger) = match merge_candidate {
                         Ok(Some(recent)) => match db.reopen_meeting(recent.id).await {
                             Ok(()) => {
                                 info!(

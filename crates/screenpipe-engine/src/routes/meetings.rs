@@ -279,7 +279,6 @@ pub(crate) async fn delete_meeting_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<JsonResponse<Value>, (StatusCode, JsonResponse<Value>)> {
-    let meeting_before = state.db.get_meeting_by_id(id).await.ok();
     let rows_affected = state.db.delete_meeting(id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -405,8 +404,6 @@ pub(crate) async fn split_meeting_handler(
             JsonResponse(json!({"error": format!("'at' must be RFC3339, got: {}", body.at)})),
         ));
     }
-
-    let meeting_before = state.db.get_meeting_by_id(id).await.ok();
 
     let (before, after) = state.db.split_meeting(id, &body.at).await.map_err(|e| {
         // Distinguish "bad split point" (400) and "no such meeting" (404) from

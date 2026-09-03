@@ -22,10 +22,6 @@ use tracing::info;
 #[cfg(target_os = "macos")]
 use tracing::{debug, error, info, warn};
 
-#[cfg(target_os = "macos")]
-use crate::analytics::capture_event_nonblocking;
-#[cfg(target_os = "macos")]
-use serde_json::json;
 use tokio::sync::Notify;
 
 /// Tracks whether the system is currently in a "post-wake" state
@@ -483,13 +479,6 @@ fn on_will_sleep() {
     // mid-COMMIT), then block until resumed on wake. This ensures no
     // SQLite I/O happens while the disk is asleep.
     screenpipe_db::request_write_pause();
-
-    capture_event_nonblocking(
-        "system_will_sleep",
-        json!({
-            "platform": "macos",
-        }),
-    );
 }
 
 /// Called when system wakes from sleep
@@ -542,16 +531,6 @@ fn on_did_wake(handle: &tokio::runtime::Handle) {
 
         // Check if recording is healthy
         let (audio_healthy, vision_healthy) = check_recording_health().await;
-
-        capture_event_nonblocking(
-            "system_did_wake",
-            json!({
-                "platform": "macos",
-                "audio_healthy_after_wake": audio_healthy,
-                "vision_healthy_after_wake": vision_healthy,
-                "check_delay_secs": 5,
-            }),
-        );
 
         if !audio_healthy || !vision_healthy {
             warn!(

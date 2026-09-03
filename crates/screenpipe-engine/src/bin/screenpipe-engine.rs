@@ -23,7 +23,6 @@ use screenpipe_core::find_ffmpeg_path;
 use screenpipe_core::paths;
 use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{
-    analytics,
     cli::{
         audio::handle_audio_command, search::handle_search_command, status::handle_status_command,
         vision::handle_vision_command, Cli, Command, RecordArgSources,
@@ -641,13 +640,6 @@ async fn main() -> anyhow::Result<()> {
 
     let resource_monitor = ResourceMonitor::new(config.analytics_enabled);
     resource_monitor.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
-
-    // Initialize analytics for API tracking
-    analytics::init(config.analytics_enabled);
-
-    // Check macOS version and send telemetry if below supported versions
-    // This helps track users who may have screen capture issues due to old macOS
-    analytics::check_macos_version();
 
     let db = Arc::new(
         DatabaseManager::new(

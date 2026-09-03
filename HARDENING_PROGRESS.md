@@ -573,3 +573,18 @@ preserving meeting detection, lifecycle mutations, events, and persistence.
   and SQLite persistence remain unchanged.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` passed; no lockfile change is required.
+
+### No-op analytics shim removal in progress
+
+Removed the remaining no-op analytics compatibility module and its startup,
+search, and macOS sleep/wake call sites. Local search and sleep monitoring
+behavior remains; only discarded telemetry metadata was removed.
+
+### No-op analytics shim removal complete — pending commit
+
+- Removed the no-op analytics shim and all remaining engine call sites. Local
+  search, sleep/wake monitoring, and resource monitoring remain intact.
+- Corrected obsolete unused meeting variables introduced by the preceding
+  telemetry removal. `cargo fmt --all -- --check`,
+  `cargo check -p screenpipe-engine --locked`, and `git diff --check` passed;
+  no lockfile change is required.
