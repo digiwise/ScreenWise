@@ -94,3 +94,8 @@ opt-level = 0
 [profile.dev.package."*"]
 opt-level = 2      # Optimize all dependencies (faster runtime, same compile time)
 debug = false      # deps don't need debug symbols — keeps target/ from ballooning
+
+# knf-rs-sys chooses its native CMake profile from the build script's debug
+# assertions. Keep it on the release CRT to match whisper-rs-sys in dev tests.
+[profile.dev.package.knf-rs-sys]
+debug-assertions = false

@@ -786,7 +786,7 @@ engines, so the historical configuration value can safely fall back locally.
   in 7m 42s with only the established audio `unused_mut` and Windows
   `CommandExt` warnings.
 
-### Dead hosted OCR helper removal — pending commit
+### Dead hosted OCR helper removal — `6946e3fde`
 
 After the screen crate stopped calling the hosted Unstructured OCR path, its
 `screenpipe-connect` module had no remaining callers. The helper still read
@@ -798,3 +798,21 @@ After the screen crate stopped calling the hosted Unstructured OCR path, its
   of both `screenpipe-connect` and `screenpipe-engine` passed in Visual Studio
   Developer PowerShell. The established audio `unused_mut` and Windows
   `CommandExt` warnings remain.
+
+### Windows debug native CRT alignment — pending commit
+
+The debug `screenpipe-engine` test executable linked `knf-rs-sys` C++ objects
+built with the Debug MSVC CRT against Whisper C++ objects intentionally built
+with the Release CRT. This caused `LNK2038` and `CrtDbgReport` failures after
+the samplerate library was fixed.
+
+- Added a `profile.dev` package override that disables debug assertions only
+  for `knf-rs-sys`; its build script consequently selects the Release CMake
+  profile, matching Whisper without changing package versions or production
+  profiles.
+- After `cargo clean -p knf-rs-sys`,
+  `cargo test -p screenpipe-engine --lib --locked --no-run` successfully linked
+  the debug test executable. The full test run executed 531 tests: 525 passed,
+  2 were ignored, and 4 unrelated `logging` tests failed because Windows does
+  not expose the active file's new length after `File::flush`; that logging
+  behavior will be repaired separately.
