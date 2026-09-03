@@ -82,7 +82,8 @@ pub(crate) struct SearchQuery {
     /// Filter audio transcriptions by speaker name (case-insensitive partial match)
     #[serde(default)]
     speaker_name: Option<String>,
-    /// Include cloud-synced data in search results (requires cloud sync to be enabled)
+    /// Reserved for the retired cloud-sync search backend. A request that
+    /// enables it is rejected before any recorded content is returned.
     #[serde(default, deserialize_with = "deserialize_flexible_bool")]
     include_cloud: bool,
     /// Truncate each result's text/transcription to this many characters using middle-truncation.
@@ -338,6 +339,16 @@ pub(crate) async fn search(
     Query(query): Query<SearchQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<JsonResponse<SearchResponse>, (StatusCode, JsonResponse<serde_json::Value>)> {
+    if query.include_cloud {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            JsonResponse(json!({
+                "error": "cloud_search_unavailable",
+                "message": "cloud-synced search is unavailable in local-only ScreenWise",
+            })),
+        ));
+    }
+
     if query.filter_pii {
         return Err((
             StatusCode::NOT_IMPLEMENTED,

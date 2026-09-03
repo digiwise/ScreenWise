@@ -699,3 +699,25 @@ remote telemetry code while retaining local diagnostics.
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`
   in VS Developer PowerShell with Ninja, and `git diff --check` passed with
   only the established audio `unused_mut` and Windows `CommandExt` warnings.
+
+### CLI AI preset/provider audit — 2026-09-03
+
+The `pipe models` CLI persists OpenAI, Anthropic, arbitrary custom URL,
+Screenpipe Cloud, ChatGPT OAuth, and local Ollama presets for the Pi/pipe
+system. That system is also represented in the existing dirty desktop files.
+Removing only cloud presets would leave an incoherent partially supported
+assistant configuration surface; retain-vs-remove local Ollama/Pi is a
+coordinated product capability decision for the later desktop provider pass.
+
+### Cloud search flag removal complete — pending commit
+
+The `include_cloud` search parameter survived the cloud-sync runtime removal
+but no longer has an implementation. The next engine-only increment makes an
+explicit `include_cloud=true` request fail closed before retrieval, preserving
+a clear local-only API contract rather than silently ignoring the request.
+
+- `include_cloud=true` now returns `501` before data retrieval; ordinary
+  local search behavior and query caching remain unchanged.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`
+  in VS Developer PowerShell with Ninja, and `git diff --check` passed with
+  only the established audio `unused_mut` and Windows `CommandExt` warnings.
