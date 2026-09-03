@@ -19,12 +19,12 @@ default-members = [
     "crates/screenpipe-screen",
     "crates/screenpipe-secrets",
     "crates/screenpipe-sync",
-    "crates/screenpipe-team-memory",
     "crates/screenpipe-vault",
 ]
 exclude = [
     "apps/screenpipe-app-tauri/src-tauri",
     "crates/screenpipe-integrations",
+    "crates/screenpipe-team-memory",
     "ee/sdk",
 ]
 resolver = "2"

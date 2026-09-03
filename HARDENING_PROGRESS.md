@@ -618,7 +618,7 @@ in dirty desktop files and remains a separate follow-up subsystem.
   blocker because the machine lacks the native static `samplerate` library.
   No dependency or native-library acquisition was attempted.
 
-### Remote CLI PII fallback removal complete — pending commit
+### Remote CLI PII fallback removal complete — `42f9ce3ae`
 
 The standalone recorder has a second remote text-redaction path: when both
 local ONNX and OPF adapters are unavailable, setting `TINFOIL_API_KEY` or
@@ -635,3 +635,26 @@ and retain local ONNX, local OPF, and regex-only behavior.
   PowerShell with Ninja, and `git diff --check` passed, with only the
   established unrelated warnings. The full engine test build remains blocked
   at the existing missing native static `samplerate` library.
+
+The remaining Tinfoil text and image adapters are consumed only by the
+desktop server's selectable `pii_backend` path. Because that source file is
+already part of the uncommitted desktop integration work, removing those
+adapters requires a coordinated desktop privacy commit; it will not be mixed
+into the standalone-engine fallback removal.
+
+### Dead team-memory workspace crate removal complete — pending commit
+
+`screenpipe-team-memory` is an unreferenced workspace member. Its markdown
+frontmatter format is solely for the removed team/pipe/enterprise memory
+stack; no local recorder, search, or desktop code imports it. The next
+increment removes this dead crate and its workspace membership only. The
+separate Pi enterprise-admin skill remains part of the broader Pi/desktop
+integration surface and is not included.
+
+- Removed the unreferenced crate manifest and source, its explicit
+  `default-members` entry, and excluded its now-empty path from the `crates/*`
+  member glob. No shared dependency versions or root lockfile entries changed.
+- `cargo metadata --offline --locked --no-deps`,
+  `cargo fmt --all -- --check`, and `cargo check -p screenpipe-engine --locked`
+  in VS Developer PowerShell with Ninja passed. The only compiler warnings
+  are the established audio `unused_mut` and Windows `CommandExt` import.
