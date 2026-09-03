@@ -446,6 +446,14 @@ external AI gateway reachable through the desktop, while removing all but
 local inference is a material retained-capability decision. No provider source
 has changed in this audit.
 
+### Engine test-build validation checkpoint
+
+After the engine-only integration removals, `cargo test -p screenpipe-engine
+--lib --locked --no-run` reached native linking but is blocked by the existing
+machine prerequisite: `libsamplerate-sys` cannot find the static `samplerate`
+library. This is unrelated to the removals; no dependency update or native
+library acquisition was attempted. Locked engine checks continue to pass.
+
 ### CLI hosted-onboarding prompt removal in progress
 
 The standalone recorder printed a hosted Screenpipe onboarding URL after every
@@ -539,3 +547,15 @@ for their later coordinated cleanup.
   and `git diff --check` pass with no root lockfile change. The sole remaining
   `connections_api` text match is an intentionally untouched stale server
   comment, not a module reference.
+
+### No-op engine analytics scheduling removal complete
+
+The server's periodic API request counter and vision/audio pipeline reporting
+loops existed solely to feed the now no-op analytics compatibility shim. They
+have been removed, including the per-request counting middleware. Local
+pipeline metrics remain live for health, WebSocket, and `/vision/metrics` and
+`/audio/metrics` consumers; the local resource monitor is unchanged.
+
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` pass with only the established unrelated warnings; no
+  root lockfile change is required.
