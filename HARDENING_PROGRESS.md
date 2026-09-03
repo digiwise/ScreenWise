@@ -668,13 +668,28 @@ machine-ID helper. Removing the crate therefore requires a coordinated
 cloud-sync feature extraction (including the dirty desktop manifest), rather
 than a safe standalone crate deletion.
 
-### Local crash attribution removal complete — pending commit
+### Local crash attribution removal complete — `7f6557685`
 
 The remaining engine `telemetry_context` module no longer drives a live
 transport. Its only compiled use collects `SCREENPIPE_*` support/customer/
 deployment/embedder identifiers into the local `last-panic.log` record. The
 next engine-only privacy increment removes that attribution collection and the
-unused telemetry module while retaining the local crash log and panic hook.
+  unused telemetry module while retaining the local crash log and panic hook.
+
+### Dead resource-monitor telemetry sender removal complete — pending commit
+
+The active resource monitor only samples local process CPU/memory and can
+optionally write a local JSON file. Its former PostHog transport, hardware
+fingerprinting, GPU-probing subprocesses, and payload construction are all
+behind `cfg(any())`. The next engine-only increment deletes that unreachable
+remote telemetry code while retaining local diagnostics.
+
+- Deleted the compile-disabled PostHog sender and its payload construction,
+  including the stale telemetry-context dependency. The active local monitor
+  remains unchanged.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`
+  in VS Developer PowerShell with Ninja, and `git diff --check` passed with
+  only the established audio `unused_mut` and Windows `CommandExt` warnings.
 
 - Removed the account/deployment/embedder attribution string from local panic
   records and deleted the now-unused telemetry-context module. Crash message,
