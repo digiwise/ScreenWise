@@ -589,7 +589,7 @@ behavior remains; only discarded telemetry metadata was removed.
   `cargo check -p screenpipe-engine --locked`, and `git diff --check` passed;
   no lockfile change is required.
 
-### Remote search-time PII filter removal complete — pending commit
+### Remote search-time PII filter removal complete — `cdbc576a6`
 
 The engine's optional `/search?filter_pii=true` path sends OCR,
 transcriptions, UI text, input text, and memory content to a
@@ -617,3 +617,21 @@ in dirty desktop files and remains a separate follow-up subsystem.
   --locked --no-run`, again reaches the existing `libsamplerate-sys` link
   blocker because the machine lacks the native static `samplerate` library.
   No dependency or native-library acquisition was attempted.
+
+### Remote CLI PII fallback removal complete — pending commit
+
+The standalone recorder has a second remote text-redaction path: when both
+local ONNX and OPF adapters are unavailable, setting `TINFOIL_API_KEY` or
+`TINFOIL_BASE_URL` switches the destructive pre-persistence worker to the
+hosted enclave. The safe local fallback is already regex-only redaction. The
+next engine-only increment will remove the environment-gated enclave fallback
+and retain local ONNX, local OPF, and regex-only behavior.
+
+- Removed the Tinfoil imports, environment-variable branch, and hosted
+  fallback. If both local AI adapters are unavailable, the worker now always
+  performs deterministic local regex-only redaction.
+- `cargo fmt --all -- --check`,
+  `cargo check -p screenpipe-engine --bin screenpipe --locked` in VS Developer
+  PowerShell with Ninja, and `git diff --check` passed, with only the
+  established unrelated warnings. The full engine test build remains blocked
+  at the existing missing native static `samplerate` library.
