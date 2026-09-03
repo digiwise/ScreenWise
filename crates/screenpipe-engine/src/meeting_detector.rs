@@ -23,7 +23,6 @@
 //! and non-meeting contexts (Slack chat, etc.). A mute button counts only when
 //! accompanied by a leave/hangup signal (see `min_signals_required`).
 
-use crate::meeting_telemetry::{capture_detection_decision, MeetingDetectionScanSummary};
 use crate::routes::meetings::{emit_meeting_status_changed, resolve_meeting_status_from};
 use chrono::{DateTime, Utc};
 use futures::{FutureExt, StreamExt};
@@ -3124,16 +3123,6 @@ pub async fn run_meeting_detection_loop(
                         resolve_meeting_status_from(db.as_ref(), manual_meeting.as_ref()).await
                     {
                         emit_meeting_status_changed(&status);
-                    }
-                    if let Ok(meeting) = db.get_meeting_by_id(meeting_id).await {
-                        capture_detection_decision(
-                            &meeting,
-                            decision_trigger,
-                            Some(MeetingDetectionScanSummary::from_scan_results(
-                                &scan_results,
-                                has_output_audio,
-                            )),
-                        );
                     }
                 }
                 StateAction::EndMeeting { meeting_id } => {

@@ -559,3 +559,17 @@ pipeline metrics remain live for health, WebSocket, and `/vision/metrics` and
 - `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
   and `git diff --check` pass with only the established unrelated warnings; no
   root lockfile change is required.
+
+### No-op meeting telemetry removal in progress
+
+`meeting_telemetry` only derived hashed meeting metadata for the disabled
+analytics shim. Its detector and meeting-route calls have been removed while
+preserving meeting detection, lifecycle mutations, events, and persistence.
+
+### No-op meeting telemetry removal complete — pending commit
+
+- Removed the disabled-analytics meeting telemetry adapter and all of its
+  detector/meeting-route call sites. Local meeting capture, controls, events,
+  and SQLite persistence remain unchanged.
+- `cargo fmt --all -- --check`, `cargo check -p screenpipe-engine --locked`,
+  and `git diff --check` passed; no lockfile change is required.

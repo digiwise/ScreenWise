@@ -12,7 +12,6 @@ use oasgen::{oasgen, OaSchema};
 use screenpipe_db::DatabaseManager;
 use screenpipe_db::{MeetingRecord, MeetingTranscriptSegment, MEETING_END_REASON_EXPLICIT_STOP};
 
-use crate::meeting_telemetry::{capture_detection_decision, capture_detection_feedback};
 use crate::server::AppState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -288,12 +287,6 @@ pub(crate) async fn delete_meeting_handler(
         )
     })?;
 
-    if rows_affected > 0 {
-        if let Some(meeting) = meeting_before {
-            capture_detection_feedback("delete", "likely_false_positive", &[meeting], None);
-        }
-    }
-
     Ok(JsonResponse(json!({"deleted": rows_affected})))
 }
 
@@ -366,15 +359,6 @@ pub(crate) async fn bulk_delete_meetings_handler(
         }
     }
 
-    if total_deleted > 0 {
-        capture_detection_feedback(
-            "bulk_delete",
-            "likely_false_positive",
-            &meetings_before,
-            None,
-        );
-    }
-
     Ok(JsonResponse(json!({"deleted": total_deleted})))
 }
 
@@ -403,8 +387,6 @@ pub(crate) async fn merge_meetings_handler(
             JsonResponse(json!({"error": e.to_string()})),
         )
     })?;
-
-    capture_detection_feedback("merge", "false_split", &meetings_before, Some(&meeting));
 
     Ok(JsonResponse(meeting))
 }
@@ -440,10 +422,6 @@ pub(crate) async fn split_meeting_handler(
         };
         (status, JsonResponse(json!({"error": msg})))
     })?;
-
-    if let Some(meeting) = meeting_before {
-        capture_detection_feedback("split", "false_merge", &[meeting], Some(&before));
-    }
 
     Ok(JsonResponse(SplitMeetingResponse { before, after }))
 }
@@ -652,14 +630,6 @@ pub(crate) async fn start_meeting_handler(
         )
     })?;
 
-    capture_detection_decision(&meeting, "manual_start", None);
-    capture_detection_feedback(
-        "manual_start",
-        "manual_start_possible_missed_detection",
-        std::slice::from_ref(&meeting),
-        None,
-    );
-
     // Emit event so triggered pipes can react
     if let Err(e) = screenpipe_events::send_event(
         "meeting_started",
@@ -751,13 +721,6 @@ pub(crate) async fn stop_meeting_handler(
             JsonResponse(json!({"error": format!("meeting not found: {}", e)})),
         )
     })?;
-
-    capture_detection_feedback(
-        "stop",
-        "user_stopped_meeting",
-        std::slice::from_ref(&meeting),
-        None,
-    );
 
     // Signal detector to stop tracking this meeting immediately (skip grace period)
     if let Err(e) = screenpipe_events::send_event(
