@@ -642,7 +642,7 @@ already part of the uncommitted desktop integration work, removing those
 adapters requires a coordinated desktop privacy commit; it will not be mixed
 into the standalone-engine fallback removal.
 
-### Dead team-memory workspace crate removal complete — pending commit
+### Dead team-memory workspace crate removal complete — `cd2ff0da0`
 
 `screenpipe-team-memory` is an unreferenced workspace member. Its markdown
 frontmatter format is solely for the removed team/pipe/enterprise memory
@@ -658,3 +658,29 @@ integration surface and is not included.
   `cargo fmt --all -- --check`, and `cargo check -p screenpipe-engine --locked`
   in VS Developer PowerShell with Ninja passed. The only compiler warnings
   are the established audio `unused_mut` and Windows `CommandExt` import.
+
+### Remaining cloud-sync crate audit — 2026-09-03
+
+`screenpipe-sync` remains compiled through `screenpipe-core`'s `cloud-sync`
+feature, which both the engine and the uncommitted desktop manifest still
+enable. The engine also uses the feature-gated module for a local stable
+machine-ID helper. Removing the crate therefore requires a coordinated
+cloud-sync feature extraction (including the dirty desktop manifest), rather
+than a safe standalone crate deletion.
+
+### Local crash attribution removal complete — pending commit
+
+The remaining engine `telemetry_context` module no longer drives a live
+transport. Its only compiled use collects `SCREENPIPE_*` support/customer/
+deployment/embedder identifiers into the local `last-panic.log` record. The
+next engine-only privacy increment removes that attribution collection and the
+unused telemetry module while retaining the local crash log and panic hook.
+
+- Removed the account/deployment/embedder attribution string from local panic
+  records and deleted the now-unused telemetry-context module. Crash message,
+  source location, backtrace, rotation, and local-only persistence remain.
+- `cargo fmt --all -- --check`,
+  `cargo check -p screenpipe-engine --bin screenpipe --locked` in VS Developer
+  PowerShell with Ninja, and `git diff --check` passed. The only compiler
+  warnings are the established audio `unused_mut` and Windows `CommandExt`
+  import.

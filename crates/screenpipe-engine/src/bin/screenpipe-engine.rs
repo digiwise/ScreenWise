@@ -423,24 +423,6 @@ async fn main() -> anyhow::Result<()> {
         // log to .prev so we don't truncate the message we most need.
         crash_log::rotate_panic_log(&panic_dir);
 
-        // Reuse the existing embedder attribution (SCREENPIPE_EMBEDDER /
-        // SCREENPIPE_CUSTOMER_ID / ...) so the local crash record is identifiable
-        // even when telemetry is off.
-        let attribution = {
-            use screenpipe_engine::telemetry_context::TelemetryContext;
-            let joined = TelemetryContext::from_env()
-                .pairs()
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(" ");
-            if joined.is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", joined)
-            }
-        };
-
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             // stderr first — the embedding parent usually pipes the child's
@@ -478,8 +460,8 @@ async fn main() -> anyhow::Result<()> {
             let backtrace = std::backtrace::Backtrace::force_capture();
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
             let record = format!(
-                "[{}] PANIC on thread '{}' at {}: {}{}\n\nBacktrace:\n{}",
-                timestamp, thread_name, location, payload, attribution, backtrace
+                "[{}] PANIC on thread '{}' at {}: {}\n\nBacktrace:\n{}",
+                timestamp, thread_name, location, payload, backtrace
             );
 
             eprintln!("{}", record);
