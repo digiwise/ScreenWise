@@ -871,15 +871,26 @@ Windows Tauri config referenced the config-root path.
   compatibility provider is deliberately inert while remaining UI call sites
   are retired in later scoped work.
 
-### Dead desktop analytics transport removal — in progress
+### Dead desktop analytics transport removal — `c300aa08e`
 
 The desktop now compiles `analytics_local.rs`, an inert compatibility module,
 instead of the former remote analytics implementation. The old `analytics.rs`
 was consequently unreferenced but still contained PostHog and attribution
 network code.
 
-- Removed that dead transport; locked desktop validation is running before its
-  separate cleanup commit.
+- Removed that dead transport.
 - `cargo check --locked --offline`, `cargo fmt --all -- --check`, and
   `git diff --check` passed. Only the established audio/engine warnings and
   unrelated existing desktop warnings remain.
+
+### Dead desktop Sentry scaffolding removal — in progress
+
+The desktop binary still retained compile-disabled Sentry initialization and
+scope-enrichment blocks, including the retired remote DSN and settings
+metadata, plus comments describing Sentry tagging. The active panic hook is
+local-file logging and is independent of those blocks.
+
+- Removed both dead blocks, the associated unused variables, and stale Sentry
+  commentary; locked desktop validation is next before a focused commit.
+- `cargo check --locked --offline`, `cargo fmt --all -- --check`, and
+  `git diff --check` passed, with only established unrelated warnings.

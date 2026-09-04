@@ -13,15 +13,6 @@ use tracing::{debug, error, info, warn};
 
 /// Log a `WebviewWindowBuilder::build()` failure with structured context.
 ///
-/// Why: Sentry events for webview build failures currently say only
-/// "failed to create webview: WebView2 error: …". Without knowing which
-/// window was being built (pipe-store, login, notifications, etc.) we
-/// can't triage.
-///
-/// Tracing's `sentry` layer (see `main.rs`) maps structured fields to
-/// Sentry tags, so `webview_label` and `webview_url` become filterable
-/// tags in the Sentry dashboard.
-///
 /// Call at every `WebviewWindowBuilder::build()` error site instead of
 /// a bare `error!(...)`. Return the error unchanged — this function is
 /// purely observability.
