@@ -753,58 +753,6 @@ pub fn get_enterprise_team_api_token() -> Option<String> {
         .map(String::from)
 }
 
-/// Read the user's screenpipe cloud session JWT from `~/.screenpipe/
-/// auth.json`. Returns None when the file is missing, malformed, or the
-/// token field is empty.
-///
-/// The settings store (`store.bin → user.token`) is the canonical
-/// runtime cache for this token but is only populated after a fresh
-/// in-app sign-in. `auth.json` is the durable on-disk copy written by
-/// the pi-agent configuration flow — it survives store resets and dev-
-/// mode launches where the in-memory user object hasn't been hydrated
-/// yet. Used by the enterprise-policy hook to send the Bearer header
-/// even when the in-app user object is still null.
-#[tauri::command]
-#[specta::specta]
-pub fn get_cloud_token() -> Option<String> {
-    let path = screenpipe_core::paths::default_screenpipe_data_dir().join("auth.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    parsed
-        .get("token")
-        .and_then(|t| t.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-}
-
-/// Push a fresh cloud-auth token into the running sidecar.
-///
-/// The frontend invokes this on every sign-in (after `loadUser` writes
-/// `settings.user`) and on sign-out (passing `None`). Without it, the
-/// `Server.cloud_token` and `PiExecutor.user_token` captured at engine
-/// boot would be permanent for the lifetime of the sidecar process —
-/// users who signed in AFTER the engine started would stay on the
-/// gateway's anonymous tier (allowed_models = haiku/gemini only) on
-/// every pipe run, surfacing as `403 "model_not_allowed"` for any
-/// Sonnet/Opus preset even with an active Pro subscription. Logout +
-/// log-in from the webview alone does NOT restart the sidecar, which
-/// is why the previous user-facing workaround was "fully quit the
-/// app from the tray."
-///
-/// Both the local `/v1/chat/completions` proxy and the pi-agent's
-/// `models.json` apiKey share the same `Arc<ArcSwap<Option<String>>>`,
-/// so one write here updates both readers on the next pipe run.
-#[tauri::command]
-#[specta::specta]
-pub async fn set_cloud_token(
-    token: Option<String>,
-    state: tauri::State<'_, crate::recording::RecordingState>,
-) -> Result<(), String> {
-    let normalized = token.filter(|t| !t.is_empty());
-    state.cloud_token.store(std::sync::Arc::new(normalized));
-    Ok(())
-}
-
 /// Persist the user's enterprise admin status + team API token so the
 /// pi-agent's `screenpipe-team` skill knows whether to install itself.
 ///
@@ -1467,86 +1415,6 @@ pub async fn get_disk_usage(
     }
 }
 
-/// Open the screenpi.pe login page.
-/// On Windows, opens in the system browser (WebView2 has issues with some auth
-/// providers; the registered deep-link scheme handles the redirect back).
-/// On macOS/Linux, uses an in-app WebView that intercepts the screenpipe://
-/// deep-link redirect (Safari blocks custom-scheme redirects).
-#[tauri::command]
-#[specta::specta]
-pub async fn open_login_window(app_handle: tauri::AppHandle) -> Result<(), String> {
-    // Windows: open in system browser — deep link is registered via
-    // tauri_plugin_deep_link::register_all() so the screenpipe:// redirect works
-    #[cfg(target_os = "windows")]
-    {
-        use tauri_plugin_opener::OpenerExt;
-        app_handle
-            .opener()
-            .open_url("https://screenpipe.com/login", None::<&str>)
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-
-    // macOS / Linux: in-app WebView to intercept the deep-link redirect
-    #[cfg(not(target_os = "windows"))]
-    {
-        use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-        let label = "login-browser";
-
-        // If already open, just focus it
-        if let Some(w) = app_handle.get_webview_window(label) {
-            let _ = w.show();
-            let _ = w.set_focus();
-            return Ok(());
-        }
-
-        let app_for_nav = app_handle.clone();
-
-        const LOGIN_URL: &str = "https://screenpipe.com/login";
-        let mut builder = WebviewWindowBuilder::new(
-            &app_handle,
-            label,
-            WebviewUrl::External(LOGIN_URL.parse().unwrap()),
-        )
-        .title("sign in to screenpipe")
-        .inner_size(460.0, 700.0)
-        .focused(true);
-
-        // Hide the title text on macOS — traffic lights stay, title bar
-        // stays opaque (no Overlay style), so the remote login page isn't
-        // covered by the bar. Same pattern used elsewhere in window/show.rs.
-        #[cfg(target_os = "macos")]
-        {
-            builder = builder.hidden_title(true);
-        }
-
-        builder = builder.on_navigation(move |url| {
-            if url.scheme() == "screenpipe" {
-                info!("login window intercepted deep link: {}", url);
-                let _ = app_for_nav.emit("deep-link-received", url.to_string());
-                // Close the login window after a short delay to avoid
-                // closing before the event is delivered
-                if let Some(w) = app_for_nav.get_webview_window("login-browser") {
-                    let _ = w.close();
-                }
-                false // block navigation to custom scheme
-            } else {
-                true // allow all https navigations (Clerk, OAuth providers, etc.)
-            }
-        });
-        builder
-            .build()
-            .map(crate::window::finalize_webview_window)
-            .map_err(|e| {
-                log_webview_build_failure(label, LOGIN_URL, &e);
-                e.to_string()
-            })?;
-
-        Ok(())
-    }
-}
-
 /// Open Google Calendar OAuth inside an in-app WebView.
 /// Same pattern as `open_login_window` — intercepts the screenpipe:// deep-link
 /// redirect so we don't rely on Safari custom-scheme support.
@@ -1706,7 +1574,8 @@ pub async fn set_window_always_on_top_native(
                 if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
                     use objc::{msg_send, sel, sel_impl};
                     let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
-                    let ns_window: *mut objc::runtime::Object = unsafe { msg_send![ns_view, window] };
+                    let ns_window: *mut objc::runtime::Object =
+                        unsafe { msg_send![ns_view, window] };
                     if !ns_window.is_null() {
                         // NSNormalWindowLevel = 0. NSFloatingWindowLevel = 3.
                         // Floating keeps recovery/onboarding above normal app
@@ -2193,7 +2062,10 @@ fn shortcut_reminder_label(
     setting_key: &str,
     disabled_shortcuts: &[String],
 ) -> String {
-    if disabled_shortcuts.iter().any(|disabled| disabled == setting_key) {
+    if disabled_shortcuts
+        .iter()
+        .any(|disabled| disabled == setting_key)
+    {
         String::new()
     } else if value.trim().is_empty() {
         String::new()

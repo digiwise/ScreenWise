@@ -828,7 +828,7 @@ rotation, cleanup, diagnostics, and tests observe durable current sizes.
   2 ignored, and no failures. This also confirms the debug native CRT alignment
   through an actual test run.
 
-### Windows screen-test dependency scoping — pending commit
+### Windows screen-test dependency scoping — `ff4011989`
 
 The `screenpipe-screen` Windows test target attempted to download the uncached
 `memory-stats` crate even though it is used solely by the macOS
@@ -841,3 +841,33 @@ The `screenpipe-screen` Windows test target attempted to download the uncached
   behind an explicit `ocr-bench` feature, so it is not resolved for normal
   unit tests. `cargo test -p screenpipe-screen --lib --locked --offline`
   passed on Windows: 99 passed, 0 failed.
+
+### Desktop local-only conversion — in progress
+
+The existing desktop/Tauri changes remove remote telemetry, crash reporting,
+account gating, and cloud-token propagation as one cohesive local-only
+boundary. Its first locked offline check exposed a packaging configuration
+error: the installed Bun sidecar exists under `src-tauri/binaries`, while the
+Windows Tauri config referenced the config-root path.
+
+- Corrected the Windows `externalBin` entry to `binaries/bun`; desktop
+  validation continues before this larger cohesive commit is staged.
+- Removed obsolete bundled-FFmpeg resource globs: this local-first build
+  relies on explicitly installed FFmpeg on the launch `PATH`, and the old
+  source-tree resources no longer exist.
+- Removed the likewise-absent `vcredist` resource glob; the toolchain runtime
+  is not a checked-in application resource.
+- Removed the stale checked-in OpenBLAS resource glob. The existing Windows
+  runtime baseline stages `libopenblas.dll` beside the executable from the
+  explicit `OPENBLAS_PATH`; installer-side staging remains a separate
+  packaging follow-up rather than a source-tree glob that prevents checks.
+- Replaced the Windows desktop prebuild's automatic FFmpeg/OpenBLAS archive
+  acquisition with explicit tool discovery: FFmpeg must be on `PATH`, and
+  native Tauri builds validate the documented `OPENBLAS_PATH`. The Bun
+  sidecar copy destination now matches the configured `binaries/bun` prefix.
+- Validation passed: `bun run build` completed the production static export;
+  `cargo check --locked --offline` completed for `screenpipe-app`. The frontend
+  build reported only the existing `unpdf` dynamic-import warning.
+- Removed the final frontend PostHog initialization and project key; the
+  compatibility provider is deliberately inert while remaining UI call sites
+  are retired in later scoped work.

@@ -1,4 +1,6 @@
 /** @type {import('next').NextConfig} */
+import path from 'path'
+
 const nextConfig = {
     output: 'export',
     images: {
@@ -17,6 +19,11 @@ const nextConfig = {
     // triaging a minified-stack incident — set SHIP_SOURCE_MAPS=1 in CI for
     // that release, then flip back. Last triage: v2.4.255 for React #185.
     productionBrowserSourceMaps: process.env.SHIP_SOURCE_MAPS === '1',
+    webpack: (config) => {
+        config.resolve.alias['posthog-js$'] = path.resolve('./lib/posthog-disabled.ts')
+        config.resolve.alias['posthog-js/react$'] = path.resolve('./lib/posthog-disabled-react.tsx')
+        return config
+    },
 }
 export default nextConfig;
 

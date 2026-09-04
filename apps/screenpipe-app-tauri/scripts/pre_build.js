@@ -7,8 +7,6 @@ import { constants as fsConstants } from 'fs'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { setupOpenBlas } from './setup_openblas.js'
-import { downloadFile, find7z } from './find_tools.js'
 
 const originalCWD = process.cwd()
 // Change CWD to src-tauri
@@ -149,7 +147,7 @@ async function copyBunBinary() {
 
 		// Tauri externalBin looks for bun-{target_triple}; on Windows arm64 → aarch64-pc-windows-msvc, x64 → x86_64-pc-windows-msvc
 		const bunTripleSuffix = winArch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc'
-		bunDest1 = path.join(cwd, `bun-${bunTripleSuffix}.exe`)
+		bunDest1 = path.join(cwd, 'binaries', `bun-${bunTripleSuffix}.exe`)
 		console.log('copying bun from:', bunSrc);
 		console.log('copying bun to:', bunDest1);
 	} else if (platform === 'linux') {
@@ -261,6 +259,7 @@ async function copyBunBinary() {
 	}
 
 	try {
+		await fs.mkdir(path.dirname(bunDest1), { recursive: true });
 		await fs.access(bunSrc);
 		await copyFile(bunSrc, bunDest1);
 		console.log(`bun binary copied successfully from ${bunSrc} to ${bunDest1}`);
@@ -637,65 +636,28 @@ async function copyVcredistDlls(arch = 'x64') {
 
 /* ########## Windows ########## */
 if (platform == 'windows') {
-	const sevenZ = await find7z();
-
-	// Setup FFMPEG (x64: gyan.dev; arm64: tordona/ffmpeg-win-arm64)
-	if (!(await fs.exists(config.ffmpegRealname))) {
-		if (winArch === 'arm64') {
-			// Resolve download URL dynamically from GitHub API (daily autobuilds change filenames)
-			const apiUrl = `https://api.github.com/repos/${config.windows.ffmpegArm64GithubRepo}/releases/latest`
-			const releaseResp = await fetch(apiUrl)
-			const releaseData = await releaseResp.json()
-			const asset = releaseData.assets?.find((a) => config.windows.ffmpegArm64AssetPattern.test(a.name))
-			if (!asset) throw new Error(`No matching ffmpeg ARM64 asset found in ${apiUrl}`)
-			const arm64Url = asset.browser_download_url
-			const arm64Filename = asset.name
-			console.log(`ffmpeg ARM64: ${arm64Url}`)
-			await downloadFile(arm64Url, arm64Filename, { retries: 10, timeoutMs: 120000 })
-			await $`${sevenZ} x ${arm64Filename}`
-			// tordona 7z extracts to a single folder; move its contents to ffmpeg (or rename if single top-level dir)
-			const entries = await fs.readdir(cwd, { withFileTypes: true })
-			const extractedDir = entries.find((d) => d.isDirectory() && d.name.startsWith('ffmpeg-') && d.name.includes('win-arm64'))
-			if (extractedDir) {
-				await fs.rename(path.join(cwd, extractedDir.name), path.join(cwd, config.ffmpegRealname))
-			} else {
-				await fs.mkdir(config.ffmpegRealname, { recursive: true })
-				for (const e of entries) {
-					if (e.name.endsWith('.7z') || e.name === config.ffmpegRealname) continue
-					await fs.rename(path.join(cwd, e.name), path.join(cwd, config.ffmpegRealname, e.name))
-				}
-			}
-			await fs.rm(path.join(cwd, arm64Filename), { force: true }).catch(() => {})
-		} else {
-			await downloadFile(config.windows.ffmpegUrl, `${config.windows.ffmpegName}.7z`, { retries: 10, timeoutMs: 120000 })
-			await $`${sevenZ} x ${config.windows.ffmpegName}.7z`
-			await $`mv ${config.windows.ffmpegName} ${config.ffmpegRealname}`
-			await $`rm -rf ${config.windows.ffmpegName}.7z`
-		}
+	const ffmpegPath = await findOnPath('ffmpeg.exe') || await findOnPath('ffmpeg')
+	if (!ffmpegPath) {
+		throw new Error(
+			'FFmpeg is required but was not found on PATH. Install it explicitly, then restart the terminal before building.'
+		)
 	}
+	exports.ffmpeg = path.dirname(ffmpegPath)
+	console.log(`using explicitly installed FFmpeg: ${ffmpegPath}`)
 
-	// Windows ARM64: tordona package has no lib/; create dummy so bundle resources "ffmpeg\lib\*" glob matches
-	if (winArch === 'arm64') {
-		const ffmpegLib = path.join(cwd, config.ffmpegRealname, 'lib')
-		await fs.mkdir(ffmpegLib, { recursive: true })
-		const placeholder = path.join(ffmpegLib, '.gitkeep')
-		if (!(await fs.exists(placeholder))) {
-			await fs.writeFile(placeholder, '')
+	const openBlasPath = process.env.OPENBLAS_PATH
+	if (openBlasPath) {
+		const cblas = path.join(openBlasPath, 'include', 'cblas.h')
+		const openBlasLib = path.join(openBlasPath, 'lib', 'libopenblas.lib')
+		if (!(await fs.exists(cblas)) || !(await fs.exists(openBlasLib))) {
+			throw new Error(
+				`OPENBLAS_PATH must contain include\\cblas.h and lib\\libopenblas.lib: ${openBlasPath}`
+			)
 		}
-	}
-
-	exports.openBlas = await setupOpenBlas({ cwd, winArch })
-
-	// Copy VC143 CRT DLLs for Tauri bundle (required in CI; optional locally). Use arch matching current Windows (x64 or arm64).
-		const inCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
-		if (inCI) {
-			await copyVcredistDlls(winArch);
-		} else {
-			try {
-				await copyVcredistDlls(winArch);
-			} catch (err) {
-				console.warn('Skipping VC redist DLL copy (optional outside CI):', err.message);
-		}
+		exports.openBlas = openBlasPath
+		console.log(`using explicitly installed OpenBLAS: ${openBlasPath}`)
+	} else {
+		console.log('OPENBLAS_PATH is not set; required for native Rust builds, not for this frontend-only build.')
 	}
 }
 
@@ -790,6 +752,9 @@ if (process.env.GITHUB_ENV) {
 		await fs.appendFile(process.env.GITHUB_ENV, embed_metal)
 	}
 	if (platform == 'windows') {
+		if (!exports.openBlas) {
+			throw new Error('OPENBLAS_PATH is required for Windows native builds.')
+		}
 		const openblas = `OPENBLAS_PATH=${exports.openBlas}\n`
 		console.log('Adding ENV', openblas)
 		await fs.appendFile(process.env.GITHUB_ENV, openblas)
@@ -806,6 +771,9 @@ if (action?.includes('--build') || action?.includes('--dev')) {
 	process.chdir(path.join(cwd, '..'))
 	process.env['FFMPEG_DIR'] = exports.ffmpeg
 	if (platform === 'windows') {
+		if (!exports.openBlas) {
+			throw new Error('OPENBLAS_PATH is required for Windows native builds.')
+		}
 		process.env['OPENBLAS_PATH'] = exports.openBlas
 		process.env['LIBCLANG_PATH'] = exports.libClang
 		process.env['PATH'] = `${process.env['PATH']};${exports.cmake}`

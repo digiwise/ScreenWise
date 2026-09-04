@@ -199,8 +199,8 @@ pub(crate) async fn restart_capture_on_mic_grant(app: tauri::AppHandle) {
                 return;
             }
             Err(e) => {
-                let transient = e.contains("Server not running")
-                    || e.contains("Server not responding");
+                let transient =
+                    e.contains("Server not running") || e.contains("Server not responding");
                 if !transient {
                     warn!("start_capture after mic grant: {}", e);
                     return;
@@ -430,7 +430,10 @@ pub async fn check_permission(permission: OSPermission) -> OSPermissionStatus {
 
 #[tauri::command(async)]
 #[specta::specta]
-pub async fn reset_permission(app: tauri::AppHandle, permission: OSPermission) -> Result<(), String> {
+pub async fn reset_permission(
+    app: tauri::AppHandle,
+    permission: OSPermission,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -459,7 +462,11 @@ pub async fn reset_permission(app: tauri::AppHandle, permission: OSPermission) -
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tccutil reset {} failed: {}", service, stderr.trim()));
+            return Err(format!(
+                "tccutil reset {} failed: {}",
+                service,
+                stderr.trim()
+            ));
         }
 
         if matches!(permission, OSPermission::Calendar) {

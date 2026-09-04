@@ -670,7 +670,6 @@ pub struct SettingsStore {
     // (`RecordingSettings::disable_timeline`) so the engine can read it too. The
     // frontend JSON key stays `disableTimeline` at the top level via serde
     // flatten — do not add a second field here or serde will conflict.
-
     /// When true, the chat window stays above all other windows (default: true).
     #[serde(rename = "chatAlwaysOnTop", default = "default_true")]
     pub chat_always_on_top: bool,

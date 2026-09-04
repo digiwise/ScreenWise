@@ -29,6 +29,7 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+#[path = "analytics_local.rs"]
 mod analytics;
 #[allow(deprecated)]
 mod icons;
@@ -113,7 +114,6 @@ pub use enterprise_policy::set_sync_streams;
 pub use permissions::do_permissions_check;
 pub use permissions::open_permission_settings;
 pub use permissions::request_permission;
-use sentry;
 use tauri::AppHandle;
 #[cfg(target_os = "macos")]
 mod dock_menu;
@@ -478,6 +478,7 @@ async fn main() {
     let _posthog_disabled = telemetry_disabled;
 
     let app_version = env!("CARGO_PKG_VERSION");
+    #[cfg(any())]
     let sentry_guard = if !telemetry_disabled {
         Some(sentry::init((
             "https://da4edafe2c8e5e8682505945695ecad7@o4505591122886656.ingest.us.sentry.io/4510761355116544",
@@ -579,7 +580,10 @@ async fn main() {
         None
     };
 
-    // Install a panic hook that logs to stderr + Sentry BEFORE the default hook runs.
+    #[cfg(not(any()))]
+    let sentry_guard: Option<()> = None;
+
+    // Install a panic hook that logs locally before the default hook runs.
     // This is critical because panics inside `tao::send_event` (called from Obj-C)
     // hit `panic_cannot_unwind` → `abort()`, and the default hook's output may be lost.
     // By logging here we capture the actual panic message for diagnosis.
@@ -661,18 +665,6 @@ async fn main() {
             let _ = f.sync_all(); // fsync before abort() kills us
         }
 
-        // Also report to Sentry if initialized
-        sentry::capture_message(
-            &format!(
-                "panic on thread '{}' at {}: {}",
-                thread_name, location, payload
-            ),
-            sentry::Level::Fatal,
-        );
-        // Flush Sentry so the event is sent before abort
-        if let Some(client) = sentry::Hub::current().client() {
-            client.flush(Some(std::time::Duration::from_secs(2)));
-        }
         // Call the default hook (prints backtrace etc.)
         default_hook(info);
     }));
@@ -732,7 +724,6 @@ async fn main() {
         is_starting_capture: Arc::new(AtomicBool::new(false)),
         last_spawn_epoch: Arc::new(AtomicU64::new(0)),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
-        cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
     };
     let pi_state = pi::PiState(Arc::new(tokio::sync::Mutex::new(pi::PiPool::new())));
     let suggestions_state = suggestions::SuggestionsState::new();
@@ -873,12 +864,7 @@ async fn main() {
     let app = app.plugin(tauri_plugin_webdriver::init());
 
     // Only add Sentry plugin if telemetry is enabled
-    let app = if let Some(ref _guard) = sentry_guard {
-        let client = sentry::Hub::current().client().unwrap();
-        app.plugin(tauri_plugin_sentry::init(&client))
-    } else {
-        app
-    };
+    let app = app;
 
     #[cfg(target_os = "macos")]
     let app = app.plugin(tauri_nspanel::init());
@@ -1017,13 +1003,7 @@ async fn main() {
             #[cfg(target_os = "macos")]
             let registry = registry.with(OsLogger::new("pe.screenpi", "app"));
 
-            if sentry_guard.is_some() {
-                registry
-                    .with(sentry::integrations::tracing::layer())
-                    .init();
-            } else {
-                registry.init();
-            }
+            registry.init();
 
             #[cfg(target_os = "windows")]
             windows_webview_env::log_diagnostics();
@@ -1137,7 +1117,9 @@ async fn main() {
                 });
             }
 
-            // Attach non-sensitive settings to all future Sentry events
+            // Disabled remote crash-reporting scope retained only while the
+            // surrounding desktop cloud code is removed.
+            #[cfg(any())]
             if !telemetry_disabled {
                 sentry::configure_scope(|scope| {
                     // Set user.id to the persistent analytics UUID. Support
@@ -1401,18 +1383,11 @@ async fn main() {
             'start_server: {
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
-                if !store_clone.app_entitled_or_dev() {
-                    info!("Skipping server auto-start: active screenpipe plan required");
-                    crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
-                    let _ = app_handle.emit("app-entitlement-required", ());
-                    break 'start_server;
-                }
                 let recording_state = app_handle.state::<RecordingState>();
                 recording_state.is_starting.store(true, std::sync::atomic::Ordering::SeqCst);
                 let server_arc = recording_state.server.clone();
                 let capture_arc = recording_state.capture.clone();
                 let is_starting_clone = recording_state.is_starting.clone();
-                let cloud_token_arc = recording_state.cloud_token.clone();
 
                 // Pipe output callback. Stage 5: legacy `pipe_event`
                 // topic dropped — every pipe stdout line goes out on
@@ -1547,7 +1522,6 @@ async fn main() {
                                 &config,
                                 on_pipe_output,
                                 Some(owned_browser),
-                                cloud_token_arc.clone(),
                             )
                             .await
                             {

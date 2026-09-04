@@ -14,12 +14,9 @@ use std::time::Duration;
 
 use screenpipe_audio::core::device::resolve_audio_devices_for_capture;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
-use screenpipe_audio::transcription::stt::{
-    OpenAICompatibleConfig, DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, DEFAULT_OPENAI_COMPATIBLE_MODEL,
-};
 use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{
-    analytics, hot_frame_cache::HotFrameCache, power::PowerManagerHandle, server::bind_listener,
+    hot_frame_cache::HotFrameCache, power::PowerManagerHandle, server::bind_listener,
     start_power_manager_with_pref, start_sleep_monitor, RecordingConfig, ResourceMonitor, SCServer,
 };
 use tokio::sync::Notify;
@@ -67,13 +64,6 @@ impl ServerCore {
         owned_browser: Option<
             std::sync::Arc<screenpipe_connect::connections::browser::OwnedBrowser>,
         >,
-        // App-scoped cloud-token handle. Outlives Server (which is recreated
-        // on every recording restart) so a token pushed via `set_cloud_token`
-        // survives capture toggles and is automatically picked up by the next
-        // Server + PiExecutor pair. Pre-existing per-Server cloud_token is
-        // replaced with this Arc so all three observers (cloud_proxy.rs,
-        // PiExecutor, the Tauri command writer) share one storage cell.
-        cloud_token_handle: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
@@ -88,7 +78,7 @@ impl ServerCore {
         if std::env::var("SCREENPIPE_DISTRIBUTION").is_err() {
             std::env::set_var("SCREENPIPE_DISTRIBUTION", "desktop-app");
         }
-        analytics::init(config.analytics_enabled);
+        crate::analytics::init(config.analytics_enabled);
 
         if config.use_chinese_mirror {
             std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
@@ -213,32 +203,11 @@ impl ServerCore {
             warn!("No audio devices available");
         }
 
-        let openai_compatible_config =
-            if config.audio_transcription_engine == AudioTranscriptionEngine::OpenAICompatible {
-                Some(OpenAICompatibleConfig {
-                    endpoint: config
-                        .openai_compatible_endpoint
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_ENDPOINT.to_string()),
-                    api_key: config.openai_compatible_api_key.clone(),
-                    model: config
-                        .openai_compatible_model
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_MODEL.to_string()),
-                    client: None,
-                    headers: config.openai_compatible_headers.clone(),
-                    raw_audio: config.openai_compatible_raw_audio,
-                })
-            } else {
-                None
-            };
-
         let hot_frame_cache = Arc::new(HotFrameCache::new());
 
         let mut audio_manager_builder = config
             .to_audio_manager_builder(data_path.clone(), audio_devices)
-            .transcription_mode(config.transcription_mode.clone())
-            .openai_compatible_config(openai_compatible_config);
+            .transcription_mode(config.transcription_mode.clone());
 
         crate::health::set_boot_phase("building_audio", Some("starting audio pipeline"));
         let mut audio_manager = audio_manager_builder.build(db.clone()).await.map_err(|e| {
@@ -319,31 +288,6 @@ impl ServerCore {
         server.manual_meeting = Some(manual_meeting.clone());
         server.api_auth = config.api_auth;
         server.api_auth_key = config.api_auth_key.clone();
-        // Cloud JWT for /v1/chat/completions proxy. config.user_id carries
-        // the Clerk JWT (despite the name — see line 96 where the same value
-        // is used as the cloud transcription bearer). Pi's bash deliberately
-        // can't see this token; the local proxy signs the upstream request.
-        //
-        // We replace the Server's per-instance cloud_token cell with the
-        // app-scoped Arc so writes from `set_cloud_token` (Tauri command,
-        // pushed on every sign-in/out from the webview) are visible to both
-        // cloud_proxy.rs AND the PiExecutor that shares this same Arc.
-        // Without this, a token captured at engine boot was permanent until
-        // restart — paying users who signed in after the sidecar started got
-        // anonymous-tier 403s on every Sonnet/Opus pipe.
-        server.cloud_token = cloud_token_handle.clone();
-        // Seed the shared cell from persisted settings, but ONLY when empty
-        // — if `set_cloud_token` has already pushed a fresher value (e.g. the
-        // user signed in between sidecar boots), don't clobber it with the
-        // stale `config.user_id` snapshot.
-        if let Some(ref t) = config.user_id {
-            if !t.is_empty() {
-                let existing = cloud_token_handle.load();
-                if existing.is_none() {
-                    cloud_token_handle.store(std::sync::Arc::new(Some(t.clone())));
-                }
-            }
-        }
         server.owned_browser = owned_browser;
 
         // Secret store — read-only keychain access on startup.
@@ -402,6 +346,7 @@ impl ServerCore {
                     );
                     refresher.start(store_arc.clone());
                     server.oauth_refresher = Some(refresher);
+
                     server.secret_store = Some(store_arc);
                 }
                 Err(e) => {
@@ -415,17 +360,9 @@ impl ServerCore {
         let pipes_dir = config.data_dir.join("pipes");
         std::fs::create_dir_all(&pipes_dir).ok();
 
-        // Share the cloud-token Arc between Server (for cloud_proxy.rs) and
-        // PiExecutor (for pi-agent provider auth). With one shared Arc the
-        // `set_cloud_token` Tauri command updates both readers in one shot,
-        // so a fresh sign-in or sign-out takes effect on the very next pipe
-        // run without restarting the engine.
-        let cloud_token_handle = server.cloud_token.clone();
         let pi_executor = Arc::new(
-            screenpipe_core::agents::pi::PiExecutor::with_shared_user_token(
-                cloud_token_handle.clone(),
-            )
-            .with_api_auth_key(config.api_auth_key.clone()),
+            screenpipe_core::agents::pi::PiExecutor::new(None)
+                .with_api_auth_key(config.api_auth_key.clone()),
         );
         let mut agent_executors: std::collections::HashMap<
             String,
@@ -433,9 +370,7 @@ impl ServerCore {
         > = std::collections::HashMap::new();
         agent_executors.insert("pi".to_string(), pi_executor.clone());
 
-        let pipe_store: Option<Arc<dyn screenpipe_core::pipes::PipeStore>> = Some(Arc::new(
-            screenpipe_engine::pipe_store::SqlitePipeStore::new(db.clone()),
-        ));
+        let pipe_store: Option<Arc<dyn screenpipe_core::pipes::PipeStore>> = None;
 
         let mut pipe_manager = screenpipe_core::pipes::PipeManager::new(
             pipes_dir,
@@ -453,7 +388,7 @@ impl ServerCore {
                 if let Some(et) = error_type {
                     props["error_type"] = serde_json::Value::String(et.to_string());
                 }
-                analytics::capture_event_nonblocking("pipe_scheduled_run", props);
+                crate::analytics::capture_event_nonblocking("pipe_scheduled_run", props);
             },
         ));
         if let Some(cb) = on_pipe_output {
@@ -555,9 +490,7 @@ impl ServerCore {
             });
         }
 
-        let server = server
-            .with_pipe_manager(shared_pipe_manager.clone())
-            .with_high_fps_controller(high_fps_controller.clone());
+        let server = server.with_high_fps_controller(high_fps_controller.clone());
 
         // Install pi agent in background
         tokio::spawn(async move {

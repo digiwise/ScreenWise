@@ -1008,7 +1008,10 @@ mod tests {
         // panicked; the helper must round down to 199 and NOT panic.
         let prefix = "a".repeat(199);
         let t = format!("{prefix}ł and more text");
-        assert!(!t.is_char_boundary(200), "test premise: byte 200 splits 'ł'");
+        assert!(
+            !t.is_char_boundary(200),
+            "test premise: byte 200 splits 'ł'"
+        );
         assert_eq!(truncate_on_char_boundary(&t, 200), prefix);
         // The real call-site shape ("{prefix}…") stays panic-free.
         assert_eq!(

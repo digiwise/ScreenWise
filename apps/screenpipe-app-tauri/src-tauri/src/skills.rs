@@ -119,7 +119,10 @@ fn parse_skill_frontmatter(skill_md: &Path) -> (Option<String>, Option<String>) 
 fn scan_roots() -> Vec<(PathBuf, String)> {
     let mut roots = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        roots.push((home.join(".claude").join("skills"), "~/.claude/skills".to_string()));
+        roots.push((
+            home.join(".claude").join("skills"),
+            "~/.claude/skills".to_string(),
+        ));
     }
     roots
 }

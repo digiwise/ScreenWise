@@ -15,12 +15,6 @@ use screenpipe_audio::audio_manager::builder::AudioManagerOptions;
 use screenpipe_audio::core::device::resolve_audio_devices_for_capture;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 use screenpipe_audio::meeting_detector::MeetingDetector;
-use screenpipe_audio::transcription::deepgram::{
-    transcription_endpoint_host_for_log, DeepgramTranscriptionConfig,
-};
-use screenpipe_audio::transcription::stt::{
-    OpenAICompatibleConfig, DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, DEFAULT_OPENAI_COMPATIBLE_MODEL,
-};
 use screenpipe_engine::{
     start_meeting_watcher, start_ui_recording,
     vision_manager::{start_monitor_watcher, stop_monitor_watcher, VisionManager},
@@ -357,71 +351,18 @@ async fn invalidate_macos_screen_streams(reason: &str) {
 async fn invalidate_macos_screen_streams(_reason: &str) {}
 
 fn log_capture_transcription_config(config: &RecordingConfig, options: &AudioManagerOptions) {
-    let deepgram_diag = match &config.deepgram_config {
-        Some(c) if c.is_ready() => format!(
-            "{}@{}",
-            c.provider_slug_for_log(),
-            transcription_endpoint_host_for_log(&c.endpoint)
-        ),
-        Some(_) => "deepgram:incomplete_credentials".into(),
-        None if config.audio_transcription_engine == AudioTranscriptionEngine::Deepgram => {
-            "deepgram:missing_config".into()
-        }
-        None => "n/a".into(),
-    };
-
-    let ms = &config.meeting_streaming;
     info!(
-        "capture transcription configured: background_engine={} built_engine={} transcription_mode={:?} deepgram[{}] meeting_live_enabled={} meeting_live_provider={} meeting_live_endpoint_host={} user_id_present={}",
+        "capture transcription configured: background_engine={} built_engine={} transcription_mode={:?}",
         config.audio_transcription_engine,
         options.transcription_engine,
         config.transcription_mode,
-        deepgram_diag,
-        ms.enabled,
-        ms.provider.as_str(),
-        transcription_endpoint_host_for_log(&ms.endpoint),
-        config
-            .user_id
-            .as_ref()
-            .is_some_and(|s| !s.trim().is_empty()),
     );
-
-    if config.audio_transcription_engine == AudioTranscriptionEngine::Deepgram
-        && !config
-            .deepgram_config
-            .as_ref()
-            .is_some_and(DeepgramTranscriptionConfig::is_ready)
-    {
-        warn!(
-            "background engine maps to Deepgram but credentials are incomplete — Fix API key / login so batch STT can start"
-        );
-    }
 }
 
 async fn reconfigure_audio_manager(
     server: &ServerCore,
     config: &RecordingConfig,
 ) -> Result<(), String> {
-    let openai_compatible_config =
-        if config.audio_transcription_engine == AudioTranscriptionEngine::OpenAICompatible {
-            Some(OpenAICompatibleConfig {
-                endpoint: config
-                    .openai_compatible_endpoint
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_ENDPOINT.to_string()),
-                api_key: config.openai_compatible_api_key.clone(),
-                model: config
-                    .openai_compatible_model
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_MODEL.to_string()),
-                client: None,
-                headers: config.openai_compatible_headers.clone(),
-                raw_audio: config.openai_compatible_raw_audio,
-            })
-        } else {
-            None
-        };
-
     let audio_devices = if config.disable_audio {
         Vec::new()
     } else {
@@ -431,8 +372,7 @@ async fn reconfigure_audio_manager(
 
     let mut audio_manager_builder = config
         .to_audio_manager_builder(server.data_path.clone(), audio_devices)
-        .transcription_mode(config.transcription_mode.clone())
-        .openai_compatible_config(openai_compatible_config);
+        .transcription_mode(config.transcription_mode.clone());
 
     let meeting_detector = if config.disable_audio {
         info!("meeting detector disabled because audio capture is disabled");

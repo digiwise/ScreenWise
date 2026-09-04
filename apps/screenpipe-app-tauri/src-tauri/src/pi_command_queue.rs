@@ -396,8 +396,7 @@ impl PiQueueHandle {
             req_id,
             cmd_str.len()
         );
-        let write_result = writeln!(*stdin_guard, "{}", cmd_str)
-            .and_then(|_| stdin_guard.flush());
+        let write_result = writeln!(*stdin_guard, "{}", cmd_str).and_then(|_| stdin_guard.flush());
         if write_result.is_err() {
             if cmd_type == "steer" {
                 self.state.clear_steer_in_flight();
@@ -538,9 +537,7 @@ pub fn spawn_queue(
                     // before pi-mono actually starts streaming.
                     {
                         let mut died_during_wait = false;
-                        while is_prompt
-                            && (state.is_agent_active() || state.is_steer_in_flight())
-                        {
+                        while is_prompt && (state.is_agent_active() || state.is_steer_in_flight()) {
                             // When only steer_in_flight holds us (agent finished
                             // but steer's agent_start hasn't arrived yet), use a
                             // short 30s timeout. If agent_start never fires (Pi
@@ -561,12 +558,9 @@ pub fn spawn_queue(
                                     }
                                 }
                             } else {
-                                let ok = wait_for_done_or_terminated(
-                                    &state,
-                                    &mut alive_rx,
-                                    &cmd_type,
-                                )
-                                .await;
+                                let ok =
+                                    wait_for_done_or_terminated(&state, &mut alive_rx, &cmd_type)
+                                        .await;
                                 if !ok {
                                     died_during_wait = true;
                                     break;
