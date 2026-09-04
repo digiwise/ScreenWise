@@ -817,7 +817,7 @@ the samplerate library was fixed.
   not expose the active file's new length after `File::flush`; that logging
   behavior will be repaired separately.
 
-### Windows rolling-log flush repair — pending commit
+### Windows rolling-log flush repair — `cf74d2a5f`
 
 With the debug engine test binary linkable, four rolling-log tests showed that
 `File::flush` alone does not make active-file length visible to independent
@@ -827,3 +827,17 @@ rotation, cleanup, diagnostics, and tests observe durable current sizes.
 - `cargo test -p screenpipe-engine --lib --locked` passed: 529 tests passed,
   2 ignored, and no failures. This also confirms the debug native CRT alignment
   through an actual test run.
+
+### Windows screen-test dependency scoping — pending commit
+
+The `screenpipe-screen` Windows test target attempted to download the uncached
+`memory-stats` crate even though it is used solely by the macOS
+`apple_leak_bench` benchmark.
+
+- Scoped `memory-stats` to macOS dev dependencies, leaving the benchmark
+  available on its supported platform while removing it from Windows test
+  resolution.
+- Moved the Windows-independent OCR benchmark/example's `strsim` dependency
+  behind an explicit `ocr-bench` feature, so it is not resolved for normal
+  unit tests. `cargo test -p screenpipe-screen --lib --locked --offline`
+  passed on Windows: 99 passed, 0 failed.
