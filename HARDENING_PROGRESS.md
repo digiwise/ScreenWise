@@ -842,7 +842,7 @@ The `screenpipe-screen` Windows test target attempted to download the uncached
   unit tests. `cargo test -p screenpipe-screen --lib --locked --offline`
   passed on Windows: 99 passed, 0 failed.
 
-### Desktop local-only conversion — in progress
+### Desktop local-only conversion — `b20ffe638`
 
 The existing desktop/Tauri changes remove remote telemetry, crash reporting,
 account gating, and cloud-token propagation as one cohesive local-only
@@ -850,8 +850,7 @@ boundary. Its first locked offline check exposed a packaging configuration
 error: the installed Bun sidecar exists under `src-tauri/binaries`, while the
 Windows Tauri config referenced the config-root path.
 
-- Corrected the Windows `externalBin` entry to `binaries/bun`; desktop
-  validation continues before this larger cohesive commit is staged.
+- Corrected the Windows `externalBin` entry to `binaries/bun`.
 - Removed obsolete bundled-FFmpeg resource globs: this local-first build
   relies on explicitly installed FFmpeg on the launch `PATH`, and the old
   source-tree resources no longer exist.
@@ -871,3 +870,16 @@ Windows Tauri config referenced the config-root path.
 - Removed the final frontend PostHog initialization and project key; the
   compatibility provider is deliberately inert while remaining UI call sites
   are retired in later scoped work.
+
+### Dead desktop analytics transport removal — in progress
+
+The desktop now compiles `analytics_local.rs`, an inert compatibility module,
+instead of the former remote analytics implementation. The old `analytics.rs`
+was consequently unreferenced but still contained PostHog and attribution
+network code.
+
+- Removed that dead transport; locked desktop validation is running before its
+  separate cleanup commit.
+- `cargo check --locked --offline`, `cargo fmt --all -- --check`, and
+  `git diff --check` passed. Only the established audio/engine warnings and
+  unrelated existing desktop warnings remain.
