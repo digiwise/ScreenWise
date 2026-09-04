@@ -799,7 +799,7 @@ After the screen crate stopped calling the hosted Unstructured OCR path, its
   Developer PowerShell. The established audio `unused_mut` and Windows
   `CommandExt` warnings remain.
 
-### Windows debug native CRT alignment — pending commit
+### Windows debug native CRT alignment — `01a68d313`
 
 The debug `screenpipe-engine` test executable linked `knf-rs-sys` C++ objects
 built with the Debug MSVC CRT against Whisper C++ objects intentionally built
@@ -816,3 +816,14 @@ the samplerate library was fixed.
   2 were ignored, and 4 unrelated `logging` tests failed because Windows does
   not expose the active file's new length after `File::flush`; that logging
   behavior will be repaired separately.
+
+### Windows rolling-log flush repair — pending commit
+
+With the debug engine test binary linkable, four rolling-log tests showed that
+`File::flush` alone does not make active-file length visible to independent
+Windows metadata reads. The writer now calls `sync_data` after flushing so
+rotation, cleanup, diagnostics, and tests observe durable current sizes.
+
+- `cargo test -p screenpipe-engine --lib --locked` passed: 529 tests passed,
+  2 ignored, and no failures. This also confirms the debug native CRT alignment
+  through an actual test run.

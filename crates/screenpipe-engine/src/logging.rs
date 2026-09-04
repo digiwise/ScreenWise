@@ -95,7 +95,11 @@ impl Write for SizedRollingWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
+        self.file.flush()?;
+        // `File::flush` does not force Windows to publish the new file length
+        // to independently opened directory entries. Persist buffered log
+        // data so rotation, cleanup, and diagnostics observe current sizes.
+        self.file.sync_data()
     }
 }
 
