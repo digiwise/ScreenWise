@@ -128,9 +128,15 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   product telemetry SDK or ingest-endpoint markers. `bun run` currently fails
   before its target starts because this checkout's Bun executable reports a
   corrupted `node_modules/.bin` remapping; invoking the installed TypeScript,
-  Vitest, and Next entrypoints directly succeeded. The optional Tauri binding
-  freshness test could not start offline because locked dev dependency
-  `assert-json-diff 2.0.2` is not cached.
+  Vitest, and Next entrypoints directly succeeded.
+- On 2026-09-07, `assert-json-diff 2.0.2` and the other already-locked desktop
+  test dependencies were fetched without changing either Rust lockfile. The
+  binding-freshness test then built, linked, and ran offline. It failed its
+  assertion because the checked-in bindings retain three unrelated
+  cloud/account commands (`getCloudToken`, `openLoginWindow`, and
+  `setCloudToken`) that the current Rust registry does not export. Regeneration
+  was inspected and reverted because accepting those removals would cross this
+  telemetry-only change's scope.
 - `Cargo.lock` and the desktop Rust lockfile are unchanged. The Bun lock delta
   removes only the three direct telemetry packages and their unreachable graph;
   Bun relocates already-present `react-is` 16.13.1/17.0.2 resolutions without
@@ -156,6 +162,45 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   remains. This does not alter the authenticated local capture and search API.
 - The enterprise/team cloud CLI has been removed; local recording does not
   query teammates' captured data through Screenpipe enterprise endpoints.
+
+## Windows native Cargo test recipe (2026-09-07)
+
+Native-linking tests need a different generator setup from the normal release
+build. Use Visual Studio Developer PowerShell and `Ninja Multi-Config` for test
+binaries that include `libsamplerate-sys`; single-config Ninja fails because
+that crate expects `out\build\Release\samplerate.lib`. If the crate has already
+been built with the wrong generator, clean only it with
+`cargo clean -p libsamplerate-sys` before retrying.
+
+The root workspace already forces `knf-rs-sys` to the release MSVC CRT in dev
+tests. The desktop app is a separate Cargo workspace and does not inherit that
+profile override, so its debug tests need the transient Cargo setting shown
+below. Without it, `knf-rs-sys` uses the debug CRT while `whisper-rs-sys` uses
+the release CRT, producing `LNK2038` and `_CrtDbgReport` errors. Merely adding
+`--release` while keeping single-config Ninja is not sufficient; that attempt
+failed earlier at the missing `samplerate` static library.
+
+`OPENBLAS_PATH` locates headers and the import library at build time. The linked
+test process separately needs `C:\Utils\OpenBLAS\win64\bin` on `PATH`, or it
+exits with `STATUS_DLL_NOT_FOUND`. The audio build script stages
+`onnxruntime.dll` in the active target profile directory.
+
+From `screenpipe\`, the exercised locked offline desktop binding command is:
+
+```powershell
+$env:OPENBLAS_PATH = "C:\Utils\OpenBLAS\win64"
+$env:CMAKE_GENERATOR = "Ninja Multi-Config"
+$env:ORT_LIB_LOCATION = "D:\Data\NoSync\Repos\ScreenWise\screenpipe\apps\screenpipe-app-tauri\src-tauri\onnxruntime-win-x64-1.22.0"
+$env:PATH = "C:\Utils\OpenBLAS\win64\bin;$env:PATH"
+cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' test `
+  -p screenpipe-app `
+  --manifest-path apps\screenpipe-app-tauri\src-tauri\Cargo.toml `
+  --locked --offline tauri_bindings_are_current -- --nocapture
+```
+
+This command built and linked successfully on 2026-09-07 and then reported the
+separate checked-in binding drift described above. The cached test graph now
+includes locked `assert-json-diff 2.0.2`; neither Rust lockfile changed.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

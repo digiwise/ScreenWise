@@ -951,6 +951,35 @@ Verification on Windows on 2026-09-04, with frontend checks repeated on
   17.0.2 resolutions rather than adding or upgrading a version.
 - The checkout's `bun run` launcher reports a corrupted `node_modules/.bin`
   remapping before starting `typecheck` or `next build`; direct execution of
-  the installed TypeScript, Vitest, and Next entrypoints passed. The optional
-  Tauri binding-freshness test could not start offline because locked dev
-  dependency `assert-json-diff 2.0.2` is not cached; Cargo made no lock change.
+  the installed TypeScript, Vitest, and Next entrypoints passed.
+
+### Desktop binding-freshness follow-up — 2026-09-07
+
+- Downloaded locked `assert-json-diff 2.0.2` and the remaining already-locked
+  desktop test helpers. Neither `Cargo.lock` nor
+  `apps/screenpipe-app-tauri/src-tauri/Cargo.lock` changed.
+- The first desktop debug test build used `Ninja Multi-Config`, which resolved
+  the known `libsamplerate-sys` layout requirement, but linking failed because
+  this separate Cargo workspace does not inherit the root workspace's
+  `knf-rs-sys` profile override. Its debug-CRT objects conflicted with
+  `whisper-rs-sys` release-CRT objects (`LNK2038`, `RuntimeLibrary`, and
+  `_CrtDbgReport`).
+- A release-profile retry with single-config Ninja was not a valid substitute:
+  it failed because `libsamplerate-sys` could not find the static `samplerate`
+  library. Native-linking tests must use Ninja Multi-Config even when the Rust
+  profile is release.
+- The locked offline debug build and link succeeded with Ninja Multi-Config and
+  transient Cargo setting
+  `--config 'profile.dev.package."knf-rs-sys".debug-assertions=false'`. The
+  first execution then returned `STATUS_DLL_NOT_FOUND`; `dumpbin /dependents`
+  identified `libopenblas.dll`, so the process also requires
+  `C:\Utils\OpenBLAS\win64\bin` on `PATH`. `OPENBLAS_PATH` alone covers only
+  compile/link discovery. `onnxruntime.dll` was already staged correctly.
+- With that complete environment, `tauri_bindings_are_current` ran offline:
+  0 passed, 1 failed, 180 filtered. The assertion showed that regeneration
+  would remove unrelated cloud/account bindings `getCloudToken`,
+  `openLoginWindow`, and `setCloudToken`. The generated diff was inspected and
+  reverted to preserve this commit's telemetry-only scope. The binding failure
+  is now exercised and understood rather than dependency-blocked.
+- The exact reusable command and failure-avoidance matrix are recorded in
+  `BUILD_NOTES.md` and the workspace `AGENTS.md`.

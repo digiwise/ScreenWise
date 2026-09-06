@@ -74,4 +74,23 @@ Developer PowerShell. The production frontend scan found no product telemetry
 SDK or ingest-endpoint marker. Both Rust lockfiles remained unchanged; the Bun
 lockfile pruned only the removed telemetry dependency graph, with no new
 package version. An optional Tauri binding-freshness test could not start
-offline because locked dev dependency `assert-json-diff 2.0.2` was not cached.
+offline because locked dev dependency `assert-json-diff 2.0.2` was not cached
+at the time of that commit. On 2026-09-07 that exact version and its remaining
+already-locked test graph were fetched without a lockfile change. The test then
+built, linked, and ran under `--locked --offline`; it failed the freshness
+assertion because regeneration would remove three unrelated cloud/account
+bindings (`getCloudToken`, `openLoginWindow`, and `setCloudToken`). That
+pre-existing drift was not accepted into the telemetry cleanup.
+
+The reproducible Windows test setup differs from the normal release build:
+native-linking test targets use Visual Studio Developer PowerShell plus
+`CMAKE_GENERATOR=Ninja Multi-Config` so `libsamplerate-sys` produces the
+expected `out\build\Release\samplerate.lib`. The separate desktop Cargo
+workspace also needs the transient setting
+`--config 'profile.dev.package."knf-rs-sys".debug-assertions=false'` to align
+its C++ runtime with `whisper-rs-sys`, and the test process needs
+`C:\Utils\OpenBLAS\win64\bin` on `PATH`. Single-config Ninja failed at the
+samplerate static library; debug desktop linking without the override failed
+with MSVC CRT mismatches; omitting the runtime `PATH` failed with
+`STATUS_DLL_NOT_FOUND`. Exact commands are recorded in `BUILD_NOTES.md` and the
+workspace `AGENTS.md`.
