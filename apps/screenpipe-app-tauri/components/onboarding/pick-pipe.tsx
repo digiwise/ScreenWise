@@ -16,7 +16,6 @@ import { Loader, Check } from "lucide-react";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { scheduleFirstRunNotification } from "@/lib/notifications";
 import { commands } from "@/lib/utils/tauri";
-import posthog from "posthog-js";
 import { localFetch } from "@/lib/api";
 
 type Pipe = {
@@ -210,7 +209,6 @@ export default function PickPipe() {
   const [gmailConnected, setGmailConnected] = useState(false);
   const { completeOnboarding } = useOnboarding();
   const isCompletingRef = useRef(false);
-  const mountTimeRef = useRef(Date.now());
 
   useEffect(() => {
     const interval = setInterval(() => setSeconds((s) => s + 1), 1000);
@@ -262,15 +260,6 @@ export default function PickPipe() {
     try {
       await Promise.all(slugs.map((slug) => installAndEnable(slug)));
 
-      // Keep legacy event name + path:"bundle" so existing PostHog dashboards
-      // keep working alongside the new bundle-shape properties.
-      posthog.capture("onboarding_path_selected", {
-        path: "bundle",
-        pipes: slugs,
-        pipe_count: slugs.length,
-        customized,
-        time_spent_ms: Date.now() - mountTimeRef.current,
-      });
 
       try {
         await completeOnboarding();
@@ -305,8 +294,6 @@ export default function PickPipe() {
     if (isCompletingRef.current) return;
     isCompletingRef.current = true;
 
-    posthog.capture("onboarding_pipe_skipped");
-    posthog.capture("onboarding_completed");
 
     try {
       await completeOnboarding();

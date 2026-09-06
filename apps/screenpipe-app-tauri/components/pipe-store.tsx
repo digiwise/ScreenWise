@@ -62,7 +62,6 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { useToast } from "@/components/ui/use-toast";
 import { MemoizedReactMarkdown } from "@/components/markdown";
 import remarkGfm from "remark-gfm";
-import posthog from "posthog-js";
 import { PipesSection } from "@/components/settings/pipes-section";
 import { ChatPrefillData } from "@/lib/chat-utils";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
@@ -634,7 +633,6 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
       });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-      posthog.capture("pipe_installed_from_store", { slug });
 
       // Override the pipe's preset so it works out of the box (published
       // pipes may reference presets the user doesn't have). Prefer the
@@ -734,7 +732,6 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-      posthog.capture("pipe_unpublished_from_store", { slug });
       toast({ title: `"${slug}" unpublished from store` });
       setShowDetail(false);
       setSelectedPipe(null);
@@ -1702,7 +1699,6 @@ STEP 5: PUBLISH (only after user says yes)
       if (!res.ok || data.error) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      posthog.capture("pipe_published_to_store", { pipe: selectedPipe });
       onPublished();
       onOpenChange(false);
       setSelectedPipe("");

@@ -33,7 +33,6 @@ import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { usePipes, type TemplatePipe } from "@/lib/hooks/use-pipes";
 
-import posthog from "posthog-js";
 import { toast } from "@/components/ui/use-toast";
 import { DailySummaryCard } from "@/components/rewind/daily-summary";
 import { useTimelineFilters } from "@/components/rewind/hooks/use-timeline-filters";
@@ -112,15 +111,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 			end: now,
 		};
 	});
-
-	// Performance tracking refs
-	const timelineOpenedAtRef = useRef<number>(performance.now());
-	const firstFrameDisplayedRef = useRef<boolean>(false);
-	const totalLoadingTimeRef = useRef<number>(0);
-	const loadingStartTimeRef = useRef<number | null>(null);
-	const framesViewedRef = useRef<number>(0);
-	const framesFailedRef = useRef<number>(0);
-	const dateChangesRef = useRef<number>(0);
 
 	const { currentFrame, setCurrentFrame } = useCurrentFrame((index) => {
 		setCurrentIndex(index);
@@ -279,7 +269,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 		snapToDevice,
 		resetFilters,
 		pausePlayback,
-		dateChangesRef,
 	});
 
 	const { zoomLevel, targetZoom, setTargetZoom, onContainerWheel } = useScrollZoom({
@@ -596,72 +585,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [frames.length, currentFrame, setCurrentFrame, seekingTimestamp]);
 
-	// Track timeline opened and setup session tracking
-	useEffect(() => {
-		timelineOpenedAtRef.current = performance.now();
-		firstFrameDisplayedRef.current = false;
-		totalLoadingTimeRef.current = 0;
-		framesViewedRef.current = 0;
-		framesFailedRef.current = 0;
-		dateChangesRef.current = 0;
-		
-		posthog.capture("timeline_opened");
-
-
-		
-		// Send session summary when timeline closes
-		return () => {
-			const sessionDuration = performance.now() - timelineOpenedAtRef.current;
-			const loadingPercentage = sessionDuration > 0 
-				? (totalLoadingTimeRef.current / sessionDuration) * 100 
-				: 0;
-			
-			posthog.capture("timeline_loading_time_total", {
-				session_duration_ms: Math.round(sessionDuration),
-				loading_time_ms: Math.round(totalLoadingTimeRef.current),
-				loading_percentage: Math.round(loadingPercentage * 10) / 10,
-				frames_viewed: framesViewedRef.current,
-				frames_failed: framesFailedRef.current,
-				date_changes: dateChangesRef.current,
-			});
-		};
-	}, []);
-	
-	// Track loading state changes for cumulative loading time
-	useEffect(() => {
-		if (isLoading || showBlockingLoader) {
-			// Started loading
-			if (loadingStartTimeRef.current === null) {
-				loadingStartTimeRef.current = performance.now();
-			}
-		} else {
-			// Stopped loading
-			if (loadingStartTimeRef.current !== null) {
-				totalLoadingTimeRef.current += performance.now() - loadingStartTimeRef.current;
-				loadingStartTimeRef.current = null;
-			}
-		}
-	}, [isLoading, showBlockingLoader]);
-	
-	// Track time to first frame
-	useEffect(() => {
-		if (currentFrame && !firstFrameDisplayedRef.current) {
-			firstFrameDisplayedRef.current = true;
-			const timeToFirstFrame = performance.now() - timelineOpenedAtRef.current;
-			
-			posthog.capture("timeline_time_to_first_frame", {
-				duration_ms: Math.round(timeToFirstFrame),
-				had_cache: frames.length > 1, // If we have multiple frames, likely from cache
-				frames_count: frames.length,
-			});
-		}
-		
-		// Track frames viewed
-		if (currentFrame) {
-			framesViewedRef.current += 1;
-		}
-	}, [currentFrame, frames.length]);
-
 	// Send timeline selection context to chat (optionally with a specific pipe)
 	const sendSelectionToChat = useCallback(async (pipe?: TemplatePipe) => {
 		if (!selectionRange) return;
@@ -735,11 +658,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 			await showChatWithPrefill({ context, prompt: `Based on my activity from ${startTime} to ${endTime}, `, source: "timeline" });
 		}
 
-		posthog.capture("timeline_selection_to_chat", {
-			selection_duration_ms: selectionRange.end.getTime() - selectionRange.start.getTime(),
-			frames_in_selection: selectedFrames.length,
-			pipe_name: pipe?.name,
-		});
 
 		if (pipe) {
 			toast({ title: `${pipe.icon} ${pipe.title}`, description: "running pipe with selection context" });
@@ -1066,9 +984,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 							}}
 							canNavigatePrev={findNextDevice(currentIndex, 1) !== currentIndex}
 							canNavigateNext={findNextDevice(currentIndex, -1) !== currentIndex}
-							onFrameLoadError={() => {
-								framesFailedRef.current += 1;
-							}}
 							onFrameUnavailable={async () => {
 								// Get the current frame's frame_id
 								const failedFrameId = frames[currentIndex]?.devices?.[0]?.frame_id;

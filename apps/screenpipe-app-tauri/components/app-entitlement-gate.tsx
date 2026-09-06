@@ -6,7 +6,6 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CreditCard, LogIn, RefreshCw } from "lucide-react";
-import posthog from "posthog-js";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Button } from "@/components/ui/button";
 import {
@@ -91,11 +90,6 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
 
   useEffect(() => {
     if (!isSettingsLoaded || devBypass || isEntitled) return;
-    posthog.capture("app_entitlement_gate_shown", {
-      logged_in: Boolean(user?.token),
-      plan: user?.subscription_plan ?? null,
-      app_entitled: user?.app_entitled ?? null,
-    });
   }, [devBypass, isEntitled, isSettingsLoaded, user?.app_entitled, user?.subscription_plan, user?.token]);
 
   useEffect(() => {
@@ -111,9 +105,6 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   }, [devBypass, isEntitled, isSettingsLoaded]);
 
   const openPricing = useCallback(() => {
-    posthog.capture("app_entitlement_choose_plan_clicked", {
-      logged_in: Boolean(user?.token),
-    });
     // Hand the Clerk token to the web checkout so it pins customer_email +
     // metadata.user_id to THIS account — prevents the "paid with a different
     // email in Stripe -> still locked" mismatch.
@@ -124,7 +115,6 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   }, [user?.token]);
 
   const openLogin = useCallback(() => {
-    posthog.capture("app_entitlement_login_clicked");
     commands.openLoginWindow();
   }, []);
 
@@ -137,7 +127,6 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
       // verify=true asks the server to consult Stripe directly, so a user who
       // just paid unlocks immediately instead of waiting for the webhook.
       await loadUser(token, true);
-      posthog.capture("app_entitlement_refresh_clicked");
     } catch (err) {
       const message = err instanceof Error ? err.message : "refresh failed";
       setRefreshError(message);

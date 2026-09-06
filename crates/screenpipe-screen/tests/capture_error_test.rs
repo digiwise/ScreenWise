@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 /// Test demonstrating window capture error scenarios
-/// Related Sentry issues:
+/// Historical capture failures covered by this regression test:
 /// - SCREENPIPE-CLI-1Z: "Failed to capture image for window TheBoringNotch"
 /// - SCREENPIPE-CLI-1Y: "Failed to capture image for window Grammarly Desktop"
 /// - SCREENPIPE-CLI-2: "GetFileVersionInfoSizeW failed: WIN32_ERROR(1813)"
@@ -48,11 +48,11 @@ fn test_skip_apps_contains_system_windows() {
     }
 }
 
-/// Test that problematic apps from Sentry are identified
+/// Test that historically problematic apps are identified
 /// These apps were causing errors in production and should be added to skip list
 #[test]
 fn test_problematic_apps_should_be_skipped() {
-    // Apps that frequently fail capture (from Sentry errors)
+    // Apps that frequently fail capture
     let problematic_apps = vec![
         "TheBoringNotch",    // macOS notch overlay app
         "Grammarly Desktop", // Overlay/tooltip windows
@@ -150,8 +150,8 @@ fn test_window_filter_logic() {
 }
 
 /// Verify error log level expectations
-/// Current: error!() - causes noise in Sentry
-/// Expected: debug!() - reduces noise, these are expected failures
+/// Current: error!() - causes noisy local logs
+/// Expected: debug!() - reduces noise because these are expected failures
 #[test]
 fn test_error_scenarios_are_expected() {
     // These error scenarios are EXPECTED and should not be logged at error level:

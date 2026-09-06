@@ -6,7 +6,6 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, ChevronUp, Plug, Plus, RefreshCw, Sparkles } from "lucide-react";
-import posthog from "posthog-js";
 import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
 import { type TemplatePipe } from "@/lib/hooks/use-pipes";
 import { FALLBACK_TEMPLATES, type CustomTemplate } from "@/lib/summary-templates";
@@ -145,20 +144,10 @@ export function SummaryCards({
   const discover = templates.filter((t) => !t.featured);
 
   const handleCardClick = (pipe: TemplatePipe) => {
-    posthog.capture("home_card_clicked", {
-      kind: pipe.featured ? "template_featured" : "template_discover",
-      template_name: pipe.name,
-      template_title: pipe.title,
-    });
     onSendMessage(pipe.prompt, `${pipe.icon} ${pipe.title}`);
   };
 
   const handleCustomTemplateClick = (template: CustomTemplate) => {
-    posthog.capture("home_card_clicked", {
-      kind: "custom_template",
-      template_id: template.id,
-      template_title: template.title,
-    });
     onSendMessage(template.prompt, `\u{1F4CC} ${template.title}`);
   };
 
@@ -203,7 +192,6 @@ export function SummaryCards({
         {/* Custom Summary card */}
         <button
           onClick={() => {
-            posthog.capture("home_card_clicked", { kind: "custom_summary_open" });
             setShowBuilder(true);
           }}
           className="group text-left p-2 border border-dashed border-border/40 bg-muted/5 hover:bg-foreground hover:text-background hover:border-foreground transition-all duration-150 cursor-pointer"
@@ -220,10 +208,6 @@ export function SummaryCards({
         {discover.length > 0 && (
           <button
             onClick={() => {
-              posthog.capture("home_card_clicked", {
-                kind: showAll ? "discover_collapse" : "discover_expand",
-                discover_count: discover.length,
-              });
               setShowAll(!showAll);
             }}
             className="group text-left p-2 border border-border/40 bg-muted/10 hover:bg-foreground hover:text-background hover:border-foreground transition-all duration-150 cursor-pointer"
@@ -243,10 +227,6 @@ export function SummaryCards({
         )}
         {onOpenConnection && visibleConnectionSetupSuggestions.map((connection) => {
           const openConnection = () => {
-            posthog.capture("home_card_clicked", {
-              kind: connection.id === "connections" ? "connection_browse_all" : "connection_setup",
-              connection_id: connection.id,
-            });
             onOpenConnection(connection.id);
           };
           return (
@@ -371,11 +351,6 @@ export function SummaryCards({
                     transition={{ duration: 0.15, delay: i * 0.05 }}
                     type="button"
                     onClick={() => {
-                      posthog.capture("home_card_clicked", {
-                        kind: "auto_suggestion",
-                        position: i,
-                        connection_icon: s.connectionIcon ?? null,
-                      });
                       onSendMessage(s.text);
                     }}
                     className="group flex min-h-[34px] w-full items-center gap-1.5 px-1.5 py-1.5 text-left font-mono text-muted-foreground transition-colors duration-150 hover:bg-muted/25 hover:text-foreground"
@@ -417,10 +392,6 @@ export function SummaryCards({
           open={showBuilder}
           onClose={() => setShowBuilder(false)}
           onGenerate={(prompt, timeRange) => {
-            posthog.capture("home_card_clicked", {
-              kind: "custom_summary_generate",
-              time_range: timeRange,
-            });
             setShowBuilder(false);
             onSendMessage(prompt, `\u2728 Custom Summary \u2014 ${timeRange}`);
           }}

@@ -29,7 +29,6 @@ import { writeTextFile, BaseDirectory } from "@tauri-apps/plugin-fs";
 import { downloadDir, join } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toast } from "@/components/ui/use-toast";
-import posthog from "posthog-js";
 import { useSettings } from "@/lib/hooks/use-settings";
 
 // ---------------------------------------------------------------------------
@@ -59,7 +58,7 @@ export type ConnectField = {
 
 /** One installable screenpipe skill (e.g. the API skill or the CLI skill). */
 export type SkillVariant = {
-  /** Stable id — sub-tab value + posthog suffix. */
+  /** Stable id used for the sub-tab value. */
   id: string;
   /** Short tab label, e.g. "API" or "CLI". */
   label: string;
@@ -86,7 +85,7 @@ export type AgentCardProps = {
   sync: {
     /** Default remote path on the VPS where ~/.screenpipe gets pushed. */
     defaultRemotePath: string;
-    /** Prefix used for localStorage keys + posthog event names. */
+    /** Prefix used for localStorage keys. */
     storageKeyPrefix: string;
   };
   /** If set, renders a "Connect" tab for entering credentials that screenpipe pipes use to call this agent. */
@@ -415,7 +414,6 @@ function RemoteSyncSection({
   const { getDataDir } = useSettings();
   const storageKey = `${sync.storageKeyPrefix}-sync-config`;
   const lastSyncKey = `${sync.storageKeyPrefix}-last-sync`;
-  const eventPrefix = sync.storageKeyPrefix;
 
   const [config, setConfig] = useState<SyncConfig>(defaultSyncConfig(sync.defaultRemotePath));
   const [isTesting, setIsTesting] = useState(false);
@@ -483,10 +481,8 @@ function RemoteSyncSection({
       const res = await commands.remoteSyncTest(toRustConfig(config));
       if (res.status === "error") throw new Error(res.error);
       setTestResult({ ok: true });
-      posthog.capture(`${eventPrefix}_ssh_test`, { success: true });
     } catch (e) {
       setTestResult({ ok: false, error: String(e) });
-      posthog.capture(`${eventPrefix}_ssh_test`, { success: false });
     }
     setIsTesting(false);
   };
@@ -510,11 +506,9 @@ function RemoteSyncSection({
       } else {
         setSyncError(result.error || "sync failed");
       }
-      posthog.capture(`${eventPrefix}_sync_manual`, { success: result.ok });
     } catch (e) {
       if (syncCancelledRef.current) return;
       setSyncError(String(e));
-      posthog.capture(`${eventPrefix}_sync_manual`, { success: false });
     }
     setIsSyncing(false);
   };
@@ -532,7 +526,6 @@ function RemoteSyncSection({
           const dataDir = await getDataDir();
           const res = await commands.remoteSyncStartScheduler(toRustConfig(config), dataDir);
           if (res.status === "error") throw new Error(res.error);
-          posthog.capture(`${eventPrefix}_sync_enabled`, { interval: config.intervalMinutes });
           if (statusPollRef.current) clearInterval(statusPollRef.current);
           statusPollRef.current = setInterval(pollSchedulerStatus, 30_000);
         } catch (e) {
@@ -757,7 +750,6 @@ function RemoteSyncSection({
               checked={config.enabled}
               onCheckedChange={(val) => {
                 updateConfig({ enabled: val });
-                if (!val) posthog.capture(`${eventPrefix}_sync_disabled`);
               }}
               className="scale-75"
             />

@@ -18,7 +18,6 @@ import {
   Users,
 } from "lucide-react";
 import { commands } from "@/lib/utils/tauri";
-import posthog from "posthog-js";
 
 interface IcsCalendarEntry {
   name: string;
@@ -75,7 +74,6 @@ export function IcsCalendarCard() {
     try {
       const testRes = await commands.icsCalendarTestUrl(url);
     if (testRes.status === "error") throw new Error(testRes.error);
-    const count = testRes.data;
       const name =
         newName.trim() ||
         new URL(url.replace("webcal://", "https://")).hostname;
@@ -86,7 +84,6 @@ export function IcsCalendarCard() {
 
       setNewUrl("");
       setNewName("");
-      posthog.capture("ics_calendar_url_added", { event_count: count });
     } catch (e) {
       setTestError(
         `Could not fetch calendar: ${e instanceof Error ? e.message : String(e)}`
@@ -99,7 +96,6 @@ export function IcsCalendarCard() {
   const handleRemove = async (index: number) => {
     const updated = entries.filter((_, i) => i !== index);
     await saveEntries(updated);
-    posthog.capture("ics_calendar_url_removed");
   };
 
   const handleToggle = async (index: number, enabled: boolean) => {
@@ -107,7 +103,6 @@ export function IcsCalendarCard() {
       i === index ? { ...e, enabled } : e
     );
     await saveEntries(updated);
-    posthog.capture(enabled ? "ics_calendar_enabled" : "ics_calendar_disabled");
   };
 
   // Fetch upcoming events

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// Test that reproduces the "channel lagged" error from Sentry
-/// Issue: SCREENPIPE-CLI-22 - "error receiving audio data: channel lagged by 214"
+/// Test that reproduces a historically observed "channel lagged" error
+/// (`error receiving audio data: channel lagged by 214`).
 ///
 /// The broadcast channel with capacity 1000 returns RecvError::Lagged when
 /// the receiver falls behind. Currently this causes the entire recording to fail.

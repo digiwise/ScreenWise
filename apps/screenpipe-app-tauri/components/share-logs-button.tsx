@@ -280,7 +280,6 @@ export const ShareLogsButton = ({
           feedback_text: feedbackText,
           screenshot_url: screenshot ? screenshotPath : undefined,
           video_url: mergedVideoPath ? videoPath : undefined,
-          screenpipe_id: settings.analyticsId,
         }),
       });
 

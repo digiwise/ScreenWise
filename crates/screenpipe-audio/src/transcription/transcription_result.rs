@@ -195,8 +195,7 @@ pub async fn process_transcription_result(
                     tokio::time::sleep(std::time::Duration::from_millis(500 * (retry as u64 + 1)))
                         .await;
                 } else {
-                    // device as a structured field so Sentry dedups across
-                    // different devices into a single issue.
+                    // Keep the device as a structured field for local diagnostics.
                     error!(
                         device = %result.input.device,
                         error = %e,

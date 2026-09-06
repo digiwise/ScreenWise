@@ -12,8 +12,8 @@ pub fn create_session<P: AsRef<Path>>(path: P) -> Result<ort::session::Session> 
     // ort 2.0.0-rc.10 panics from inside its global OnceLock when the ONNX
     // Runtime API can't be initialized (Windows DLL/version mismatch hits
     // `expect("Failed to initialize ORT API")` at lib.rs:188). That panic
-    // bubbles up the tokio worker and Sentry — convert it to a normal error
-    // so callers fall back gracefully instead of crashing the runtime.
+    // bubbles up the tokio worker — convert it to a normal error so callers
+    // fall back gracefully instead of crashing the runtime.
     catch_panic_into_error(|| {
         let session = ort::session::Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?

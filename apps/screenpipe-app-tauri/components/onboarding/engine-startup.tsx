@@ -7,7 +7,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Check, Upload, Loader, Calendar } from "lucide-react";
 import { Button } from "../ui/button";
-import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 import { openPermissionSettingsWithFlow } from "@/lib/utils/permission-flow";
 import { motion, AnimatePresence } from "framer-motion";
@@ -106,7 +105,8 @@ export default function EngineStartup({
   const [logsSent, setLogsSent] = useState(false);
   // When spawn_screenpipe rejects (e.g. TCC permission denied) we used to
   // swallow the error and let the 15s "stuck" timer fire with empty boot phase.
-  // PostHog showed 90% of stuck users had serverStarted=false / boot_phase=?,
+  // Earlier startup diagnostics showed most stuck users had
+  // serverStarted=false / boot_phase=?,
   // which is exactly this case. Now we surface the real reason immediately.
   const [spawnError, setSpawnError] = useState<string | null>(null);
   const [spawnErrorKind, setSpawnErrorKind] = useState<
@@ -141,7 +141,6 @@ export default function EngineStartup({
   // Boot phase — polled via Tauri IPC, available before HTTP server binds
   const [bootPhase, setBootPhase] = useState<BootPhaseSnapshot | null>(null);
 
-  const hasAdvancedRef = useRef(false);
   const mountTimeRef = useRef(Date.now());
   const feedStartRef = useRef(0);
 
@@ -196,11 +195,6 @@ export default function EngineStartup({
         const kind: "permission" | "other" = /permission/i.test(message)
           ? "permission"
           : "other";
-        posthog.capture("onboarding_engine_spawn_failed", {
-          time_spent_ms: Date.now() - mountTimeRef.current,
-          error_message: message,
-          error_kind: kind,
-        });
 
         setSpawnError(message);
         setSpawnErrorKind(kind);
@@ -271,9 +265,6 @@ export default function EngineStartup({
   useEffect(() => {
     if (state !== "running") return;
 
-    posthog.capture("onboarding_engine_started", {
-      time_spent_ms: Date.now() - mountTimeRef.current,
-    });
     // Small delay so user sees the completed progress, then transition to live feed
     const elapsed = Date.now() - mountTimeRef.current;
     const delay = Math.max(0, 1200 - elapsed);
@@ -689,13 +680,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
           // when bootPhase updates.
           return current;
         }
-        posthog.capture("onboarding_engine_stuck", {
-          time_spent_ms: Date.now() - mountTimeRef.current,
-          serverStarted,
-          audioReady,
-          visionReady,
-          boot_phase: bootPhase?.phase ?? "unknown",
-        });
         return "stuck";
       });
     }, STUCK_TIMEOUT_MS);
@@ -711,11 +695,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
   }, [settings.aiPresets.length, settings.user?.cloud_subscribed, updateSettings]);
 
   const handleContinue = async () => {
-    posthog.capture("onboarding_livefeed_continued", {
-      time_spent_ms: Date.now() - mountTimeRef.current,
-      feed_time_ms: Date.now() - feedStartRef.current,
-      items_shown: activityItems.length,
-    });
     try {
       await ensureDefaultPreset();
     } catch {}
@@ -723,12 +702,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
   };
 
   const handleSkip = async () => {
-    posthog.capture("onboarding_startup_skipped", {
-      serverStarted,
-      audioReady,
-      visionReady,
-      time_spent_ms: Date.now() - mountTimeRef.current,
-    });
     try {
       await ensureDefaultPreset();
     } catch {}
@@ -829,9 +802,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
   // from the engine never fires again without a reset.
   const resetScreenRecordingPermission = async () => {
     setIsResettingPerm(true);
-    posthog.capture("onboarding_engine_permission_reset_clicked", {
-      bundle_id: bundleId,
-    });
     try {
       await commands.resetAndRequestPermission("screenRecording");
     } catch (err) {

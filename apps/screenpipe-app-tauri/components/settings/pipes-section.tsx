@@ -89,7 +89,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PostInstallConnectionsModal } from "@/components/post-install-connections-modal";
-import posthog from "posthog-js";
 import { MemoizedReactMarkdown } from "@/components/markdown";
 import { useDeviceMonitor } from "@/lib/hooks/use-device-monitor";
 import { Monitor, Wifi, WifiOff, ScanSearch } from "lucide-react";
@@ -785,7 +784,6 @@ export function PipesSection() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       await commands.copyTextToClipboard(data.url);
-      posthog.capture("pipe_shared_public", { pipe_name: pipe.config.name, pipe_id: data.id });
       toast({ title: "link copied!", description: data.url });
     } catch (err: any) {
       toast({ title: "failed to share pipe", description: err.message, variant: "destructive" });
@@ -926,7 +924,6 @@ export function PipesSection() {
     fetchPipes();
   };
 
-  const trackedPipesView = useRef(false);
   const autoUpdateRan = useRef(false);
   useEffect(() => {
     fetchConnections();
@@ -959,19 +956,6 @@ export function PipesSection() {
     }
 
     fetchPipes().then(() => {
-      if (!trackedPipesView.current) {
-        trackedPipesView.current = true;
-        setPipes((current) => {
-          if (current.length > 0) {
-            posthog.capture("pipes_viewed", {
-              count: current.length,
-              enabled_count: current.filter(p => p.config.enabled).length,
-              pipes: current.map(p => p.config.name),
-            });
-          }
-          return current;
-        });
-      }
       // Auto-open connection modal for newly installed pipes that have missing connections
       setPipes((current) => {
         for (const pipe of current) {
@@ -1063,7 +1047,6 @@ export function PipesSection() {
   };
 
   const togglePipe = async (name: string, enabled: boolean) => {
-    posthog.capture("pipe_toggled", { pipe: name, enabled });
     // Optimistic update — flip the switch immediately
     setPipes((prev) =>
       prev.map((p) =>
@@ -1108,7 +1091,6 @@ export function PipesSection() {
   };
 
   const runPipe = async (name: string) => {
-    posthog.capture("pipe_run", { pipe: name });
     setRunningPipe(name);
     try {
       // Wait for any pending config save (e.g. preset change) to land first
@@ -1150,7 +1132,6 @@ export function PipesSection() {
   };
 
   const stopPipe = async (name: string) => {
-    posthog.capture("pipe_stopped", { pipe: name });
     setStoppingPipe(name);
     try {
       await fetch(`${apiBase}/pipes/${name}/stop`, {
@@ -1168,7 +1149,6 @@ export function PipesSection() {
   };
 
   const deletePipe = async (name: string) => {
-    posthog.capture("pipe_deleted", { pipe: name });
     await fetch(`${apiBase}/pipes/${name}`, { method: "DELETE" });
     setExpanded(null);
     fetchPipes();
@@ -2646,31 +2626,6 @@ export function PipesSection() {
           const value = input?.value?.trim();
           if (!value) return;
           input.value = "";
-
-          // North-star funnel: mark the generation attempt so standalone-chat
-          // can fire `pipe_generation_completed` when a new pipe lands.
-          // Baseline captures the current installed list so we can detect the
-          // delta even if the user already has pipes installed.
-          const generationId = crypto.randomUUID();
-          const baseline = pipes.map((p: any) => p?.config?.name).filter(Boolean);
-          try {
-            sessionStorage.setItem(
-              "pipeGenerationContext",
-              JSON.stringify({
-                generation_id: generationId,
-                started_at: Date.now(),
-                prompt_length: value.length,
-                baseline_pipes: baseline,
-              })
-            );
-          } catch {
-            // sessionStorage unavailable — funnel will miss this attempt, not fatal
-          }
-          posthog.capture("pipe_generation_started", {
-            generation_id: generationId,
-            prompt_length: value.length,
-            baseline_pipe_count: baseline.length,
-          });
 
           navigateHomeAndPrefill({
             context: PIPE_CREATION_PROMPT,

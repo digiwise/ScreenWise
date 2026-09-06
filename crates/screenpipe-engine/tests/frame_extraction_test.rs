@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-// Test that reproduces the "moov atom not found" error from Sentry
+// Test that reproduces the "moov atom not found" extraction error.
 // Issue: SCREENPIPE-CLI-D, SCREENPIPE-CLI-X, SCREENPIPE-CLI-T
 //
 // Root cause: User requests frame from video file that's still being written.

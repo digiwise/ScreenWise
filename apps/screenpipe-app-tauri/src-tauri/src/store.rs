@@ -110,7 +110,7 @@ pub fn snapshot_last_good(store_path: &Path) {
 /// The bad current file is preserved as `.pre-restore-<UTC ts>` so we have
 /// forensics if a user reports the restore was wrong.
 ///
-/// Returns `true` when a restore happened (telemetry hook). Logged loudly so
+/// Returns `true` when a restore happened. Logged loudly so
 /// it shows up in screenpipe-app.YYYY-MM-DD.log.
 pub fn auto_restore_if_wiped(store_path: &Path) -> bool {
     // Only act on plain-JSON files. Encrypted files are handled by the
@@ -1045,7 +1045,6 @@ Rules:
                 monitor_ids: vec!["default".to_string()],
                 audio_devices: vec!["default".to_string()],
                 use_pii_removal: true,
-                analytics_id: uuid::Uuid::new_v4().to_string(),
                 ignored_windows,
                 ..screenpipe_config::RecordingSettings::default()
             },
@@ -1393,7 +1392,7 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
             // Fallback to defaults when deserialization fails (e.g., corrupted store)
             // DON'T save - preserve original store in case it can be manually recovered
             // This prevents crashes from invalid values like negative integers in u32 fields
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
+            // Non-fatal — logged as warn to distinguish it from startup failures.
             warn!(
                 "Failed to deserialize settings, using defaults (store not overwritten): {}",
                 e
@@ -1445,7 +1444,7 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
 
     if should_save {
         if let Err(e) = store.save(app) {
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
+            // Non-fatal — logged as warn to distinguish it from startup failures.
             // Common cause on Windows: antivirus / Controlled Folder Access / OneDrive
             // blocks the first write; we retry on subsequent saves so the user isn't
             // actually stuck. Not worth paging Louis about.
@@ -1464,7 +1463,7 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
         Err(e) => {
             // Fallback to defaults when deserialization fails
             // DON'T save - preserve original store
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
+            // Non-fatal — logged as warn to distinguish it from startup failures.
             warn!(
                 "Failed to deserialize onboarding, using defaults (store not overwritten): {}",
                 e
@@ -1475,7 +1474,7 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
 
     if should_save {
         if let Err(e) = onboarding.save(app) {
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
+            // Non-fatal — logged as warn to distinguish it from startup failures.
             // See matching comment in init_settings_store.
             warn!("Failed to save initial onboarding store (non-fatal): {}", e);
         }

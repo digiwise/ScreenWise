@@ -10,7 +10,6 @@ import { ZoomIn, ZoomOut, Mic, Monitor, AppWindow, Globe, Hash, RotateCcw, Phone
 import type { Meeting } from "@/lib/hooks/use-meetings";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import posthog from "posthog-js";
 import { cn } from "@/lib/utils";
 import { commands } from "@/lib/utils/tauri";
 import { emit } from "@tauri-apps/api/event";
@@ -954,9 +953,6 @@ export const TimelineSlider = ({
 			setSelectionRect(null);
 		} else if (selectedIndices.size > 1) {
 			// Track selection if multiple frames were selected
-			posthog.capture("timeline_selection_made", {
-				frames_selected: selectedIndices.size,
-			});
 
 			// Compute bounding rect of selected frames for toolbar positioning
 			const container = containerRef.current;

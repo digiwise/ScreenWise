@@ -87,7 +87,12 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
 
 - The standalone CLI no longer queries the NPM registry at startup or during its periodic terminal reminder rotation. Updating is now an explicit user/package-management action; `SCREENPIPE_NO_UPDATE_CHECK` is obsolete.
 - Missing FFmpeg no longer triggers a version query, archive download, extraction, or shell-profile edit. Runtime discovery accepts a preinstalled matching FFmpeg/FFprobe pair on `PATH`, an application-bundled pair, or an existing sidecar installation; otherwise it logs explicit setup guidance and disables dependent functionality.
-- Engine and desktop-app recording configurations now force analytics off. Persisted settings and the legacy CLI flag cannot initialize PostHog or Sentry; the compatibility fields remain temporarily while the wider cloud-facing surface is removed in reviewable steps.
+- Product telemetry and crash reporting have been removed from the engine and
+  desktop application rather than merely forced off. The legacy CLI switch,
+  persisted analytics settings, PostHog UI events/identity code, Sentry browser
+  and Tauri plumbing, and their frontend packages are gone. Existing settings
+  files may still contain the retired keys; serde ignores them for backward
+  compatibility.
 - Diarization and Silero VAD models must now be explicitly pre-staged; missing files produce their exact cache path and expected SHA-256 instead of starting background downloads. Verified artifacts: `segmentation-3.0.onnx` = `B78FC48113BB46FD247AE6A9AEA737079550C647638DB961DF7E0E1E9F4BA62E`, `wespeaker_en_voxceleb_CAM++.onnx` = `C46FAD10B5F81E1AA4A60C162714208577093655076C5450F8C469E522EC54EF`, and `silero_vad_v5.onnx` = `1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3`.
 - Audio startup now streams each explicitly provisioned diarization or Silero
   artifact through SHA-256 before caching or loading it. A mismatch is a
@@ -102,9 +107,34 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   diagnostics only, and panic diagnostics remain in `last-panic.log` without
   remote reporting. The intentional dependency removal prunes the related
   Sentry packages from `Cargo.lock`; no package versions were upgraded.
-  `cargo test -p screenpipe-engine --lib --locked` remains blocked on this host
-  by the pre-existing native `libsamplerate-sys` requirement for a `samplerate`
-  static library; the locked engine check succeeds.
+  The earlier native `libsamplerate-sys` test prerequisite was subsequently
+  satisfied by the validated Developer PowerShell environment; current engine
+  test results are recorded below.
+- Final desktop telemetry cleanup removed every product PostHog/Sentry import,
+  call site, compatibility shim, package, native lifecycle adapter, settings
+  field, and generated permission entry. Local browser/engine logs, local
+  process CPU/memory diagnostics (including the opt-in rotating resource JSONL
+  file), and `last-panic.log` remain active. User-configured PostHog/Sentry
+  service connectors and secret-redaction patterns are separate features and
+  intentionally remain.
+- Verification on 2026-09-04, with the frontend typecheck/build repeated on
+  2026-09-07: direct Bun TypeScript checking passed; two focused
+  Vitest files passed 10/10 tests; the production Next export passed; locked
+  offline engine and desktop checks passed; `screenpipe-config` passed 26/26;
+  `screenpipe-engine --lib` passed 529 with 2 ignored; and the full Visual
+  Studio 2026 Developer PowerShell `cargo build --release --locked --offline`
+  passed in 7m 58s. The release CLI no longer advertises
+  `--disable-telemetry`, and the production frontend artifacts contain no
+  product telemetry SDK or ingest-endpoint markers. `bun run` currently fails
+  before its target starts because this checkout's Bun executable reports a
+  corrupted `node_modules/.bin` remapping; invoking the installed TypeScript,
+  Vitest, and Next entrypoints directly succeeded. The optional Tauri binding
+  freshness test could not start offline because locked dev dependency
+  `assert-json-diff 2.0.2` is not cached.
+- `Cargo.lock` and the desktop Rust lockfile are unchanged. The Bun lock delta
+  removes only the three direct telemetry packages and their unreachable graph;
+  Bun relocates already-present `react-is` 16.13.1/17.0.2 resolutions without
+  introducing a new version or incidental upgrade.
 - Cloud synchronization, cloud-search metadata, cloud archive upload, and
   SFTP remote-sync CLI paths have been removed from the engine. The
   authenticated localhost API retains its independent local retention routes;

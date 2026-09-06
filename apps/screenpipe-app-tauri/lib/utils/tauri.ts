@@ -2737,14 +2737,6 @@ powerMode?: string | null;
  */
 useChineseMirror: boolean;
 /**
- * Enable anonymous analytics (PostHog).
- */
-analyticsEnabled: boolean;
-/**
- * Persistent analytics ID (UUID, stable across sessions).
- */
-analyticsId: string;
-/**
  * Enable AI workflow event detection (cloud feature, requires subscription).
  * When enabled, classifies desktop activity and triggers event-based pipes.
  */

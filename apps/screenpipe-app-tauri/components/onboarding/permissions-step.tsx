@@ -10,7 +10,6 @@ import { commands } from "@/lib/utils/tauri";
 import { requestPermissionWithFlow } from "@/lib/utils/permission-flow";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { motion } from "framer-motion";
-import posthog from "posthog-js";
 
 interface PermissionsStepProps {
   handleNextSlide: () => void;
@@ -95,7 +94,6 @@ export default function PermissionsStep({
   const [requesting, setRequesting] = useState(false);
   const [showSkip, setShowSkip] = useState(false);
   const hasAdvancedRef = useRef(false);
-  const mountTimeRef = useRef(Date.now());
 
   const permissions: PermissionDef[] = [
     {
@@ -207,10 +205,6 @@ export default function PermissionsStep({
   useEffect(() => {
     if (allRequiredGranted && !hasAdvancedRef.current && !isPlatformLoading) {
       hasAdvancedRef.current = true;
-      posthog.capture("onboarding_permissions_granted", {
-        time_spent_ms: Date.now() - mountTimeRef.current,
-        statuses,
-      });
       // Small delay so the user sees the last checkmark animate
       setTimeout(() => handleNextSlide(), 600);
     }
@@ -278,10 +272,6 @@ export default function PermissionsStep({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           onClick={() => {
-            posthog.capture("onboarding_permission_skipped", {
-              time_spent_ms: Date.now() - mountTimeRef.current,
-              statuses,
-            });
             hasAdvancedRef.current = true;
             handleNextSlide();
           }}

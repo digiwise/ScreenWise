@@ -12,9 +12,10 @@ untracked `smoke-baseline-20260901/` and `smoke-fixed-20260901/` directories.
 - Stay on branch `screenwise`; use locked Cargo commands and do not run
   `cargo update`.
 - Keep lockfiles unchanged unless a dependency change is explicitly justified
-  and reviewed. The engine lockfile now has an intentional Sentry-only graph
-  reduction from `ba67c6283`; the desktop lockfile is being reviewed as part
-  of its separate Sentry-plugin removal.
+  and reviewed. The engine lockfile has the intentional Sentry-only graph
+  reduction from `ba67c6283`; the final desktop cleanup leaves both Rust
+  lockfiles unchanged and prunes only the removed frontend telemetry graph from
+  `bun.lock`.
 
 ## Completed before this continuation
 
@@ -883,7 +884,7 @@ network code.
   `git diff --check` passed. Only the established audio/engine warnings and
   unrelated existing desktop warnings remain.
 
-### Dead desktop Sentry scaffolding removal — in progress
+### Dead desktop Sentry scaffolding removal — `f47b9f3c1`
 
 The desktop binary still retained compile-disabled Sentry initialization and
 scope-enrichment blocks, including the retired remote DSN and settings
@@ -891,6 +892,65 @@ metadata, plus comments describing Sentry tagging. The active panic hook is
 local-file logging and is independent of those blocks.
 
 - Removed both dead blocks, the associated unused variables, and stale Sentry
-  commentary; locked desktop validation is next before a focused commit.
+  commentary.
 - `cargo check --locked --offline`, `cargo fmt --all -- --check`, and
   `git diff --check` passed, with only established unrelated warnings.
+
+### Third-party integrations audit — in progress
+
+The remaining integration surface combines generic external OAuth and service
+connections, Google/ICS calendar fetching, ChatGPT OAuth, and locally useful
+browser-control code under the same historical `connections` naming. The
+removal sequence will first isolate external credential/network features from
+the local browser/capture path, then remove the former without treating all
+connection code as disposable.
+
+### Product telemetry and crash-reporting removal — complete
+
+The final cleanup removes the remaining product instrumentation rather than
+retaining inert shims. It incorporates the completed desktop Sentry handoff
+above without changing the separate third-party integration audit.
+
+- Removed all frontend `posthog-js`, `posthog-js/react`, `@sentry/react`, and
+  `tauri-plugin-sentry-api` imports, calls, providers, compatibility aliases,
+  telemetry-only state/effects, consent UI, identity/settings fields, and test
+  mocks. Removed the corresponding packages and unreachable Bun graph.
+- Removed the desktop analytics compatibility module and its lifecycle/event
+  call sites, analytics UUID/environment setup, generated Sentry permission
+  entries, telemetry-only build timestamp, and the obsolete
+  `--disable-telemetry` CLI/config surface.
+- Removed the root workspace's unused `sentry` declaration and the remaining
+  compile-disabled hardware/transport payload code from the resource monitor.
+  The monitor still samples local process CPU/memory, emits local debug logs,
+  and optionally maintains its bounded rotating resource JSONL file.
+- Preserved local browser and engine structured logs plus the independent panic
+  hook and `last-panic.log`. Legacy analytics keys remain only inside a serde
+  compatibility fixture so older settings files continue to load.
+- User-configured PostHog/Sentry service connectors, their UI labels/icons, and
+  local secret-redaction patterns are not product telemetry and remain. Static
+  URL-detection fixture strings also remain test data.
+
+Verification on Windows on 2026-09-04, with frontend checks repeated on
+2026-09-07:
+
+- `bun ./node_modules/typescript/bin/tsc --noEmit` passed.
+- Focused Vitest passed 2 files and 10 tests. The production Next static export
+  passed (with only the existing `unpdf` dynamic-import warning), and its output
+  contained no telemetry SDK or ingest-endpoint marker.
+- `cargo check -p screenpipe-engine --locked --offline` and desktop
+  `cargo check --locked --offline` passed. `screenpipe-config` passed 26/26
+  tests; `screenpipe-engine --lib` passed 529 tests with 2 ignored.
+- `cargo fmt --all -- --check`, `git diff --check`, and the full Visual Studio
+  2026 Developer PowerShell `cargo build --release --locked --offline` passed;
+  the release build took 7m 58s and reported only the two established
+  audio/engine warnings. `screenpipe.exe record --help` contains no telemetry
+  option.
+- `Cargo.lock` and `apps/screenpipe-app-tauri/src-tauri/Cargo.lock` are
+  unchanged. `bun.lock` removes only the telemetry packages and unreachable
+  transitive graph; its `react-is` lines relocate already-present 16.13.1 and
+  17.0.2 resolutions rather than adding or upgrading a version.
+- The checkout's `bun run` launcher reports a corrupted `node_modules/.bin`
+  remapping before starting `typecheck` or `next build`; direct execution of
+  the installed TypeScript, Vitest, and Next entrypoints passed. The optional
+  Tauri binding-freshness test could not start offline because locked dev
+  dependency `assert-json-diff 2.0.2` is not cached; Cargo made no lock change.

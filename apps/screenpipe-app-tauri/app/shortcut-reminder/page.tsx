@@ -10,7 +10,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { localFetch } from "@/lib/api";
 import { exists, readTextFile } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import posthog from "posthog-js";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { getStore, saveAndEncrypt } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
@@ -209,7 +208,6 @@ export default function ShortcutReminderPage() {
       loadShortcutsFromFile();
     });
 
-    posthog.capture("shortcut_reminder_shown");
 
     return () => {
       unlistenShortcut.then((fn) => fn());
@@ -238,7 +236,6 @@ export default function ShortcutReminderPage() {
       const settings = await store.get<Record<string, unknown>>("settings") || {};
       await store.set("settings", { ...settings, showShortcutOverlay: false });
       await saveAndEncrypt(store);
-      posthog.capture("shortcut_reminder_dismissed");
       // Use Tauri command instead of getCurrentWindow().hide() for better panel support
       await commands.hideShortcutReminder();
     } catch (e) {
@@ -288,7 +285,6 @@ export default function ShortcutReminderPage() {
             onClick={(e) => {
               e.stopPropagation();
               commands.showWindow("Main");
-              posthog.capture("shortcut_reminder_timeline_clicked");
             }}
             onMouseDown={(e) => e.stopPropagation()}
             className="flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer min-w-0"
@@ -310,7 +306,6 @@ export default function ShortcutReminderPage() {
             onClick={(e) => {
               e.stopPropagation();
               commands.showWindow("Chat");
-              posthog.capture("shortcut_reminder_chat_clicked");
             }}
             onMouseDown={(e) => e.stopPropagation()}
             className="flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer min-w-0"
@@ -331,7 +326,6 @@ export default function ShortcutReminderPage() {
             onClick={(e) => {
               e.stopPropagation();
               commands.showWindow({ Search: { query: null } });
-              posthog.capture("shortcut_reminder_search_clicked");
             }}
             onMouseDown={(e) => e.stopPropagation()}
             className="flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer min-w-0"

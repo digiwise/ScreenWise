@@ -9,7 +9,6 @@ import "./globals.css";
 import { Providers } from "./providers";
 import { Toaster } from "@/components/ui/toaster";
 import { Suspense, useEffect } from "react";
-import { ShortcutTracker } from "@/components/shortcut-reminder";
 import { PipeInstallDialog } from "@/components/pipe-install-dialog";
 import { BrowserPairingDialog } from "@/components/browser-pairing-dialog";
 import { RecentChatSwitcherController } from "@/components/chat/recent-chat-switcher-controller";
@@ -192,12 +191,12 @@ export default function RootLayout({
 
     // Auto-reload on IndexedDB disconnect (APP-2E, 27 users on v2.0.379)
     // WKWebView's IndexedDB server can crash; the page becomes unusable.
-    // PostHog JS SDK uses IndexedDB for session replay — this is a known WebKit bug.
+    // IndexedDB can still be used by local application storage.
     let idbReloadPending = false;
     const handleUnhandledRejection = (e: PromiseRejectionEvent) => {
       const msg = String(e.reason?.message || e.reason || "");
       if (msg.includes("Connection to Indexed Database server lost")) {
-        // Prevent the error from reaching Sentry — we handle it via reload
+        // Prevent duplicate handling because this path reloads the app.
         e.preventDefault();
         if (idbReloadPending) return; // debounce: only one reload
         idbReloadPending = true;
@@ -389,7 +388,6 @@ export default function RootLayout({
           {/* DeeplinkHandler is mounted in Providers (outside the entitlement
               gate) so the screenpipe:// login callback is always caught, even
               while the "sign in required" screen is showing. */}
-          {!isOverlay && <ShortcutTracker />}
           {!isOverlay && <PipeInstallDialog />}
           {!isOverlay && <BrowserPairingDialog />}
           <Suspense fallback={null}>

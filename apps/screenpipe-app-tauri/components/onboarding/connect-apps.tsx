@@ -4,7 +4,7 @@
 
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Check, Loader, Lock } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { commands } from "@/lib/utils/tauri";
@@ -14,7 +14,6 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { readTextFile, writeFile, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir, join, dirname } from "@tauri-apps/api/path";
 import { platform } from "@tauri-apps/plugin-os";
-import posthog from "posthog-js";
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
 
@@ -506,7 +505,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
   const [errorMessages, setErrorMessages] = useState<Record<string, string>>({});
   const [seconds, setSeconds] = useState(0);
-  const mountTimeRef = useRef(Date.now());
 
   // Check existing connections on mount
   useEffect(() => {
@@ -603,10 +601,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
       return;
     }
 
-    posthog.capture("onboarding_upgrade_clicked", {
-      source: "connect_apps",
-      user_type: isPro ? "pro" : "free",
-    });
 
     try {
       const response = await fetch("https://screenpi.pe/api/cloud-sync/checkout", {
@@ -646,7 +640,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
       // Pro gate — locked cards show upsell inline, connect button is never shown for them
       if (integration.isPro && !isPro) return;
 
-      posthog.capture("onboarding_integration_connect_clicked", { integration: integration.id });
       setErrorMessages((prev) => { const next = { ...prev }; delete next[integration.cardKey]; return next; });
       setCardState(integration.cardKey, "connecting");
 
@@ -656,7 +649,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
           if (res.status === "ok" && res.data) {
             setCardState(integration.cardKey, "connected");
             setDisplayNames((prev) => ({ ...prev, [integration.cardKey]: "ChatGPT Plus" }));
-            posthog.capture("onboarding_integration_connected", { integration: integration.id });
           } else {
             setCardState(integration.cardKey, "idle");
           }
@@ -666,21 +658,18 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
         if (integration.type === "mcp") {
           await installCursorMcp();
           setCardState(integration.cardKey, "connected");
-          posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
         }
 
         if (integration.type === "claude") {
           await installClaudeMcp();
           setCardState(integration.cardKey, "connected");
-          posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
         }
 
         if (integration.type === "codex") {
           await installCodexMcp();
           setCardState(integration.cardKey, "connected");
-          posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
         }
 
@@ -688,7 +677,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
           const vaultName = await connectObsidianFirstVault();
           setCardState(integration.cardKey, "connected");
           setDisplayNames((prev) => ({ ...prev, [integration.cardKey]: vaultName }));
-          posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
         }
 
@@ -707,10 +695,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
           if (res.data.display_name) {
             setDisplayNames((prev) => ({ ...prev, [integration.cardKey]: res.data.display_name! }));
           }
-          posthog.capture("onboarding_integration_connected", {
-            integration: integration.id,
-            has_display_name: !!res.data.display_name,
-          });
         } else {
           // User cancelled or OAuth didn't complete — go back to idle quietly
           setCardState(integration.cardKey, "idle");
@@ -731,20 +715,10 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
   );
 
   const handleContinue = useCallback(() => {
-    posthog.capture("onboarding_connect_apps_completed", {
-      num_connected: numConnected,
-      integrations_connected: connectedKeys,
-      time_spent_ms: Date.now() - mountTimeRef.current,
-    });
     handleNextSlide();
   }, [numConnected, connectedKeys, handleNextSlide]);
 
   const handleSkip = useCallback(() => {
-    posthog.capture("onboarding_connect_apps_skipped", {
-      num_connected: numConnected,
-      integrations_connected: connectedKeys,
-      time_spent_ms: Date.now() - mountTimeRef.current,
-    });
     handleNextSlide();
   }, [numConnected, connectedKeys, handleNextSlide]);
 

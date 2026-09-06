@@ -208,7 +208,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
 
     // Everything else (pipe, api, mute, dismiss, auto_dismiss, legacy string
     // actions) still goes to the JS handler. The overlay window owns those
-    // because they need access to posthog / localforage / chat prefill.
+    // because they need access to localforage / chat prefill.
     let _ = app.emit("native-notification-action", &json);
 }
 
@@ -2458,7 +2458,7 @@ pub async fn show_notification_panel(
         if native_notification::is_available() {
             info!("Using native SwiftUI notification panel");
             if native_notification::show(&payload) {
-                // Emit event so the main window can save notification history + PostHog analytics
+                // Emit event so the main window can save notification history.
                 // (the webview panel page does this in JS, but we bypass it with native)
                 let _ = app_handle.emit("native-notification-shown", &payload);
                 return Ok(());

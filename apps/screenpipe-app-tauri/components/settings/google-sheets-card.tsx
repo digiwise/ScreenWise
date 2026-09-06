@@ -11,7 +11,6 @@ import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { commands } from "@/lib/utils/tauri";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Loader2, Lock, LogOut, Plus, Table2 } from "lucide-react";
-import posthog from "posthog-js";
 import { GoogleOAuthUnverifiedAppHint } from "./google-oauth-unverified-app-hint";
 
 interface SheetsAccount {
@@ -65,7 +64,6 @@ export function GoogleSheetsCard({
     try {
       const res = await commands.oauthConnect("google-sheets", null);
       if (res.status === "ok" && res.data.connected) {
-        posthog.capture("google_sheets_connected");
         await fetchAccounts();
         notifyConnectionsUpdated();
         onConnectionChange?.();
@@ -81,7 +79,6 @@ export function GoogleSheetsCard({
     setDisconnecting(key);
     try {
       await commands.oauthDisconnect("google-sheets", instance ?? null);
-      posthog.capture("google_sheets_disconnected", { instance });
       await fetchAccounts();
       notifyConnectionsUpdated();
       onConnectionChange?.();

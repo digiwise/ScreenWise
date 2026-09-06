@@ -11,7 +11,6 @@ import { commands } from "@/lib/utils/tauri";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
-import posthog from "posthog-js";
 import { localFetch } from "@/lib/api";
 import { GoogleOAuthUnverifiedAppHint } from "./google-oauth-unverified-app-hint";
 
@@ -114,7 +113,6 @@ export function GoogleDocsCard() {
     try {
       const res = await commands.oauthConnect("google-docs", null);
       if (res.status === "ok" && res.data.connected) {
-        posthog.capture("google_docs_connected");
         await fetchAccounts();
         notifyConnectionsUpdated();
       }
@@ -129,7 +127,6 @@ export function GoogleDocsCard() {
     setDisconnecting(key);
     try {
       await commands.oauthDisconnect("google-docs", instance ?? null);
-      posthog.capture("google_docs_disconnected", { instance });
       await fetchAccounts();
       notifyConnectionsUpdated();
     } catch (e) {

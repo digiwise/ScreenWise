@@ -109,8 +109,6 @@ pub struct RecordingConfig {
 
     // Misc
     pub use_chinese_mirror: bool,
-    pub analytics_enabled: bool,
-    pub analytics_id: String,
 
     /// Custom vocabulary for transcription biasing and word replacement.
     pub vocabulary: Vec<VocabularyEntry>,
@@ -273,9 +271,6 @@ impl RecordingConfig {
             user_name: settings.user_name.clone(),
             video_quality: settings.video_quality.clone(),
             use_chinese_mirror: settings.use_chinese_mirror,
-            // ScreenWise is local-only: telemetry cannot be enabled from persisted settings.
-            analytics_enabled: false,
-            analytics_id: settings.analytics_id.clone(),
             vocabulary: settings
                 .vocabulary
                 .iter()

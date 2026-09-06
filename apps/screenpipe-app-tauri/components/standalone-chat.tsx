@@ -39,7 +39,6 @@ import { AIPreset, PiQueuedPrompt } from "@/lib/utils/tauri";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 // OpenAI SDK no longer used directly — all providers route through Pi agent
-import posthog from "posthog-js";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { save as saveDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readFile, mkdir } from "@tauri-apps/plugin-fs";
@@ -172,7 +171,6 @@ const APP_SUGGESTION_LIMIT = 10;
 const STREAM_RENDER_THROTTLE_MS = 80;
 const EMPTY_QUEUED_PROMPTS: PiQueuedPrompt[] = [];
 const FOLLOW_UP_GENERATION_DELAY_MS = 10_000;
-const POST_STREAM_SIDE_EFFECT_DELAY_MS = 1_500;
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
 const CONNECTION_SUGGESTION_LIMIT = 3;
@@ -3578,77 +3576,8 @@ export function StandaloneChat({
         setIsPreparingPrefill(false);
       }
     }
-    // Clean up stale pipe-generation markers (>30 min old) so they don't
-    // leak into a future unrelated chat session.
-    try {
-      const raw = sessionStorage.getItem("pipeGenerationContext");
-      if (raw) {
-        const ctx = JSON.parse(raw);
-        if (!ctx?.started_at || Date.now() - ctx.started_at > 30 * 60 * 1000) {
-          sessionStorage.removeItem("pipeGenerationContext");
-          if (ctx?.generation_id) {
-            posthog.capture("pipe_generation_abandoned", {
-              generation_id: ctx.generation_id,
-              age_ms: Date.now() - (ctx.started_at ?? Date.now()),
-            });
-          }
-        }
-      }
-    } catch {}
     return () => { unlisten.then((fn) => fn()); };
   }, []);
-
-  // Pipe-generation funnel completion detector.
-  // Fires `pipe_generation_completed` the first time Pi's message stream
-  // ends (isLoading: true → false) AFTER we see a new pipe installed
-  // compared to the baseline captured when the user submitted the
-  // "describe a pipe to create" form. Single-shot per generation_id.
-  const prevIsLoadingRef = useRef(isLoading);
-  useEffect(() => {
-    const wasLoading = prevIsLoadingRef.current;
-    prevIsLoadingRef.current = isLoading;
-    if (!wasLoading || isLoading) return; // only fire on true → false edge
-
-    let cancelled = false;
-    (async () => {
-      let ctx: { generation_id: string; started_at: number; baseline_pipes: string[] } | null = null;
-      try {
-        const raw = sessionStorage.getItem("pipeGenerationContext");
-        if (!raw) return;
-        ctx = JSON.parse(raw);
-      } catch {
-        return;
-      }
-      if (!ctx?.generation_id) return;
-
-      try {
-        const res = await localFetch("/pipes");
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled) return;
-        const installedNames: string[] = (data?.data ?? [])
-          .map((p: any) => p?.config?.name ?? p?.name)
-          .filter((n: unknown): n is string => typeof n === "string");
-        const baseline = new Set(ctx.baseline_pipes ?? []);
-        const newPipes = installedNames.filter((n) => !baseline.has(n));
-        if (newPipes.length === 0) return;
-
-        posthog.capture("pipe_generation_completed", {
-          generation_id: ctx.generation_id,
-          pipe_name: newPipes[0],
-          new_pipes_count: newPipes.length,
-          duration_ms: Date.now() - ctx.started_at,
-        });
-        sessionStorage.removeItem("pipeGenerationContext");
-      } catch {
-        // Leave context in place — maybe the next assistant turn installs the pipe.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isLoading]);
 
   // Guard against duplicate chat-prefill processing. The listener below
   // re-subscribes when piInfo changes; during the brief overlap window
@@ -5188,10 +5117,6 @@ export function StandaloneChat({
           // Detect rate limit or daily limit from the error
           const quotaErrorType = classifyQuotaError(errorStr);
           if (quotaErrorType === "daily" || quotaErrorType === "rate") {
-            if (quotaErrorType === "daily") {
-              posthog.capture("wall_hit", { reason: "daily_limit", source: "chat" });
-            }
-
             if (piMessageIdRef.current) {
               const msgId = piMessageIdRef.current;
               const content = quotaErrorType === "daily"
@@ -5225,10 +5150,7 @@ export function StandaloneChat({
             const quotaErrorType = classifyQuotaError(fullError);
             if (quotaErrorType === "daily" || quotaErrorType === "rate") {
               if (quotaErrorType === "daily") {
-                try {
-                  const match = fullError.match(/"resets_at":\s*"([^"]+)"/);
-                } catch {}
-                                  setMessages((prev) =>
+                setMessages((prev) =>
                   prev.map((m) => m.id === msgId ? { ...m, content: buildDailyLimitMessage(fullError) } : m)
                 );
               } else {
@@ -5414,10 +5336,6 @@ export function StandaloneChat({
 
             const quotaErrorType = classifyQuotaError(errMsg);
             if (quotaErrorType === "daily") {
-              try {
-                const resetsAtMatch = errMsg.match(/"resets_at":\s*"([^"]+)"/);
-                } catch {}
-                            posthog.capture("wall_hit", { reason: "daily_limit", source: "chat" });
               setMessages((prev) =>
                 prev.map((m) => m.id === msgId ? { ...m, content: buildDailyLimitMessage(errMsg) } : m)
               );
@@ -5471,10 +5389,7 @@ export function StandaloneChat({
               const errStr = agentEndError;
               const quotaErrorType = classifyQuotaError(errStr);
               if (quotaErrorType === "daily") {
-                try {
-                  const resetsAtMatch = errStr.match(/"resets_at":\s*"([^"]+)"/);
-                    } catch {}
-                                  content = buildDailyLimitMessage(errStr);
+                content = buildDailyLimitMessage(errStr);
               } else if (quotaErrorType === "rate") {
                 content = buildRateLimitMessage(errStr);
               } else if (errStr.includes("model_not_allowed")) {
@@ -5526,7 +5441,6 @@ export function StandaloneChat({
                 const lastErr = piLastErrorRef.current;
                 const lastErrKind = lastErr ? classifyQuotaError(lastErr) : "none";
                 if (lastErr && lastErrKind === "daily") {
-                  posthog.capture("wall_hit", { reason: "daily_limit", source: "chat" });
                   content = buildDailyLimitMessage(lastErr);
                 } else if (lastErr && lastErrKind === "rate") {
                   content = buildRateLimitMessage(lastErr);
@@ -5553,16 +5467,6 @@ export function StandaloneChat({
                 : m);
             });
             if (!isPipeWatch) {
-              const analyticsPayload = {
-                provider: activePreset?.provider,
-                model: activePreset?.model,
-                has_tool_use: blocksSnapshot.some((b) => b.type === "tool"),
-                response_length: streamedText?.length ?? 0,
-              };
-              setTimeout(() => {
-                posthog.capture("chat_response_received", analyticsPayload);
-              }, POST_STREAM_SIDE_EFFECT_DELAY_MS);
-
               const followUpText = streamedText || content || "";
               if (followUpText.length > 500 && !followUpFiredRef.current) {
                 const followUpTurnId = msgId;
@@ -5658,10 +5562,7 @@ export function StandaloneChat({
             const quotaErrorType = classifyQuotaError(errorStr);
             if (quotaErrorType === "daily" || quotaErrorType === "rate") {
               if (quotaErrorType === "daily") {
-                try {
-                  const match = errorStr.match(/"resets_at":\s*"([^"]+)"/);
-                } catch {}
-                                  setMessages((prev) =>
+                setMessages((prev) =>
                   prev.map((m) => m.id === msgId ? { ...m, content: buildDailyLimitMessage(errorStr) } : m)
                 );
               } else {
@@ -5698,16 +5599,6 @@ export function StandaloneChat({
               );
             }
           }
-          const quotaErrorType = classifyQuotaError(errorStr);
-          const errorCategory = quotaErrorType === "daily" ? "daily_limit"
-            : quotaErrorType === "rate" ? "rate_limit"
-            : errorStr.includes("model_not_allowed") ? "model_not_allowed"
-            : "other";
-          posthog.capture("chat_response_error", {
-            provider: activePreset?.provider,
-            model: activePreset?.model,
-            error_type: errorCategory,
-          });
           piStreamingTextRef.current = "";
           optimisticSteerRef.current = null;
           if (piMessageIdRef.current?.startsWith("pipe-")) {
@@ -6425,11 +6316,6 @@ export function StandaloneChat({
         turnIntentId: queuedTurnIntentId,
       });
 
-      posthog.capture("chat_message_enqueued", {
-        provider: activePreset?.provider,
-        model: activePreset?.model,
-        pending_count: queuedPrompts.length + 1,
-      });
     } catch (e) {
       setInput(prevInput);
       if (hadPastedImages) setPastedImages(queuedImageDataUrls);
@@ -6633,13 +6519,6 @@ export function StandaloneChat({
       storeState.actions.patch(sidNow, { lastUserMessageAt: Date.now() });
     }
 
-    posthog.capture("chat_message_sent", {
-      provider: activePreset?.provider,
-      model: activePreset?.model,
-      has_images: outgoingImages.length > 0 || !!prefillFrameId,
-      has_context: !!prefillContext,
-      message_index: messages.filter((m) => m.role === "user").length,
-    });
 
     // No timeout — Pi can run for minutes on long tasks (e.g. 30-day analysis
     // with many tool calls). Process death is detected via pi_terminated event.
@@ -7440,12 +7319,6 @@ export function StandaloneChat({
       return sendPiMessage(trimmed, displayLabel, imageDataUrls);
     }
 
-    posthog.capture("chat_message_steered", {
-      provider: activePreset?.provider,
-      model: activePreset?.model,
-      had_active_reply: hadActiveReply,
-      from_queue: !!imageDataUrls,
-    });
 
     const outgoingImages = imageDataUrls ?? pastedImages;
     const shouldClearPastedImages = imageDataUrls == null && pastedImages.length > 0;

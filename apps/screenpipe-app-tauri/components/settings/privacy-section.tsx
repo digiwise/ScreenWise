@@ -10,7 +10,6 @@ import type { SettingsField } from "./settings-search";
 export const searchIndex: SettingsField[] = [
   { label: "Blocklist", keywords: ["ignore", "exclude", "block"] },
   { label: "PII masking", keywords: ["mask", "redact"] },
-  { label: "Telemetry" },
 ];
 import { LockedSetting, ManagedSwitch } from "@/components/enterprise-locked-setting";
 import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
@@ -19,7 +18,6 @@ import {
   EyeOff,
   Globe,
   Shield,
-  Monitor,
   Loader2,
   AlertCircle,
   RefreshCw,
@@ -47,9 +45,6 @@ import { useToast } from "@/components/ui/use-toast";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { useInstalledApps } from "@/lib/hooks/use-installed-apps";
 import { commands } from "@/lib/utils/tauri";
-import posthog from "posthog-js";
-import * as Sentry from "@sentry/react";
-import { defaultOptions } from "tauri-plugin-sentry-api";
 import {
   validateField,
   sanitizeValue,
@@ -365,7 +360,6 @@ export function PrivacySection() {
     });
 
     try {
-      const pendingSettings = pendingSettingsRef.current;
       await pendingSettingsWriteRef.current;
       pendingSettingsRef.current = {};
 
@@ -373,22 +367,6 @@ export function PrivacySection() {
         const res = await commands.setApiAuthKey(pendingApiKey);
         if (res.status === "error") throw new Error(res.error);
         setPendingApiKey(null);
-      }
-
-      const analyticsEnabled =
-        pendingSettings.analyticsEnabled ?? settings.analyticsEnabled;
-
-      if (!analyticsEnabled) {
-        posthog.capture("telemetry", { enabled: false });
-        posthog.opt_out_capturing();
-        Sentry.close();
-      } else {
-        const isDebug = process.env.TAURI_ENV_DEBUG === "true";
-        if (!isDebug) {
-          posthog.opt_in_capturing();
-          posthog.capture("telemetry", { enabled: true });
-          Sentry.init({ ...defaultOptions });
-        }
       }
 
       await commands.stopScreenpipe();
@@ -576,10 +554,6 @@ export function PrivacySection() {
     handleSettingsChange({ recordWhileLocked: checked }, true);
   };
 
-  const handleAnalyticsToggle = (checked: boolean) => {
-    handleSettingsChange({ analyticsEnabled: checked }, true);
-  };
-
   // Add one pattern from the WindowPicker. Reuses the MultiSelect change
   // handler so the mutual-exclusion logic (a pattern in ignore is removed
   // from include and vice versa) stays in one place.
@@ -695,7 +669,7 @@ export function PrivacySection() {
   return (
     <div className="space-y-5">
       <p className="text-muted-foreground text-sm mb-4">
-        Content filtering, PII redaction, and telemetry
+        Content filtering and PII redaction
       </p>
 
       <div className="flex items-center justify-end">
@@ -1372,38 +1346,6 @@ export function PrivacySection() {
             </div>
           </CardContent>
         </Card>
-      </div>
-
-      {/* Telemetry */}
-      <div className="space-y-2">
-        <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
-          Telemetry
-        </h2>
-        <LockedSetting settingKey="telemetry">
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
-                <div>
-                  <h3 className="text-sm font-medium text-foreground">
-                    Analytics
-                  </h3>
-                  <p className="text-xs text-muted-foreground">
-                    Anonymous usage data
-                  </p>
-                </div>
-              </div>
-              <ManagedSwitch
-                settingKey="analyticsEnabled"
-                id="analyticsEnabled"
-                checked={settings.analyticsEnabled}
-                onCheckedChange={handleAnalyticsToggle}
-              />
-            </div>
-          </CardContent>
-        </Card>
-        </LockedSetting>
       </div>
 
       {/* Floating apply & restart button */}

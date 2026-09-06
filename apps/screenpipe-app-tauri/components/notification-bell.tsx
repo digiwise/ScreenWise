@@ -9,7 +9,6 @@ import { Bell, ChevronRight, ChevronDown, MessageSquare, X } from "lucide-react"
 import ReactMarkdown from "react-markdown";
 import { notificationUrlTransform, openScreenpipeViewerLink } from "@/components/markdown";
 import remarkGfm from "remark-gfm";
-import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 import {
   Popover,
@@ -128,7 +127,6 @@ export function NotificationBell() {
   };
 
   const clearAll = async () => {
-    posthog.capture("notification_bell_clear_all", { count: history.length });
     setHistory([]);
     try {
       await notificationFetch("/notifications", { method: "DELETE" });
@@ -136,11 +134,6 @@ export function NotificationBell() {
   };
 
   const dismissOne = async (id: string) => {
-    const entry = history.find((n) => n.id === id);
-    posthog.capture("notification_bell_dismiss", {
-      notification_type: entry?.type,
-      pipe_name: entry?.pipe_name,
-    });
     setHistory((prev) => prev.filter((n) => n.id !== id));
     if (expandedId === id) setExpandedId(null);
     try {
@@ -165,10 +158,6 @@ export function NotificationBell() {
         setOpen(o);
         if (o) {
           void loadHistory();
-          posthog.capture("notification_bell_opened", {
-            unread_count: unreadCount,
-            total_count: history.length,
-          });
           markAllRead();
         }
       }}
@@ -236,13 +225,6 @@ export function NotificationBell() {
                     onClick={() => {
                       const willExpand = !isExpanded;
                       setExpandedId(willExpand ? entry.id : null);
-                      if (willExpand) {
-                        posthog.capture("notification_bell_expand", {
-                          notification_type: entry.type,
-                          pipe_name: entry.pipe_name,
-                          title: entry.title,
-                        });
-                      }
                     }}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter" && e.key !== " ") return;
@@ -357,11 +339,6 @@ export function NotificationBell() {
                         data-testid={`notification-bell-ask-ai-${entry.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          posthog.capture("notification_bell_ask_ai", {
-                            notification_type: entry.type,
-                            pipe_name: entry.pipe_name,
-                            title: entry.title,
-                          });
                           setOpen(false);
                           showChatWithPrefill({
                             context: `notification from ${entry.pipe_name || "screenpipe"}:\n\n**${entry.title}**\n${entry.body}`,

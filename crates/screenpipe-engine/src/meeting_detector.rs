@@ -2986,7 +2986,7 @@ pub async fn run_meeting_detection_loop(
         // event is strong evidence the meeting is still going. This only sustains an
         // already-detected meeting (it never starts one), so a "Lunch" calendar
         // entry can't trigger recording on its own. `has_output_audio` is kept
-        // separate so detection-decision telemetry stays audio-accurate.
+        // separate so local detection decisions stay audio-accurate.
         let keep_alive = has_output_audio
             || (matches!(state, MeetingState::Ending { .. })
                 && has_active_calendar_event(&calendar_events, Utc::now()));

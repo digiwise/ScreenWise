@@ -9,7 +9,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 // and the tauri `commands` object, so we drive entitlement scenarios by swapping
 // `mocks.state.user` and assert on the engine start/stop calls it makes.
 const mocks = vi.hoisted(() => ({
-  capture: vi.fn(),
   open: vi.fn().mockResolvedValue(undefined),
   stopScreenpipe: vi.fn().mockResolvedValue(undefined),
   spawnScreenpipe: vi.fn().mockResolvedValue(undefined),
@@ -38,7 +37,6 @@ vi.mock("@/lib/utils/tauri", () => ({
   },
 }));
 
-vi.mock("posthog-js", () => ({ default: { capture: mocks.capture } }));
 vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.open }));
 
 // The resume effect only restarts the engine from the primary window, which it

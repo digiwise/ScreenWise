@@ -7,7 +7,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { commands } from "@/lib/utils/tauri";
-import posthog from "posthog-js";
 import ReactMarkdown from "react-markdown";
 import {
   notificationUrlTransform,
@@ -94,17 +93,12 @@ export default function NotificationPanelPage() {
   const pausedProgressRef = useRef<number | null>(null);
 
   const hide = useCallback(
-    async (auto: boolean) => {
+    async () => {
       setVisible(false);
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
-      posthog.capture("notification_dismissed", {
-        type: payload?.type,
-        id: payload?.id,
-        auto,
-      });
       try {
         await commands.hideNotificationPanel();
       } catch {
@@ -120,12 +114,6 @@ export default function NotificationPanelPage() {
       const actionStr = typeof actionOrObj === "string" ? actionOrObj : actionOrObj.action;
       const actionObj = typeof actionOrObj === "object" ? actionOrObj : null;
 
-      posthog.capture("notification_action", {
-        type: payload?.type,
-        id: payload?.id,
-        action: actionStr,
-        actionType: actionObj?.type,
-      });
 
       try {
         // New typed action dispatch (pipe notifications)
@@ -218,7 +206,7 @@ export default function NotificationPanelPage() {
             case "dismiss":
               break;
           }
-          await hide(false);
+          await hide();
           return;
         }
 
@@ -273,7 +261,7 @@ export default function NotificationPanelPage() {
               setRestartState("success");
               await new Promise((r) => setTimeout(r, 2000));
               try {
-                await hide(false);
+                await hide();
               } catch {
                 // fallback: force-hide via invoke directly
                 try { await commands.hideNotificationPanel(); } catch {}
@@ -293,22 +281,15 @@ export default function NotificationPanelPage() {
         // bug like "click Open does nothing" used to vanish. We still hide
         // the panel so the user isn't left with a stuck UI, but the failure
         // now shows up in DevTools + ~/.screenpipe/logs (via tracing from
-        // any Tauri command that errored) + PostHog as a distinct event.
+        // any Tauri command that errored) as a distinct local error.
         console.error(
           "notification action failed",
           { action: actionStr, type: actionObj?.type },
           e
         );
-        posthog.capture("notification_action_error", {
-          type: payload?.type,
-          id: payload?.id,
-          action: actionStr,
-          actionType: actionObj?.type,
-          error: String(e),
-        });
       }
 
-      await hide(false);
+      await hide();
     },
     [payload?.type, payload?.id, payload?.pipe_name, hide]
   );
@@ -324,10 +305,6 @@ export default function NotificationPanelPage() {
         setRestartState("idle");
         setRestartError(null);
 
-        posthog.capture("notification_shown", {
-          type: data.type,
-          id: data.id,
-        });
 
         // Save to notification history (max 100 entries)
         localforage.getItem<any[]>("notification-history").then((history) => {
@@ -372,7 +349,7 @@ export default function NotificationPanelPage() {
     const doHide = () => {
       if (dismissed) return;
       dismissed = true;
-      hide(true);
+      hide();
     };
 
     intervalRef.current = setInterval(() => {
@@ -511,7 +488,7 @@ export default function NotificationPanelPage() {
             screenpipe
           </span>
           <button
-            onClick={() => hide(false)}
+            onClick={() => hide()}
             style={{
               background: "none",
               border: "none",
@@ -710,7 +687,7 @@ export default function NotificationPanelPage() {
         >
           <span
             onClick={async () => {
-              await hide(false);
+              await hide();
               await emit("navigate", { url: "/home?section=notifications" });
               try { await commands.showWindow({ Home: { page: null } }); } catch {}
             }}
@@ -743,7 +720,7 @@ export default function NotificationPanelPage() {
                     settings.notificationPrefs = prefs;
                     await localforage.setItem("screenpipe-settings", JSON.stringify(settings));
                   } catch {}
-                  await hide(false);
+                  await hide();
                 }}
                 style={{
                   fontSize: "9px",

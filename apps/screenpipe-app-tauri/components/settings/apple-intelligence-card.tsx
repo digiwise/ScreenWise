@@ -8,7 +8,6 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { platform } from "@tauri-apps/plugin-os";
-import posthog from "posthog-js";
 import { localFetch } from "@/lib/api";
 
 export function AppleIntelligenceCard() {
@@ -69,9 +68,6 @@ export function AppleIntelligenceCard() {
     try {
       localStorage?.setItem("apple-intelligence-enabled", String(val));
     } catch {}
-    posthog.capture(
-      val ? "apple_intelligence_enabled" : "apple_intelligence_disabled"
-    );
   };
 
   const statusCapturedRef = useRef(false);
@@ -103,11 +99,6 @@ export function AppleIntelligenceCard() {
         setAiStatusReason(data.status || "");
         if (!statusCapturedRef.current) {
           statusCapturedRef.current = true;
-          posthog.capture("apple_intelligence_status", {
-            available: data.available,
-            status: data.status,
-            enabled,
-          });
         }
       } else {
         console.warn("[apple-intelligence] /ai/status unreachable — endpoint may not be compiled in");

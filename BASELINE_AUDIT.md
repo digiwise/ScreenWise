@@ -41,7 +41,7 @@ This inventory distinguishes observed baseline startup behavior from optional co
 | Speaker models: baseline used moving raw GitHub URLs for `segmentation-3.0.onnx` and `wespeaker_en_voxceleb_CAM++.onnx` | Runtime download was removed. Both MIT-baseline artifacts are verified by SHA-256 before ONNX Runtime loads them. | One-time explicit setup only. | Pre-stage under `%LOCALAPPDATA%\screenpipe\models`; a missing or mismatched file fails locally with no network fallback. |
 | Silero VAD v5: baseline used a moving `snakers4/silero-vad` raw `master` URL | Runtime download was removed and the accepted artifact hash is verified before loading. | One-time explicit setup only. | Pre-stage `silero_vad_v5.onnx` under `%LOCALAPPDATA%\screenpipe\vad`; record immutable source/tag/licence provenance when acquiring it, because the baseline URL was mutable. |
 | Parakeet: Hugging Face repo `istupakov/parakeet-tdt-0.6b-v3-onnx` through `audiopipe`/`hf-hub` | transcription model initialization/cache refresh. Successful run loaded the cached model. | One-time model acquisition. | Pre-stage/cache during setup; runtime code first attempts cache-only and background acquisition when unavailable. |
-| PostHog `https://us.i.posthog.com` and Sentry ingest | The engine PostHog transport, Sentry dependency, and resource-monitor HTTP reporting were removed. Desktop telemetry removal remains a separate follow-up. | Not required. | Engine local logs and `last-panic.log` remain available without remote reporting. |
+| PostHog `https://us.i.posthog.com` and Sentry ingest | Product telemetry and crash-reporting transports, lifecycle/event call sites, settings, shims, permissions, and frontend dependencies were removed from the engine and desktop app. | Not required. | Local logs, local process CPU/memory diagnostics and their optional rotating JSONL file, and `last-panic.log` remain available. User-configured PostHog/Sentry connectors and secret-redaction rules are unrelated and remain. |
 | Screenpipe cloud sync, cloud archive, and SFTP remote sync | CLI sync commands, service startup, cloud-search metadata, sync/archive routes, and client transports were removed. | Not required for the local recorder. | Local retention remains available without any upload prerequisite. Cloud proxy, providers, and integrations remain separate follow-up removals. |
 | Screenpipe product account and cloud-completions proxy | Engine account CLI commands, cloud JWT state, and the `/v1/chat/completions` proxy were removed. | Not required for local capture/search. | The localhost API's distinct bearer authentication remains required and unchanged. Desktop account UI is a separate desktop build increment. |
 | External audio transcription and live meeting streaming | Deepgram/OpenAI-compatible batch clients plus Screenpipe Cloud/Deepgram meeting WebSocket clients were removed. | Not required. | Local Whisper, Qwen, and Parakeet transcription remain; meeting overlays use the selected local engine only. |
@@ -50,8 +50,28 @@ This inventory distinguishes observed baseline startup behavior from optional co
 | Enterprise/team CLI | Direct Screenpipe enterprise device/search/record queries were removed. | Not required. | The local recorder has no team-cloud command path. |
 | mDNS multicast | Server discovery path; only when `--enable-mdns`/environment opt-in is set. | Not required. | Off by default; observed skipped for loopback-only server. |
 
-With FFmpeg and all pinned models pre-staged, telemetry disabled, sync off, and local transcription selected, the recorder's capture/search path can operate locally. The automatic CLI NPM update check has been removed. A later network-deny soak test should confirm this at the OS firewall layer after the remaining surprise automatic paths are removed.
+With FFmpeg and all pinned models pre-staged, product telemetry removed, sync
+off, and local transcription selected, the recorder's capture/search path can
+operate locally. The automatic CLI NPM update check has been removed. A later
+network-deny soak test should confirm this at the OS firewall layer after the
+remaining surprise automatic paths are removed.
 
 ## Recommended first removal/hardening tranche
 
-Keep it small: disable/remove the automatic CLI update check and automatic FFmpeg download, replace moving model URLs with explicit pinned setup artifacts and checksums, then remove telemetry/crash-reporting initialization. Build and smoke-test after each change. Cloud sync, external AI gateway, accounts and pipes should follow as separate commits because their reach is broader.
+The first tranche is complete: automatic CLI update checks and FFmpeg downloads
+were removed, model artifacts became explicit/checksummed setup inputs, and
+product telemetry/crash reporting was removed while local diagnostics stayed
+intact. Continue to isolate remaining cloud, account, provider, automation, and
+integration surfaces in separate reviewable commits because their reach is
+broader.
+
+The final telemetry-removal verification on 2026-09-04, with frontend checks
+repeated on 2026-09-07, passed direct TypeScript checking, 10 focused frontend
+tests, the production Next export, locked offline
+engine and desktop checks, 26 configuration tests, 529 engine library tests
+(2 ignored), and a full locked offline release build in Visual Studio 2026
+Developer PowerShell. The production frontend scan found no product telemetry
+SDK or ingest-endpoint marker. Both Rust lockfiles remained unchanged; the Bun
+lockfile pruned only the removed telemetry dependency graph, with no new
+package version. An optional Tauri binding-freshness test could not start
+offline because locked dev dependency `assert-json-diff 2.0.2` was not cached.

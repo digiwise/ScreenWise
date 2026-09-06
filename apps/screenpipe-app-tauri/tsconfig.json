@@ -28,12 +28,6 @@
       ],
       "@ee/*": [
         "../../ee/desktop/*"
-      ],
-      "posthog-js": [
-        "./lib/posthog-disabled.ts"
-      ],
-      "posthog-js/react": [
-        "./lib/posthog-disabled-react.tsx"
       ]
     },
     "types": ["@tauri-apps/api"]

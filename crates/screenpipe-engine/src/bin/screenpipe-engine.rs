@@ -171,11 +171,7 @@ fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
     Ok(base_dir)
 }
 
-fn setup_logging(
-    local_data_dir: &PathBuf,
-    debug: bool,
-    _disable_telemetry: bool,
-) -> anyhow::Result<WorkerGuard> {
+fn setup_logging(local_data_dir: &PathBuf, debug: bool) -> anyhow::Result<WorkerGuard> {
     let file_appender = screenpipe_engine::logging::SizedRollingWriter::builder()
         .directory(local_data_dir)
         .prefix("screenpipe")
@@ -269,8 +265,8 @@ fn setup_logging(
         ),
     );
 
-    // Local logs are the only diagnostics sink. Remote Sentry tracing is not
-    // compiled into ScreenWise builds.
+    // Local logs are the only diagnostics sink. Remote crash-report tracing is
+    // not compiled into ScreenWise builds.
     tracing_registry.init();
 
     Ok(guard)
@@ -300,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
             port,
         } => {
             let local_data_dir = get_base_dir(data_dir)?;
-            let _log_guard = Some(setup_logging(&local_data_dir, false, true)?);
+            let _log_guard = Some(setup_logging(&local_data_dir, false)?);
             handle_status_command(json, data_dir, port).await?;
             return Ok(());
         }
@@ -397,11 +393,7 @@ async fn main() -> anyhow::Result<()> {
     screenpipe_connect::mdns::set_enabled(record_args.enable_mdns);
 
     // Store the guard in a variable that lives for the entire main function
-    let _log_guard = Some(setup_logging(
-        &local_data_dir,
-        record_args.debug,
-        !config.analytics_enabled,
-    )?);
+    let _log_guard = Some(setup_logging(&local_data_dir, record_args.debug)?);
 
     // Crash diagnostics. Integrators embed this binary as a child process
     // inside their own wrapper (e.g. an Electron app) and, when it dies, see
@@ -409,8 +401,7 @@ async fn main() -> anyhow::Result<()> {
     // message + backtrace to last-panic.log so the parent can read the cause
     // after the process exits. Installed only on the Record
     // path (the long-running server; subcommands return earlier) and written
-    // regardless of telemetry, so analytics-disabled customers still get a
-    // local crash record. Mirrors the desktop app's hook in
+    // for every recorder crash. Mirrors the desktop app's hook in
     // apps/screenpipe-app-tauri/src-tauri/src/main.rs.
     {
         // Write to the resolved data dir (honors --data-dir) so the crash log
@@ -620,8 +611,8 @@ async fn main() -> anyhow::Result<()> {
 
     let audio_devices_clone = audio_devices.clone();
 
-    let resource_monitor = ResourceMonitor::new(config.analytics_enabled);
-    resource_monitor.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
+    let resource_monitor = ResourceMonitor::new();
+    resource_monitor.start_monitoring(Duration::from_secs(30));
 
     let db = Arc::new(
         DatabaseManager::new(
@@ -635,8 +626,8 @@ async fn main() -> anyhow::Result<()> {
         })?,
     );
 
-    // Start sleep/wake monitor for telemetry (macOS only)
-    // This tracks sleep/wake events and checks if recording is degraded after wake
+    // Start the sleep/wake monitor (macOS only).
+    // This checks if recording is degraded after wake.
     // NOTE: must be started AFTER database init — the monitor spawns background
     // threads with ObjC run loops that segfault during process teardown if an
     // earlier init step (like DB) fails and the process exits.
@@ -764,7 +755,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Create shared pipeline metrics (used by recording + health endpoint + PostHog)
+    // Create shared pipeline metrics for recording and the local health endpoint.
     let vision_metrics = Arc::new(screenpipe_screen::PipelineMetrics::new());
 
     // Start power manager — polls battery/thermal state and broadcasts profile changes
@@ -1081,10 +1072,6 @@ async fn main() -> anyhow::Result<()> {
     );
     println!("│ debug mode             │ {:<34} │", record_args.debug);
     println!(
-        "│ telemetry              │ {:<34} │",
-        config.analytics_enabled
-    );
-    println!(
         "│ use pii removal        │ {:<34} │",
         config.use_pii_removal
     );
@@ -1242,21 +1229,6 @@ async fn main() -> anyhow::Result<()> {
         "{}",
         "you are using local processing. all your data stays on your computer.\n".bright_green()
     );
-
-    // Add warning for telemetry
-    if config.analytics_enabled {
-        println!(
-            "{}",
-            "warning: telemetry is enabled. only error-level data will be sent.\n\
-            to disable, use the --disable-telemetry flag."
-                .bright_yellow()
-        );
-    } else {
-        println!(
-            "{}",
-            "telemetry is disabled. no data will be sent to external services.".bright_green()
-        );
-    }
 
     // start recording after all this text
     if !config.disable_audio {

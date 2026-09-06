@@ -434,10 +434,9 @@ pub async fn invalidate_device_cache() {
 /// "No supported input configurations found" or
 /// `AUDCLNT_E_UNSUPPORTED_FORMAT`.
 ///
-/// Without this filter the device monitor polls every 2s and we spam the
-/// user's logs + Sentry inbox (one real user had 686 of these errors in a
-/// single session from a PDP/Sony controller adapter that exposes itself
-/// as `Microphone (PDP Audio Device)`). The user also sees the phantom
+/// Without this filter the device monitor polls every 2s and floods the
+/// user's logs with repeated errors from controller adapters that expose
+/// themselves as `Microphone (PDP Audio Device)`. The user also sees the phantom
 /// in the settings dropdown and can pick it, only to silently get no
 /// audio. Strict-empty signal — we don't blocklist by name — so it stays
 /// safe across hardware revisions and locales.

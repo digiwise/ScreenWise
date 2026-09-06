@@ -13,7 +13,6 @@ import ConnectApps from "@/components/onboarding/connect-apps";
 import PickPipe from "@/components/onboarding/pick-pipe";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
-import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 
 type SlideKey = "login" | "permissions" | "engine" | "connect-apps" | "pipe";
@@ -92,7 +91,6 @@ export default function OnboardingPage() {
   useEffect(() => {
     setWindowSizeForSlide(currentSlide);
     setIsVisible(true);
-    posthog.capture(`onboarding_${currentSlide}_viewed`);
   }, [currentSlide]);
 
   // Redirect if already completed
@@ -113,7 +111,6 @@ export default function OnboardingPage() {
     if (isTransitioning) return;
     setIsTransitioning(true);
 
-    posthog.capture(`onboarding_${currentSlide}_completed`);
     const stepOrder: SlideKey[] = [
       "login",
       "permissions",
@@ -122,10 +119,6 @@ export default function OnboardingPage() {
       "pipe",
     ];
     const currentIdx = stepOrder.indexOf(currentSlide);
-    posthog.capture("onboarding_step_reached", {
-      step_name: `${currentSlide}_completed`,
-      step_index: currentIdx + 1,
-    });
 
     const nextSlide = stepOrder[currentIdx + 1] || "pipe";
     try {

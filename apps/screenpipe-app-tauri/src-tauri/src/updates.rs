@@ -173,7 +173,7 @@ pub struct PendingUpdateSnapshot {
 // runs onnxruntime's C++ static destructors while `AudioManager::new` is
 // still mid-`create_session` on the server worker thread, and the global
 // DataTypeRegistry gets torn down under the still-running PlannerImpl,
-// segfaulting at 0x2c8. Stack: #3557. Sentry can't see this crash because
+// segfaulting at 0x2c8. Stack: #3557. The panic hook cannot see this crash because
 // the Rust SDK dies before the event ships.
 //
 // `await_restart_gate` is the single internal entry point; the
@@ -419,7 +419,7 @@ impl UpdatesManager {
             Err(ref e) => {
                 // warn, not error — updater failures are mostly transient network
                 // issues or "endpoints not set" on source builds; neither is actionable.
-                // Sentry would just get noise.
+                // Repeated error logs would just create noise.
                 warn!("updater check() error: {}", e);
             }
         }

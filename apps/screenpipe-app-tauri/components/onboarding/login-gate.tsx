@@ -7,7 +7,6 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
 import { motion, AnimatePresence } from "framer-motion";
-import posthog from "posthog-js";
 import { hasAppEntitlement, isDevBillingBypassEnabled } from "@/lib/app-entitlement";
 
 interface OnboardingLoginProps {
@@ -245,20 +244,17 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({ handleNextSlide }) =>
   useEffect(() => {
     if (settings.user?.token && (canSkipLogin || hasAppEntitlement(settings.user)) && !hasAdvanced.current) {
       hasAdvanced.current = true;
-      posthog.capture("onboarding_login_completed");
       setTimeout(() => handleNextSlide(), 500);
     }
   }, [canSkipLogin, settings.user, settings.user?.token, handleNextSlide]);
 
   const handleLogin = useCallback(() => {
-    posthog.capture("onboarding_login_clicked");
     // Open login in an in-app WebView instead of Safari so we can intercept
     // the screenpipe:// deep-link redirect (Safari blocks custom-scheme redirects)
     commands.openLoginWindow();
   }, []);
 
   const handleSkip = useCallback(() => {
-    posthog.capture("onboarding_login_skipped_dev");
     handleNextSlide();
   }, [handleNextSlide]);
 

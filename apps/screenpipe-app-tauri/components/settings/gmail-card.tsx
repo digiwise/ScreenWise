@@ -11,7 +11,6 @@ import { commands } from "@/lib/utils/tauri";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import posthog from "posthog-js";
 import { GoogleOAuthUnverifiedAppHint } from "./google-oauth-unverified-app-hint";
 
 interface GmailAccount {
@@ -59,7 +58,6 @@ export function GmailCard() {
     try {
       const res = await commands.oauthConnect("gmail", null);
       if (res.status === "ok" && res.data.connected) {
-        posthog.capture("gmail_connected");
         await fetchAccounts();
         notifyConnectionsUpdated();
       }
@@ -74,7 +72,6 @@ export function GmailCard() {
     setDisconnecting(key);
     try {
       await commands.oauthDisconnect("gmail", instance ?? null);
-      posthog.capture("gmail_disconnected", { instance });
       await fetchAccounts();
       notifyConnectionsUpdated();
     } catch (e) {

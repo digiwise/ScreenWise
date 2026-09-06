@@ -10,7 +10,6 @@ const mocks = vi.hoisted(() => ({
   completeOnboarding: vi.fn().mockResolvedValue(undefined),
   scheduleFirstRunNotification: vi.fn(),
   localFetch: vi.fn(),
-  capture: vi.fn(),
   oauthStatus: vi.fn().mockResolvedValue({
     status: "ok",
     data: { connected: false },
@@ -34,12 +33,6 @@ vi.mock("@/lib/api", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     oauthStatus: mocks.oauthStatus,
-  },
-}));
-
-vi.mock("posthog-js", () => ({
-  default: {
-    capture: mocks.capture,
   },
 }));
 

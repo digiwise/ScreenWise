@@ -411,10 +411,6 @@ pub struct RecordArgs {
     #[arg(long, value_enum, default_value_t = CliTranscriptionMode::Batch)]
     pub transcription_mode: CliTranscriptionMode,
 
-    /// Disable telemetry
-    #[arg(long, default_value_t = false)]
-    pub disable_telemetry: bool,
-
     /// Video quality preset: low, balanced, high, max
     #[arg(long, default_value = "balanced")]
     pub video_quality: String,
@@ -598,7 +594,6 @@ pub struct RecordArgSources {
     pub ignored_urls: bool,
     pub ignored_meeting_apps: bool,
     pub transcription_mode: bool,
-    pub disable_telemetry: bool,
     pub video_quality: bool,
     pub pause_on_drm_content: bool,
     pub disable_clipboard_capture: bool,
@@ -646,7 +641,6 @@ impl RecordArgSources {
             ignored_urls: from_command_line(record, "ignored_urls"),
             ignored_meeting_apps: from_command_line(record, "ignored_meeting_apps"),
             transcription_mode: from_command_line(record, "transcription_mode"),
-            disable_telemetry: from_command_line(record, "disable_telemetry"),
             video_quality: from_command_line(record, "video_quality"),
             pause_on_drm_content: from_command_line(record, "pause_on_drm_content"),
             disable_clipboard_capture: from_command_line(record, "disable_clipboard_capture"),
@@ -686,7 +680,6 @@ impl RecordArgSources {
             || self.ignored_urls
             || self.ignored_meeting_apps
             || self.transcription_mode
-            || self.disable_telemetry
             || self.video_quality
             || self.pause_on_drm_content
             || self.disable_clipboard_capture
@@ -853,8 +846,6 @@ impl RecordArgs {
             prioritize_input_latency: self.prioritize_input_latency,
             extraction_thread_priority: self.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: self.pause_extraction_on_input_ms,
-            // Retain the CLI flag for compatibility, but never initialize telemetry.
-            analytics_enabled: false,
             ignore_incognito_windows: true,
             pause_on_drm_content: self.pause_on_drm_content,
             disable_clipboard_capture: self.disable_clipboard_capture,
@@ -1115,9 +1106,6 @@ impl RecordArgs {
                 CliTranscriptionMode::Realtime => "realtime".to_string(),
                 CliTranscriptionMode::Batch => "batch".to_string(),
             };
-        }
-        if sources.disable_telemetry {
-            settings.analytics_enabled = !self.disable_telemetry;
         }
         if sources.video_quality {
             settings.video_quality = self.video_quality.clone();

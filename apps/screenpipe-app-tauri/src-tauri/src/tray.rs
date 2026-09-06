@@ -533,7 +533,7 @@ pub fn recreate_tray(app: &AppHandle) {
                 }
             }); // with_autorelease_pool
         })) {
-            // The panic hook already sent the panic message + backtrace to Sentry
+            // The panic hook already wrote the panic message + backtrace locally.
             // (as a Fatal-level capture_message). Log here for local diagnostics.
             let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
                 s.to_string()

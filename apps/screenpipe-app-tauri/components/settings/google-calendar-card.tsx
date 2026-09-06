@@ -20,7 +20,6 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "@/components/ui/use-toast";
-import posthog from "posthog-js";
 import { localFetch } from "@/lib/api";
 import { GoogleOAuthUnverifiedAppHint } from "./google-oauth-unverified-app-hint";
 
@@ -161,7 +160,6 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
     try {
       const res = await commands.oauthConnect("google-calendar", null);
       if (res.status === "ok" && res.data.connected) {
-        posthog.capture("google_calendar_connected");
         await fetchStatus();
         notifyConnectionsUpdated();
         onConnected?.();
@@ -196,7 +194,6 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
       await commands.oauthDisconnect("google-calendar", instance ?? null);
       setAccounts(remainingAccounts);
       await fetchStatus();
-      posthog.capture("google_calendar_disconnected");
       notifyConnectionsUpdated();
       if (remainingAccounts.length === 0) {
         onDisconnected?.();

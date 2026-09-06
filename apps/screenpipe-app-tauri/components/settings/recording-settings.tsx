@@ -116,7 +116,6 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { platform } from "@tauri-apps/plugin-os";
-import posthog from "posthog-js";
 import { Language } from "@/lib/language";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ToastAction } from "@/components/ui/toast";
@@ -130,8 +129,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { MeetingAppsPicker } from "./meeting-apps-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
-import * as Sentry from "@sentry/react";
-import { defaultOptions } from "tauri-plugin-sentry-api";
 import { useLoginDialog } from "../login-dialog";
 import { BatterySaverSection } from "./battery-saver-section";
 // ScheduleSettings moved to privacy-section
@@ -1311,7 +1308,7 @@ function TranscriptionDictionary({
             <Textarea
               value={bulkText}
               onChange={(e) => setBulkText(e.target.value)}
-              placeholder={"paste terms separated by commas, newlines, semicolons, or tabs\n\ne.g. kubernetes, posthog, screenpipe, terraform"}
+              placeholder={"paste terms separated by commas, newlines, semicolons, or tabs\n\ne.g. kubernetes, screenpipe, terraform"}
               className="text-xs font-mono min-h-[80px] resize-y"
               spellCheck={false}
               autoCorrect="off"
@@ -2103,27 +2100,6 @@ export function RecordingSettings() {
     });
 
     try {
-      if (!settings.analyticsEnabled) {
-        posthog.capture("telemetry", {
-          enabled: false,
-        });
-        posthog.opt_out_capturing();
-        Sentry.close();
-        console.log("Telemetry disabled");
-      } else {
-        const isDebug = process.env.TAURI_ENV_DEBUG === "true";
-        if (!isDebug) {
-          posthog.opt_in_capturing();
-          posthog.capture("telemetry", {
-            enabled: true,
-          });
-          console.log("Telemetry enabled");
-          Sentry.init({
-            ...defaultOptions,
-          });
-        }
-      }
-
       if (pendingAudioExclusions !== null) {
         try {
           const resWriteExcl = await commands.writeAudioExclusions(pendingAudioExclusions);
@@ -2250,11 +2226,6 @@ export function RecordingSettings() {
 
   const handleDisableAudioChange = (checked: boolean) => {
     handleSettingsChange({ disableAudio: checked }, true);
-  };
-
-  const handleAnalyticsToggle = (checked: boolean) => {
-    const newValue = checked;
-    handleSettingsChange({ analyticsEnabled: newValue }, true);
   };
 
   const handleChineseMirrorToggle = async (checked: boolean) => {

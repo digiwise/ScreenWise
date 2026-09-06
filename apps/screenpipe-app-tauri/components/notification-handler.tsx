@@ -87,15 +87,11 @@ const NotificationHandler: React.FC = () => {
   }, []);
 
 
-  // Save notification history + PostHog tracking when native panel is shown (macOS)
+  // Save notification history when the native panel is shown (macOS).
   useEffect(() => {
     const unlisten = listen<string>("native-notification-shown", async (event) => {
       try {
         const data = JSON.parse(event.payload);
-        // PostHog analytics (same as webview panel)
-        const posthog = (await import("posthog-js")).default;
-        posthog.capture("notification_shown", { type: data.type, id: data.id });
-
         // Save to notification history (same as webview panel, max 100 entries)
         const localforage = (await import("localforage")).default;
         const history = await localforage.getItem<any[]>("notification-history") || [];
@@ -124,14 +120,9 @@ const NotificationHandler: React.FC = () => {
         const action = JSON.parse(event.payload);
         console.log("native notification action:", action);
 
-        // PostHog tracking for dismiss/action (mirrors webview panel)
-        const posthog = (await import("posthog-js")).default;
         if (action.type === "dismiss" || action.type === "auto_dismiss") {
-          posthog.capture("notification_dismissed", { auto: action.type === "auto_dismiss" });
           return;
         }
-        posthog.capture("notification_action", { action: action.action, actionType: action.type });
-
         if (action.type === "manage") {
           const { emit } = await import("@tauri-apps/api/event");
           // Show window first, then navigate after a brief delay so the

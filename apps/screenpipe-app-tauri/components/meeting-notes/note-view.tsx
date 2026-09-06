@@ -34,7 +34,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
-import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -224,11 +223,6 @@ export function NoteView({
         if (images.length === 0) return;
         const { x, y } = toClient(pos);
         noteEditorRef.current?.insertImages(images, { clientX: x, clientY: y });
-        posthog.capture("meeting_note_images_inserted", {
-          meeting_id: meeting.id,
-          count: images.length,
-          source: "drag_drop",
-        });
       } catch (err) {
         console.error("failed to insert dropped meeting note image", err);
         toast({
@@ -301,15 +295,6 @@ export function NoteView({
       note: meeting.note ?? "",
     };
   }, [meeting.id, initialTranscriptOpen]);
-
-  useEffect(() => {
-    posthog.capture("meeting_note_opened", {
-      meeting_id: meeting.id,
-      is_live: isLive,
-      has_title: !!meeting.title,
-      has_note: !!meeting.note,
-    });
-  }, [meeting.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -513,11 +498,6 @@ export function NoteView({
   }, [saveState.kind, save, title, attendees, note]);
 
   const handleSummarize = async () => {
-    posthog.capture("meeting_summarize_clicked", {
-      meeting_id: meeting.id,
-      was_live: isLive,
-      pipe_slug: settings.meetingSummaryPipeSlug || "meeting-summary",
-    });
     setSummarizing(true);
     try {
       const last = lastSavedRef.current;

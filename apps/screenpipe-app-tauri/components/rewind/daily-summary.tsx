@@ -21,7 +21,6 @@ import {
 } from "@/components/ui/tooltip";
 import { platform } from "@tauri-apps/plugin-os";
 import { Command } from "@tauri-apps/plugin-shell";
-import posthog from "posthog-js";
 import { localFetch } from "@/lib/api";
 
 // ─── Generation lock ────────────────────────────────────────────────────────
@@ -432,13 +431,6 @@ export function DailySummaryCard({
       saveSummary(newSummary);
       setSummary(newSummary);
       setIsExpanded(true);
-      posthog.capture("apple_intelligence_summary_generated", {
-        key_moments: newSummary.keyMoments.length,
-        action_items: newSummary.actionItems.length,
-        people_mentioned: newSummary.peopleMentioned.length,
-        time_breakdown_apps: newSummary.timeBreakdown.length,
-        had_audio: parts.length > 0,
-      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to generate summary");
     } finally {

@@ -43,7 +43,6 @@ import { VoiceMemosCard } from "./voice-memos-card";
 import { InputMonitoringPanel } from "./input-monitoring-card";
 import { CustomMcpCard } from "./custom-mcp-card";
 import { SkillsCard } from "./skills-card";
-import posthog from "posthog-js";
 
 // ---------------------------------------------------------------------------
 // Utility functions (unchanged)
@@ -1509,7 +1508,6 @@ function MemorySyncSubsection({
 
       setConnected(true);
       notifyConnectionsUpdated();
-      posthog.capture("connection_saved", { integration: integrationId });
 
       // Kick off an immediate sync so the user sees the file populate
       // before the next 5-minute scheduler tick.
@@ -2414,7 +2412,6 @@ export function ConnectionCredentialForm({
       setStatus("idle");
       setIsSaved(true);
       notifyConnectionsUpdated();
-      posthog.capture("connection_saved", { integration: integrationId });
       onSaved?.();
     } catch (e: any) {
       setError(e?.message || "unknown error");
@@ -2620,7 +2617,6 @@ function ObsidianPanel({ onConnected, onDisconnected }: { onConnected?: () => vo
       setManualPath("");
       await loadConnected();
       notifyConnectionsUpdated();
-      posthog.capture("connection_saved", { integration: "obsidian" });
       onConnected?.();
     } catch (e: any) {
       setError(e?.message || "connection failed");
@@ -3322,15 +3318,6 @@ export function ConnectionsSection({
           apiCache.set(cacheKey, data.data, 30_000); // 30s TTL
           setIntegrations(data.data);
           setIntegrationsLoaded(true);
-          // Track active connections as user property (IDs only, no credentials)
-          const connected = data.data
-            .filter((i: any) => i.connected)
-            .map((i: any) => i.id);
-          if (connected.length > 0) {
-            posthog.capture("connections_loaded", {
-              $set: { active_connections: connected, connection_count: connected.length },
-            });
-          }
           return;
         }
       } catch { /* server may not be running yet */ }

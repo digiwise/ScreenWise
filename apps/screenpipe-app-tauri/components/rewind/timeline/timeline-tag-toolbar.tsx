@@ -20,7 +20,6 @@ import {
 	AlertDialogHeader,
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import posthog from "posthog-js";
 import { PipeAIIcon } from "@/components/pipe-ai-icon";
 import { localFetch } from "@/lib/api";
 import { showChatWithPrefill } from "@/lib/chat-utils";
@@ -141,11 +140,6 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 				title: "tagged",
 				description: `applied "${tag.trim()}" to ${frameIds.length} frames`,
 			});
-			posthog.capture("timeline_tag_applied", {
-				tag: tag.trim(),
-				frames_count: frameIds.length,
-				is_quick_tag: quickTags.includes(tag.trim()),
-			});
 			setCustomTag("");
 			setSelectionRange(null);
 		} catch {
@@ -165,10 +159,6 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 		setIsApplying(true);
 		try {
 			await removeTagFromFrames(frameIds, tag);
-			posthog.capture("timeline_tag_removed", {
-				tag,
-				frames_count: frameIds.length,
-			});
 		} catch {
 			toast({
 				title: "remove failed",
@@ -204,10 +194,6 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 				title: "deleted",
 				description: `removed ${data.frames_deleted} frames, ${data.audio_transcriptions_deleted} audio segments`,
 			});
-			posthog.capture("timeline_range_deleted", {
-				duration_ms: selectionRange.end.getTime() - selectionRange.start.getTime(),
-				frames_deleted: data.frames_deleted,
-			});
 			setSelectionRange(null);
 			setShowDeleteConfirm(false);
 			clearTextCache();
@@ -228,7 +214,6 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 		const end = selectionRange.end.toISOString();
 
 		try {
-			posthog.capture("timeline_retranscribe", { method: "ai_chat" });
 			await showChatWithPrefill({
 				context: "",
 				prompt: `please read your screenpipe-api skill first, then retranscribe the audio from ${start} to ${end}. after retranscribing, ask me if i want to assign speaker names to the different speakers in the transcription.`,

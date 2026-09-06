@@ -1176,18 +1176,16 @@ pub async fn start_device_monitor(
                                     continue;
                                 }
                                 // SCK transiently fails during device switches ("callback never
-                                // fired") — downgrade to warn so it doesn't reach Sentry; the
-                                // monitor will retry on the next 2-second tick.
+                                // fired"). Keep this at warn because the monitor retries on the
+                                // next 2-second tick.
                                 if e_str.contains("callback never fired") {
                                     warn!("device check transient error (will retry): {e}");
                                     continue;
                                 }
                                 // User denied TCC (mic / screen capture / etc.) — the 2-second
-                                // monitor loop keeps trying, so without this branch every retry
-                                // hits Sentry. SCREENPIPE-CLI-S8: 4 users × ~50 events/wk of
-                                // identical "declined TCCs" noise. Warn (not Sentry) and let
-                                // the next tick try again so we pick up the moment the user
-                                // grants permission.
+                                // monitor loop keeps trying, so keep identical permission errors
+                                // at warn and let the next tick try again. This still notices the
+                                // moment the user grants permission without flooding local logs.
                                 if e_str.contains("declined TCCs")
                                     || e_str.contains("Screen recording permission denied")
                                 {

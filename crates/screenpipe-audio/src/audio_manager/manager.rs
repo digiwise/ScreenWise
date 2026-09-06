@@ -56,16 +56,15 @@ use serde::{Deserialize, Serialize};
 /// Rate-limiter for the "Error processing audio" log.
 ///
 /// Why: when the ONNX segmentation/embedding model file is missing or
-/// corrupt, every audio chunk fails with the same error — one user hit
-/// 583 events from the model-missing error alone (Sentry SCREENPIPE-CLI).
-/// Firing to Sentry on every chunk is noise; once every 5 minutes is
-/// enough to see the problem. Below-threshold hits still go to debug!().
+/// corrupt, every audio chunk fails with the same error. Emitting the same
+/// error on every chunk floods the local log; once every 5 minutes is enough
+/// to see the problem. Below-threshold hits still go to debug!().
 ///
 /// A single shared timestamp is intentional: the error class doesn't
-/// matter for rate-limiting purposes — we just want to stop flooding
-/// Sentry during a sustained failure.
+/// matter for rate-limiting purposes — we just want to stop flooding the
+/// local log during a sustained failure.
 static LAST_AUDIO_PROCESS_ERROR_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
-const AUDIO_PROCESS_ERROR_SENTRY_INTERVAL_SECS: u64 = 300;
+const AUDIO_PROCESS_ERROR_LOG_INTERVAL_SECS: u64 = 300;
 
 fn log_audio_process_error(e: &anyhow::Error) {
     let now = SystemTime::now()
@@ -73,7 +72,7 @@ fn log_audio_process_error(e: &anyhow::Error) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let last = LAST_AUDIO_PROCESS_ERROR_EPOCH_SECS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) >= AUDIO_PROCESS_ERROR_SENTRY_INTERVAL_SECS {
+    if now.saturating_sub(last) >= AUDIO_PROCESS_ERROR_LOG_INTERVAL_SECS {
         LAST_AUDIO_PROCESS_ERROR_EPOCH_SECS.store(now, Ordering::Relaxed);
         error!("Error processing audio: {:?}", e);
     } else {
@@ -821,9 +820,8 @@ impl AudioManager {
                                 }
                             }
                             if !inserted {
-                                // path is a structured field so Sentry dedups the
-                                // issue across different devices; otherwise every
-                                // device name creates a new Sentry issue.
+                                // Keep the path as a structured field so local log
+                                // consumers can group the error across devices.
                                 error!(
                                     audio_chunk_path = %path,
                                     "audio chunk DB insert failed after 3 retries, data may be missing from timeline"

@@ -41,7 +41,6 @@ import { localFetch } from "@/lib/api";
 import { listen } from "@tauri-apps/api/event";
 import { ReferralCard } from "./referral-card";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
-import posthog from "posthog-js";
 
 /**
  * Map a thrown fetch error into a user-readable description.
@@ -71,12 +70,6 @@ export function AccountSection() {
   const [connectionsSyncing, setConnectionsSyncing] = useState(false);
 
   useEffect(() => {
-    if (!settings.user?.email) {
-      posthog.capture("app_login", {
-        email: settings.user?.email,
-      });
-    }
-
     const setupDeepLink = async () => {
       const unsubscribeDeepLink = await onOpenUrl(async (urls) => {
         console.log("received deep link urls:", urls);
@@ -127,7 +120,6 @@ export function AccountSection() {
       return;
     }
     if (!settings.user?.cloud_subscribed) {
-      posthog.capture("cloud_plan_selected", { plan: "pro", interval: annual ? "year" : "month" });
       try {
         // New subscription checkout ($50/mo Pro). Pass the Clerk token so the
         // session pins customer_email + metadata.user_id to this account — the

@@ -91,7 +91,7 @@ export interface SessionRecord {
    *  as the sort fallback for chats that haven't received a user
    *  message yet. */
   createdAt: number;
-  /** ms since epoch of the most recent activity. Tracked for telemetry
+  /** ms since epoch of the most recent activity. Used to detect
    *  / "last activity" UI only — DOES NOT affect sort order. */
   updatedAt: number;
   /** ms since epoch of the most recent USER-SENT message. Drives the

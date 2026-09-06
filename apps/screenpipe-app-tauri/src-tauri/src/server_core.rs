@@ -70,15 +70,6 @@ impl ServerCore {
 
         // --- Environment setup ---
         std::env::set_var("SCREENPIPE_FD_LIMIT", "8192");
-        if !config.analytics_id.is_empty() {
-            std::env::set_var("SCREENPIPE_ANALYTICS_ID", &config.analytics_id);
-        }
-        // Tag engine telemetry as the desktop app (vs cli / source) so WAU can be
-        // split by distribution. Respect an explicit override (e.g. enterprise embeds).
-        if std::env::var("SCREENPIPE_DISTRIBUTION").is_err() {
-            std::env::set_var("SCREENPIPE_DISTRIBUTION", "desktop-app");
-        }
-        crate::analytics::init(config.analytics_enabled);
 
         if config.use_chinese_mirror {
             std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
@@ -265,8 +256,8 @@ impl ServerCore {
         let manual_meeting = Arc::new(tokio::sync::RwLock::new(None::<i64>));
 
         // --- Resource + sleep monitors (long-lived) ---
-        let resource_monitor = ResourceMonitor::new(config.analytics_enabled);
-        resource_monitor.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
+        let resource_monitor = ResourceMonitor::new();
+        resource_monitor.start_monitoring(Duration::from_secs(30));
         start_sleep_monitor();
 
         // --- HTTP server ---
@@ -378,19 +369,6 @@ impl ServerCore {
             pipe_store,
             config.port,
         );
-        pipe_manager.set_on_run_complete(Arc::new(
-            |pipe_name, success, duration_secs, error_type| {
-                let mut props = serde_json::json!({
-                    "pipe": pipe_name,
-                    "success": success,
-                    "duration_secs": duration_secs,
-                });
-                if let Some(et) = error_type {
-                    props["error_type"] = serde_json::Value::String(et.to_string());
-                }
-                crate::analytics::capture_event_nonblocking("pipe_scheduled_run", props);
-            },
-        ));
         if let Some(cb) = on_pipe_output {
             pipe_manager.set_on_output_line(cb);
         }

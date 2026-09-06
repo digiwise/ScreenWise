@@ -423,7 +423,7 @@ pub fn start_sleep_monitor() {
     });
 
     // Thread 3: NSWorkspace notification observers for system sleep/wake.
-    // These are still useful for the RECENTLY_WOKE flag and telemetry.
+    // These drive the local RECENTLY_WOKE flag.
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let workspace = ns::Workspace::shared();

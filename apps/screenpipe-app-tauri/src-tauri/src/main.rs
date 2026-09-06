@@ -6,7 +6,6 @@
 #![allow(deprecated)] // cocoa/objc crate deprecations — will migrate to objc2 later
 #![allow(unused_imports)]
 
-use analytics::AnalyticsManager;
 use commands::show_main_window;
 use serde_json::json;
 use std::env;
@@ -29,11 +28,8 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
-#[path = "analytics_local.rs"]
-mod analytics;
 #[allow(deprecated)]
 mod icons;
-use crate::analytics::start_analytics;
 mod agent_event_emitter;
 mod audio_exclusions;
 mod calendar;
@@ -516,8 +512,7 @@ async fn main() {
         // a residual race is possible if the worker is inside an await
         // that doesn't include the shutdown future. Either way, this is
         // orderly-shutdown noise — not a crash — and logging it to
-        // last-panic.log + Sentry makes the app look unstable to users
-        // and skews crash-rate dashboards.
+        // last-panic.log makes the app look unstable to users.
         if payload.contains("Tokio 1.x context was found, but it is being shutdown") {
             eprintln!(
                 "(suppressed tokio shutdown-time panic on thread '{}' at {})",
@@ -753,9 +748,6 @@ async fn main() {
     #[cfg(feature = "e2e")]
     let app = app.plugin(tauri_plugin_webdriver::init());
 
-    // Only add Sentry plugin if telemetry is enabled
-    let app = app;
-
     #[cfg(target_os = "macos")]
     let app = app.plugin(tauri_nspanel::init());
 
@@ -884,8 +876,7 @@ async fn main() {
                 .with_writer(std::io::stdout)
                 .with_filter(EnvFilter::new(LOG_FILTER));
 
-            // Initialize the tracing subscriber with both layers + optional Sentry layer
-            // The Sentry layer captures error!() and warn!() events (not just panics)
+            // Initialize local file and console logging.
             let registry = tracing_subscriber::registry()
                 .with(file_layer)
                 .with(console_layer);
@@ -930,10 +921,6 @@ async fn main() {
 
             info!("App version: {}", env!("CARGO_PKG_VERSION"));
             info!("Local data directory: {}", base_dir.display());
-
-            // PostHog analytics setup
-            let posthog_api_key = "phc_z7FZXE8vmXtdTQ78LMy3j1BQWW4zP6PGDUP46rgcdnb".to_string();
-            let interval_hours = 6;
 
             // Store setup and initialization - must be done first
             // Note: StoreBuilder handles file creation internally — pre-creating
@@ -1435,8 +1422,6 @@ async fn main() {
                 });
             }
 
-            let is_analytics_enabled = false;
-
             let is_autostart_enabled = store
                 .auto_start_enabled;
 
@@ -1450,31 +1435,6 @@ async fn main() {
                 "registered for autostart? {}",
                 autostart_manager.is_enabled().unwrap_or(false)
             );
-
-            // Use persistent analytics_id for PostHog (consistent across frontend and backend)
-            let unique_id = store.recording.analytics_id.clone();
-            let email = store.user.email.unwrap_or_default();
-            let local_api = crate::recording::local_api_context_from_app(&app_handle);
-
-            if is_analytics_enabled {
-                match start_analytics(
-                    unique_id,
-                    email,
-                    posthog_api_key,
-                    interval_hours,
-                    local_api.url(""),
-                    local_api.api_key.clone(),
-                    data_dir.clone(),
-                    is_analytics_enabled,
-                ) {
-                    Ok(analytics_manager) => {
-                        app.manage(analytics_manager);
-                    }
-                    Err(e) => {
-                        error!("Failed to start analytics: {}", e);
-                    }
-                }
-            }
 
             // Start health check service (macos only)
             let app_handle_clone = app_handle.clone();
@@ -1656,23 +1616,6 @@ async fn main() {
         // or in any code this synchronously calls (e.g. ShowRewindWindow::show/close).
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match event {
-                tauri::RunEvent::Ready { .. } => {
-                    debug!("Ready event");
-                    // Send app started event
-                    let app_handle = app_handle.app_handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Some(analytics) = app_handle.try_state::<Arc<AnalyticsManager>>() {
-                            let _ = analytics
-                                .send_event(
-                                    "app_started",
-                                    Some(json!({
-                                        "startup_type": "normal"
-                                    })),
-                                )
-                                .await;
-                        }
-                    });
-                }
                 tauri::RunEvent::ExitRequested { api, .. } => {
                     // When the user clicks "quit screenpipe" in the tray menu,
                     // QUIT_REQUESTED is set to true — let the exit proceed.
@@ -1688,22 +1631,6 @@ async fn main() {
 
                 tauri::RunEvent::Exit => {
                     info!("App exiting — running cleanup");
-
-                    // Send app closed analytics
-                    let app_handle_v2 = app_handle.app_handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Some(analytics) = app_handle_v2.try_state::<Arc<AnalyticsManager>>()
-                        {
-                            let _ = analytics
-                                .send_event(
-                                    "app_closed",
-                                    Some(json!({
-                                        "shutdown_type": "normal"
-                                    })),
-                                )
-                                .await;
-                        }
-                    });
 
                     // Shut down embedded server (incl. audio manager / ggml Metal cleanup)
                     // MUST happen synchronously before exit() runs C++ static destructors,
