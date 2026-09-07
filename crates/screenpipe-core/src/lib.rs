@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod connections;
 pub mod ffmpeg;
+pub mod machine_id;
 pub mod memories;
 pub mod paths;
 pub mod permissions;
@@ -25,7 +26,4 @@ pub mod pii_removal;
 pub use pii_removal::*;
 
 pub use language::{Language, TESSERACT_LANGUAGES};
-#[cfg(feature = "cloud-sync")]
-pub mod sync;
-#[cfg(feature = "cloud-sync")]
-pub use sync::*;
+pub use machine_id::get_or_create_machine_id;

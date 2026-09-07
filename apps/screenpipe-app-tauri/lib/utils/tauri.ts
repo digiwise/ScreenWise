@@ -288,30 +288,6 @@ async deleteCacheFiles(paths: string[]) : Promise<Result<number, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Delete all cloud data.
- */
-async deleteCloudData() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_cloud_data") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Delete all locally-stored data that was synced from a specific remote device.
- * This calls the local screenpipe server's /data/delete-device endpoint.
- * Refuses to delete data for the current device as a safety guard.
- */
-async deleteDeviceLocalData(machineId: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_device_local_data", { machineId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async disableKeychainEncryption() : Promise<Result<KeychainStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("disable_keychain_encryption") };
@@ -656,39 +632,6 @@ async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Get sync configuration.
- */
-async getSyncConfig() : Promise<Result<SyncConfig, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_sync_config") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get list of registered devices.
- */
-async getSyncDevices() : Promise<Result<SyncDeviceInfo[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_sync_devices") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get current sync status.
- */
-async getSyncStatus() : Promise<Result<SyncStatusResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_sync_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async hideMainWindow() : Promise<void> {
     await TAURI_INVOKE("hide_main_window");
 },
@@ -748,19 +691,6 @@ async icsCalendarTestUrl(url: string) : Promise<Result<number, string>> {
 async importSkill(sourcePath: string) : Promise<Result<ImportedSkill, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_skill", { sourcePath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Initialize sync with password.
- * This initializes both the local SyncManager (for device queries) and
- * the server's SyncService (for actual data sync).
- */
-async initSync(password: string) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("init_sync", { password }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -879,17 +809,6 @@ async livetextSetGuardRect(key: string, x: number, y: number, w: number, h: numb
 async livetextUpdatePosition(frameId: string, x: number, y: number, w: number, h: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("livetext_update_position", { frameId, x, y, w, h }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Lock sync (clear keys from memory and stop server sync service).
- */
-async lockSync() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("lock_sync") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1484,17 +1403,6 @@ async removeImportedSkill(name: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Remove a device from sync.
- */
-async removeSyncDevice(deviceId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_sync_device", { deviceId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Request macOS Automation permission for Arc browser.
  * In production: triggers "screenpipe wants to control Arc" prompt via direct FFI.
  * In dev mode: runs the binary itself via launchctl to trigger the prompt with
@@ -1802,17 +1710,6 @@ async setOnboardingStep(step: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Enable or disable sync.
- */
-async setSyncEnabled(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_sync_enabled", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Called by the frontend after fetching the `syncStreams` block from
  * `/api/enterprise/policy`. Flat booleans rather than a struct so the
  * specta-generated TS binding stays trivial.
@@ -1987,17 +1884,6 @@ async trainVoice(name: string, startTime: string, endTime: string) : Promise<Res
 }
 },
 /**
- * Trigger an immediate sync via the screenpipe server.
- */
-async triggerSync() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trigger_sync") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * User-initiated update check from Settings → General. Returns:
  * - `Ok(true)`  when an update was found (banner will appear after download).
  * - `Ok(false)` when already up to date or the build can't auto-update.
@@ -2035,17 +1921,6 @@ async updateGlobalShortcuts(showShortcut: string, startShortcut: string, stopSho
 async updateShowScreenpipeShortcut(newShortcut: string, enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_show_screenpipe_shortcut", { newShortcut, enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Update sync configuration.
- */
-async updateSyncConfig(config: SyncConfig) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_sync_config", { config }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2849,18 +2724,6 @@ preview?: string | null;
  * Priority: 1 = hero card (most relevant), 2+ = supporting cards
  */
 priority?: number }
-/**
- * Sync configuration.
- */
-export type SyncConfig = { enabled: boolean; syncIntervalMinutes: number; syncTranscripts: boolean; syncOcr: boolean; syncAudio: boolean; syncFrames: boolean }
-/**
- * Device information.
- */
-export type SyncDeviceInfo = { id: string; deviceId: string; deviceName: string | null; deviceOs: string; lastSyncAt: string | null; createdAt: string; isCurrent: boolean }
-/**
- * Sync status response.
- */
-export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSync: string | null; lastError: string | null; storageUsed: number | null; storageLimit: number | null; deviceCount: number | null; deviceLimit: number | null; syncTier: string | null; machineId: string }
 export type User = { id: string | null; name: string | null; email: string | null; image: string | null; token: string | null; clerk_id: string | null; api_key: string | null; credits: Credits | null; stripe_connected: boolean | null; stripe_account_status: string | null; github_username: string | null; bio: string | null; website: string | null; contact: string | null; cloud_subscribed: boolean | null; credits_balance: number | null; app_entitled: boolean | null; subscription_plan: string | null; entitlement: JsonValue | null }
 export type ViewerContent = { kind: "text"; text: string; name: string; path: string; truncated: boolean; total_bytes: number } | { kind: "image"; data_url: string; name: string; path: string } |
 /**

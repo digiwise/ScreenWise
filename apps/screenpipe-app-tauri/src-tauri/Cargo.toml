@@ -119,11 +119,11 @@ urlencoding = "2"
 url = "2"
 async-trait = "0.1"
 
-# Cloud sync utilities
+# Remote-device discovery (removed with the separate SFTP sync subsystem)
 hostname = "0.4"
 
-# Screenpipe core (for sync)
-screenpipe-core = { path = "../../../crates/screenpipe-core", features = ["cloud-sync", "secrets"] }
+# Shared local core utilities and secret storage.
+screenpipe-core = { path = "../../../crates/screenpipe-core", features = ["secrets"] }
 
 # Embedded screenpipe server
 screenpipe-config = { path = "../../../crates/screenpipe-config", features = ["specta"] }

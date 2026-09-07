@@ -4,7 +4,7 @@
 
 "use client";
 
-import { getStore, saveAndEncrypt, useSettings } from "@/lib/hooks/use-settings";
+import { getStore, useSettings } from "@/lib/hooks/use-settings";
 
 import React, { useEffect, useState, useRef, useCallback, ErrorInfo } from "react";
 import NotificationHandler from "@/components/notification-handler";
@@ -193,66 +193,6 @@ export default function OverlayPage() {
       checkScreenPermissionRestart();
     }
   }, [onboardingData.isCompleted]);
-
-  // Auto-init cloud sync from saved password on app startup
-  useEffect(() => {
-    if (!isSettingsLoaded || !settings.user?.token) return;
-    
-    const autoInitSync = async () => {
-      try {
-        // Check if sync is already running
-        const resp = await localFetch("/sync/status");
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.enabled) return; // Already running
-        }
-      } catch {
-        // Server not ready yet, retry after delay
-        return;
-      }
-
-      // Try saved password from store.bin first, then localStorage for migration
-      let password: string | null = null;
-      try {
-        const store = await getStore();
-        password = await store.get<string>("sync_password") || null;
-      } catch {
-        // Store not available yet
-      }
-
-      // Fall back to old localStorage for migration
-      if (!password) {
-        const legacy = localStorage.getItem("sync_password");
-        if (legacy) {
-          password = atob(legacy);
-          // Migrate to store.bin
-          try {
-            const store = await getStore();
-            await store.set("sync_password", password);
-            await saveAndEncrypt(store);
-            localStorage.removeItem("sync_password");
-            console.log("migrated sync password from localStorage to store.bin");
-          } catch {
-            // Non-critical
-          }
-        }
-      }
-
-      if (!password) return;
-
-      try {
-        await commands.initSync(password);
-        console.log("cloud sync auto-initialized from saved password");
-      } catch (e) {
-        console.log("cloud sync auto-init failed:", e);
-        // Don't clear password - might be a transient error (server not ready)
-      }
-    };
-
-    // Delay to let the server start first
-    const timer = setTimeout(autoInitSync, 5000);
-    return () => clearTimeout(timer);
-  }, [isSettingsLoaded, settings.user?.token]);
 
   const sendLogs = async () => {
     setIsSendingLogs(true);

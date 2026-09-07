@@ -983,3 +983,80 @@ Verification on Windows on 2026-09-04, with frontend checks repeated on
   is now exercised and understood rather than dependency-blocked.
 - The exact reusable command and failure-avoidance matrix are recorded in
   `BUILD_NOTES.md` and the workspace `AGENTS.md`.
+
+### Remaining desktop cloud-sync boundary — 2026-09-08
+
+The engine sync CLI, service, and HTTP routes are already gone, but the desktop
+still registers the consumer cloud-sync command/state module and starts its
+sync and cloud-archive tasks. The overlay also retries a persisted sync
+password, while the storage UI and onboarding/account surfaces still call the
+retired local `/sync` and `/archive` routes plus Screenpipe-hosted cloud-sync
+subscription and checkout endpoints. The checked-in Tauri bindings expose the
+same dead commands and types.
+
+`screenpipe-engine` otherwise enables `screenpipe-core/cloud-sync` only to use
+the stable machine-ID helper when annotating local memory records. That helper
+can move to a plainly named, always-available core module without changing its
+existing `~/.screenpipe/machine_id` persistence or any historical database
+columns. Local retention is implemented beside the desktop sync code but uses
+the authenticated loopback `/retention/configure` route and must be extracted
+and preserved.
+
+The generic `screenpipe-sync` workspace crate is not yet unused: the optional
+desktop `enterprise-build` path imports it directly for enterprise uploads.
+The consumer `cloud-sync` feature edge and default-workspace build edge can be
+removed now; deleting the crate itself is deferred until the separately scoped
+enterprise removal proves that final caller gone.
+
+### Desktop consumer cloud-sync removal — complete
+
+- Removed desktop cloud-sync/cloud-archive command registration, managed state,
+  startup tasks, password retry, settings stores, UI, generated command types,
+  and stale `/sync` and `/archive` endpoint tests and documentation. The account
+  page no longer advertises or controls data, pipe, memory, or connection sync.
+- Extracted the authenticated local retention startup call into `retention.rs`;
+  it still uses the resolved local API bearer token and `/retention/configure`.
+  No retention behavior or database schema was removed.
+- Moved the stable machine-ID helper to `screenpipe-core::machine_id` without
+  changing its `~/.screenpipe/machine_id` path or value format. Local memory
+  records continue to use it.
+- Removed the engine and desktop `cloud-sync` feature edges and the cloud-only
+  core modules and direct dependency declarations. `screenpipe-sync` is no
+  longer a default workspace member, but remains a workspace crate and an
+  optional desktop dependency because `enterprise-build` still imports it;
+  deletion is deferred to the separately scoped enterprise-service removal.
+- Preserved historical sync columns and old settings-file keys by making no
+  destructive migration or persisted-settings rewrite. The vision design note
+  now marks its multi-machine sync discussion as retired compatibility history.
+- Tracked-code searches found no remaining consumer sync command/state names,
+  settings fields, local sync/archive route calls, OpenAPI operations, or
+  active `cloud-sync` feature edge. Screenpipe-hosted checkout/subscription
+  calls remain only in product-account/provider sales surfaces and are assigned
+  to the next account/provider commits. Static URL-detection fixture text and
+  the enterprise-only `screenpipe-sync` caller are non-consumer exceptions.
+
+Verification on Windows on 2026-09-08:
+
+- Root `cargo check -p screenpipe-engine --locked --offline` and desktop
+  `cargo check --locked --offline` passed in Visual Studio Developer
+  PowerShell. The full root `cargo build --release --locked --offline` passed
+  with Ninja in 10m 02s and only the two established audio/engine warnings.
+- `cargo test -p screenpipe-core --lib --locked --offline` ran 286 tests: 285
+  passed and the unrelated, time-sensitive
+  `pipes::tests::test_should_run_cron_stale_last_run_waits` failed. This is
+  recorded rather than hidden and belongs to the later pipe removal.
+- Root `cargo fmt --all -- --check`, direct TypeScript `tsc --noEmit`, the
+  direct Next production static export, and `git diff --check` passed. Next
+  reported only the existing `unpdf` `import.meta` warning. The separate
+  desktop fmt check still reports only its pre-existing `main.rs` `icons`
+  module-order drift.
+- The exact documented native desktop binding test built, linked, and ran. It
+  failed only because checked-in bindings still contain `getCloudToken`,
+  `openLoginWindow`, and `setCloudToken`; a generated comparison found no other
+  command or type drift. Those three account bindings are intentionally removed
+  in the immediately following product-account commit, where the test must pass.
+- Initial locked checks correctly rejected the changed direct dependency lists.
+  Both lockfiles were refreshed offline. Inspection shows only removals from the
+  `screenpipe-core` dependency arrays; no package/version was added, removed, or
+  upgraded because the remaining workspace/enterprise graph still uses those
+  packages. `bun.lock` is unchanged.

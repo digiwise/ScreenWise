@@ -261,8 +261,6 @@ describe("Local API search and stability", function () {
     ["/speakers/unnamed", "unnamed speakers"],
     ["/speakers/search?q=test", "speaker search"],
     ["/retention/status", "retention status"],
-    ["/sync/status", "sync status"],
-    ["/archive/status", "archive status"],
     ["/power", "power status"],
     ["/openapi.json", "OpenAPI JSON"],
   ] as const;
@@ -290,8 +288,6 @@ describe("Local API search and stability", function () {
     ["/speakers/search?name=", "empty speaker search"],
     ["/speakers/search?name=Louis", "named speaker search"],
     ["/retention/status?force=true", "retention force status"],
-    ["/sync/status?detail=true", "sync detail status"],
-    ["/archive/status?detail=true", "archive detail status"],
     ["/power?detail=true", "power detail status"],
     ["/pipes/list", "pipes list"],
     ["/connections", "connections list"],

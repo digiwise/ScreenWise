@@ -101,7 +101,7 @@ const ALL_SECTIONS = [
 const SETTINGS_SECTIONS = new Set<string>([
   "account", "recording", "ai", "general", "display", "shortcuts", "notifications",
   "privacy", "storage", "team", "referral", "usage", "speakers",
-  "disk-usage", "cloud-archive", "cloud-sync", // backwards compat → maps to "storage"
+  "disk-usage", // backwards compat → maps to "storage"
 ]);
 
 function HomeContent() {
@@ -160,7 +160,7 @@ function HomeContent() {
   // Redirect settings sections to the standalone settings page
   useEffect(() => {
     if (SETTINGS_SECTIONS.has(activeSection)) {
-      const section = activeSection === "disk-usage" || activeSection === "cloud-archive" || activeSection === "cloud-sync"
+      const section = activeSection === "disk-usage"
         ? "storage"
         : activeSection;
       router.push(`/settings?section=${section}`);
@@ -880,7 +880,7 @@ function HomeContent() {
       const section = url.searchParams.get("section");
       if (!section) return;
       if (SETTINGS_SECTIONS.has(section)) {
-        const mapped = section === "disk-usage" || section === "cloud-archive" || section === "cloud-sync"
+        const mapped = section === "disk-usage"
           ? "storage" : section;
         router.push(`/settings?section=${mapped}`);
       } else {

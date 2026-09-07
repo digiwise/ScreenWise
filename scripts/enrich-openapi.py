@@ -354,79 +354,6 @@ ENRICHMENTS = {
             "description": "Initialize vault encryption with a password. Only needs to be done once.",
         }
     },
-    # Sync
-    "/sync/init": {
-        "post": {
-            "tag": "Cloud Sync",
-            "summary": "Initialize cloud sync",
-            "description": "Set up cloud sync with authentication credentials and encryption password.",
-        }
-    },
-    "/sync/status": {
-        "get": {
-            "tag": "Cloud Sync",
-            "summary": "Get sync status",
-        }
-    },
-    "/sync/trigger": {
-        "post": {
-            "tag": "Cloud Sync",
-            "summary": "Trigger sync",
-            "description": "Manually trigger an immediate sync cycle.",
-        }
-    },
-    "/sync/lock": {
-        "post": {
-            "tag": "Cloud Sync",
-            "summary": "Lock sync",
-        }
-    },
-    "/sync/download": {
-        "post": {
-            "tag": "Cloud Sync",
-            "summary": "Download synced data",
-            "description": "Download and import data from other synced devices.",
-        }
-    },
-    "/sync/pipes/push": {
-        "post": {
-            "tag": "Cloud Sync",
-            "summary": "Push pipe configs to cloud",
-        }
-    },
-    "/sync/pipes/pull": {
-        "post": {
-            "tag": "Cloud Sync",
-            "summary": "Pull pipe configs from cloud",
-        }
-    },
-    # Archive
-    "/archive/init": {
-        "post": {
-            "tag": "Cloud Archive",
-            "summary": "Initialize cloud archive",
-            "description": "Set up cloud archive for encrypted off-device backup of old data.",
-        }
-    },
-    "/archive/configure": {
-        "post": {
-            "tag": "Cloud Archive",
-            "summary": "Configure archive settings",
-        }
-    },
-    "/archive/status": {
-        "get": {
-            "tag": "Cloud Archive",
-            "summary": "Get archive status",
-        }
-    },
-    "/archive/run": {
-        "post": {
-            "tag": "Cloud Archive",
-            "summary": "Run archive now",
-            "description": "Trigger an immediate archive upload cycle.",
-        }
-    },
     # Retention
     "/retention/configure": {
         "post": {
@@ -484,8 +411,6 @@ TAG_ORDER = [
     ("Tags", "Tag content items for organization"),
     ("Activity", "Activity summaries and analytics"),
     ("Vault", "Encrypt/decrypt all data at rest"),
-    ("Cloud Sync", "Sync data across devices via cloud"),
-    ("Cloud Archive", "Archive old data to cloud storage"),
     ("Data Retention", "Auto-delete old data locally"),
     ("Data Management", "Manual data deletion and storage info"),
     ("Database", "Direct database access"),
@@ -561,8 +486,6 @@ def _auto_tag(path):
         "/meetings": "Meetings",
         "/memories": "Memories",
         "/vault": "Vault",
-        "/sync": "Cloud Sync",
-        "/archive": "Cloud Archive",
         "/retention": "Data Retention",
         "/data": "Data Management",
         "/health": "System",
@@ -592,8 +515,6 @@ def _auto_summary(operation_id, method, path):
         "routes_data_",
         "routes_vault_",
         "routes_activity_summary_",
-        "sync_api_",
-        "archive_",
         "retention_",
     ]:
         if name.startswith(prefix):

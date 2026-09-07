@@ -145,18 +145,9 @@ curl -X POST http://localhost:3030/retention/configure \
   -d '{"enabled": true, "days": 30}'
 ```
 
-retention keeps disk usage bounded. pair it with archive if you want old recordings moved out before deletion.
+retention keeps disk usage bounded by deleting local data older than the configured period.
 
-## 14. archive old data
-
-```bash
-curl "http://localhost:3030/archive/status"
-curl -X POST http://localhost:3030/archive/run
-```
-
-archive is for moving older media to encrypted storage while keeping the local timeline searchable.
-
-## 15. delete a time range
+## 14. delete a time range
 
 ```bash
 curl -X POST http://localhost:3030/data/delete-range \

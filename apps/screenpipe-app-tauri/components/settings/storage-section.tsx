@@ -10,14 +10,9 @@ import type { SettingsField } from "./settings-search";
 export const searchIndex: SettingsField[] = [
   { label: "Disk usage", keywords: ["disk", "space", "gb"] },
   { label: "Retention", keywords: ["cleanup", "delete old"] },
-  { label: "Archive" },
   { label: "Clear Cache" },
-  { label: "Sync", keywords: ["backup"] },
 ];
-import { cn } from "@/lib/utils";
 import { DiskUsageSection } from "./disk-usage-section";
-import { ArchiveSettings } from "./archive-settings";
-import { SyncSettings } from "./sync-settings";
 import { LockedSetting } from "@/components/enterprise-locked-setting";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -37,8 +32,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-type StorageTab = "local" | "archive" | "sync";
-
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -48,24 +41,11 @@ function formatBytes(bytes: number): string {
 }
 
 export function StorageSection() {
-  const [activeTab, setActiveTab] = useState<StorageTab>("local");
   const { settings, updateSettings, getDataDir } = useSettings();
   const { toast } = useToast();
   const [cacheFiles, setCacheFiles] = useState<CacheFile[]>([]);
   const [showCacheDialog, setShowCacheDialog] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
-  // The historical remote feature flag is gone. Keep the existing
-  // ScreenWise behavior until cloud sync is handled in its own cleanup.
-  const showCloudSync = false;
-
-  const tabs: { id: StorageTab; label: string; hidden?: boolean }[] = [
-    { id: "local", label: "Local" },
-    { id: "archive", label: "Archive" },
-    { id: "sync", label: "Sync", hidden: !showCloudSync },
-  ];
-
-  const visibleTabs = tabs.filter((t) => !t.hidden);
-
   const handleDataDirChange = useCallback(async () => {
     try {
       const dataDir = await getDataDir();
@@ -105,7 +85,7 @@ export function StorageSection() {
   return (
     <div className="space-y-5">
       <p className="text-muted-foreground text-sm mb-4">
-        Local disk, cloud archive, and sync
+        Local disk usage and retention
       </p>
 
       {/* Data Directory */}
@@ -244,28 +224,7 @@ export function StorageSection() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-4 border-b border-border">
-        {visibleTabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              "pb-2 text-sm transition-colors duration-150 border-b-2 -mb-px",
-              activeTab === tab.id
-                ? "border-foreground text-foreground font-medium"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab content */}
-      {activeTab === "local" && <DiskUsageSection />}
-      {activeTab === "archive" && <ArchiveSettings />}
-      {activeTab === "sync" && showCloudSync && <SyncSettings />}
+      <DiskUsageSection />
     </div>
   );
 }

@@ -345,7 +345,12 @@ After implementation, measure on real user setups:
 | Pipeline stall duration | 60s+ (indefinite) | 0s (never stalls) |
 | Health accuracy | reports "ok" when stalled | reflects actual state |
 
-## 7. Multi-Machine & Cloud Sync Considerations
+## 7. Historical Multi-Machine & Cloud Sync Considerations (retired)
+
+> This section records constraints from the superseded upstream design. The
+> ScreenWise cloud-sync runtime has been removed. Existing sync-related columns
+> remain readable for database compatibility, but no new cloud-sync behavior
+> should be built from the scenarios below.
 
 ### 7.1 Current State
 

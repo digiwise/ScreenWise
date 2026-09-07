@@ -66,6 +66,7 @@ mod pi_command_queue;
 mod pipe_suggestions_scheduler;
 mod recording;
 mod remote_sync_commands;
+mod retention;
 mod secrets;
 mod server;
 mod server_core;
@@ -74,7 +75,6 @@ mod server_core;
 mod space_monitor;
 mod store;
 mod suggestions;
-mod sync;
 mod tray;
 mod updates;
 mod voice_training;
@@ -345,9 +345,6 @@ macro_rules! define_specta_builder {
             .commands(tauri_helper::specta_collect_commands!())
             .typ::<SettingsStore>()
             .typ::<OnboardingStore>()
-            .typ::<sync::SyncStatusResponse>()
-            .typ::<sync::SyncDeviceInfo>()
-            .typ::<sync::SyncConfig>()
             .typ::<calendar::CalendarStatus>()
             .typ::<calendar::CalendarEventItem>()
             .typ::<store::IcsCalendarEntry>()
@@ -994,9 +991,6 @@ async fn main() {
                 });
             }
 
-            // Initialize sync state
-            app.manage(sync::SyncState::default());
-
             // Initialize onboarding store
             let onboarding_store = store::init_onboarding_store(&app.handle()).unwrap_or_else(|e| {
                 error!("Failed to init onboarding store, using defaults: {}", e);
@@ -1564,35 +1558,11 @@ async fn main() {
             // telemetry builds with SCREENPIPE_ENTERPRISE_LICENSE_KEY env set.
             let _enterprise_shutdown_tx = enterprise_sync::spawn(&app_handle);
 
-            // Auto-start cloud sync if it was enabled
-            let app_handle_clone = app_handle.clone();
-            let sync_state = app_handle.state::<sync::SyncState>();
-            let sync_state_clone = sync::SyncState {
-                enabled: sync_state.enabled.clone(),
-                is_syncing: sync_state.is_syncing.clone(),
-                last_sync: sync_state.last_sync.clone(),
-                last_error: sync_state.last_error.clone(),
-                manager: sync_state.manager.clone(),
-                machine_id: sync_state.machine_id.clone(),
-            };
-            tauri::async_runtime::spawn(async move {
-                // Wait for server to be ready
-                tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
-                sync::auto_start_sync(&app_handle_clone, &sync_state_clone).await;
-            });
-
-            // Auto-start cloud archive if it was enabled (after sync so it can reuse sync manager)
-            let app_handle_clone = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-                sync::auto_start_archive(&app_handle_clone).await;
-            });
-
             // Auto-start local data retention if it was enabled
             let app_handle_clone = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
-                sync::auto_start_retention(&app_handle_clone).await;
+                retention::auto_start(&app_handle_clone).await;
             });
 
             Ok(())

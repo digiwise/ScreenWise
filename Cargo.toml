@@ -18,7 +18,6 @@ default-members = [
     "crates/screenpipe-redact",
     "crates/screenpipe-screen",
     "crates/screenpipe-secrets",
-    "crates/screenpipe-sync",
     "crates/screenpipe-vault",
 ]
 exclude = [
