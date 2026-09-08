@@ -149,13 +149,8 @@ fn fallback_cloud_models() -> serde_json::Value {
 pub struct PiExecutor {
     /// Screenpipe cloud token (for LLM calls via screenpipe proxy).
     ///
-    /// Wrapped in `ArcSwap` so the desktop app can refresh it at
-    /// runtime via the `set_cloud_token` Tauri command — without this the
-    /// token captured at engine boot would be permanent for the lifetime of
-    /// the process. Users who sign in AFTER the engine started would stay on
-    /// the gateway's anonymous tier (allowed_models = haiku/gemini only)
-    /// until they fully quit and restart, because logout/login from the
-    /// webview doesn't restart the screenpipe sidecar.
+    /// Wrapped in `ArcSwap` for the remaining gateway runtime. ScreenWise no
+    /// longer hydrates this value from a product account.
     pub user_token: Arc<ArcSwap<Option<String>>>,
     /// Screenpipe API base URL (default: `https://api.screenpipe.com/v1`).
     pub api_url: String,
@@ -2761,9 +2756,7 @@ mod tests {
 
     /// Confirms the design promise: a single shared `ArcSwap` written
     /// from one place is observed by every PiExecutor that was constructed
-    /// with `with_shared_user_token` against that same Arc. This is what
-    /// lets the Tauri `set_cloud_token` command update the running
-    /// pi-agent's apiKey AND the cloud_proxy.rs forwarder in one write.
+    /// with `with_shared_user_token` against that same Arc.
     #[tokio::test]
     async fn shared_arc_propagates_token_writes_across_executors() {
         let shared = Arc::new(ArcSwap::new(Arc::new(None::<String>)));

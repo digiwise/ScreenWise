@@ -1407,8 +1407,8 @@ pub async fn get_disk_usage(
 }
 
 /// Open Google Calendar OAuth inside an in-app WebView.
-/// Same pattern as `open_login_window` — intercepts the screenpipe:// deep-link
-/// redirect so we don't rely on Safari custom-scheme support.
+/// Intercepts the screenpipe:// deep-link redirect so we do not rely on Safari
+/// custom-scheme support.
 #[allow(dead_code)] // invoked via Tauri IPC, not direct Rust calls
 #[tauri::command]
 #[specta::specta]

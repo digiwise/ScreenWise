@@ -489,22 +489,6 @@ async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Read the user's screenpipe cloud session JWT from `~/.screenpipe/
- * auth.json`. Returns None when the file is missing, malformed, or the
- * token field is empty.
- *
- * The settings store (`store.bin → user.token`) is the canonical
- * runtime cache for this token but is only populated after a fresh
- * in-app sign-in. `auth.json` is the durable on-disk copy written by
- * the pi-agent configuration flow — it survives store resets and dev-
- * mode launches where the in-memory user object hasn't been hydrated
- * yet. Used by the enterprise-policy hook to send the Bearer header
- * even when the in-app user object is still null.
- */
-async getCloudToken() : Promise<string | null> {
-    return await TAURI_INVOKE("get_cloud_token");
-},
 async getDiskUsage(forceRefresh: boolean | null, dataDir: string | null) : Promise<Result<JsonValue, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_disk_usage", { forceRefresh, dataDir }) };
@@ -876,27 +860,12 @@ async oauthStatus(integrationId: string, instance: string | null) : Promise<Resu
 },
 /**
  * Open Google Calendar OAuth inside an in-app WebView.
- * Same pattern as `open_login_window` — intercepts the screenpipe:// deep-link
- * redirect so we don't rely on Safari custom-scheme support.
+ * Intercepts the screenpipe:// deep-link redirect so we do not rely on Safari
+ * custom-scheme support.
  */
 async openGoogleCalendarAuthWindow(authUrl: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_google_calendar_auth_window", { authUrl }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Open the screenpi.pe login page.
- * On Windows, opens in the system browser (WebView2 has issues with some auth
- * providers; the registered deep-link scheme handles the redirect back).
- * On macOS/Linux, uses an in-app WebView that intercepts the screenpipe://
- * deep-link redirect (Safari blocks custom-scheme redirects).
- */
-async openLoginWindow() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_login_window") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1650,33 +1619,6 @@ async setCloudMediaAnalysisSkill(enabled: boolean) : Promise<Result<null, string
 }
 },
 /**
- * Push a fresh cloud-auth token into the running sidecar.
- *
- * The frontend invokes this on every sign-in (after `loadUser` writes
- * `settings.user`) and on sign-out (passing `None`). Without it, the
- * `Server.cloud_token` and `PiExecutor.user_token` captured at engine
- * boot would be permanent for the lifetime of the sidecar process —
- * users who signed in AFTER the engine started would stay on the
- * gateway's anonymous tier (allowed_models = haiku/gemini only) on
- * every pipe run, surfacing as `403 "model_not_allowed"` for any
- * Sonnet/Opus preset even with an active Pro subscription. Logout +
- * log-in from the webview alone does NOT restart the sidecar, which
- * is why the previous user-facing workaround was "fully quit the
- * app from the tray."
- *
- * Both the local `/v1/chat/completions` proxy and the pi-agent's
- * `models.json` apiKey share the same `Arc<ArcSwap<Option<String>>>`,
- * so one write here updates both readers on the next pipe run.
- */
-async setCloudToken(token: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_cloud_token", { token }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Enable or disable enhanced AI suggestions (uses screenpipe cloud).
  */
 async setEnhancedAiSuggestions(enabled: boolean, token: string) : Promise<Result<null, string>> {
@@ -2055,7 +1997,6 @@ endDisplay: string; attendees: string[]; location: string | null; meetingUrl: st
 source?: string }
 export type CalendarStatus = { available: boolean; authorized: boolean; authorizationStatus: string; calendarCount: number }
 export type ChatGptOAuthStatus = { logged_in: boolean }
-export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.
  */
@@ -2135,11 +2076,7 @@ export type PendingUpdateSnapshot = { version: string; body: string;
 /**
  * True once the bundle is downloaded and the app is ready to restart.
  */
-downloaded: boolean;
-/**
- * True when download failed with 401/403 — user must sign in.
- */
-auth_required: boolean }
+downloaded: boolean }
 export type PiCheckResult = { available: boolean; path: string | null }
 /**
  * Image content for Pi RPC protocol (pi-ai ImageContent format)
@@ -2651,7 +2588,7 @@ listenOnLan?: boolean }) &
  * that the Rust struct doesn't know about. Without this, `save()` would
  * serialize only known fields and silently wipe frontend-only data.
  */
-({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { aiPresets: AIPreset[]; isLoading: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string; showShortcutOverlay?: boolean;
+({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { aiPresets: AIPreset[]; isLoading: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string; showShortcutOverlay?: boolean;
 /**
  * Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
  */
@@ -2724,7 +2661,6 @@ preview?: string | null;
  * Priority: 1 = hero card (most relevant), 2+ = supporting cards
  */
 priority?: number }
-export type User = { id: string | null; name: string | null; email: string | null; image: string | null; token: string | null; clerk_id: string | null; api_key: string | null; credits: Credits | null; stripe_connected: boolean | null; stripe_account_status: string | null; github_username: string | null; bio: string | null; website: string | null; contact: string | null; cloud_subscribed: boolean | null; credits_balance: number | null; app_entitled: boolean | null; subscription_plan: string | null; entitlement: JsonValue | null }
 export type ViewerContent = { kind: "text"; text: string; name: string; path: string; truncated: boolean; total_bytes: number } | { kind: "image"; data_url: string; name: string; path: string } |
 /**
  * Non-text, non-image file (random binary). The UI surfaces a

@@ -448,11 +448,9 @@ export default function EngineStartup({
     return parts.join(". ") + ".";
   }, []);
 
-  // Stream a warm summary using the user's default preset, falling back to
-  // their cloud token. If neither is available, leave summary empty and let
-  // the fallback timer release the continue button.
-  // Track attempts so a transient failure (no token at first poll, network
-  // blip) gets retried instead of permanently breaking the slide.
+  // Stream a warm summary using the user's configured provider. If none is
+  // available, leave summary empty and let the fallback timer release the
+  // continue button.
   const summaryAttemptsRef = useRef(0);
   const MAX_SUMMARY_ATTEMPTS = 3;
 
@@ -471,13 +469,7 @@ export default function EngineStartup({
       let model = "claude-haiku-4-5";
       let auth: Record<string, string> = {};
 
-      const userToken = settings.user?.token;
-
-      if (preset?.provider === "screenpipe-cloud" && userToken) {
-        endpoint = "https://api.screenpipe.com/v1/chat/completions";
-        model = preset.model || model;
-        auth = { Authorization: `Bearer ${userToken}` };
-      } else if (
+      if (
         (preset?.provider === "openai" || preset?.provider === "custom" || preset?.provider === "anthropic") &&
         preset.apiKey &&
         preset.url
@@ -485,14 +477,8 @@ export default function EngineStartup({
         endpoint = `${preset.url.replace(/\/$/, "")}/chat/completions`;
         model = preset.model;
         auth = { Authorization: `Bearer ${preset.apiKey}` };
-      } else if (userToken) {
-        // Fall back to cloud even if preset is non-cloud but token exists.
-        endpoint = "https://api.screenpipe.com/v1/chat/completions";
-        auth = { Authorization: `Bearer ${userToken}` };
       } else {
-        // No way to call any model. Bail and reset the gate so a later poll
-        // can retry — settings.user.token can land asynchronously after the
-        // login slide completes.
+        // No configured provider can serve this optional onboarding summary.
         summaryStartedRef.current = false;
         return;
       }
@@ -585,9 +571,7 @@ if the input is sparse, just describe what little you have warmly. don't apologi
         // Network / model error — leave whatever streamed so far visible.
         // The fallback timer releases the continue button. Reset the started
         // flag so the next poll cycle gets one more shot up to
-        // MAX_SUMMARY_ATTEMPTS — a stale settings.user.token at the very
-        // first poll (login slide just finished, token not yet propagated)
-        // would otherwise permanently kill the summary.
+        // MAX_SUMMARY_ATTEMPTS.
         if ((err as any)?.name !== "AbortError") {
           console.warn("summary stream failed:", err);
           summaryStartedRef.current = false;
@@ -596,7 +580,7 @@ if the input is sparse, just describe what little you have warmly. don't apologi
         setSummaryStreaming(false);
       }
     },
-    [settings.aiPresets, settings.user?.token]
+    [settings.aiPresets]
   );
 
   // Kick off the summary once we have enough signals.
@@ -689,10 +673,9 @@ if the input is sparse, just describe what little you have warmly. don't apologi
 
   const ensureDefaultPreset = useCallback(async () => {
     if (settings.aiPresets.length === 0) {
-      const isPro = settings.user?.cloud_subscribed === true;
-      await updateSettings({ aiPresets: makeDefaultPresets(isPro) as any });
+      await updateSettings({ aiPresets: makeDefaultPresets() as any });
     }
-  }, [settings.aiPresets.length, settings.user?.cloud_subscribed, updateSettings]);
+  }, [settings.aiPresets.length, updateSettings]);
 
   const handleContinue = async () => {
     try {
@@ -717,8 +700,8 @@ if the input is sparse, just describe what little you have warmly. don't apologi
       try {
         localStorage?.setItem("machineId", machineId);
       } catch {}
-      const identifier = settings.user?.id || machineId;
-      const type = settings.user?.id ? "user" : "machine";
+      const identifier = machineId;
+      const type = "machine";
       const logFilesResult = await commands.getLogFiles();
       if (logFilesResult.status !== "ok")
         throw new Error("Failed to get log files");

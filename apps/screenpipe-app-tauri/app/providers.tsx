@@ -44,10 +44,7 @@ export const Providers = forwardRef<
   // succeeds; the post-mount effect flips mounted=true and the real tree
   // renders client-only without a hydration step.
   const [mounted, setMounted] = useState(false);
-  // The deep-link handler (which turns the screenpipe:// login callback into a
-  // loadUser call) MUST stay mounted outside the entitlement gate. Otherwise the
-  // "sign in required" screen unmounts it and the login token is dropped, so
-  // sign-in can never complete and the user is locked out for good.
+  // Keep navigation and integration deep links mounted in every main window.
   const pathname = usePathname();
   const isOverlay = pathname === "/shortcut-reminder";
   useEffect(() => {

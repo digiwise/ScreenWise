@@ -54,7 +54,7 @@ const canRun = !seedFlags.includes("onboarding");
       // The app spawns its initial window and waitForAppReady already
       // settled the stores. The active webview's URL is the load-bearing
       // assertion: a regression that re-routes fresh installs to /home
-      // (and crashes downstream because settings.user is undefined) is
+      // (and crashes downstream before settings are loaded) is
       // exactly the kind of "first impression is a white screen" bug
       // that costs us users at hour 1.
       const url = new URL(await browser.getUrl());
@@ -66,17 +66,15 @@ const canRun = !seedFlags.includes("onboarding");
       expect(url.pathname).toBe("/onboarding");
     });
 
-    it("renders the login slide content, not a loading spinner or blank shell", async () => {
+    it("renders onboarding content, not a loading spinner or blank shell", async () => {
       // The page has a top-level isLoading branch that shows only a
       // spinner — guard against the test passing while the user actually
-      // sees nothing useful. Asserting visible text from login-gate.tsx
-      // (the brand wordmark + tagline) catches both "spinner never
-      // resolved" and "login component threw and got unmounted".
+      // sees nothing useful. Asserting visible setup content catches both
+      // "spinner never resolved" and a failed onboarding render.
       const bodyText = ((await browser.execute(
         () => document.body?.innerText || "",
       )) as string).toLowerCase();
-      expect(bodyText).toContain("screenpipe");
-      expect(bodyText).toContain("ai finally knows what you");
+      expect(bodyText).toContain("permissions");
     });
 
     it("does not open a home window alongside onboarding", async () => {

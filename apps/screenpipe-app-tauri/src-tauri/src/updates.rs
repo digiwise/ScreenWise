@@ -41,21 +41,12 @@ pub async fn install_specific_version(app: &tauri::AppHandle, version: &str) -> 
     info!("rollback: installing v{} from {}", version, rollback_url);
 
     // Build updater pointed at our rollback endpoint
-    let mut builder = app
+    let builder = app
         .updater_builder()
         .endpoints(vec![rollback_url
             .parse()
             .map_err(|e| format!("invalid url: {}", e))?])
         .map_err(|e| format!("failed to build updater: {}", e))?;
-
-    // Add auth header so R2 download works for paid users
-    if let Ok(Some(settings)) = SettingsStore::get(app) {
-        if let Some(ref token) = settings.user.token {
-            builder = builder
-                .header("Authorization", format!("Bearer {}", token))
-                .map_err(|e| format!("failed to set auth header: {}", e))?;
-        }
-    }
 
     let update = builder
         .build()
@@ -160,8 +151,6 @@ pub struct PendingUpdateSnapshot {
     pub body: String,
     /// True once the bundle is downloaded and the app is ready to restart.
     pub downloaded: bool,
-    /// True when download failed with 401/403 — user must sign in.
-    pub auth_required: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -388,15 +377,11 @@ impl UpdatesManager {
             current_version,
             self.app.config().identifier
         );
-        // Build updater with auth header so paid users can download from R2
+        // Enterprise builds authenticate updates with their license key.
         let mut builder = self.app.updater_builder();
         if is_enterprise_build(&self.app) {
             if let Some(license_key) = crate::commands::get_enterprise_license_key() {
                 builder = builder.header("X-License-Key", license_key)?;
-            }
-        } else if let Ok(Some(settings)) = SettingsStore::get(&self.app) {
-            if let Some(ref token) = settings.user.token {
-                builder = builder.header("Authorization", format!("Bearer {}", token))?;
             }
         }
         let check_result = builder.build()?.check().await;
@@ -429,7 +414,6 @@ impl UpdatesManager {
                 version: update.version.clone(),
                 body: update.body.clone().unwrap_or_default(),
                 downloaded: false,
-                auth_required: false,
             });
 
             let auto_update = load_auto_update_enabled(&self.app);
@@ -631,38 +615,6 @@ impl UpdatesManager {
                 }
                 Err(e) => {
                     let err_str = e.to_string();
-                    if err_str.contains("401")
-                        || err_str.contains("403")
-                        || err_str.contains("Unauthorized")
-                        || err_str.contains("Forbidden")
-                    {
-                        warn!("update download requires authentication: {}", err_str);
-                        if let Some(snap) = self.pending_update.lock().await.as_mut() {
-                            snap.auth_required = true;
-                        }
-                        let _ = self.app.emit(
-                            "update-auth-required",
-                            serde_json::json!({
-                                "version": update.version,
-                                "message": "sign in to get the latest update",
-                            }),
-                        );
-                        let app_notif = self.app.clone();
-                        let version_str = update.version.clone();
-                        std::thread::spawn(move || {
-                            let _ = app_notif
-                                .notification()
-                                .builder()
-                                .title("screenpipe update available")
-                                .body(format!("v{} is ready — sign in to download", version_str))
-                                .show();
-                        });
-                        if let Some(ref item) = self.update_menu_item {
-                            item.set_enabled(true)?;
-                            item.set_text("Sign in to update")?;
-                        }
-                        return Ok(false);
-                    }
                     // Generic failure (network/disk/server). Clear latched state
                     // so the periodic loop and tray can retry without an app
                     // restart, and tell the user what happened.

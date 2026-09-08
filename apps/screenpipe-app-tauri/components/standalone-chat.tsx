@@ -25,7 +25,6 @@ import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
-import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   MemoizedReactMarkdown,
@@ -4444,7 +4443,7 @@ export function StandaloneChat({
       // User's selection still exists. Re-bind to the latest object so edits
       // in the Settings tab flow through, but keep the same id (don't snap
       // back to the default just because settings got rewritten by an
-      // unrelated update — loadUser, team sync, device discovery, etc).
+      // unrelated update — team sync, device discovery, etc).
       const stillThere = presets.find((p) => p.id === prev.id);
       if (stillThere) {
         return stillThere.provider === prev.provider &&
@@ -4465,10 +4464,6 @@ export function StandaloneChat({
   // All providers now route through Pi — isPi is always true when we have a preset
   const isPi = true;
   const hasValidModel = activePreset?.model && activePreset.model.trim() !== "";
-  const needsLogin = activePreset?.provider === "screenpipe-cloud" && !settings.user?.token;
-  // needsLogin is advisory only — chat is allowed without auth (the cloud
-  // backend accepts unauthenticated requests for now). The login warning is
-  // surfaced in the UI banner but does not gate sends.
   // Pi auto-starts on first message, so don't block chat when Pi is not running
   const canChat = hasPresets && hasValidModel && !piStarting;
 
@@ -4649,9 +4644,9 @@ export function StandaloneChat({
       apiKey: providerConfig.apiKey,
       maxTokens: providerConfig.maxTokens,
       systemPrompt: providerConfig.systemPrompt,
-      token: settings.user?.token ?? null,
+      token: null,
     };
-  }, [settings.user?.token]);
+  }, []);
 
   const restartCurrentPiSession = useCallback(async (providerConfig: NonNullable<ReturnType<typeof buildProviderConfig>>) => {
     let currentPid = piInfo?.pid;
@@ -4677,7 +4672,7 @@ export function StandaloneChat({
     const result = await commands.piStart(
       piSessionIdRef.current,
       dir,
-      settings.user?.token ?? null,
+      null,
       providerConfig,
     );
     if (result.status !== "ok" || !result.data.running) {
@@ -4686,7 +4681,7 @@ export function StandaloneChat({
     setPiInfo(result.data);
     piSessionSyncedRef.current = false;
     setRunningConfigFromProviderConfig(providerConfig);
-  }, [piInfo?.pid, piInfo?.running, setRunningConfigFromProviderConfig, settings.user?.token]);
+  }, [piInfo?.pid, piInfo?.running, setRunningConfigFromProviderConfig]);
 
   // When connections change (e.g., user connected Google Calendar in Settings),
   // silently restart Pi if the system prompt changed and no message is in-flight.
@@ -4766,7 +4761,7 @@ export function StandaloneChat({
       running.apiKey !== providerConfig.apiKey ||
       running.maxTokens !== providerConfig.maxTokens ||
       running.systemPrompt !== providerConfig.systemPrompt ||
-      running.token !== (settings.user?.token ?? null);
+      running.token !== null;
 
     if (!providerChanged && !modelChanged && !spawnTimeFieldsChanged) {
       // Preset save that didn't actually change anything Pi cares about.
@@ -4817,7 +4812,7 @@ export function StandaloneChat({
       }
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.user?.token, setRunningConfigFromProviderConfig, restartCurrentPiSession]);
+  }, [setRunningConfigFromProviderConfig, restartCurrentPiSession]);
 
   useEffect(() => {
     if (!isStreaming && pendingPresetRef.current) {
@@ -5729,7 +5724,7 @@ export function StandaloneChat({
               const providerConfig = buildProviderConfig();
               const home = await homeDir();
               const dir = await join(home, ".screenpipe", "pi-chat");
-              const result = await commands.piStart(piSessionIdRef.current, dir, settings.user?.token ?? null, providerConfig);
+              const result = await commands.piStart(piSessionIdRef.current, dir, null, providerConfig);
               if (result.status === "ok") {
                 setPiInfo(result.data);
                 piSessionSyncedRef.current = false;
@@ -5742,7 +5737,7 @@ export function StandaloneChat({
                     apiKey: providerConfig.apiKey,
                     maxTokens: providerConfig.maxTokens,
                     systemPrompt: providerConfig.systemPrompt,
-                    token: settings.user?.token ?? null,
+                    token: null,
                   };
                 }
               } else {
@@ -6389,7 +6384,7 @@ export function StandaloneChat({
         try {
           const home = await homeDir();
           const dir = await join(home, ".screenpipe", "pi-chat");
-          const result = await commands.piStart(piSessionIdRef.current, dir, settings.user?.token ?? null, providerConfig);
+          const result = await commands.piStart(piSessionIdRef.current, dir, null, providerConfig);
           if (result.status === "ok" && result.data.running) {
             setPiInfo(result.data);
             piSessionSyncedRef.current = false;
@@ -6669,7 +6664,7 @@ export function StandaloneChat({
           const startRes = await commands.piStart(
             piSessionIdRef.current,
             dir,
-            settings.user?.token ?? null,
+            null,
             providerConfig,
           );
           if (startRes.status === "ok" && startRes.data.running) {
@@ -8264,33 +8259,19 @@ export function StandaloneChat({
             executionId={activePipeExecution.executionId}
           />
         )}
-        {messages.length === 0 && !isPreparingPrefill && !activePipeExecution && !isLoading && !isStreaming && disabledReason && (!hasPresets || !hasValidModel || needsLogin) && (
+        {messages.length === 0 && !isPreparingPrefill && !activePipeExecution && !isLoading && !isStreaming && disabledReason && (!hasPresets || !hasValidModel) && (
           <div className="relative flex flex-col items-center justify-center py-12 space-y-4">
             <div className="relative p-6 rounded-2xl border bg-muted/50 border-border/50">
-              {needsLogin ? (
-                <PipeAIIconLarge size={48} thinking={false} className="text-muted-foreground" />
-              ) : (
-                <Settings className="h-12 w-12 text-muted-foreground" />
-              )}
+              <Settings className="h-12 w-12 text-muted-foreground" />
             </div>
             <div className="text-center space-y-2">
               <h3 className="font-semibold tracking-tight">
-                {!hasPresets ? "No AI Presets" : !hasValidModel ? "No Model Selected" : needsLogin ? "Login to continue" : "Setup Required"}
+                {!hasPresets ? "No AI Presets" : !hasValidModel ? "No Model Selected" : "Setup Required"}
               </h3>
               <p className="text-sm text-muted-foreground max-w-sm">
-                {needsLogin ? "Sign in to use the AI assistant" : disabledReason}
+                {disabledReason}
               </p>
             </div>
-            {needsLogin && (
-              <Button
-                variant="default"
-                size="lg"
-                onClick={() => commands.openLoginWindow()}
-                className="gap-2 font-medium bg-foreground text-background hover:bg-foreground/90 transition-colors duration-150 px-8"
-              >
-                Sign in
-              </Button>
-            )}
             {!hasPresets && (
               <Button
                 variant="outline"

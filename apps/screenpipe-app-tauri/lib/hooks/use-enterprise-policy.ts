@@ -47,9 +47,6 @@ const EMPTY_POLICY: EnterprisePolicy = {
   orgName: "",
 };
 
-// Sections always hidden in enterprise builds (regardless of policy)
-const ENTERPRISE_DEFAULT_HIDDEN = ["account", "referral"];
-
 // Re-fetch policy every 5 minutes so admin changes propagate without app restart
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -312,30 +309,19 @@ export function useEnterprisePolicy() {
 
   const fetchPolicy = useCallback(async (licenseKey: string): Promise<FetchResult> => {
     try {
-      // Include device ID for pipe targeting + cloud session JWT so the
-      // server can tell us whether the signed-in user is an admin of this
-      // license. The admin bit gates installation of the screenpipe-team
-      // skill in the desktop pi-agent — see `Pi::is_enterprise_admin`.
+      // Include device ID for pipe targeting. The enterprise license key is
+      // the sole credential after removal of the product-account session.
       let deviceId = "unknown";
-      let cloudToken: string | null = null;
       try {
         const store = await getStore();
         const settings = (await store.get<Record<string, unknown>>("settings")) || {};
         deviceId = (settings.deviceId as string) || "unknown";
-        const user = settings.user as Record<string, unknown> | undefined;
-        const token = user?.token;
-        if (typeof token === "string" && token.length > 0) {
-          cloudToken = token;
-        }
       } catch {}
 
       const headers: Record<string, string> = {
         "X-License-Key": licenseKey,
         "X-Device-Id": deviceId,
       };
-      if (cloudToken) {
-        headers["Authorization"] = `Bearer ${cloudToken}`;
-      }
       const res = await tauriFetch("https://screenpi.pe/api/enterprise/policy", {
         method: "GET",
         headers,
@@ -357,7 +343,6 @@ export function useEnterprisePolicy() {
       );
       const lockedKeys = Object.keys(data.lockedSettings || {});
       const allHidden = [
-        ...ENTERPRISE_DEFAULT_HIDDEN,
         ...(data.hiddenSections || []),
         ...lockedKeys,
       ];
@@ -443,28 +428,6 @@ export function useEnterprisePolicy() {
         console.warn("[enterprise] failed to push sync streams to Rust:", e);
       }
 
-      // Persist admin status into ~/.screenpipe/enterprise.json so the
-      // pi-agent can decide whether to install the screenpipe-team skill
-      // on its next boot. Only meaningful when we sent a cloud token in
-      // the request — without one, the server has no way to identify the
-      // user, so `data.isAdmin` is always false (don't accidentally wipe
-      // an existing admin marker just because the user was signed-out at
-      // policy-fetch time).
-      if (cloudToken) {
-        try {
-          const adminFlag = Boolean(data.isAdmin);
-          console.log(
-            `[enterprise] persisting team config: is_admin=${adminFlag} (raw response.isAdmin=${data.isAdmin})`
-          );
-          await commands.saveEnterpriseTeamConfig(adminFlag, true, null);
-        } catch (e) {
-          console.warn("[enterprise] failed to persist team config:", e);
-        }
-      } else {
-        console.warn(
-          "[enterprise] no cloud token available — skipping team-config persist (sign in to screenpipe cloud to enable team queries)"
-        );
-      }
       return { ok: true, policy: result };
     } catch (e) {
       console.error("[enterprise] policy fetch error:", e);
@@ -508,12 +471,12 @@ export function useEnterprisePolicy() {
       console.warn("[enterprise] saved key is invalid, prompting for new one");
       setNeedsLicenseKey(true);
       const cached = loadCachedPolicy();
-      setPolicy(cached ?? { ...EMPTY_POLICY, hiddenSections: ENTERPRISE_DEFAULT_HIDDEN });
+      setPolicy(cached ?? EMPTY_POLICY);
     } else {
       // Network error — use cached policy, keep trying
       setNeedsLicenseKey(false);
       const cached = loadCachedPolicy();
-      setPolicy(cached ?? { ...EMPTY_POLICY, hiddenSections: ENTERPRISE_DEFAULT_HIDDEN });
+      setPolicy(cached ?? EMPTY_POLICY);
       startPolling(key);
     }
   }, [fetchPolicy, startPolling]);
@@ -576,7 +539,7 @@ export function useEnterprisePolicy() {
         console.warn("[enterprise] no license key — prompting user to enter one");
         setNeedsLicenseKey(true);
         const cached = loadCachedPolicy();
-        setPolicy(cached ?? { ...EMPTY_POLICY, hiddenSections: ENTERPRISE_DEFAULT_HIDDEN });
+        setPolicy(cached ?? EMPTY_POLICY);
         return;
       }
 

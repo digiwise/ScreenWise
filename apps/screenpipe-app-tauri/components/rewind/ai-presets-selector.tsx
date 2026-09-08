@@ -36,7 +36,6 @@ import {
   EyeOff,
   Settings,
   LogIn,
-  AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -112,7 +111,6 @@ type RecommendedPreset = BaseRecommendedPreset &
 interface AIProviderConfigProps {
   onSubmit: (data: AIPreset) => void;
   defaultPreset?: AIPreset;
-  showLoginCta?: boolean;
 }
 interface OpenAIModel {
   id: string;
@@ -184,7 +182,6 @@ function ChatGptSignInButton() {
 export function AIProviderConfig({
   onSubmit,
   defaultPreset,
-  showLoginCta = true,
 }: AIProviderConfigProps) {
   const [selectedProvider, setSelectedProvider] = useState<
     AIPreset["provider"]
@@ -205,7 +202,7 @@ export function AIProviderConfig({
     if (selectedProvider !== "screenpipe-cloud") return;
     const fetchPiModels = async () => {
       try {
-        const token = settings?.user?.token || "";
+        const token = "";
         const resp = await fetch("https://api.screenpipe.com/v1/models", {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
@@ -229,7 +226,7 @@ export function AIProviderConfig({
       }
     };
     fetchPiModels();
-  }, [selectedProvider, settings?.user?.token]);
+  }, [selectedProvider]);
 
   // Check Pi availability (installed at app startup by Rust background thread)
   useEffect(() => {
@@ -495,7 +492,6 @@ export function AIProviderConfig({
           {piAvailable && (
             <Button
               type="button"
-              disabled={!settings?.user?.token}
               variant={selectedProvider === "screenpipe-cloud" ? "default" : "outline"}
               className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
               onClick={() => {
@@ -957,7 +953,6 @@ interface AIPresetDialogProps {
   onOpenChange: (open: boolean) => void;
   onSave: (preset: Partial<AIPreset>) => void;
   preset?: AIPreset;
-  showLoginCta?: boolean;
 }
 
 interface AIPresetsSelectorProps {
@@ -966,7 +961,6 @@ interface AIPresetsSelectorProps {
   onPresetChange?: (preset: AIPreset) => void;
   /** Called when user saves a preset (explicit action) — use to restart Pi deterministically */
   onPresetSaved?: (preset: AIPreset) => void;
-  showLoginCta?: boolean;
   /** Controlled mode: override which preset id is shown as selected */
   controlledPresetId?: string | null;
   /** Controlled mode: callback when user picks a preset (null = "none") */
@@ -990,7 +984,6 @@ export const AIPresetDialog = ({
   onOpenChange,
   onSave,
   preset,
-  showLoginCta = true,
 }: AIPresetDialogProps) => {
   const handleProviderSubmit = (providerData: any) => {
     const newPreset: Partial<AIPreset> = {
@@ -1053,7 +1046,6 @@ export const AIPresetDialog = ({
         <AIProviderConfig
           onSubmit={handleProviderSubmit}
           defaultPreset={defaultPreset}
-          showLoginCta={showLoginCta}
         />
       </DialogContent>
     </Dialog>
@@ -1065,7 +1057,6 @@ export const AIPresetsSelector = ({
   shortcutKey = "/",
   onPresetChange,
   onPresetSaved,
-  showLoginCta = true,
   controlledPresetId,
   onControlledSelect,
   allowNone = false,
@@ -1101,12 +1092,6 @@ export const AIPresetsSelector = ({
     );
     return defaultPreset?.id || aiPresets[0]?.id || undefined;
   }, [aiPresets, isControlled, controlledPresetId]);
-
-  // Check if selected preset requires login
-  const selectedPresetRequiresLogin = useMemo(() => {
-    const preset = aiPresets.find((p) => p.id === selectedPreset);
-    return preset?.provider === "screenpipe-cloud" && !settings?.user?.token;
-  }, [aiPresets, selectedPreset, settings?.user?.token]);
 
   const selectedPresetData = useMemo(
     () => aiPresets.find((p) => p.id === selectedPreset),
@@ -1364,13 +1349,6 @@ export const AIPresetsSelector = ({
       return;
     }
 
-    // Prevent deletion of screenpipe-cloud preset for Pro subscribers
-    if (preset.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed) {
-      toast.error("Cannot delete cloud preset", {
-        description: "This preset is included with your Business subscription",
-      });
-      return;
-    }
     if (preset.defaultPreset) {
       toast.error("Cannot delete default preset", {
         description: "Please set another preset as default first",
@@ -1391,27 +1369,6 @@ export const AIPresetsSelector = ({
   return (
     <>
       <div className={cn("flex flex-col w-full gap-2", containerClassName)}>
-        {!isControlled && selectedPresetRequiresLogin && !showModelOnly && (
-          <div className="flex items-center gap-2 p-2 text-sm bg-muted border border-border rounded-lg">
-            <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span className="text-foreground flex-1">
-              Login required to use Screenpipe Cloud
-            </span>
-            {showLoginCta && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="shrink-0 h-7 text-xs border-border hover:bg-muted"
-                onClick={async () => {
-                  await commands.showWindow({ Home: { page: "account" } });
-                }}
-              >
-                <LogIn className="h-3 w-3 mr-1" />
-                Login
-              </Button>
-            )}
-          </div>
-        )}
         <div className="flex w-full items-center gap-2">
         <Popover open={open} onOpenChange={setOpen}>
           <TooltipProvider>
@@ -1425,16 +1382,12 @@ export const AIPresetsSelector = ({
                   className={cn(
                     "w-full justify-between hover:bg-accent hover:text-accent-foreground",
                     compact && "h-8 text-xs",
-                    selectedPresetRequiresLogin && "border-amber-500/50",
                     triggerClassName
                   )}
                 >
                   {selectedPreset ? (
                     showModelOnly ? (
                       <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-                        {selectedPresetRequiresLogin && (
-                          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-                        )}
                         <span
                           className="truncate text-left font-medium"
                           title={
@@ -1449,9 +1402,6 @@ export const AIPresetsSelector = ({
                     ) : (
                       <div className="flex w-full items-center justify-between gap-2 overflow-hidden min-w-0">
                         <div className="flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
-                          {selectedPresetRequiresLogin && (
-                            <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-                          )}
                           <span className="font-medium truncate text-left">
                             {formatPresetName(selectedPresetData?.id || '')}
                           </span>
@@ -1475,19 +1425,13 @@ export const AIPresetsSelector = ({
                 </Button>
               </PopoverTrigger>
               <TooltipContent>
-                {selectedPresetRequiresLogin ? (
-                  <p className="text-muted-foreground">
-                    Login required to use this preset
-                  </p>
-                ) : (
-                  <p className="flex items-center gap-2">
-                    <span>Press</span>
-                    <kbd className="px-1.5 py-0.5 text-xs font-semibold bg-muted rounded">
-                      ⌘/
-                    </kbd>
-                    <span>to cycle presets</span>
-                  </p>
-                )}
+                <p className="flex items-center gap-2">
+                  <span>Press</span>
+                  <kbd className="px-1.5 py-0.5 text-xs font-semibold bg-muted rounded">
+                    ⌘/
+                  </kbd>
+                  <span>to cycle presets</span>
+                </p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -1731,7 +1675,6 @@ export const AIPresetsSelector = ({
         onOpenChange={setDialogOpen}
         onSave={handleSavePreset}
         preset={selectedPresetToEdit}
-        showLoginCta={showLoginCta}
       />
     </>
   );

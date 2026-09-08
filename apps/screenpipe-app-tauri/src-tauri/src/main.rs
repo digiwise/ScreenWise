@@ -961,7 +961,6 @@ async fn main() {
                 store.recording.disable_audio = false;
                 store.recording.disable_vision = true;
                 store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
-                store.user = store::User::default();
                 store
                     .extra
                     .insert("_parakeetDefaultMigrationDone".to_string(), json!(true));
@@ -1490,23 +1489,6 @@ async fn main() {
 
             // Auto-start suggestions scheduler (always on)
             let suggestions_state = app_handle.state::<suggestions::SuggestionsState>();
-            // Initialize enhanced AI config from saved settings
-            {
-                if let Ok(Some(store)) = crate::store::SettingsStore::get(&app_handle) {
-                    if store.enhanced_ai {
-                        let token = store.user.token.clone().unwrap_or_default();
-                        if !token.is_empty() {
-                            // Use try_lock — blocking_lock panics inside a tokio runtime context
-                            if let Ok(mut guard) = suggestions_state.enhanced_ai.try_lock() {
-                                *guard = Some(suggestions::EnhancedAIConfig {
-                                    enabled: true,
-                                    token,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
             let suggestions_state_clone = suggestions::SuggestionsState {
                 cache: suggestions_state.cache.clone(),
                 scheduler_handle: suggestions_state.scheduler_handle.clone(),

@@ -42,8 +42,6 @@ pub fn resolved_api_auth_key() -> Option<String> {
 
 /// Magic header for encrypted store.bin files.
 const STORE_MAGIC: &[u8; 8] = b"SPSTORE1";
-const APP_ENTITLEMENT_MAX_STALE_HOURS: i64 = 72;
-const APP_ENTITLEMENT_CLOCK_SKEW_MINUTES: i64 = 5;
 
 // ---------------------------------------------------------------------------
 // Settings-loss recovery
@@ -620,8 +618,6 @@ pub struct SettingsStore {
         deserialize_with = "deserialize_null_as_default"
     )]
     pub disabled_shortcuts: Vec<String>,
-    #[serde(rename = "user", deserialize_with = "deserialize_null_as_default")]
-    pub user: User,
     #[serde(rename = "showScreenpipeShortcut")]
     pub show_screenpipe_shortcut: String,
     #[serde(rename = "startRecordingShortcut")]
@@ -797,130 +793,25 @@ impl Default for AIPreset {
     }
 }
 
-#[derive(Serialize, Deserialize, Type, Clone)]
-#[serde(default)]
-pub struct User {
-    pub id: Option<String>,
-    pub name: Option<String>,
-    pub email: Option<String>,
-    pub image: Option<String>,
-    pub token: Option<String>,
-    pub clerk_id: Option<String>,
-    pub api_key: Option<String>,
-    pub credits: Option<Credits>,
-    pub stripe_connected: Option<bool>,
-    pub stripe_account_status: Option<String>,
-    pub github_username: Option<String>,
-    pub bio: Option<String>,
-    pub website: Option<String>,
-    pub contact: Option<String>,
-    pub cloud_subscribed: Option<bool>,
-    pub credits_balance: Option<i32>,
-    pub app_entitled: Option<bool>,
-    pub subscription_plan: Option<String>,
-    pub entitlement: Option<serde_json::Value>,
-}
-
-impl Default for User {
-    fn default() -> Self {
-        Self {
-            id: None,
-            name: None,
-            email: None,
-            image: None,
-            token: None,
-            clerk_id: None,
-            api_key: None,
-            credits: None,
-            stripe_connected: None,
-            stripe_account_status: None,
-            github_username: None,
-            bio: None,
-            website: None,
-            contact: None,
-            cloud_subscribed: None,
-            credits_balance: None,
-            app_entitled: None,
-            subscription_plan: None,
-            entitlement: None,
-        }
-    }
-}
-
-fn parse_entitlement_time(
-    value: Option<&serde_json::Value>,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    value
-        .and_then(|value| value.as_str())
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&chrono::Utc))
-}
-
-fn entitlement_checked_recently(entitlement: &serde_json::Value) -> bool {
-    let Some(checked_at) = parse_entitlement_time(entitlement.get("checked_at")) else {
-        return false;
-    };
-
-    let now = chrono::Utc::now();
-    checked_at <= now + chrono::Duration::minutes(APP_ENTITLEMENT_CLOCK_SKEW_MINUTES)
-        && now.signed_duration_since(checked_at)
-            <= chrono::Duration::hours(APP_ENTITLEMENT_MAX_STALE_HOURS)
-}
-
-fn entitlement_active(entitlement: &serde_json::Value) -> bool {
-    entitlement
-        .get("active")
-        .and_then(|active| active.as_bool())
-        .unwrap_or(false)
-}
-
-fn entitlement_has_future_grace(entitlement: &serde_json::Value) -> bool {
-    parse_entitlement_time(entitlement.get("grace_until"))
-        .map(|grace_until| grace_until > chrono::Utc::now())
-        .unwrap_or(false)
-}
-
-fn entitlement_is_lifetime(entitlement: &serde_json::Value) -> bool {
-    let field = |key: &str| {
-        entitlement
-            .get(key)
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-    };
-    field("plan") == "lifetime" || field("source") == "lifetime"
-}
-
-fn entitlement_feature(entitlement: &serde_json::Value, feature: &str) -> bool {
-    entitlement
-        .get("features")
-        .and_then(|features| features.get(feature))
-        .and_then(|feature| feature.as_bool())
-        .unwrap_or(false)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum AudioEngineFallbackReason {
-    NotLoggedIn,
-    NotSubscribed,
+    UnavailableProvider,
     MissingDeepgramKey,
 }
 
 impl AudioEngineFallbackReason {
     pub fn notification_title(&self) -> &'static str {
         match self {
-            Self::NotLoggedIn | Self::NotSubscribed => "Screenpipe Cloud unavailable",
+            Self::UnavailableProvider => "Screenpipe Cloud unavailable",
             Self::MissingDeepgramKey => "Deepgram unavailable",
         }
     }
 
     pub fn notification_body(&self) -> &'static str {
         match self {
-            Self::NotLoggedIn => {
-                "You are not logged in, so audio is being transcribed locally with Whisper Turbo (fast). Log in to use Screenpipe Cloud."
-            }
-            Self::NotSubscribed => {
-                "Screenpipe Cloud requires an active subscription, so audio is being transcribed locally with Whisper Turbo (fast)."
+            Self::UnavailableProvider => {
+                "Screenpipe Cloud is not available in local ScreenWise, so audio is being transcribed locally with Whisper Turbo (fast)."
             }
             Self::MissingDeepgramKey => {
                 "Deepgram has no API key configured, so audio is being transcribed locally with Whisper Turbo (fast)."
@@ -935,18 +826,6 @@ pub struct AudioEngineResolution {
     pub requested: String,
     pub active: String,
     pub fallback_reason: Option<AudioEngineFallbackReason>,
-}
-
-#[derive(Serialize, Deserialize, Type, Clone)]
-#[serde(default)]
-pub struct Credits {
-    pub amount: i32,
-}
-
-impl Default for Credits {
-    fn default() -> Self {
-        Self { amount: 0 }
-    }
 }
 
 #[derive(Serialize, Deserialize, Type, Clone)]
@@ -1062,7 +941,6 @@ Rules:
             auto_start_enabled: true,
             platform: "unknown".to_string(),
             disabled_shortcuts: vec![],
-            user: User::default(),
             #[cfg(target_os = "windows")]
             show_screenpipe_shortcut: "Alt+S".to_string(),
             #[cfg(not(target_os = "windows"))]
@@ -1209,30 +1087,9 @@ impl SettingsStore {
 
     /// Build a `RecordingSettings` from this settings store.
     ///
-    /// Since RecordingSettings is now embedded via flatten, this is mostly a
-    /// clone with overrides for fields that need special handling (e.g. user_id
-    /// comes from the User auth object, user_name has a fallback chain).
+    /// Since RecordingSettings is now embedded via flatten, this is a clone.
     pub fn to_recording_settings(&self) -> screenpipe_config::RecordingSettings {
-        let mut settings = self.recording.clone();
-        // Override user_id with the Clerk JWT token from the auth user object.
-        // This token is used as the Bearer credential for screenpipe cloud
-        // (transcription proxy, Pi agent, etc.), not as a database ID.
-        // Fallback to user.id if token is unavailable.
-        settings.user_id = self
-            .user
-            .token
-            .as_ref()
-            .filter(|t| !t.is_empty())
-            .or(self.user.id.as_ref().filter(|id| !id.is_empty()))
-            .cloned()
-            .unwrap_or_default();
-        // Fallback chain: userName setting → cloud name → cloud email
-        settings.user_name = settings
-            .user_name
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| self.user.name.clone().filter(|s| !s.trim().is_empty()))
-            .or_else(|| self.user.email.clone().filter(|s| !s.trim().is_empty()));
-        settings
+        self.recording.clone()
     }
 
     /// Build a unified `RecordingConfig` from this settings store.
@@ -1278,49 +1135,8 @@ impl SettingsStore {
         config
     }
 
-    pub fn app_entitled_or_dev(&self) -> bool {
-        // Debug builds (`bun tauri dev`, e2e, signed dev builds) are never gated.
-        // Release builds must not be bypassable via a runtime env var.
-        if cfg!(debug_assertions) {
-            return true;
-        }
-
-        // Legacy cloud subscribers keep working during rollout.
-        if self.user.cloud_subscribed == Some(true) {
-            return true;
-        }
-
-        let Some(entitlement) = self.user.entitlement.as_ref() else {
-            return false;
-        };
-
-        let has_app_feature =
-            self.user.app_entitled == Some(true) || entitlement_feature(entitlement, "app");
-        if !has_app_feature {
-            return false;
-        }
-
-        // Perpetual (lifetime) grants and server-issued offline grace windows stay
-        // valid even when the cached entitlement is stale. A local-first app must
-        // not stop recording just because it could not reach the server for a few
-        // days.
-        if entitlement_is_lifetime(entitlement) || entitlement_has_future_grace(entitlement) {
-            return true;
-        }
-
-        // Otherwise require a recent check confirming the plan is still active.
-        entitlement_checked_recently(entitlement) && entitlement_active(entitlement)
-    }
-
     pub fn audio_engine_resolution(&self) -> AudioEngineResolution {
         let engine = self.recording.audio_transcription_engine.clone();
-        let has_cloud_auth = self
-            .user
-            .token
-            .as_ref()
-            .map_or(false, |token| !token.is_empty())
-            || self.user.id.as_ref().map_or(false, |id| !id.is_empty());
-        let is_subscribed = self.user.cloud_subscribed == Some(true);
         let has_deepgram_key = !self.recording.deepgram_api_key.is_empty()
             && self.recording.deepgram_api_key != "default";
         let fallback = "whisper-large-v3-turbo-quantized".to_string();
@@ -1331,15 +1147,10 @@ impl SettingsStore {
         };
 
         match engine.as_str() {
-            "screenpipe-cloud" if !has_cloud_auth => {
-                tracing::warn!("screenpipe-cloud selected but user not logged in, falling back to whisper-large-v3-turbo-quantized");
+            "screenpipe-cloud" => {
+                tracing::warn!("screenpipe-cloud is unavailable in local ScreenWise, falling back to whisper-large-v3-turbo-quantized");
                 resolution.active = fallback;
-                resolution.fallback_reason = Some(AudioEngineFallbackReason::NotLoggedIn);
-            }
-            "screenpipe-cloud" if !is_subscribed => {
-                tracing::warn!("screenpipe-cloud selected but user is not a pro subscriber, falling back to whisper-large-v3-turbo-quantized");
-                resolution.active = fallback;
-                resolution.fallback_reason = Some(AudioEngineFallbackReason::NotSubscribed);
+                resolution.fallback_reason = Some(AudioEngineFallbackReason::UnavailableProvider);
             }
             "deepgram" if !has_deepgram_key => {
                 tracing::warn!("deepgram selected but no API key configured, falling back to whisper-large-v3-turbo-quantized");
@@ -1599,12 +1410,9 @@ mod tests {
     }
 
     #[test]
-    fn screenpipe_cloud_falls_back_when_not_logged_in() {
+    fn screenpipe_cloud_falls_back_when_provider_is_unavailable() {
         let mut store = SettingsStore::default();
         store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
-        store.user.id = None;
-        store.user.token = None;
-        store.user.cloud_subscribed = Some(true);
 
         let resolution = store.audio_engine_resolution();
 
@@ -1612,37 +1420,8 @@ mod tests {
         assert_eq!(resolution.active, FALLBACK_ENGINE);
         assert_eq!(
             resolution.fallback_reason,
-            Some(AudioEngineFallbackReason::NotLoggedIn)
+            Some(AudioEngineFallbackReason::UnavailableProvider)
         );
-    }
-
-    #[test]
-    fn screenpipe_cloud_falls_back_when_not_subscribed() {
-        let mut store = SettingsStore::default();
-        store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
-        store.user.token = Some("token".to_string());
-        store.user.cloud_subscribed = Some(false);
-
-        let resolution = store.audio_engine_resolution();
-
-        assert_eq!(resolution.active, FALLBACK_ENGINE);
-        assert_eq!(
-            resolution.fallback_reason,
-            Some(AudioEngineFallbackReason::NotSubscribed)
-        );
-    }
-
-    #[test]
-    fn screenpipe_cloud_stays_active_for_subscribed_users() {
-        let mut store = SettingsStore::default();
-        store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
-        store.user.token = Some("token".to_string());
-        store.user.cloud_subscribed = Some(true);
-
-        let resolution = store.audio_engine_resolution();
-
-        assert_eq!(resolution.active, "screenpipe-cloud");
-        assert_eq!(resolution.fallback_reason, None);
     }
 
     #[test]
@@ -1871,8 +1650,25 @@ mod tests {
         );
         let settings = settings.unwrap();
 
-        assert_eq!(settings.user.token, None);
+        assert_eq!(settings.extra.get("user"), Some(&Value::Null));
         assert_eq!(settings.embedded_llm.enabled, false);
         assert_eq!(settings.ai_presets.len(), 0);
+    }
+
+    #[test]
+    fn legacy_product_user_is_preserved_as_extra_json() {
+        let legacy_user = json!({
+            "id": "historical-user-id",
+            "token": "historical-product-token",
+            "cloud_subscribed": true
+        });
+        let settings: SettingsStore = serde_json::from_value(json!({
+            "user": legacy_user.clone()
+        }))
+        .unwrap();
+
+        assert_eq!(settings.extra.get("user"), Some(&legacy_user));
+        let serialized = serde_json::to_value(settings).unwrap();
+        assert_eq!(serialized.get("user"), Some(&legacy_user));
     }
 }

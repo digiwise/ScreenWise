@@ -4,7 +4,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSettings } from "@/lib/hooks/use-settings";
 
 /**
  * Daily quota snapshot from the ai-proxy worker's /v1/usage endpoint.
@@ -30,8 +29,7 @@ const USAGE_URL = "https://api.screenpipe.com/v1/usage";
 const POLL_INTERVAL_MS = 30_000;
 
 export function useUsageStatus(): UsageStatus | null {
-  const { settings } = useSettings();
-  const token = settings.user?.token;
+  const token = undefined;
   const [status, setStatus] = useState<UsageStatus | null>(null);
 
   useEffect(() => {

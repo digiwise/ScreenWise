@@ -1060,3 +1060,90 @@ Verification on Windows on 2026-09-08:
   `screenpipe-core` dependency arrays; no package/version was added, removed, or
   upgraded because the remaining workspace/enterprise graph still uses those
   packages. `bun.lock` is unchanged.
+
+### Product-account boundary — 2026-09-08
+
+The native `get_cloud_token`, `set_cloud_token`, and `open_login_window`
+commands are already absent from the Tauri command registry. Only their three
+stale checked-in TypeScript bindings remain. Valid frontend callers still reach
+those missing commands through the Account settings page, onboarding login
+gate, login dialog, provider upsells, and a dead entitlement-gate component.
+
+The active settings provider also persists and refreshes a Screenpipe product
+`user` session through `https://screenpi.pe/api/user`, installs a hosted-API
+401 interceptor, accepts login/purchase deep links, polls subscription state,
+and exposes account, entitlement, Stripe, credit, referral, and hosted API-key
+metadata through Rust and generated TypeScript settings types. The tray still
+shows plan/upgrade items and emits the checkout event. The Rust recording gate
+is already an unconditional local allow, so the remaining native entitlement
+parsers and UI tests are unreachable policy scaffolding rather than a retained
+capability.
+
+Several later-removal systems currently read the product account only as a
+credential or paywall input: Screenpipe cloud AI/transcription, hosted pipes,
+remote-device sync, third-party integration upsells, usage/team hooks, and
+enterprise policy. They can be decoupled now without enabling a new network
+path; their implementations are removed in their separately scoped commits.
+ChatGPT OAuth state and provider credentials are independent and must not be
+removed in this account commit. The local API bearer key is held in recording
+settings and the local secret store, not in the product `user` object, and must
+remain unchanged.
+
+Removing the typed Rust `user` field remains settings-compatible because
+`SettingsStore.extra` is a flattened catch-all: older serialized `user` data is
+accepted and round-tripped as unknown legacy JSON rather than causing a
+deserialization failure or migration. Frontend code will likewise stop reading
+or refreshing it without rewriting the stored object solely to delete history.
+
+Implementation and post-change evidence:
+
+- Removed the desktop product-account ingress route, login and purchase deep
+  links, settings refresh/interceptor, entitlement gates, account/referral
+  settings and onboarding UI, tray plan/upgrade state, subscription polling,
+  checkout/referral calls, account-conditioned updater state, and their tests.
+  The onboarding flow now begins with local recorder permissions.
+- Removed the typed native/frontend `user` and `credits` objects and the dead
+  entitlement helpers. A native round-trip test proves an older serialized
+  `user` object remains readable and preserved in the flattened legacy JSON
+  map. No migration deletes historical account data.
+- Removed the stale generated `getCloudToken`, `openLoginWindow`, and
+  `setCloudToken` bindings after confirming their native commands were already
+  absent. `tauri_bindings_are_current` now passes with the documented Windows
+  native-test matrix. The generated pending-update binding was also refreshed
+  after deleting its obsolete account-auth-required state.
+- Later-removal subsystems no longer read or receive the product account token:
+  hosted AI/usage, pipes, remote-device monitoring, integrations, team, and
+  enterprise policy remain isolated for their own commits. ChatGPT OAuth and
+  third-party credentials were not conflated with the Screenpipe account.
+- Tracked searches find no remaining product login commands/callers, desktop
+  `/api/user`, checkout/purchase/referral route, plan/entitlement field use, or
+  account/referral settings route. Remaining `auth_required` names belong to
+  the browser extension's preserved local API bearer authentication. Hosted AI
+  subscription code under `packages/ai-gateway` is part of the next provider
+  boundary, not a desktop product session.
+- The local API bearer configuration and secret store were unchanged. Root
+  `Cargo.lock`, desktop `Cargo.lock`, and desktop `bun.lock` are unchanged at
+  SHA-256 `52102E97DFD54A20340F1AF03EAB3D7B8F3EA2AACE39EB6910C4537445FAC57E`,
+  `02B00FA9019FE750A8892C7B729DCC0C55E32388383228A504B4F59D5F3EAEBB`, and
+  `758A49562E49967F8B91F1169D64DA7C74242051CF1544889734BE0E47A3701D`.
+
+Verification on Windows on 2026-09-08:
+
+- `cargo fmt --all -- --check`: passed from the root workspace. Direct
+  `rustfmt --edition 2021 --check` passed for every changed Rust file except
+  `main.rs`; the full desktop `cargo fmt --all -- --check` still reports only
+  the documented pre-existing `icons` module-order difference in `main.rs`.
+- Locked/offline desktop `cargo check`: passed in Visual Studio Developer
+  PowerShell with the normal Ninja/OpenBLAS/ORT environment.
+- `store::tests`: 17 passed with Ninja Multi-Config, the transient
+  `knf-rs-sys` dev CRT override, and OpenBLAS on runtime `PATH`.
+- `tauri_bindings_are_current`: 1 passed with the same documented native-test
+  matrix.
+- Direct TypeScript `tsc --noEmit`: passed.
+- Direct Vitest run: 42 files and 536 tests passed.
+- Direct Next production build: passed; it emitted only the existing `unpdf`
+  `import.meta` warning.
+- `cargo build --release --locked --offline`: passed in 51.68 seconds from the
+  root workspace with the normal release environment.
+- `git diff --check`: passed. The complete source diff and all three lockfiles
+  were inspected before commit.

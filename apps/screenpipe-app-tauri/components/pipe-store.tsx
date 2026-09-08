@@ -391,7 +391,7 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
   const { settings } = useSettings();
   const { toast } = useToast();
   const openFeedback = useFeedbackStore((s) => s.openFeedback);
-  const token = settings.user?.token;
+  const token = undefined;
 
   // Browse state
   const [pipes, setPipes] = useState<StorePipe[]>([]);
@@ -830,7 +830,7 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
             hasUpdate={!!availableUpdates[selectedPipe.slug]}
             sourceExpanded={sourceExpanded}
             onToggleSource={() => setSourceExpanded(!sourceExpanded)}
-            currentUserId={settings.user?.id}
+            currentUserId={undefined}
             onUnpublish={handleUnpublish}
             unpublishing={unpublishing}
             onRefresh={() => openDetail(selectedPipe.slug)}

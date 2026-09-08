@@ -119,7 +119,6 @@ import { platform } from "@tauri-apps/plugin-os";
 import { Language } from "@/lib/language";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ToastAction } from "@/components/ui/toast";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { listen } from "@tauri-apps/api/event";
 import { getMediaFile } from "@/lib/actions/video-actions";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -129,7 +128,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { MeetingAppsPicker } from "./meeting-apps-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
-import { useLoginDialog } from "../login-dialog";
 import { BatterySaverSection } from "./battery-saver-section";
 // ScheduleSettings moved to privacy-section
 import { ValidatedInput } from "../ui/validated-input";
@@ -179,8 +177,7 @@ const TRANSCRIPTION_ENGINE_LABELS: Record<string, string> = {
 };
 
 type AudioEngineFallbackReason =
-  | "notLoggedIn"
-  | "notSubscribed"
+  | "unavailableProvider"
   | "missingDeepgramKey";
 
 type AudioEngineResolution = {
@@ -195,24 +192,15 @@ const getTranscriptionEngineLabel = (engine: string) =>
 const getAudioEngineResolution = (settings: Settings): AudioEngineResolution => {
   const requested = settings.audioTranscriptionEngine;
   const fallback = FALLBACK_TRANSCRIPTION_ENGINE;
-  const hasCloudAuth = Boolean(settings.user?.token || settings.user?.id);
   const hasDeepgramKey = Boolean(
     settings.deepgramApiKey && settings.deepgramApiKey !== "default"
   );
 
-  if (requested === "screenpipe-cloud" && !hasCloudAuth) {
+  if (requested === "screenpipe-cloud") {
     return {
       requested,
       active: fallback,
-      fallbackReason: "notLoggedIn",
-    };
-  }
-
-  if (requested === "screenpipe-cloud" && !settings.user?.cloud_subscribed) {
-    return {
-      requested,
-      active: fallback,
-      fallbackReason: "notSubscribed",
+      fallbackReason: "unavailableProvider",
     };
   }
 
@@ -233,10 +221,8 @@ const getAudioEngineResolution = (settings: Settings): AudioEngineResolution => 
 
 const getAudioFallbackMessage = (reason: AudioEngineFallbackReason) => {
   switch (reason) {
-    case "notLoggedIn":
-      return "You are not logged in, so audio is being transcribed locally.";
-    case "notSubscribed":
-      return "Screenpipe Cloud requires an active subscription, so audio is being transcribed locally.";
+    case "unavailableProvider":
+      return "Screenpipe Cloud is unavailable in local ScreenWise, so audio is being transcribed locally.";
     case "missingDeepgramKey":
       return "Deepgram has no API key configured, so audio is being transcribed locally.";
   }
@@ -1692,7 +1678,7 @@ function HighFpsCard({
 }
 
 export function RecordingSettings() {
-  const { settings, updateSettings, getDataDir, loadUser } = useSettings();
+  const { settings, updateSettings, getDataDir } = useSettings();
   const [openLanguages, setOpenLanguages] = React.useState(false);
   // Dev-only: warn if searchIndex drifts from rendered headings. State-gated
   // fields are marked `conditional: true` in the index above, so no false
@@ -1833,8 +1819,6 @@ export function RecordingSettings() {
   const [isWindows, setIsWindows] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [showOpenAIApiKey, setShowOpenAIApiKey] = useState(false);
-  const [isRefreshingSubscription, setIsRefreshingSubscription] = useState(false);
-  const { checkLogin } = useLoginDialog();
   const overlayData = useOverlayData();
   const [hwCapability, setHwCapability] = useState<HardwareCapability | null>(null);
 
@@ -1870,9 +1854,6 @@ export function RecordingSettings() {
     [
       settings.audioTranscriptionEngine,
       settings.deepgramApiKey,
-      settings.user?.cloud_subscribed,
-      settings.user?.id,
-      settings.user?.token,
     ]
   );
 
@@ -2165,38 +2146,6 @@ export function RecordingSettings() {
     value: string,
     realtime = false
   ) => {
-    const isLoggedIn = checkLogin(settings.user);
-    // If trying to use cloud but not logged in
-    if (value === "screenpipe-cloud" && !isLoggedIn) {
-      return;
-    }
-
-    // If trying to use cloud but not subscribed
-    if (value === "screenpipe-cloud" && !settings.user?.cloud_subscribed) {
-      try {
-        const response = await fetch("https://screenpi.pe/api/cloud-sync/checkout", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${settings.user?.token}`,
-          },
-          body: JSON.stringify({
-            tier: "pro",
-            billingPeriod: "monthly",
-            userId: settings.user?.id,
-            email: settings.user?.email,
-          }),
-        });
-        const data = await response.json();
-        openUrl(data.url || "https://screenpipe.com/billing");
-      } catch {
-        openUrl("https://screenpipe.com/billing");
-      }
-      // Revert back to previous value in the Select component
-      return;
-    }
-
-    // Only proceed with the change if all checks pass
     const newSettings = realtime
       ? { realtimeAudioTranscriptionEngine: value }
       : { audioTranscriptionEngine: value };
@@ -2522,9 +2471,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   <SelectContent>
                     <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">cloud</SelectLabel>
-                      <SelectItem value="screenpipe-cloud" disabled={!settings.user?.cloud_subscribed}>
-                        Screenpipe Cloud {!settings.user?.cloud_subscribed && "(pro)"}{hwCapability?.recommendedEngine === "screenpipe-cloud" && " ★"}
-                      </SelectItem>
                       <SelectItem value="deepgram">Deepgram</SelectItem>
                     </SelectGroup>
                     <SelectGroup>
@@ -2571,30 +2517,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2 pt-1">
-                    {audioEngineResolution.fallbackReason === "notLoggedIn" && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        data-testid="audio-engine-fallback-login"
-                        onClick={() => checkLogin(settings.user)}
-                      >
-                        Log in
-                      </Button>
-                    )}
-                    {audioEngineResolution.fallbackReason === "notSubscribed" && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        data-testid="audio-engine-fallback-upgrade"
-                        onClick={() => openUrl("https://screenpipe.com/billing")}
-                      >
-                        Upgrade
-                      </Button>
-                    )}
                     <Button
                       type="button"
                       variant="outline"
@@ -2919,18 +2841,10 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="selected-engine">Current transcription engine</SelectItem>
-                      <SelectItem value="screenpipe-cloud">screenpipe cloud live</SelectItem>
                       <SelectItem value="deepgram-live">Direct Deepgram live</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                {(settings.meetingLiveTranscriptionProvider ?? "selected-engine") === "screenpipe-cloud" &&
-                  !settings.user?.token &&
-                  !settings.user?.id && (
-                  <p className="text-xs text-muted-foreground">
-                    Log in to screenpipe cloud to use the cloud live provider.
-                  </p>
-                )}
                 {(settings.meetingLiveTranscriptionProvider ?? "selected-engine") === "selected-engine" &&
                   settings.audioTranscriptionEngine === "disabled" && (
                   <p className="text-xs text-muted-foreground">

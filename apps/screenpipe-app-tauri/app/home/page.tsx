@@ -9,7 +9,6 @@ import {
   Workflow,
   Plus,
   Clock,
-  Gift,
   HelpCircle,
   UserPlus,
   Monitor,
@@ -99,8 +98,8 @@ const ALL_SECTIONS = [
 
 // Settings sections that should redirect to /settings
 const SETTINGS_SECTIONS = new Set<string>([
-  "account", "recording", "ai", "general", "display", "shortcuts", "notifications",
-  "privacy", "storage", "team", "referral", "usage", "speakers",
+  "recording", "ai", "general", "display", "shortcuts", "notifications",
+  "privacy", "storage", "team", "usage", "speakers",
   "disk-usage", // backwards compat → maps to "storage"
 ]);
 
@@ -1297,32 +1296,6 @@ function HomeContent() {
                       <Tooltip>
                         <TooltipTrigger asChild>{btn}</TooltipTrigger>
                         <TooltipContent side="right" className="text-xs">{teamLabel}</TooltipContent>
-                      </Tooltip>
-                    );
-                  }
-                  return btn;
-                })()}
-
-                {/* Get free month — hidden in enterprise */}
-                {!isSectionHidden("referral") && (() => {
-                  const btn = (
-                    <button
-                      onClick={() => openSettings("referral")}
-                      className={cn(
-                        "w-full flex items-center px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
-                        sidebarCollapsed ? "justify-center" : "space-x-2.5",
-                        isTranslucent ? "vibrant-nav-item vibrant-nav-hover" : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      <Gift className={cn("h-3.5 w-3.5 transition-colors flex-shrink-0", isTranslucent ? "" : "text-muted-foreground group-hover:text-foreground")} />
-                      {!sidebarCollapsed && <span className="font-medium text-xs truncate">Get free month</span>}
-                    </button>
-                  );
-                  if (sidebarCollapsed) {
-                    return (
-                      <Tooltip>
-                        <TooltipTrigger asChild>{btn}</TooltipTrigger>
-                        <TooltipContent side="right" className="text-xs">Get free month</TooltipContent>
                       </Tooltip>
                     );
                   }

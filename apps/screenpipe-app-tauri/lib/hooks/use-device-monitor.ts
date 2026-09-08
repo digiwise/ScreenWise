@@ -125,7 +125,7 @@ export function useDeviceMonitor() {
   // Stable key for effect dependency
   const deviceKey = registeredDevices.map((d) => d.address).sort().join(",");
 
-  const apiKey = settings.user?.api_key || settings.user?.token;
+  const apiKey = undefined;
 
   const localHealthFetch = useCallback(
     async (timeoutMs: number): Promise<Response> => {

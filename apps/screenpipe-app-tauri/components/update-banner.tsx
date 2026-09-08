@@ -17,17 +17,11 @@ interface UpdateInfo {
   body: string;
 }
 
-interface AuthRequiredInfo {
-  version: string;
-  message: string;
-}
-
 interface UpdateBannerState {
   isVisible: boolean;
   updateInfo: UpdateInfo | null;
   isInstalling: boolean;
   pendingUpdate: Update | null;
-  authRequired: AuthRequiredInfo | null;
   // Version the user dismissed in this session. Periodic re-checks and
   // providers-remount hydration would otherwise re-show the same banner
   // immediately after the user clicked X.
@@ -36,7 +30,6 @@ interface UpdateBannerState {
   setUpdateInfo: (info: UpdateInfo | null) => void;
   setIsInstalling: (installing: boolean) => void;
   setPendingUpdate: (update: Update | null) => void;
-  setAuthRequired: (info: AuthRequiredInfo | null) => void;
   dismiss: (version: string) => void;
   resetDismissed: () => void;
 }
@@ -46,14 +39,12 @@ export const useUpdateBanner = create<UpdateBannerState>((set) => ({
   updateInfo: null,
   isInstalling: false,
   pendingUpdate: null,
-  authRequired: null,
   dismissedVersion: null,
   setIsVisible: (visible) => set({ isVisible: visible }),
   setUpdateInfo: (info) => set({ updateInfo: info }),
   setIsInstalling: (installing) => set({ isInstalling: installing }),
   setPendingUpdate: (update) => set({ pendingUpdate: update }),
-  setAuthRequired: (info) => set({ authRequired: info }),
-  dismiss: (version) => set({ isVisible: false, authRequired: null, dismissedVersion: version }),
+  dismiss: (version) => set({ isVisible: false, dismissedVersion: version }),
   resetDismissed: () => set({ dismissedVersion: null }),
 }));
 
@@ -65,7 +56,7 @@ interface UpdateBannerProps {
 }
 
 export function UpdateBanner({ className, compact = false, variant = "default" }: UpdateBannerProps) {
-  const { isVisible, updateInfo, isInstalling, setIsInstalling, pendingUpdate, authRequired, dismiss } = useUpdateBanner();
+  const { isVisible, updateInfo, isInstalling, setIsInstalling, pendingUpdate, dismiss } = useUpdateBanner();
   const { toast } = useToast();
 
   const handleUpdate = async () => {
@@ -148,57 +139,6 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
       });
     }
   };
-
-  // Show auth-required state — user needs to sign in to download updates
-  if (authRequired) {
-    if (compact) {
-      return (
-        <div className={cn("flex items-center gap-2 text-xs text-muted-foreground", className)}>
-          <Sparkles className="h-3 w-3 text-primary" />
-          <span>v{authRequired.version} available</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-5 px-2 text-xs"
-            onClick={() => window.location.href = "/home"}
-          >
-            sign in to update
-          </Button>
-        </div>
-      );
-    }
-    return (
-      <div className={cn(
-        "flex items-center justify-between gap-3 px-3 py-2 bg-muted/50 border-b text-sm",
-        className
-      )}>
-        <div className="flex items-center gap-2 flex-1">
-          <Sparkles className="h-4 w-4 text-primary" />
-          <span>
-            screenpipe <span className="font-medium">v{authRequired.version}</span> is available — sign in to download
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            className="h-7 px-3 text-xs"
-            onClick={() => window.location.href = "/home"}
-          >
-            sign in
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0"
-            onClick={() => dismiss(authRequired.version)}
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-    );
-  }
 
   if (!isVisible || !updateInfo) return null;
 
@@ -284,7 +224,6 @@ interface PendingUpdateSnapshot {
   version: string;
   body: string;
   downloaded: boolean;
-  auth_required: boolean;
 }
 
 // Hook to listen for update events from Rust.
@@ -294,12 +233,11 @@ interface PendingUpdateSnapshot {
 // state from Rust so it can recover if the event fired before this hook
 // registered (boot-time webview race).
 export function useUpdateListener() {
-  const { setIsVisible, setUpdateInfo, setAuthRequired, resetDismissed } = useUpdateBanner();
+  const { setIsVisible, setUpdateInfo, resetDismissed } = useUpdateBanner();
 
   useEffect(() => {
     let unlistenAvailable: (() => void) | undefined;
     let unlistenClick: (() => void) | undefined;
-    let unlistenAuth: (() => void) | undefined;
 
     // Rust re-emits update-available on every periodic check, and providers
     // hydration runs on every remount — both would otherwise resurrect a
@@ -311,12 +249,6 @@ export function useUpdateListener() {
         setIsVisible(true);
       }
     };
-    const showAuthIfNotDismissed = (info: AuthRequiredInfo) => {
-      if (useUpdateBanner.getState().dismissedVersion !== info.version) {
-        setAuthRequired(info);
-      }
-    };
-
     const setupListeners = async () => {
       // Download happens silently in the background. Banner only appears
       // when the download is complete and the app is ready to restart.
@@ -331,21 +263,12 @@ export function useUpdateListener() {
         setIsVisible(true);
       });
 
-      // Listen for auth-required (user needs to sign in to download update)
-      unlistenAuth = await listen<AuthRequiredInfo>("update-auth-required", (event) => {
-        showAuthIfNotDismissed(event.payload);
-      });
-
       // Hydrate from Rust in case the event fired before we mounted.
       try {
         const resPending = await commands.getPendingUpdate();
-  const pending = resPending.status === "ok" ? resPending.data : null;
-        if (pending) {
-          if (pending.auth_required) {
-            showAuthIfNotDismissed({ version: pending.version, message: "sign in to get the latest update" });
-          } else if (pending.downloaded) {
-            showIfNotDismissed({ version: pending.version, body: pending.body });
-          }
+        const pending = resPending.status === "ok" ? resPending.data : null;
+        if (pending?.downloaded) {
+          showIfNotDismissed({ version: pending.version, body: pending.body });
         }
       } catch (e) {
         // Command not registered yet (older Rust side) or app not ready.
@@ -358,7 +281,6 @@ export function useUpdateListener() {
     return () => {
       unlistenAvailable?.();
       unlistenClick?.();
-      unlistenAuth?.();
     };
-  }, [setIsVisible, setUpdateInfo, setAuthRequired, resetDismissed]);
+  }, [setIsVisible, setUpdateInfo, resetDismissed]);
 }

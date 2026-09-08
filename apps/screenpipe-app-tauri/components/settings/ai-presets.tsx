@@ -1073,7 +1073,7 @@ const AISection = ({
         case "screenpipe-cloud": {
           // Fetch models from gateway so new models appear automatically
           try {
-            const token = settings.user?.token || "";
+            const token = "";
             const piResp = await fetch("https://api.screenpipe.com/v1/models", {
               headers: token ? { Authorization: `Bearer ${token}` } : {},
             });
@@ -1134,7 +1134,7 @@ const AISection = ({
       setIsLoadingModels(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.apiKey, settings.user?.id, chatgptLoggedIn]);
+  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.apiKey, chatgptLoggedIn]);
 
   const apiKey = useMemo(() => {
     if (settingsPreset && "apiKey" in settingsPreset) {
@@ -1245,12 +1245,10 @@ const AISection = ({
             <AIProviderCard
               type="screenpipe-cloud"
               title="Screenpipe Cloud"
-              description="AI coding agent powered by Screenpipe Cloud. Requires login."
+              description="AI coding agent powered by Screenpipe Cloud"
               imageSrc="/images/screenpipe.png"
               selected={settingsPreset?.provider === "screenpipe-cloud"}
               onClick={() => handleAiProviderChange("screenpipe-cloud")}
-              disabled={!settings.user?.token}
-              warningText={!settings.user?.token ? "Login required" : undefined}
             />
           )}
 
@@ -1511,25 +1509,7 @@ const AISection = ({
                           <CommandItem
                             key={model.id}
                             value={model.id}
-                            onSelect={async () => {
-                              if (model.id === "claude-opus-4-8" && !settings.user?.cloud_subscribed) {
-                                if (!settings.user?.token) {
-                                  await commands.openLoginWindow();
-                                } else {
-                                  try {
-                                    const res = await fetch("https://screenpi.pe/api/cloud-sync/checkout", {
-                                      method: "POST",
-                                      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.user.token}` },
-                                      body: JSON.stringify({ tier: "pro", billingPeriod: "monthly", userId: settings.user.id, email: settings.user.email }),
-                                    });
-                                    const data = await res.json();
-                                    if (data.url) await openUrl(data.url);
-                                  } catch (e) {
-                                    console.error("checkout failed:", e);
-                                  }
-                                }
-                                return;
-                              }
+                            onSelect={() => {
                               updateSettingsPreset({ model: model.id });
                               setIsModelPickerOpen(false);
                             }}
@@ -2110,7 +2090,6 @@ useEffect(() => {
   const removePreset = async (id: string) => {
     setIsLoading(true);
     try {
-      // Prevent deletion of screenpipe-cloud preset for Pro subscribers
       const presetToRemove = settings.aiPresets.find((preset) => preset.id === id);
       if (
         isEnterprise &&
@@ -2123,15 +2102,6 @@ useEffect(() => {
         });
         return;
       }
-      if (presetToRemove?.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed) {
-        toast({
-          title: "Cannot delete cloud preset",
-          description: "This preset is included with your Business subscription",
-          variant: "destructive",
-        });
-        return;
-      }
-
       const checkIfDefault = settings.aiPresets.find(
         (preset) => preset.id === id
       )?.defaultPreset;

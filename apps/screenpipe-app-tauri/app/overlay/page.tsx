@@ -18,7 +18,6 @@ import { useHealthCheck } from "@/lib/hooks/use-health-check";
 
 import { commands } from "@/lib/utils/tauri";
 import localforage from "localforage";
-import { LoginDialog } from "@/components/login-dialog";
 import { UpdateBanner } from "@/components/update-banner";
 import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 import { ModelDownloadTracker } from "@/components/model-download-tracker";
@@ -100,7 +99,7 @@ class TimelineErrorBoundary extends React.Component<
 }
 
 export default function OverlayPage() {
-  const { settings, updateSettings, loadUser, reloadStore, isSettingsLoaded, loadingError } = useSettings();
+  const { isSettingsLoaded, loadingError } = useSettings();
   const { toast } = useToast();
   const openFeedback = useFeedbackStore((s) => s.openFeedback);
   const { onboardingData } = useOnboarding();
@@ -200,8 +199,8 @@ export default function OverlayPage() {
       const BASE_URL = "https://screenpi.pe";
       const machineId = localStorage?.getItem("machineId") || crypto.randomUUID();
       try { localStorage?.setItem("machineId", machineId); } catch {}
-      const identifier = settings.user?.id || machineId;
-      const type = settings.user?.id ? "user" : "machine";
+      const identifier = machineId;
+      const type = "machine";
       const logFilesResult = await commands.getLogFiles();
       if (logFilesResult.status !== "ok") throw new Error("Failed to get log files");
       const logFiles = logFilesResult.data.slice(0, 3);
@@ -324,7 +323,6 @@ export default function OverlayPage() {
         <>
           <ChangelogDialog />
 
-          {!isEnterprise && <LoginDialog />}
           <ModelDownloadTracker />
           <UpdateBanner />
           

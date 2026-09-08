@@ -6,13 +6,8 @@ import { homeDir } from "@tauri-apps/api/path";
 import { commands } from "@/lib/utils/tauri";
 import { platform } from "@tauri-apps/plugin-os";
 import { Store } from "@tauri-apps/plugin-store";
-import { emit, listen } from "@tauri-apps/api/event";
-import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { User } from "../utils/tauri";
+import React, { createContext, useContext, useEffect, useState } from "react";
 import { SettingsStore } from "../utils/tauri";
-import { installAuthInterceptor } from "../auth-guard";
-import { normalizeAppUser } from "@/lib/app-entitlement";
-import { screenpipeWebUrl } from "@/lib/web-url";
 import type { SourceCitation } from "@/lib/source-citations";
 import type {
 	EnterpriseAppUpdatePolicy,
@@ -406,44 +401,11 @@ const DEFAULT_IGNORED_WINDOWS_PER_OS: Record<string, string[]> = {
 	linux: ["Info center", "Discover", "Parted"],
 };
 
-// Two default screenpipe-cloud presets on first install:
-// - "Chat":  Claude Opus 4.7 if the user is pro, Claude Sonnet 4.5 otherwise.
-//           Opus is gated in the ai-gateway (subscribed tier), so pushing
-//           it to non-pro users would 403 their first message.
-// - "Pipes": Claude Haiku 4.5 — cheap/fast for recurring pipe runs.
-//           Pipes default to this preset; users can override per-pipe.
-const CHAT_PRESET_ID = "chat";
-const PIPES_PRESET_ID = "pipes";
-
-// Pro users get the chat / pipes pair (opus for interactive chat, auto for
-// pipe runs that pick the cheapest model that fits the task).
-// Non-pro users get a single "screenpipe" preset on auto — auto handles
-// model routing without needing the user to know what to pick.
+// Temporary default until the external-provider cleanup selects the retained
+// local Pi/Ollama preset.
 const SCREENPIPE_PRESET_ID = "screenpipe";
 
-export function makeDefaultPresets(isPro: boolean): AIPreset[] {
-	if (isPro) {
-		return [
-			{
-				id: CHAT_PRESET_ID,
-				provider: "screenpipe-cloud",
-				url: "",
-				model: "claude-opus-4-8",
-				maxContextChars: 200000,
-				defaultPreset: true,
-				prompt: "",
-			},
-			{
-				id: PIPES_PRESET_ID,
-				provider: "screenpipe-cloud",
-				url: "",
-				model: "auto",
-				maxContextChars: 200000,
-				defaultPreset: false,
-				prompt: "",
-			},
-		];
-	}
+export function makeDefaultPresets(): AIPreset[] {
 	return [
 		{
 			id: SCREENPIPE_PRESET_ID,
@@ -457,40 +419,8 @@ export function makeDefaultPresets(isPro: boolean): AIPreset[] {
 	];
 }
 
-// Seed value — module load can't know pro status yet, so fall back to non-pro.
-// ensureDefaultPreset() re-seeds with pro status once settings.user is loaded.
-const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
-
-const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
-
-const isLoggedInProUser = (user: User | null | undefined) =>
-	user?.cloud_subscribed === true && Boolean(user.token || user.id);
-
-const applyProCloudAudioDefaults = (settings: Settings): Settings => {
-	if (!isLoggedInProUser(settings.user)) return settings;
-	if ((settings as any)._proCloudAudioDefaultsAppliedV2) return settings;
-
-	// If the user picked a non-default, non-cloud engine, they've configured audio
-	// themselves — don't flip live-meeting on or rewrite the provider behind their back.
-	// V2 marker is intentionally left unset so a later switch back to default re-evaluates.
-	const userChoseCustomEngine =
-		settings.audioTranscriptionEngine !== DEFAULT_AUDIO_ENGINE &&
-		settings.audioTranscriptionEngine !== "screenpipe-cloud";
-	if (userChoseCustomEngine) return settings;
-
-	const oldCloudEngineMigrationAlreadyRan = (settings as any)._cloudEngineApplied === true;
-	if (!oldCloudEngineMigrationAlreadyRan) {
-		settings.audioTranscriptionEngine = "screenpipe-cloud";
-	}
-	settings.meetingLiveTranscriptionEnabled = true;
-	settings.meetingLiveTranscriptionProvider = "screenpipe-cloud";
-	(settings as any)._proCloudAudioDefaultsAppliedV2 = true;
-
-	return settings;
-};
-
 let DEFAULT_SETTINGS: Settings = {
-			aiPresets: makeDefaultPresets(false) as any,
+			aiPresets: makeDefaultPresets() as any,
 			deviceId: crypto.randomUUID(),
 			deepgramApiKey: "",
 			isLoading: false,
@@ -529,27 +459,6 @@ let DEFAULT_SETTINGS: Settings = {
 			autoStartEnabled: true,
 			platform: "unknown",
 			disabledShortcuts: [],
-			user: {
-				id: null,
-				name: null,
-				email: null,
-				image: null,
-				token: null,
-				clerk_id: null,
-				api_key: null,
-				credits: null,
-				stripe_connected: null,
-				stripe_account_status: null,
-				github_username: null,
-				bio: null,
-				website: null,
-				contact: null,
-				cloud_subscribed: null,
-				credits_balance: null,
-				app_entitled: null,
-				subscription_plan: null,
-				entitlement: null
-			},
 			showScreenpipeShortcut: "Control+Super+S",
 			startRecordingShortcut: "Super+Alt+U",
 			stopRecordingShortcut: "Super+Alt+X",
@@ -696,27 +605,7 @@ function createSettingsStore() {
 
 		// Migration: Add default presets if user has none
 		if (!settings.aiPresets || settings.aiPresets.length === 0) {
-			const isPro = settings.user?.cloud_subscribed === true;
-			settings.aiPresets = makeDefaultPresets(isPro) as any;
-			needsUpdate = true;
-		}
-
-		// b2 seed: the first time we see a logged-in user, replace the anonymous
-		// "screenpipe" placeholder with the pro pair (chat + pipes) IF they're pro.
-		// Anonymous users keep the placeholder forever (which is correct — non-pro
-		// stays on the single "screenpipe" auto preset). Existing users with their
-		// own presets are untouched. Runs exactly once per install.
-		if (!(settings as any)._presetsSeededForUser && settings.user?.token) {
-			const isPro = settings.user?.cloud_subscribed === true;
-			const presets = settings.aiPresets ?? [];
-			const isAnonymousPlaceholder =
-				presets.length === 1 &&
-				(presets[0] as any)?.id === SCREENPIPE_PRESET_ID &&
-				(presets[0] as any)?.provider === "screenpipe-cloud";
-			if (isPro && isAnonymousPlaceholder) {
-				settings.aiPresets = makeDefaultPresets(true) as any;
-			}
-			(settings as any)._presetsSeededForUser = true;
+			settings.aiPresets = makeDefaultPresets() as any;
 			needsUpdate = true;
 		}
 
@@ -733,18 +622,6 @@ function createSettingsStore() {
 			settings.aiPresets = settings.aiPresets.map((p: any) =>
 				p.id === "pi-agent" ? { ...p, id: "screenpipe-cloud" } : p
 			);
-			needsUpdate = true;
-		}
-
-		// Migration: Add screenpipe-cloud preset for existing users (without touching their existing presets)
-		const hasCloudPreset = settings.aiPresets?.some(
-			(p: any) => p.id === "screenpipe-cloud" || p.provider === "screenpipe-cloud"
-		);
-		if (settings.aiPresets && settings.aiPresets.length > 0 && !hasCloudPreset) {
-			// Only set as default if no other preset is already default
-			const hasDefault = settings.aiPresets.some((p: any) => p.defaultPreset);
-			const cloudPreset = { ...DEFAULT_CLOUD_PRESET, defaultPreset: !hasDefault };
-			settings.aiPresets = [cloudPreset as any, ...settings.aiPresets];
 			needsUpdate = true;
 		}
 
@@ -789,17 +666,9 @@ function createSettingsStore() {
 			// platform() unavailable (SSR/tests) — keep existing value
 		}
 
-		// Mark pro migration as done so the old migration doesn't re-trigger
-		if (!(settings as any)._proCloudMigrationDone) {
-			(settings as any)._proCloudMigrationDone = true;
-			needsUpdate = true;
-		}
-
 		// Migration: Set default transcription engine (one-time only)
 		// - macOS → whisper-large-v3-turbo-quantized
 		// - Windows/Linux → parakeet
-		// Does NOT set screenpipe-cloud here because user may not be logged in yet.
-		// Cloud switch happens in account-section.tsx when subscription is confirmed.
 		if (!(settings as any)._parakeetDefaultMigrationDone) {
 			const engine = settings.audioTranscriptionEngine;
 			const isWhisperVariant = engine?.includes("whisper");
@@ -815,45 +684,6 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// Post-migration: when a logged-in Pro user is first confirmed, default
-		// both background and live transcription to Screenpipe Cloud. The marker
-		// prevents future user refreshes from overriding a manual engine choice.
-		if (isLoggedInProUser(settings.user) && !(settings as any)._proCloudAudioDefaultsAppliedV2) {
-			applyProCloudAudioDefaults(settings);
-			needsUpdate = true;
-		}
-
-		// Post-migration: if user becomes pro and the Chat preset is still on the
-		// non-pro fallback (Sonnet), upgrade it to Opus 4.7.
-		// Guards:
-		//   - only touches the preset with id === "chat" (leaves user-created presets alone)
-		//   - only if provider is still screenpipe-cloud and model is exactly the seeded
-		//     Sonnet value (prevents clobbering a manual override like glm-5)
-		//   - _chatOpusAppliedForPro flag prevents re-upgrading after user manually
-		//     switches back to something else
-		if (
-			settings.user?.cloud_subscribed &&
-			!(settings as any)._chatOpusAppliedForPro &&
-			Array.isArray(settings.aiPresets)
-		) {
-			let upgraded = false;
-			settings.aiPresets = settings.aiPresets.map((p: any) => {
-				if (
-					p?.id === "chat" &&
-					p?.provider === "screenpipe-cloud" &&
-					p?.model === "claude-sonnet-4-5"
-				) {
-					upgraded = true;
-					return { ...p, model: "claude-opus-4-8" };
-				}
-				return p;
-			});
-			if (upgraded) {
-				(settings as any)._chatOpusAppliedForPro = true;
-				needsUpdate = true;
-			}
-		}
-
 		// Save migrations if needed
 		if (needsUpdate) {
 			await store.set("settings", settings);
@@ -866,15 +696,7 @@ function createSettingsStore() {
 	const set = async (value: Partial<Settings>) => {
 		const store = await getStore();
 		const current = await get();
-		let newSettings = { ...current, ...value } as Settings;
-		if ("user" in value) {
-			// On logout / Pro→non-Pro transition, clear the V2 marker so a future
-			// Pro login re-evaluates cloud defaults (handles account switching).
-			if (!isLoggedInProUser(newSettings.user)) {
-				delete (newSettings as any)._proCloudAudioDefaultsAppliedV2;
-			}
-			newSettings = applyProCloudAudioDefaults(newSettings);
-		}
+		const newSettings = { ...current, ...value } as Settings;
 		await store.set("settings", newSettings);
 		await saveAndEncrypt(store);
 	};
@@ -917,7 +739,6 @@ interface SettingsContextType {
 	resetSettings: () => Promise<void>;
 	resetSetting: <K extends keyof Settings>(key: K) => Promise<void>;
 	reloadStore: () => Promise<void>;
-	loadUser: (token: string, verify?: boolean) => Promise<void>;
 	getDataDir: () => Promise<string>;
 	isSettingsLoaded: boolean;
 	loadingError: string | null;
@@ -981,148 +802,11 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 		};
 	}, []);
 
-	// Install global fetch interceptor to catch 401s from screenpi.pe
-	const settingsRef = useRef(settings);
-	settingsRef.current = settings;
-
-	// Monotonic auth generation, bumped on every explicit sign-out. A
-	// loadUser() call snapshots this at entry; if a sign-out bumps it while the
-	// network request is still in flight, loadUser refuses to write the user
-	// back. Without this, a slow refresh that started before the user clicked
-	// "logout" resurrects the just-cleared session — the user had to click
-	// logout twice. Regression test: e2e/specs/zz-logout-resurrect.spec.ts.
-	const authGenerationRef = useRef(0);
-
-	useEffect(() => {
-		installAuthInterceptor(
-			() => settingsRef.current.user?.token ?? undefined,
-			async () => {
-				await updateSettings({ user: null as any });
-			}
-		);
-	}, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-	// Cross-window sign-out: when any window broadcasts a sign-out (logout
-	// button or 401 interceptor), bump THIS window's auth generation so an
-	// in-flight loadUser here also aborts instead of writing the user back
-	// into the shared store. Pairs with the emit() in updateSettings.
-	useEffect(() => {
-		const unlistenPromise = listen("screenpipe-auth-signout", () => {
-			authGenerationRef.current += 1;
-		});
-		return () => {
-			unlistenPromise.then((un) => un()).catch(() => {});
-		};
-	}, []);
-
-	// Auto-refresh user data from API when app starts with a stored token.
-	// This ensures subscription status (cloud_subscribed) stays current —
-	// e.g. when a subscription is granted after the user last logged in.
-	// Retries with exponential backoff so transient network failures don't
-	// leave the user stuck on a stale tier for the entire session.
-	useEffect(() => {
-		if (!isSettingsLoaded) return;
-		const token = settings.user?.token;
-		if (!token) return;
-
-		let cancelled = false;
-		const MAX_RETRIES = 3;
-		const BASE_DELAY_MS = 2000; // 2s, 4s, 8s
-
-		const attemptLoad = async () => {
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-				if (cancelled) return;
-				try {
-					await loadUser(token);
-					return; // success
-				} catch (err) {
-					// Don't retry on auth errors — the interceptor handles sign-out
-					const msg = err instanceof Error ? err.message : String(err);
-					if (msg.includes("401") || msg.includes("403")) {
-						console.warn("auto-refresh: token rejected, stopping retries");
-						return;
-					}
-					console.warn(
-						`auto-refresh user data failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`,
-						err
-					);
-					if (attempt < MAX_RETRIES && !cancelled) {
-						const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-						await new Promise((r) => setTimeout(r, delay));
-					}
-				}
-			}
-		};
-
-		attemptLoad();
-		return () => { cancelled = true; };
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [isSettingsLoaded, settings.user?.token]);
-
-	// When user becomes a Pro subscriber, default to cloud transcription (one-time)
-	useEffect(() => {
-		if (!isSettingsLoaded) return;
-		if ((settings as any)._proCloudMigrationDone) return;
-
-		// Mark migration as done — we no longer force cloud transcription for Pro users.
-		// Local engines (whisper/qwen3) are now the default for all users.
-		settingsStore.set({ _proCloudMigrationDone: true } as any);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [settings.user?.cloud_subscribed, isSettingsLoaded]);
-
-	// Upgrade the seeded "chat" preset Sonnet → Opus 4.7 the moment the user
-	// becomes pro (mirrors the on-load migration for same-session transitions).
-	// Guards match the migration: only touch the unmodified seeded chat preset,
-	// never clobber a user override, only fire once.
-	useEffect(() => {
-		if (!isSettingsLoaded) return;
-		if (!settings.user?.cloud_subscribed) return;
-		if ((settings as any)._chatOpusAppliedForPro) return;
-		if (!Array.isArray(settings.aiPresets)) return;
-
-		const idx = settings.aiPresets.findIndex(
-			(p: any) =>
-				p?.id === "chat" &&
-				p?.provider === "screenpipe-cloud" &&
-				p?.model === "claude-sonnet-4-5"
-		);
-		if (idx === -1) {
-			// Nothing to upgrade, but still record the decision so we don't re-check
-			// every render. User either (a) already has Opus, (b) customized, or
-			// (c) deleted the chat preset.
-			settingsStore.set({ _chatOpusAppliedForPro: true } as any);
-			return;
-		}
-
-		const nextPresets = settings.aiPresets.map((p: any, i: number) =>
-			i === idx ? { ...p, model: "claude-opus-4-8" } : p
-		);
-		settingsStore.set({
-			aiPresets: nextPresets,
-			_chatOpusAppliedForPro: true,
-		} as any);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [settings.user?.cloud_subscribed, isSettingsLoaded]);
-
 	useEffect(() => {
 		applyFontSize(settings.fontSize);
 	}, [settings.fontSize]);
 
 	const updateSettings = async (updates: Partial<Settings>) => {
-		// Sign-out (user → null) must invalidate any loadUser() request that is
-		// currently in flight so the cleared session can't be resurrected when a
-		// slow refresh resolves afterwards. Bump synchronously — before the first
-		// await — so even the logout button's fire-and-forget call wins the race.
-		if ("user" in updates && !updates.user) {
-			authGenerationRef.current += 1;
-			// Broadcast to the other windows. Each non-overlay window has its own
-			// SettingsProvider + DeeplinkHandler, so a login's deep-link fires a
-			// loadUser in EVERY window. Without this, a logout in this window
-			// wouldn't invalidate an in-flight loadUser in another window, which
-			// would write the user back into the shared store and resurrect the
-			// session. Fire-and-forget; the listener above bumps each window's ref.
-			emit("screenpipe-auth-signout").catch(() => {});
-		}
 		await settingsStore.set(updates);
 		// Settings will be updated via the listener
 
@@ -1167,54 +851,12 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 		return `${homeDirPath}/.screenpipe`;
 	};
 
-	const loadUser = async (token: string, verify = false) => {
-		// Snapshot the auth generation at the start of the request. If the user
-		// signs out while this fetch is in flight, the generation changes and we
-		// abort the write below instead of resurrecting the cleared session.
-		const generation = authGenerationRef.current;
-		try {
-			const response = await fetch(screenpipeWebUrl("/api/user", "https://screenpi.pe"), {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				// verify=true asks the server to consult Stripe directly (used by the
-				// entitlement gate right after purchase); normal polls omit it to keep
-				// the hot path off Stripe.
-				body: JSON.stringify({ token, ...(verify ? { verify: true } : {}) }),
-			});
-
-			if (!response.ok) {
-				const body = await response.text().catch(() => "<no body>");
-				throw new Error(`failed to verify token: ${response.status} ${response.statusText} - ${body}`);
-			}
-
-			const data = await response.json();
-			const userData = normalizeAppUser(data.user, token) as User;
-
-			// The user signed out while this request was in flight — writing
-			// userData now would resurrect the cleared session (the "logout needs
-			// two clicks" bug). Abort silently; the sign-out already won.
-			if (authGenerationRef.current !== generation) {
-				console.log("loadUser: sign-out during fetch — not restoring session");
-				return;
-			}
-
-			await updateSettings({ user: userData });
-
-		} catch (err) {
-			console.error("failed to load user:", err instanceof Error ? err.message : err);
-			throw err;
-		}
-	};
-
 	const value: SettingsContextType = {
 		settings,
 		updateSettings,
 		resetSettings,
 		resetSetting,
 		reloadStore,
-		loadUser,
 		getDataDir,
 		isSettingsLoaded,
 		loadingError,

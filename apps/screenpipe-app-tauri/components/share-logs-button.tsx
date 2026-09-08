@@ -8,7 +8,6 @@ import { Upload, Loader, X, Camera, Video } from "lucide-react";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { commands } from "@/lib/utils/tauri";
 import { useState, useEffect } from "react";
-import { useSettings } from "@/lib/hooks/use-settings";
 import { getVersion } from "@tauri-apps/api/app";
 import {
   version as osVersion,
@@ -40,7 +39,6 @@ export const ShareLogsButton = ({
   prefillText?: string;
 }) => {
   const { toast } = useToast();
-  const { settings } = useSettings();
   const [isSending, setIsSending] = useState(false);
   const [machineId, setMachineId] = useState("");
   const [feedbackText, setFeedbackText] = useState(prefillText ?? "");
@@ -165,8 +163,8 @@ export const ShareLogsButton = ({
     setIsSending(true);
     try {
       const BASE_URL = "https://screenpi.pe";
-      const identifier = settings.user?.id || machineId;
-      const type = settings.user?.id ? "user" : "machine";
+      const identifier = machineId;
+      const type = "machine";
 
       const MAX_LOG_SIZE = 100 * 1024;
       const logContents = await Promise.all(

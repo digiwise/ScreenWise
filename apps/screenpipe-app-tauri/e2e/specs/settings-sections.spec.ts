@@ -43,8 +43,6 @@ const SETTINGS_SECTIONS = [
   { id: 'storage', keywords: ['storage', 'disk', 'retention', 'cache'] },
   { id: 'speakers', keywords: ['speaker', 'voice'] },
   { id: 'team', keywords: ['team', 'share', 'member', 'invite'] },
-  { id: 'account', keywords: ['account', 'sign', 'login', 'cloud'] },
-  { id: 'referral', keywords: ['free month', 'referral', 'invite', 'share'] },
 ] as const;
 
 describe('Settings sections', () => {

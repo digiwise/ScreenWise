@@ -11,13 +11,13 @@ import { TextOverlay, extractUrlsFromText, isUrl, normalizeUrl } from "@/compone
 import { SelectableTextLayer, getSelectableLayerText, clearSelectableLayerSelection } from "@/components/selectable-text-layer";
 import { RegionOcrOverlay } from "@/components/rewind/region-ocr-overlay";
 import { useSearchHighlight } from "@/lib/hooks/use-search-highlight";
-import { useSettings } from "@/lib/hooks/use-settings";
 import { ImageOff, ChevronLeft, ChevronRight, Copy, ImageIcon, Link2, MessageCircle, Type } from "lucide-react";
 import { usePipes } from "@/lib/hooks/use-pipes";
 import { toast } from "@/components/ui/use-toast";
 import { useFrameLoading } from "@/components/rewind/hooks/use-frame-loading";
 import { useLiveText } from "@/components/rewind/hooks/use-live-text";
 import { useFrameActions } from "@/components/rewind/hooks/use-frame-actions";
+import { useSettings } from "@/lib/hooks/use-settings";
 
 export interface DetectedUrl {
 	normalized: string;
@@ -93,8 +93,8 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 	isPlaying,
 	playbackSpeed,
 }) => {
-	const { isMac } = usePlatform();
 	const { settings } = useSettings();
+	const { isMac } = usePlatform();
 	const { templatePipes } = usePipes();
 	const { highlightTerms, dismissed: highlightDismissed, clear: clearHighlight } = useSearchHighlight();
 	const [contextMenuOpen, setContextMenuOpen] = useState(false);
@@ -546,7 +546,7 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 				frameId={debouncedFrame?.frameId ?? null}
 				renderedImageInfo={renderedImageInfo}
 				naturalDimensions={naturalDimensions}
-				userToken={settings.user?.token ?? null}
+				userToken={null}
 			/>
 
 		</div>

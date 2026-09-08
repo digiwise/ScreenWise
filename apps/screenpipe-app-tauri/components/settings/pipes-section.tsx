@@ -777,8 +777,8 @@ export function PipesSection() {
         body: JSON.stringify({
           raw_content: pipe.raw_content,
           name: pipe.config.name,
-          author_id: settings.user?.id || null,
-          author_email: settings.user?.email || null,
+          author_id: null,
+          author_email: null,
         }),
       });
       const data = await res.json();
@@ -2691,7 +2691,7 @@ export function PipesSection() {
       <PublishDialog
         open={!!publishPipeName}
         onOpenChange={(v) => { if (!v) setPublishPipeName(null); }}
-        token={settings.user?.token}
+        token={undefined}
         onPublished={() => {
           setPublishPipeName(null);
           toast({ title: "pipe published to store" });

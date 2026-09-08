@@ -51,14 +51,6 @@ export default function GeneralSettings() {
       const pendingRes = await commands.getPendingUpdate();
       if (pendingRes.status === "ok" && pendingRes.data) {
         const pending = pendingRes.data;
-        if (pending.auth_required) {
-          toast({
-            title: "update available",
-            description: `v${pending.version} is available — sign in to download it`,
-          });
-          return;
-        }
-
         if (pending.downloaded) {
           toast({
             title: "update ready",
@@ -317,7 +309,7 @@ export default function GeneralSettings() {
                 checked={settings?.enhancedAI ?? false}
                 onCheckedChange={async (checked) => {
                   handleSettingsChange({ enhancedAI: checked });
-                  const token = settings?.user?.token || "";
+                  const token = "";
                   try {
                     await commands.setEnhancedAiSuggestions(checked, token);
                   } catch {}
