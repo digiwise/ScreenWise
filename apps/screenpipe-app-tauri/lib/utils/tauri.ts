@@ -1136,9 +1136,9 @@ async piSetModel(sessionId: string | null, providerConfig: PiProviderConfig) : P
 /**
  * Start the Pi sidecar in RPC mode (Tauri command wrapper)
  */
-async piStart(sessionId: string | null, projectDir: string, userToken: string | null, providerConfig: PiProviderConfig | null) : Promise<Result<PiInfo, string>> {
+async piStart(sessionId: string | null, projectDir: string, providerConfig: PiProviderConfig | null) : Promise<Result<PiInfo, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("pi_start", { sessionId, projectDir, userToken, providerConfig }) };
+    return { status: "ok", data: await TAURI_INVOKE("pi_start", { sessionId, projectDir, providerConfig }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1188,9 +1188,9 @@ async piStop(sessionId: string | null) : Promise<Result<PiInfo, string>> {
  * Prefer `pi_set_model` when only provider+model changed — it preserves the
  * conversation state instead of killing the subprocess.
  */
-async piUpdateConfig(userToken: string | null, providerConfig: PiProviderConfig | null) : Promise<Result<null, string>> {
+async piUpdateConfig(providerConfig: PiProviderConfig | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("pi_update_config", { userToken, providerConfig }) };
+    return { status: "ok", data: await TAURI_INVOKE("pi_update_config", { providerConfig }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1593,43 +1593,6 @@ async setBrowserCookieAccessState(granted: boolean, disabled: boolean) : Promise
 }
 },
 /**
- * Toggle the "Cloud audio + video + image analysis" capability
- * in the screenpipe-api skill that Pi installs on every run.
- *
- * Mechanism: the screenpipe-core `Pi::ensure_screenpipe_skill` reads
- * `~/.screenpipe/cloud_media_analysis.disabled` at install time and
- * conditionally appends the Gemma 4 E4B confidential-enclave section
- * to `<project>/.pi/skills/screenpipe-api/SKILL.md`. Default (no
- * marker) = enabled. This command just creates or removes the marker.
- *
- * Why a marker file instead of editing the rendered skill: Pi rewrites
- * the rendered skill from a compiled-in template on every run, so any
- * post-install edits get overwritten on the next pipe execution. The
- * only stable seam is at install time.
- *
- * Idempotent. Effect takes hold on the next Pi run (next pipe
- * execution or new pi-chat session).
- */
-async setCloudMediaAnalysisSkill(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_cloud_media_analysis_skill", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Enable or disable enhanced AI suggestions (uses screenpipe cloud).
- */
-async setEnhancedAiSuggestions(enabled: boolean, token: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_enhanced_ai_suggestions", { enabled, token }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Called by the frontend after fetching the enterprise policy.
  */
 async setEnterprisePolicy(hiddenSections: string[]) : Promise<void> {
@@ -1944,7 +1907,7 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 /** user-defined types **/
 
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
-export type AIProviderType = "openai" | "openai-chatgpt" | "native-ollama" | "custom" | "screenpipe-cloud" | "pi" | "anthropic"
+export type AIProviderType = "openai" | "openai-chatgpt" | "native-ollama" | "custom" | "anthropic"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
 export type BootPhaseSnapshot = {
 /**
@@ -2088,7 +2051,7 @@ export type PiInfo = { running: boolean; projectDir: string | null; pid: number 
  */
 export type PiProviderConfig = {
 /**
- * Provider type: "openai", "native-ollama", "custom", "screenpipe-cloud"
+ * Provider type: "openai", "native-ollama", "custom"
  */
 provider: string;
 /**
@@ -2606,11 +2569,6 @@ autoUpdate?: boolean;
  * Auto-update store-installed pipes that haven't been locally modified.
  */
 autoUpdatePipes?: boolean;
-/**
- * Use screenpipe cloud for AI-powered features like suggestions.
- * Better quality but sends activity context to the cloud (zero data retention).
- */
-enhancedAI?: boolean;
 /**
  * Timeline overlay mode: "fullscreen" (floating panel above everything) or
  * "window" (normal resizable window with title bar).

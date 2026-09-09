@@ -9,8 +9,7 @@ export type EnterpriseAiPresetProvider =
   | "openai-chatgpt"
   | "anthropic"
   | "native-ollama"
-  | "custom"
-  | "screenpipe-cloud";
+  | "custom";
 
 export interface EnterpriseManagedAiPreset {
   id: string;
@@ -25,7 +24,6 @@ export interface EnterpriseManagedAiPreset {
 
 export interface EnterpriseAiPresetPolicy {
   version: 2;
-  allow_screenpipe_cloud: boolean;
   allow_employee_custom_presets: boolean;
   lock_default_preset: boolean;
   default_preset_id: string | null;
@@ -34,7 +32,6 @@ export interface EnterpriseAiPresetPolicy {
 
 export const DEFAULT_ENTERPRISE_AI_PRESET_POLICY: EnterpriseAiPresetPolicy = {
   version: 2,
-  allow_screenpipe_cloud: true,
   allow_employee_custom_presets: true,
   lock_default_preset: false,
   default_preset_id: null,
@@ -47,7 +44,6 @@ const VALID_PROVIDERS = new Set<EnterpriseAiPresetProvider>([
   "anthropic",
   "native-ollama",
   "custom",
-  "screenpipe-cloud",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,22 +56,26 @@ function stringValue(value: unknown, fallback = ""): string {
 
 function normalizeManagedPreset(value: unknown, index: number): EnterpriseManagedAiPreset | null {
   if (!isRecord(value)) return null;
-  const provider = stringValue(value.provider) as EnterpriseAiPresetProvider;
+  const rawProvider = stringValue(value.provider);
+  const provider = (rawProvider === "screenpipe-cloud" || rawProvider === "pi"
+    ? "native-ollama"
+    : rawProvider) as EnterpriseAiPresetProvider;
   if (!VALID_PROVIDERS.has(provider)) return null;
 
-  const model =
-    provider === "screenpipe-cloud"
-      ? stringValue(value.model, "screenpipe-cloud")
-      : stringValue(value.model);
+  const model = rawProvider === "screenpipe-cloud" || rawProvider === "pi"
+    ? "ministral-3:latest"
+    : stringValue(value.model);
   if (!model) return null;
 
   return {
     id: stringValue(value.id, `enterprise-managed-${index + 1}`),
     provider,
-    url: provider === "screenpipe-cloud" ? "" : stringValue(value.url),
+    url: rawProvider === "screenpipe-cloud" || rawProvider === "pi"
+      ? "http://localhost:11434/v1"
+      : stringValue(value.url),
     model,
     api_key:
-      provider === "screenpipe-cloud" || provider === "native-ollama" || provider === "openai-chatgpt"
+      provider === "native-ollama" || provider === "openai-chatgpt"
         ? ""
         : stringValue(value.api_key ?? value.apiKey),
     prompt: stringValue(value.prompt),
@@ -104,26 +104,21 @@ export function normalizeEnterpriseAiPresetPolicy(value: unknown): EnterpriseAiP
 
   if (!isRecord(value)) return DEFAULT_ENTERPRISE_AI_PRESET_POLICY;
 
-  const allowScreenpipeCloud = value.allow_screenpipe_cloud !== false;
   const managedPresets = Array.isArray(value.managed_presets)
     ? value.managed_presets
         .map((preset, index) => normalizeManagedPreset(preset, index))
         .filter((preset): preset is EnterpriseManagedAiPreset => Boolean(preset))
     : [];
   const defaultPresetId = stringValue(value.default_preset_id);
-  const validDefaults = new Set([
-    ...(allowScreenpipeCloud ? ["screenpipe-cloud"] : []),
-    ...managedPresets.map((preset) => preset.id),
-  ]);
+  const validDefaults = new Set(managedPresets.map((preset) => preset.id));
 
   return {
     version: 2,
-    allow_screenpipe_cloud: allowScreenpipeCloud,
     allow_employee_custom_presets: value.allow_employee_custom_presets !== false,
     lock_default_preset: value.lock_default_preset === true,
     default_preset_id: validDefaults.has(defaultPresetId)
       ? defaultPresetId
-      : managedPresets[0]?.id ?? (allowScreenpipeCloud ? "screenpipe-cloud" : null),
+      : managedPresets[0]?.id ?? null,
     managed_presets: managedPresets,
   };
 }
@@ -138,7 +133,6 @@ export function isPresetAllowedByEnterprisePolicy(
   policy: EnterpriseAiPresetPolicy
 ): boolean {
   if (isEnterpriseManagedPreset(preset)) return true;
-  if (preset.provider === "screenpipe-cloud") return policy.allow_screenpipe_cloud;
   return policy.allow_employee_custom_presets;
 }
 

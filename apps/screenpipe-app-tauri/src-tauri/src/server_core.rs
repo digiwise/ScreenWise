@@ -352,7 +352,7 @@ impl ServerCore {
         std::fs::create_dir_all(&pipes_dir).ok();
 
         let pi_executor = Arc::new(
-            screenpipe_core::agents::pi::PiExecutor::new(None)
+            screenpipe_core::agents::pi::PiExecutor::new()
                 .with_api_auth_key(config.api_auth_key.clone()),
         );
         let mut agent_executors: std::collections::HashMap<

@@ -4,8 +4,7 @@
 
 /**
  * Some models occasionally emit tool-call XML markup as raw text instead of
- * as a structured tool_use event (claude-opus-4-7 and qwen have been
- * observed doing this via screenpipe-cloud). Pi doesn't intercept it, so it
+ * as a structured tool_use event. Pi doesn't intercept it, so it
  * lands in the assistant message's text. When react-markdown + rehypeRaw
  * processes it, the unknown `<function_calls>` / `<invoke>` / `<parameter>`
  * elements collapse into invisible inline spans and the args bleed into the

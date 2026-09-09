@@ -22,9 +22,7 @@ export type AIProviderType =
 	| "openai-chatgpt"
 	| "anthropic"
 	| "custom"
-	| "embedded"
-	| "screenpipe-cloud"
-	| "pi";
+	| "embedded";
 
 export type EmbeddedLLMConfig = {
 	enabled: boolean;
@@ -55,18 +53,12 @@ export type AIPreset = {
 			provider: "native-ollama";
 	  }
 	| {
-			provider: "screenpipe-cloud";
-	  }
-	| {
 			provider: "anthropic";
 			apiKey: string;
 	  }
 	| {
 			provider: "custom";
 			apiKey: string;
-	  }
-	| {
-			provider: "pi";
 	  }
 	| {
 			provider: "openai-chatgpt";
@@ -230,13 +222,6 @@ export type Settings = SettingsStore & {
 	openaiCompatibleHeaders?: Record<string, string>;
 	/** Send raw WAV audio instead of MP3 to OpenAI-compatible endpoint */
 	openaiCompatibleRawAudio?: boolean;
-	/** Let Pi / Claude Code call the confidential cloud enclave
-	 * (Gemma 4 E4B inside an attested Tinfoil CVM) to analyze audio,
-	 * video frames, and images from screenpipe data. Default true. When
-	 * false, the "Cloud audio + video + image analysis" section is
-	 * stripped from `~/.claude/skills/screenpipe-api/SKILL.md` so agents
-	 * literally cannot see the endpoint and won't try to call it. */
-	cloudMediaAnalysisEnabled?: boolean;
 	/** Filter music-dominant audio before transcription (reduces Spotify/YouTube music noise) */
 	filterMusic?: boolean;
 	/** Maximum batch transcription duration in seconds (0 = engine default: Deepgram 5000s, OpenAI 3000s, Whisper 600s) */
@@ -401,17 +386,15 @@ const DEFAULT_IGNORED_WINDOWS_PER_OS: Record<string, string[]> = {
 	linux: ["Info center", "Discover", "Parted"],
 };
 
-// Temporary default until the external-provider cleanup selects the retained
-// local Pi/Ollama preset.
-const SCREENPIPE_PRESET_ID = "screenpipe";
+const LOCAL_OLLAMA_PRESET_ID = "local-ollama";
 
 export function makeDefaultPresets(): AIPreset[] {
 	return [
 		{
-			id: SCREENPIPE_PRESET_ID,
-			provider: "screenpipe-cloud",
-			url: "",
-			model: "auto",
+			id: LOCAL_OLLAMA_PRESET_ID,
+			provider: "native-ollama",
+			url: "http://localhost:11434/v1",
+			model: "ministral-3:latest",
 			maxContextChars: 200000,
 			defaultPreset: true,
 			prompt: "",
@@ -609,18 +592,20 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// Migration: Rename "pi" provider to "screenpipe-cloud" for clarity
-		if (settings.aiPresets?.some((p: any) => p.provider === "pi")) {
+		// Retired hosted presets remain readable but execute locally.
+		if (settings.aiPresets?.some((p: any) =>
+			["screenpipe-cloud", "pi", "claude-code", "opencode"].includes(p.provider)
+		)) {
 			settings.aiPresets = settings.aiPresets.map((p: any) =>
-				p.provider === "pi" ? { ...p, provider: "screenpipe-cloud" } : p
-			);
-			needsUpdate = true;
-		}
-
-		// Migration: Rename "pi-agent" preset id to "screenpipe-cloud"
-		if (settings.aiPresets?.some((p: any) => p.id === "pi-agent")) {
-			settings.aiPresets = settings.aiPresets.map((p: any) =>
-				p.id === "pi-agent" ? { ...p, id: "screenpipe-cloud" } : p
+				["screenpipe-cloud", "pi", "claude-code", "opencode"].includes(p.provider)
+					? {
+						...p,
+						provider: "native-ollama",
+						url: "http://localhost:11434/v1",
+						model: "ministral-3:latest",
+						apiKey: undefined,
+					  }
+					: p
 			);
 			needsUpdate = true;
 		}

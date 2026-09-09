@@ -3084,7 +3084,6 @@ export function StandaloneChat({
     apiKey: string | null;
     maxTokens: number;
     systemPrompt: string | null;
-    token: string | null;
   } | null>(null);
 
   // Active pipe execution (when watching a running pipe)
@@ -4644,7 +4643,6 @@ export function StandaloneChat({
       apiKey: providerConfig.apiKey,
       maxTokens: providerConfig.maxTokens,
       systemPrompt: providerConfig.systemPrompt,
-      token: null,
     };
   }, []);
 
@@ -4672,7 +4670,6 @@ export function StandaloneChat({
     const result = await commands.piStart(
       piSessionIdRef.current,
       dir,
-      null,
       providerConfig,
     );
     if (result.status !== "ok" || !result.data.running) {
@@ -4760,8 +4757,7 @@ export function StandaloneChat({
       running.url !== providerConfig.url ||
       running.apiKey !== providerConfig.apiKey ||
       running.maxTokens !== providerConfig.maxTokens ||
-      running.systemPrompt !== providerConfig.systemPrompt ||
-      running.token !== null;
+      running.systemPrompt !== providerConfig.systemPrompt;
 
     if (!providerChanged && !modelChanged && !spawnTimeFieldsChanged) {
       // Preset save that didn't actually change anything Pi cares about.
@@ -4842,7 +4838,6 @@ export function StandaloneChat({
   // costly re-extraction every time the closure changes.
   useEffect(() => {
     let unlistenLog: UnlistenFn | null = null;
-    let unlistenReauth: UnlistenFn | null = null;
     let mounted = true;
     // Bus registrations to release on cleanup. Mixed with the legacy
     // unlisten handles below so the cleanup section drains them
@@ -5126,7 +5121,7 @@ export function StandaloneChat({
             if (piMessageIdRef.current) {
               const msgId = piMessageIdRef.current;
               setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade." } : m)
+                prev.map((m) => m.id === msgId ? { ...m, content: "The configured provider rejected this model." } : m)
               );
             }
           }
@@ -5156,7 +5151,7 @@ export function StandaloneChat({
               }
             } else if (fullError.includes("model_not_allowed")) {
                 setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade." } : m)
+                prev.map((m) => m.id === msgId ? { ...m, content: "The configured provider rejected this model." } : m)
               );
             } else if (fullError.includes("already processing")) {
               // Transient error — Pi was still busy when the prompt arrived.
@@ -5388,7 +5383,7 @@ export function StandaloneChat({
               } else if (quotaErrorType === "rate") {
                 content = buildRateLimitMessage(errStr);
               } else if (errStr.includes("model_not_allowed")) {
-                content = "This model requires an upgrade.";
+                content = "The configured provider rejected this model.";
               } else {
                 content = errStr;
               }
@@ -5568,7 +5563,7 @@ export function StandaloneChat({
               }
             } else if (errorStr.includes("model_not_allowed")) {
                 setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade." } : m)
+                prev.map((m) => m.id === msgId ? { ...m, content: "The configured provider rejected this model." } : m)
               );
             } else if (errorStr.includes("already processing")) {
               console.warn("[Pi] already-processing race in response event:", errorStr);
@@ -5724,7 +5719,7 @@ export function StandaloneChat({
               const providerConfig = buildProviderConfig();
               const home = await homeDir();
               const dir = await join(home, ".screenpipe", "pi-chat");
-              const result = await commands.piStart(piSessionIdRef.current, dir, null, providerConfig);
+              const result = await commands.piStart(piSessionIdRef.current, dir, providerConfig);
               if (result.status === "ok") {
                 setPiInfo(result.data);
                 piSessionSyncedRef.current = false;
@@ -5737,7 +5732,6 @@ export function StandaloneChat({
                     apiKey: providerConfig.apiKey,
                     maxTokens: providerConfig.maxTokens,
                     systemPrompt: providerConfig.systemPrompt,
-                    token: null,
                   };
                 }
               } else {
@@ -5833,22 +5827,6 @@ export function StandaloneChat({
       } catch { /* ignore — queue may not be initialized yet */ }
     })();
 
-    // Restart the current session when a new auth token arrives (deeplink login).
-    listen<{ apiKey: string }>("pi-reauth", async (event) => {
-      if (!mounted) return;
-      try {
-        const home = await homeDir();
-        const dir = await join(home, ".screenpipe", "pi-chat");
-        const result = await commands.piStart(piSessionIdRef.current, dir, event.payload.apiKey, buildProviderConfig());
-        if (result.status === "ok") {
-          setPiInfo(result.data);
-          piSessionSyncedRef.current = false;
-        }
-      } catch (e) {
-        console.warn("[Pi] reauth restart skipped:", e);
-      }
-    }).then(fn => { unlistenReauth = fn; });
-
     return () => {
       mounted = false;
       cancelStreamingMessageRender();
@@ -5856,7 +5834,6 @@ export function StandaloneChat({
         try { off(); } catch { /* ignore — tearing down */ }
       }
       unlistenLog?.();
-      unlistenReauth?.();
       unlistenQueue?.();
       // Abort any in-flight Pi request when navigating away from chat.
       // Without this, Pi keeps streaming in the background and rejects
@@ -6384,7 +6361,7 @@ export function StandaloneChat({
         try {
           const home = await homeDir();
           const dir = await join(home, ".screenpipe", "pi-chat");
-          const result = await commands.piStart(piSessionIdRef.current, dir, null, providerConfig);
+          const result = await commands.piStart(piSessionIdRef.current, dir, providerConfig);
           if (result.status === "ok" && result.data.running) {
             setPiInfo(result.data);
             piSessionSyncedRef.current = false;
@@ -6664,7 +6641,6 @@ export function StandaloneChat({
           const startRes = await commands.piStart(
             piSessionIdRef.current,
             dir,
-            null,
             providerConfig,
           );
           if (startRes.status === "ok" && startRes.data.running) {

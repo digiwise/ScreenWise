@@ -21,12 +21,6 @@ import {
   useSettings,
 } from "@/lib/hooks/use-settings";
 import {
-  useUsageStatus,
-  messagesLeftForModel,
-  shouldWarnLowQuota,
-  formatResetTime,
-} from "@/lib/hooks/use-usage-status";
-import {
   buildChatTestBody,
   shouldRetryWithMaxCompletionTokens,
 } from "@/lib/utils/chat-test-body";
@@ -165,7 +159,7 @@ const INITIAL_DIAGNOSTICS: DiagnosticResults = {
 };
 
 export interface AIProviderCardProps {
-  type: "openai" | "openai-chatgpt" | "native-ollama" | "anthropic" | "custom" | "embedded" | "screenpipe-cloud";
+  type: "openai" | "openai-chatgpt" | "native-ollama" | "anthropic" | "custom" | "embedded";
   title: string;
   description: string;
   imageSrc: string;
@@ -197,9 +191,6 @@ export interface AIModel {
   cost_tier?: 'free' | 'low' | 'medium' | 'high' | 'very_high';
   recommended_for?: string[];
   warning?: string;
-  /** How many daily-quota units one message on this model consumes.
-   *  0 = free / doesn't count. Populated by the screenpipe worker. */
-  query_weight?: number;
 }
 
 export const AIProviderCard = ({
@@ -250,21 +241,16 @@ const AISection = ({
   preset,
   setDialog,
   isDuplicating,
-  piAvailable,
 }: {
   preset?: AIPreset;
   setDialog: (value: boolean) => void;
   isDuplicating?: boolean;
-  piAvailable?: boolean;
 }) => {
   const { settings, updateSettings } = useSettings();
   const { isEnterprise, policy: enterprisePolicy } = useEnterprisePolicy();
   const aiPresetPolicy = enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY;
   const employeePresetsAllowed =
     !isEnterprise || aiPresetPolicy.allow_employee_custom_presets || (preset ? isEnterpriseManagedPreset(preset) : false);
-  // Daily quota snapshot — drives the "N left today" chip on weighted
-  // models. Null on BYOK providers; we render nothing in that case.
-  const usage = useUsageStatus();
   const [settingsPreset, setSettingsPreset] = useState<
     Partial<AIPreset> | undefined
   >(preset);
@@ -520,7 +506,6 @@ const AISection = ({
     if (!model) return;
     if (model === prevModelRef.current) return; // no change — preserve saved value
     prevModelRef.current = model;
-    if (settingsPreset?.provider === "screenpipe-cloud") return;
     const tokens = getDefaultMaxTokens(model);
     if (tokens) {
       updateSettingsPreset({ maxTokens: tokens } as any);
@@ -552,7 +537,6 @@ const AISection = ({
       "openai": "openai",
       "anthropic": "claude",
       "native-ollama": "ollama",
-      "screenpipe-cloud": "screenpipe-cloud",
     };
 
     let newUrl = "";
@@ -576,10 +560,6 @@ const AISection = ({
         newUrl = "https://api.anthropic.com";
         newModel = "claude-sonnet-4-6";
         break;
-      case "screenpipe-cloud":
-        newUrl = ""; // Pi uses RPC mode, not HTTP
-        newModel = "auto";
-        break;
     }
 
     const updates: Partial<AIPreset> = { provider: newValue, url: newUrl, model: newModel };
@@ -597,7 +577,6 @@ const AISection = ({
   const [modelSearch, setModelSearch] = useState("");
 
   const runDiagnostics = useCallback(async () => {
-    if (settingsPreset?.provider === "screenpipe-cloud") return;
 
     // Abort any previous run
     diagnosticsAbortRef.current?.abort();
@@ -906,8 +885,6 @@ const AISection = ({
   const isApiKeyRequired =
     settingsPreset?.provider !== "openai-chatgpt" &&
     settingsPreset?.provider !== "anthropic" &&
-    settingsPreset?.url !== "https://api.screenpipe.com/v1" &&
-    settingsPreset?.url !== "https://api.screenpi.pe/v1" &&
     settingsPreset?.url !== "http://localhost:11434/v1" &&
     settingsPreset?.url !== "embedded";
 
@@ -1070,57 +1047,6 @@ const AISection = ({
           break;
         }
 
-        case "screenpipe-cloud": {
-          // Fetch models from gateway so new models appear automatically
-          try {
-            const token = "";
-            const piResp = await fetch("https://api.screenpipe.com/v1/models", {
-              headers: token ? { Authorization: `Bearer ${token}` } : {},
-            });
-            if (piResp.ok) {
-              const piData = await piResp.json();
-              const piModels: AIModel[] = (piData.data || [])
-                .map((m: any) => ({
-                id: m.id,
-                name: m.name || m.id,
-                provider: "screenpipe",
-                description: m.description,
-                tags: m.tags,
-                free: m.free,
-                context_window: m.context_window,
-                best_for: m.best_for,
-                speed: m.speed,
-                intelligence: m.intelligence,
-                cost_tier: m.cost_tier,
-                recommended_for: m.recommended_for,
-                warning: m.warning,
-                query_weight: m.query_weight,
-                }))
-                .filter((m: AIModel, idx: number, arr: AIModel[]) => arr.findIndex((x) => x.id === m.id) === idx);
-              if (piModels.length > 0) {
-                setModels(piModels);
-                break;
-              }
-            }
-          } catch {
-            // fallback to hardcoded
-          }
-          setModels([
-            { id: "auto", name: "Auto (recommended)", provider: "screenpipe" },
-            { id: "claude-haiku-4-5", name: "Haiku 4.5 (fast)", provider: "screenpipe" },
-            { id: "claude-sonnet-4-5", name: "Sonnet 4.5 (balanced)", provider: "screenpipe" },
-            { id: "claude-opus-4-8", name: "Opus 4.8 (powerful, pro)", provider: "screenpipe" },
-            { id: "claude-fable-5", name: "Fable 5 (most capable, pro)", provider: "screenpipe" },
-            { id: "gemini-3-flash", name: "Gemini 3 Flash (fast)", provider: "screenpipe" },
-            { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash-Lite (cheapest)", provider: "screenpipe" },
-            { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (balanced)", provider: "screenpipe" },
-            { id: "qwen/qwen3.5-flash-02-23", name: "Qwen3.5 Flash (cheapest, 1M ctx)", provider: "screenpipe" },
-            { id: "deepseek/deepseek-chat", name: "DeepSeek V3.2 (fast)", provider: "screenpipe" },
-            { id: "meta-llama/llama-4-scout", name: "Llama 4 Scout", provider: "screenpipe" },
-          ]);
-          break;
-        }
-
         default:
           setModels([]);
       }
@@ -1157,7 +1083,6 @@ const AISection = ({
 
   // Auto-trigger diagnostics when provider + url + apiKey are set (debounced)
   useEffect(() => {
-    if (settingsPreset?.provider === "screenpipe-cloud") return;
     if (!settingsPreset?.provider) return;
 
     const needsApiKey =
@@ -1240,17 +1165,6 @@ const AISection = ({
             selected={settingsPreset?.provider === "native-ollama"}
             onClick={() => handleAiProviderChange("native-ollama")}
           />
-
-          {piAvailable && (!isEnterprise || aiPresetPolicy.allow_screenpipe_cloud) && (
-            <AIProviderCard
-              type="screenpipe-cloud"
-              title="Screenpipe Cloud"
-              description="AI coding agent powered by Screenpipe Cloud"
-              imageSrc="/images/screenpipe.png"
-              selected={settingsPreset?.provider === "screenpipe-cloud"}
-              onClick={() => handleAiProviderChange("screenpipe-cloud")}
-            />
-          )}
 
         </div>
       </div>
@@ -1502,7 +1416,7 @@ const AISection = ({
                           ))}
                         </CommandGroup>
                       )}
-                      <CommandGroup heading={models?.some((m) => m.free) ? "Included with Screenpipe" : "Available Models"}>
+                      <CommandGroup heading="Available Models">
                         {models?.filter((m) => !m.free).map((model) => {
                           const costLabel = model.cost_tier === 'low' ? '$' : model.cost_tier === 'medium' ? '$$' : model.cost_tier === 'high' ? '$$$' : model.cost_tier === 'very_high' ? '$$$$' : '';
                           return (
@@ -1520,18 +1434,6 @@ const AISection = ({
                                 <div className="flex items-center gap-1 ml-2">
                                   {costLabel && <Badge variant="outline" className="text-[10px]">{costLabel}</Badge>}
                                   {model.speed === "fast" && <Badge variant="outline" className="text-[10px]">fast</Badge>}
-                                  {/* Low-quota warning — only renders when the user is within
-                                      ~30% of exhausting their daily cap for this specific model.
-                                      Silent otherwise (normal state = no extra clutter). */}
-                                  {shouldWarnLowQuota(usage, model.query_weight) && (
-                                    <Badge
-                                      variant="outline"
-                                      className="text-[10px] bg-yellow-500/10 text-yellow-700 border-yellow-500/40 dark:text-yellow-400"
-                                      title={`approaching daily limit${usage?.resets_at ? ` — resets ${formatResetTime(usage.resets_at)}` : ""}`}
-                                    >
-                                      ≈ {messagesLeftForModel(usage, model.query_weight)} left
-                                    </Badge>
-                                  )}
                                 </div>
                               </div>
                               <span className="text-xs text-muted-foreground">
@@ -1621,7 +1523,6 @@ const AISection = ({
         helperText="This prompt will be used to guide the AI's responses"
       />
 
-      {settingsPreset?.provider !== "screenpipe-cloud" && (
         <div className="w-full">
           <Label htmlFor="maxTokens" className="text-sm font-medium">
             Max Output Tokens
@@ -1664,9 +1565,7 @@ const AISection = ({
             ))}
           </div>
         </div>
-      )}
 
-      {settingsPreset?.provider !== "screenpipe-cloud" && (
         <div className="w-full border rounded-lg">
           <button
             type="button"
@@ -1774,7 +1673,6 @@ const AISection = ({
             </div>
           )}
         </div>
-      )}
 
       <div className="flex justify-end gap-2">
         <Button 
@@ -1826,9 +1724,6 @@ const providerImageSrc: Record<string, string> = {
   anthropic: "/images/claude-ai.svg",
   "native-ollama": "/images/ollama.png",
   custom: "/images/custom.png",
-  pi: "/images/screenpipe.png",
-  screenpipe: "/images/screenpipe.png",
-  "screenpipe-cloud": "/images/screenpipe.png",
 };
 
 // Sortable preset card for drag-and-drop reordering
@@ -1999,7 +1894,6 @@ export const AIPresets = () => {
     [settings.aiPresets, isEnterprise, aiPresetPolicy]
   );
   const canManageEmployeePresets = !isEnterprise || aiPresetPolicy.allow_employee_custom_presets;
-  const [piAvailable, setPiAvailable] = useState(false);
   const [chatgptTokenValid, setChatgptTokenValid] = useState<boolean | null>(null);
   const team = useTeam();
   const isTeamAdmin = !!team.team && team.role === "admin";
@@ -2035,26 +1929,6 @@ export const AIPresets = () => {
     [settings.aiPresets, updateSettings]
   );
 
-  // Check Pi availability (installed at app startup by Rust background thread)
-  useEffect(() => {
-    const checkPi = async () => {
-      const result = await commands.piCheck();
-      if (result.status === "ok" && result.data.available) {
-        setPiAvailable(true);
-      }
-    };
-    if (isEnterprise) {
-      setPiAvailable(aiPresetPolicy.allow_screenpipe_cloud);
-      return;
-    }
-    if (!isEnterprise) {
-      checkPi();
-    }
-    // Re-check periodically in case background install finishes
-    const interval = isEnterprise ? null : setInterval(checkPi, 5000);
-    return () => { if (interval) clearInterval(interval); };
-  }, [isEnterprise, aiPresetPolicy.allow_screenpipe_cloud]);
-
   useEffect(() => {
   const hasChatGptPreset = settings.aiPresets?.some(
     (p) => p.provider === "openai-chatgpt"
@@ -2083,7 +1957,6 @@ useEffect(() => {
         setDialog={setCreatePresentDialog}
         preset={selectedPreset}
         isDuplicating={isDuplicating}
-        piAvailable={piAvailable}
       />
     );
 
@@ -2306,7 +2179,7 @@ useEffect(() => {
                   key={preset.id}
                   preset={preset}
                   isDefault={preset.defaultPreset}
-                  hasValidation={!!(preset.provider && preset.model && (preset.url || preset.provider === "screenpipe-cloud" || preset.provider === "openai-chatgpt"))}
+                  hasValidation={!!(preset.provider && preset.model && (preset.url || preset.provider === "openai-chatgpt"))}
                   chatgptTokenExpired={preset.provider === "openai-chatgpt" && chatgptTokenValid === false}
                   onEdit={() => {
                     setSelectedPreset(preset);

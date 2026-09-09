@@ -658,8 +658,8 @@ commits: `fa887407`, `815f52e6`, `60840155`, `e66c3ff8`, `c905ffbf`, `01147096`,
 - [ ] **Screenpipe Analytics skill** — The `screenpipe-analytics` skill can be used by the Pi agent to perform raw SQL usage analytics.
 - [ ] **Screenpipe Retranscribe skill** — The `screenpipe-retranscribe` skill can be used by the Pi agent for retranscription.
 - [ ] **AI preset save stability** — Saving AI presets should not cause crashes, especially when dealing with pipe session conflicts.
-- [ ] **Pipe token handling** — Ensure that Pi configuration for pipes uses the actual token value, not the environment variable name.
-- [ ] **Pipe user_token passthrough** — Verify that the `user_token` is correctly passed to Pi pre-configuration so pipes use the screenpipe provider.
+- [ ] **Pipe local-provider defaults** — Verify that a pipe without an explicit preset uses local Ollama and never inserts a hosted Screenpipe provider or credential into Pi configuration.
+- [ ] **Legacy hosted preset compatibility** — Verify that stored `screenpipe-cloud`, `pi`, and `pi-agent` presets remain readable and execute through local Ollama without deleting the stored preset.
 - [ ] **Pipe preset override** — Install a pipe from the store. Verify its preset can be overridden by user's default. (`bee49f1e7`)
 - [ ] **Pipe configurable timeout** — Add `timeout` to pipe.md frontmatter. Verify pipe respects this timeout. (`cc0ecef53`)
 - [ ] **Pipe store caching** — Navigate pipe store and connections pages. Verify fast loading due to client-side caching. (`f501c19fb`)
@@ -713,8 +713,8 @@ commits: `fa887407`, `815f52e6`, `60840155`, `e66c3ff8`, `c905ffbf`, `01147096`,
 - [ ] **Screenpipe Analytics skill** — The `screenpipe-analytics` skill can be used by the Pi agent to perform raw SQL usage analytics.
 - [ ] **Screenpipe Retranscribe skill** — The `screenpipe-retranscribe` skill can be used by the Pi agent for retranscription.
 - [ ] **AI preset save stability** — Saving AI presets should not cause crashes, especially when dealing with pipe session conflicts.
-- [ ] **Pipe token handling** — Ensure that Pi configuration for pipes uses the actual token value, not the environment variable name.
-- [ ] **Pipe user_token passthrough** — Verify that the `user_token` is correctly passed to Pi pre-configuration so pipes use the screenpipe provider.
+- [ ] **Pipe local-provider defaults** — Verify that a pipe without an explicit preset uses local Ollama and never inserts a hosted Screenpipe provider or credential into Pi configuration.
+- [ ] **Legacy hosted preset compatibility** — Verify that stored `screenpipe-cloud`, `pi`, and `pi-agent` presets remain readable and execute through local Ollama without deleting the stored preset.
 - [ ] **Default AI model ID** — Verify that the default AI model ID does not contain outdated date suffixes.
 - [ ] **Move provider/model flags** — `--provider` and `--model` flags should be correctly moved before `-p prompt` in `pi spawn` commands.
 

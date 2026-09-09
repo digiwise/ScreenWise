@@ -32,7 +32,6 @@ pub enum Provider {
     Anthropic,
     NativeOllama,
     Custom,
-    ScreenpipeCloud,
     /// CLI refuses to write this — token lives in the encrypted secrets store
     /// and is established by the OAuth login flow, not a flag.
     OpenAiChatGpt,
@@ -45,10 +44,9 @@ impl Provider {
             "anthropic" => Ok(Provider::Anthropic),
             "native-ollama" | "ollama" => Ok(Provider::NativeOllama),
             "custom" => Ok(Provider::Custom),
-            "screenpipe-cloud" | "pi" => Ok(Provider::ScreenpipeCloud),
             "openai-chatgpt" => Ok(Provider::OpenAiChatGpt),
             other => bail!(
-                "unknown provider '{}'. Valid: openai, anthropic, native-ollama, custom, screenpipe-cloud",
+                "unknown provider '{}'. Valid: openai, anthropic, native-ollama, custom",
                 other
             ),
         }
@@ -60,7 +58,6 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::NativeOllama => "native-ollama",
             Provider::Custom => "custom",
-            Provider::ScreenpipeCloud => "screenpipe-cloud",
             Provider::OpenAiChatGpt => "openai-chatgpt",
         }
     }
@@ -73,15 +70,8 @@ impl Provider {
         matches!(self, Provider::OpenAi | Provider::Anthropic)
     }
 
-    fn forbids_url(self) -> bool {
-        matches!(self, Provider::ScreenpipeCloud)
-    }
-
     fn forbids_api_key(self) -> bool {
-        matches!(
-            self,
-            Provider::NativeOllama | Provider::ScreenpipeCloud | Provider::OpenAiChatGpt
-        )
+        matches!(self, Provider::NativeOllama | Provider::OpenAiChatGpt)
     }
 }
 
@@ -243,12 +233,6 @@ fn validate_provider_combo(
             hint
         );
     }
-    if provider.forbids_url() && url.map(|s| !s.is_empty()).unwrap_or(false) {
-        bail!(
-            "provider '{}' does not accept --url (cloud endpoint is fixed)",
-            provider.as_canonical()
-        );
-    }
     if provider.requires_api_key() && api_key.map(str::is_empty).unwrap_or(true) {
         bail!(
             "provider '{}' requires --api-key (or set it later via `pipe models update`)",
@@ -258,7 +242,6 @@ fn validate_provider_combo(
     if provider.forbids_api_key() && api_key.map(|s| !s.is_empty()).unwrap_or(false) {
         let reason = match provider {
             Provider::NativeOllama => "local ollama doesn't authenticate",
-            Provider::ScreenpipeCloud => "cloud uses your login token (run `screenpipe login`)",
             _ => "this provider does not accept --api-key",
         };
         bail!(
@@ -680,12 +663,6 @@ mod tests {
 
         assert!(validate_provider_combo(Provider::Anthropic, None, Some("sk-ant-x")).is_ok());
         assert!(validate_provider_combo(Provider::Anthropic, None, Some("sk-x")).is_err());
-
-        assert!(validate_provider_combo(Provider::ScreenpipeCloud, None, None).is_ok());
-        assert!(
-            validate_provider_combo(Provider::ScreenpipeCloud, Some("http://x"), None).is_err()
-        );
-        assert!(validate_provider_combo(Provider::ScreenpipeCloud, None, Some("k")).is_err());
 
         assert!(validate_provider_combo(Provider::Custom, Some("http://x"), Some("k")).is_ok());
         assert!(validate_provider_combo(Provider::Custom, None, Some("k")).is_err());

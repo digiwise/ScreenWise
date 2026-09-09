@@ -15,7 +15,7 @@ export const embeddedLLMSchema = z.object({
   port: z.number().int().min(1024).max(65535, "Port must be between 1024-65535"),
 });
 
-export const aiProviderTypeSchema = z.enum(["openai", "native-ollama", "custom", "screenpipe-cloud", "pi", "anthropic"]);
+export const aiProviderTypeSchema = z.enum(["openai", "native-ollama", "custom", "anthropic"]);
 
 export const aiPresetSchema = z.object({
   id: z.string().min(1, "Preset name is required").regex(/^[a-zA-Z0-9\s\-_]+$/, "Only letters, numbers, spaces, hyphens, and underscores allowed").refine(

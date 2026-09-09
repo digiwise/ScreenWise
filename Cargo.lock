@@ -8245,7 +8245,6 @@ dependencies = [
  "accessibility",
  "accessibility-sys",
  "anyhow",
- "arc-swap",
  "async-trait",
  "chrono",
  "clap",

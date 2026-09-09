@@ -56,7 +56,7 @@ function toLocalAiPreset(
   preset: EnterpriseManagedAiPreset,
   defaultPreset: boolean
 ): Record<string, unknown> {
-  const provider = preset.provider === "screenpipe-cloud" ? "screenpipe-cloud" : preset.provider;
+  const provider = preset.provider;
   return {
     id: preset.id,
     prompt: preset.prompt || "",
@@ -365,7 +365,7 @@ export function useEnterprisePolicy() {
         try {
           await applyAiPresetPolicy(result.aiPresetPolicy);
           console.log(
-            `[enterprise] applied AI preset policy: cloud=${result.aiPresetPolicy.allow_screenpipe_cloud}, employee=${result.aiPresetPolicy.allow_employee_custom_presets}, managed=${result.aiPresetPolicy.managed_presets.length}`
+            `[enterprise] applied AI preset policy: employee=${result.aiPresetPolicy.allow_employee_custom_presets}, managed=${result.aiPresetPolicy.managed_presets.length}`
           );
         } catch (e) {
           console.warn("[enterprise] failed to apply AI preset policy:", e);

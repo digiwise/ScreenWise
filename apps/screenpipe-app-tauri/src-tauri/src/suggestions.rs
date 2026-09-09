@@ -52,24 +52,11 @@ pub struct CachedSuggestions {
     pub tags: Vec<String>,
 }
 
-// ─── Enhanced AI config ─────────────────────────────────────────────────────
-
-/// When enabled, uses screenpipe cloud (api.screenpipe.com) instead of Apple
-/// Intelligence for generating suggestions. Produces much better results
-/// but sends recent activity context to the cloud.
-#[derive(Debug, Clone)]
-pub struct EnhancedAIConfig {
-    pub enabled: bool,
-    /// User's Clerk JWT token for authenticating with screenpipe cloud.
-    pub token: String,
-}
-
 // ─── Managed state ──────────────────────────────────────────────────────────
 
 pub struct SuggestionsState {
     pub cache: Arc<Mutex<Option<CachedSuggestions>>>,
     pub scheduler_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    pub enhanced_ai: Arc<Mutex<Option<EnhancedAIConfig>>>,
 }
 
 impl SuggestionsState {
@@ -77,7 +64,6 @@ impl SuggestionsState {
         Self {
             cache: Arc::new(Mutex::new(None)),
             scheduler_handle: Arc::new(Mutex::new(None)),
-            enhanced_ai: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -134,29 +120,11 @@ pub async fn force_regenerate_suggestions(
     state: tauri::State<'_, SuggestionsState>,
     app: AppHandle,
 ) -> Result<CachedSuggestions, String> {
-    let enhanced = state.enhanced_ai.lock().await.clone();
     let api = local_api_context_from_app(&app);
-    let cached = generate_suggestions(&api, enhanced.as_ref()).await?;
+    let cached = generate_suggestions(&api).await?;
     let mut guard = state.cache.lock().await;
     *guard = Some(cached.clone());
     Ok(cached)
-}
-
-/// Enable or disable enhanced AI suggestions (uses screenpipe cloud).
-#[tauri::command]
-#[specta::specta]
-pub async fn set_enhanced_ai_suggestions(
-    state: tauri::State<'_, SuggestionsState>,
-    enabled: bool,
-    token: String,
-) -> Result<(), String> {
-    let mut guard = state.enhanced_ai.lock().await;
-    if enabled && !token.is_empty() {
-        *guard = Some(EnhancedAIConfig { enabled, token });
-    } else {
-        *guard = None;
-    }
-    Ok(())
 }
 
 // ─── Auto-start ─────────────────────────────────────────────────────────────
@@ -166,7 +134,6 @@ pub async fn set_enhanced_ai_suggestions(
 pub async fn auto_start_scheduler(app: AppHandle, state: &SuggestionsState) {
     let cache = state.cache.clone();
     let handle_arc = state.scheduler_handle.clone();
-    let enhanced_ai = state.enhanced_ai.clone();
 
     let handle = tokio::spawn(async move {
         info!("suggestions scheduler: started (10-min interval + event triggers)");
@@ -213,12 +180,9 @@ pub async fn auto_start_scheduler(app: AppHandle, state: &SuggestionsState) {
                 continue;
             }
 
-            // Read current enhanced AI config (picks up setting changes each cycle)
-            let enhanced = enhanced_ai.lock().await.clone();
-
             // Fetch activity & generate suggestions
             let api = local_api_context_from_app(&app);
-            match generate_suggestions(&api, enhanced.as_ref()).await {
+            match generate_suggestions(&api).await {
                 Ok(cached) => {
                     debug!(
                         "suggestions scheduler: generated {} suggestions (mode={}, ai={}, trigger={})",
@@ -1428,61 +1392,28 @@ struct AiResult {
     tags: Vec<String>,
 }
 
-/// Screenpipe cloud API endpoint for enhanced AI suggestions.
-const SCREENPIPE_CLOUD_API: &str = "https://api.screenpipe.com/v1";
-
 async fn generate_ai_suggestions(
     api: &LocalApiContext,
     mode: &str,
     apps: &[AppActivity],
     windows: &[WindowActivity],
-    enhanced_ai: Option<&EnhancedAIConfig>,
 ) -> Option<AiResult> {
-    // Determine which AI backend to use
-    let use_cloud = enhanced_ai
-        .as_ref()
-        .map_or(false, |c| c.enabled && !c.token.is_empty());
-
-    if !use_cloud && !check_ai_available(api).await {
-        info!("suggestions: Apple Intelligence not available and enhanced AI not enabled, using templates");
+    if !check_ai_available(api).await {
+        info!("suggestions: local Apple Intelligence is unavailable, using templates");
         return None;
     }
 
     let context = build_activity_context(api, apps, windows).await;
 
     debug!(
-        "suggestions: AI prompt ~{} tokens, backend={}",
-        context.len() / 4,
-        if use_cloud {
-            "screenpipe-cloud"
-        } else {
-            "apple-intelligence"
-        }
+        "suggestions: AI prompt ~{} tokens, backend=apple-intelligence",
+        context.len() / 4
     );
 
     let client = reqwest::Client::new();
-
-    let resp = if use_cloud {
-        let config = enhanced_ai.unwrap();
-        client
-            .post(format!("{}/chat/completions", SCREENPIPE_CLOUD_API))
-            .header("Authorization", format!("Bearer {}", config.token))
-            .json(&serde_json::json!({
-                "model": "auto",
-                "messages": [
-                    {"role": "system", "content": AI_SYSTEM_PROMPT},
-                    {"role": "user", "content": format!("Activity mode: {}\n\n{}", mode, context)}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 500
-            }))
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-    } else {
-        // Apple Intelligence (on-device)
-        let prompt = format!("{}Activity mode: {}\n\n{}", AI_SYSTEM_PROMPT, mode, context);
-        api.apply_auth(
+    let prompt = format!("{}Activity mode: {}\n\n{}", AI_SYSTEM_PROMPT, mode, context);
+    let resp = api
+        .apply_auth(
             client
                 .post(api.url("/ai/chat/completions"))
                 .json(&serde_json::json!({
@@ -1493,8 +1424,7 @@ async fn generate_ai_suggestions(
                 .timeout(std::time::Duration::from_secs(30)),
         )
         .send()
-        .await
-    };
+        .await;
 
     match resp {
         Ok(r) if r.status().is_success() => {
@@ -1509,19 +1439,11 @@ async fn generate_ai_suggestions(
             parse_ai_response(content)
         }
         Ok(r) => {
-            warn!(
-                "suggestions: AI returned status {} (backend={})",
-                r.status(),
-                if use_cloud { "cloud" } else { "apple" }
-            );
+            warn!("suggestions: local AI returned status {}", r.status());
             None
         }
         Err(e) => {
-            warn!(
-                "suggestions: AI request failed: {} (backend={})",
-                e,
-                if use_cloud { "cloud" } else { "apple" }
-            );
+            warn!("suggestions: local AI request failed: {}", e);
             None
         }
     }
@@ -1632,10 +1554,7 @@ fn extract_json_object(content: &str) -> Option<String> {
     }
 }
 
-async fn generate_suggestions(
-    api: &LocalApiContext,
-    enhanced_ai: Option<&EnhancedAIConfig>,
-) -> Result<CachedSuggestions, String> {
+async fn generate_suggestions(api: &LocalApiContext) -> Result<CachedSuggestions, String> {
     let (apps, windows) = tokio::join!(fetch_app_activity(api), fetch_window_activity(api));
     let apps = apps.unwrap_or_default();
     let windows = windows.unwrap_or_default();
@@ -1652,7 +1571,7 @@ async fn generate_suggestions(
 
     // Try AI-powered suggestions + tags in one call
     let (suggestions, tags, ai_generated) =
-        match generate_ai_suggestions(api, mode, &apps, &windows, enhanced_ai).await {
+        match generate_ai_suggestions(api, mode, &apps, &windows).await {
             Some(result) => {
                 info!(
                     "suggestions: AI generated {} suggestions + {} tags",
@@ -2072,7 +1991,7 @@ mod tests {
         let mut all_suggestions = Vec::new();
 
         for run in 0..3 {
-            let result = generate_ai_suggestions(&api, mode, &apps, &windows, None).await;
+            let result = generate_ai_suggestions(&api, mode, &apps, &windows).await;
             match result {
                 Some(ai_result) => {
                     let mut run_scores = Vec::new();

@@ -649,10 +649,6 @@ pub struct SettingsStore {
     /// Auto-update store-installed pipes that haven't been locally modified.
     #[serde(rename = "autoUpdatePipes", default = "default_true")]
     pub auto_update_pipes: bool,
-    /// Use screenpipe cloud for AI-powered features like suggestions.
-    /// Better quality but sends activity context to the cloud (zero data retention).
-    #[serde(rename = "enhancedAI", default)]
-    pub enhanced_ai: bool,
     /// Timeline overlay mode: "fullscreen" (floating panel above everything) or
     /// "window" (normal resizable window with title bar).
     #[serde(rename = "overlayMode", default = "default_overlay_mode")]
@@ -745,10 +741,6 @@ pub enum AIProviderType {
     NativeOllama,
     #[serde(rename = "custom")]
     Custom,
-    #[serde(rename = "screenpipe-cloud", alias = "claude-code")]
-    ScreenpipeCloud,
-    #[serde(rename = "pi", alias = "opencode")]
-    Pi,
     #[serde(rename = "anthropic")]
     Anthropic,
 }
@@ -782,9 +774,9 @@ impl Default for AIPreset {
         Self {
             id: String::new(),
             prompt: String::new(),
-            provider: AIProviderType::ScreenpipeCloud,
-            url: "https://api.screenpipe.com/v1".to_string(),
-            model: "qwen/qwen3.5-flash-02-23".to_string(),
+            provider: AIProviderType::NativeOllama,
+            url: "http://localhost:11434/v1".to_string(),
+            model: "ministral-3:latest".to_string(),
             default_preset: false,
             api_key: None,
             max_context_chars: 512000,
@@ -899,18 +891,18 @@ impl Default for SettingsStore {
             "Parted".to_string(),
         ]);
 
-        // Default AI preset - works without login
+        // Default AI preset — local and usable without any product account.
         let default_free_preset = AIPreset {
-            id: "screenpipe-cloud".to_string(),
+            id: "local-ollama".to_string(),
             prompt: r#"IMPORTANT: At the start of every conversation, read the files in .pi/skills/ directory (e.g. .pi/skills/screenpipe-api/SKILL.md and .pi/skills/screenpipe-cli/SKILL.md) before responding.
 Rules:
 - Media: use standard markdown with angle-bracket local paths, like ![description](</path/to/file.mp4>) for videos and ![description](</path/to/image.jpg>) for images
 - Always wrap local file paths in angle brackets because screenpipe paths often contain spaces or parentheses
 - Always answer my question/intent, do not make up things
 "#.to_string(),
-            provider: AIProviderType::ScreenpipeCloud,
-            url: "https://api.screenpipe.com/v1".to_string(),
-            model: "auto".to_string(),
+            provider: AIProviderType::NativeOllama,
+            url: "http://localhost:11434/v1".to_string(),
+            model: "ministral-3:latest".to_string(),
             default_preset: true,
             api_key: None,
             max_context_chars: 128000,
@@ -978,7 +970,6 @@ Rules:
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: false,
             auto_update_pipes: true,
-            enhanced_ai: false,
             #[cfg(target_os = "macos")]
             overlay_mode: "fullscreen".to_string(),
             #[cfg(not(target_os = "macos"))]
@@ -1030,14 +1021,39 @@ impl SettingsStore {
                 "openai-chatgpt",
                 "native-ollama",
                 "custom",
-                "screenpipe-cloud",
-                "opencode",
-                "pi",
                 "anthropic",
             ];
             if let Some(presets) = obj.get_mut("aiPresets") {
                 if let Some(arr) = presets.as_array_mut() {
                     for preset in arr.iter_mut() {
+                        let legacy_cloud = preset
+                            .get("provider")
+                            .and_then(|p| p.as_str())
+                            .map(|provider| {
+                                matches!(
+                                    provider,
+                                    "screenpipe-cloud" | "pi" | "claude-code" | "opencode"
+                                )
+                            })
+                            .unwrap_or(false);
+                        if legacy_cloud {
+                            if let Some(obj) = preset.as_object_mut() {
+                                obj.insert(
+                                    "provider".to_string(),
+                                    Value::String("native-ollama".to_string()),
+                                );
+                                obj.insert(
+                                    "url".to_string(),
+                                    Value::String("http://localhost:11434/v1".to_string()),
+                                );
+                                obj.insert(
+                                    "model".to_string(),
+                                    Value::String("ministral-3:latest".to_string()),
+                                );
+                                obj.insert("apiKey".to_string(), Value::Null);
+                            }
+                            continue;
+                        }
                         if let Some(provider) = preset.get("provider").and_then(|p| p.as_str()) {
                             if !known_providers.contains(&provider) {
                                 tracing::warn!(
@@ -1626,6 +1642,25 @@ mod tests {
             presets[0].get("provider").unwrap().as_str().unwrap(),
             "custom"
         );
+    }
+
+    #[test]
+    fn test_sanitize_legacy_cloud_preset_to_local_ollama() {
+        let stored = json!({
+            "aiPresets": [{
+                "provider": "screenpipe-cloud",
+                "url": "https://api.screenpi.pe/v1",
+                "model": "auto",
+                "apiKey": "legacy-token"
+            }]
+        });
+
+        let sanitized = SettingsStore::sanitize_legacy_fields(stored);
+        let preset = &sanitized["aiPresets"][0];
+        assert_eq!(preset["provider"], "native-ollama");
+        assert_eq!(preset["url"], "http://localhost:11434/v1");
+        assert_eq!(preset["model"], "ministral-3:latest");
+        assert!(preset["apiKey"].is_null());
     }
 
     #[test]

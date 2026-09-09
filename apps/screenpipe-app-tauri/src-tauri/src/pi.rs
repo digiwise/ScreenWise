@@ -6,7 +6,6 @@
 //!
 //! Manages the pi coding agent via RPC mode (stdin/stdout JSON protocol).
 
-use screenpipe_core::agents::pi::screenpipe_cloud_models;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use specta::Type;
@@ -295,7 +294,8 @@ fn check_package_bin(pkg_dir: std::path::PathBuf, bin_name: &str) -> Option<Stri
 const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.75.4";
 const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.75.4";
 const PI_NAMESPACE_DIR: &str = "@earendil-works";
-const SCREENPIPE_API_URL: &str = "https://api.screenpipe.com/v1";
+const LOCAL_OLLAMA_URL: &str = "http://localhost:11434/v1";
+const LOCAL_OLLAMA_MODEL: &str = "ministral-3:latest";
 
 /// Pool of Pi sessions — each session_id gets its own PiManager/process.
 pub struct PiPool {
@@ -949,44 +949,17 @@ fn ensure_screenpipe_skill(project_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to install screenpipe skills: {}", e))
 }
 
-/// Ensure the web-search extension exists in the project's .pi/extensions directory
-/// Install or remove the web-search extension based on provider.
-/// Web search uses the screenpipe cloud backend (Gemini + Google Search),
-/// so we only enable it for screenpipe-cloud presets to avoid sending
-/// user data to our backend when they chose a local/custom provider.
-fn ensure_web_search_extension(
-    project_dir: &str,
-    provider_config: Option<&PiProviderConfig>,
-) -> Result<(), String> {
-    let ext_dir = std::path::Path::new(project_dir)
+/// Remove the retired hosted web-search extension from existing chat projects.
+fn remove_web_search_extension(project_dir: &str) -> Result<(), String> {
+    let ext_path = std::path::Path::new(project_dir)
         .join(".pi")
-        .join("extensions");
-    let ext_path = ext_dir.join("web-search.ts");
-
-    let is_screenpipe_cloud = match provider_config {
-        Some(config) => matches!(config.provider.as_str(), "screenpipe-cloud" | "pi"),
-        None => true, // default preset = screenpipe cloud
-    };
-
-    if is_screenpipe_cloud {
-        std::fs::create_dir_all(&ext_dir)
-            .map_err(|e| format!("Failed to create extensions dir: {}", e))?;
-
-        let ext_content = include_str!("../assets/extensions/web-search.ts");
-        std::fs::write(&ext_path, ext_content)
-            .map_err(|e| format!("Failed to write web-search extension: {}", e))?;
-
-        debug!("Web search extension installed at {:?}", ext_path);
-    } else if ext_path.exists() {
+        .join("extensions")
+        .join("web-search.ts");
+    if ext_path.exists() {
         std::fs::remove_file(&ext_path)
             .map_err(|e| format!("Failed to remove web-search extension: {}", e))?;
-
-        info!(
-            "Web search extension removed (provider {:?} is not screenpipe-cloud)",
-            provider_config.map(|c| &c.provider)
-        );
+        info!("Retired hosted web-search extension removed");
     }
-
     Ok(())
 }
 
@@ -1014,7 +987,7 @@ fn ensure_mcp_bridge_extension(project_dir: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PiProviderConfig {
-    /// Provider type: "openai", "native-ollama", "custom", "screenpipe-cloud"
+    /// Provider type: "openai", "native-ollama", "custom"
     pub provider: String,
     /// Base URL for the provider API
     pub url: String,
@@ -1039,33 +1012,33 @@ fn default_max_tokens() -> i32 {
 /// Returns a map of provider entries to merge into the existing models.json.
 /// We merge instead of rebuilding from scratch to avoid a race condition where
 /// concurrent pipes overwrite each other's providers.
-async fn build_models_json(
-    user_token: Option<&str>,
-    provider_config: Option<&PiProviderConfig>,
-) -> serde_json::Value {
+async fn build_models_json(provider_config: Option<&PiProviderConfig>) -> serde_json::Value {
     let mut providers_map = serde_json::Map::new();
-
-    // Always add screenpipe cloud provider
-    let api_key_value = user_token.unwrap_or("SCREENPIPE_API_KEY");
-    let models = screenpipe_cloud_models(SCREENPIPE_API_URL, user_token).await;
-    let screenpipe_provider = json!({
-        "baseUrl": SCREENPIPE_API_URL,
-        "api": "openai-completions",
-        "apiKey": api_key_value,
-        "authHeader": true,
-        "models": models
+    let mut resolved_config = provider_config.cloned().unwrap_or(PiProviderConfig {
+        provider: "native-ollama".to_string(),
+        url: LOCAL_OLLAMA_URL.to_string(),
+        model: LOCAL_OLLAMA_MODEL.to_string(),
+        api_key: None,
+        max_tokens: default_max_tokens(),
+        system_prompt: None,
     });
-    providers_map.insert("screenpipe".to_string(), screenpipe_provider);
+    if matches!(resolved_config.provider.as_str(), "screenpipe-cloud" | "pi") {
+        resolved_config.provider = "native-ollama".to_string();
+        resolved_config.url = LOCAL_OLLAMA_URL.to_string();
+        resolved_config.model = LOCAL_OLLAMA_MODEL.to_string();
+        resolved_config.api_key = None;
+    }
 
-    // Add the user's selected provider (if not screenpipe-cloud)
-    if let Some(config) = provider_config {
+    // Add only the selected provider. Existing unrelated user-managed entries
+    // remain in models.json when this map is merged below.
+    if let Some(config) = Some(&resolved_config) {
         let provider_name = match config.provider.as_str() {
             "openai" => "openai-byok",
             "openai-chatgpt" => "openai-chatgpt",
             "native-ollama" => "ollama",
             "anthropic" => "anthropic-byok",
             "custom" => "custom",
-            _ => "", // screenpipe-cloud already added above
+            _ => "",
         };
 
         if !provider_name.is_empty() {
@@ -1147,16 +1120,13 @@ async fn build_models_json(
     json!({"providers": providers_map})
 }
 
-/// Write pi's provider config (models.json + auth.json).
-async fn ensure_pi_config(
-    user_token: Option<&str>,
-    provider_config: Option<&PiProviderConfig>,
-) -> Result<(), String> {
+/// Write Pi's provider config while preserving unrelated user providers.
+async fn ensure_pi_config(provider_config: Option<&PiProviderConfig>) -> Result<(), String> {
     let config_dir = get_pi_config_dir()?;
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("Failed to create pi config dir: {}", e))?;
 
-    let new_providers = build_models_json(user_token, provider_config).await;
+    let new_providers = build_models_json(provider_config).await;
 
     // Merge into existing models.json to avoid race conditions with concurrent pipes
     let models_path = config_dir.join("models.json");
@@ -1172,6 +1142,15 @@ async fn ensure_pi_config(
         .is_some()
     {
         models_config = json!({"providers": {}});
+    }
+
+    // Remove the retired hosted provider from configurations written by
+    // earlier releases while preserving every unrelated provider.
+    if let Some(providers) = models_config
+        .get_mut("providers")
+        .and_then(|p| p.as_object_mut())
+    {
+        providers.remove("screenpipe");
     }
 
     // Merge new providers into existing ones (add/update, don't remove others)
@@ -1191,24 +1170,25 @@ async fn ensure_pi_config(
     std::fs::write(&models_path, models_str)
         .map_err(|e| format!("Failed to write pi models config: {}", e))?;
 
-    // -- auth.json: merge screenpipe token, preserve other providers --
-    if let Some(token) = user_token {
-        let auth_path = config_dir.join("auth.json");
-        let mut auth: serde_json::Value = if auth_path.exists() {
-            let content = std::fs::read_to_string(&auth_path).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
-        } else {
-            json!({})
-        };
-
-        if let Some(obj) = auth.as_object_mut() {
-            obj.insert("screenpipe".to_string(), json!(token));
+    // Remove only the obsolete Screenpipe product credential. Third-party
+    // provider credentials in Pi's auth file remain untouched.
+    let auth_path = config_dir.join("auth.json");
+    if auth_path.exists() {
+        let content = std::fs::read_to_string(&auth_path)
+            .map_err(|e| format!("Failed to read pi auth config: {}", e))?;
+        if let Ok(mut auth) = serde_json::from_str::<serde_json::Value>(&content) {
+            let removed = auth
+                .as_object_mut()
+                .map(|entries| entries.remove("screenpipe").is_some())
+                .unwrap_or(false);
+            if removed {
+                let auth_str = serde_json::to_string_pretty(&auth)
+                    .map_err(|e| format!("Failed to serialize pi auth config: {}", e))?;
+                std::fs::write(&auth_path, auth_str)
+                    .map_err(|e| format!("Failed to write pi auth config: {}", e))?;
+                info!("Retired Screenpipe gateway credential removed from Pi auth config");
+            }
         }
-
-        let auth_str = serde_json::to_string_pretty(&auth)
-            .map_err(|e| format!("Failed to serialize auth: {}", e))?;
-        std::fs::write(&auth_path, auth_str)
-            .map_err(|e| format!("Failed to write pi auth: {}", e))?;
     }
 
     info!("Pi config merged at {:?}", models_path);
@@ -1259,11 +1239,10 @@ pub async fn pi_start(
     state: State<'_, PiState>,
     session_id: Option<String>,
     project_dir: String,
-    user_token: Option<String>,
     provider_config: Option<PiProviderConfig>,
 ) -> Result<PiInfo, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
-    pi_start_inner(app, &state, &sid, project_dir, user_token, provider_config).await
+    pi_start_inner(app, &state, &sid, project_dir, provider_config).await
 }
 
 /// Kill orphan Pi RPC processes left over from a previous app crash.
@@ -1324,42 +1303,6 @@ fn kill_orphan_pi_processes(managed_alive: bool) {
 /// 200ms is enough to detect immediate-exit crashes without delaying first chat.
 const PI_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Resolve a model name for the screenpipe provider.
-///
-/// The gateway (api.screenpipe.com) is the source of truth for model validation
-/// and supports many more models than the local hardcoded list (OpenRouter,
-/// Gemini, Anthropic, etc.). We only do lightweight normalization here
-/// (strip date suffixes) and pass through to the gateway which will reject
-/// unknown models with a proper error.
-fn resolve_screenpipe_model(requested: &str, provider: &str) -> String {
-    // Only touch screenpipe provider — other providers use their own model names
-    if provider != "screenpipe" {
-        return requested.to_string();
-    }
-
-    // Strip date suffix (@20251001 or -20251001) for cleaner model IDs
-    let base = requested.split('@').next().unwrap_or(requested);
-    let base = if base.len() > 9 && base.as_bytes()[base.len() - 9] == b'-' {
-        let suffix = &base[base.len() - 8..];
-        if suffix.chars().all(|c| c.is_ascii_digit()) {
-            &base[..base.len() - 9]
-        } else {
-            base
-        }
-    } else {
-        base
-    };
-
-    if base != requested {
-        info!(
-            "resolved model '{}' -> '{}' (stripped date suffix)",
-            requested, base
-        );
-    }
-
-    base.to_string()
-}
-
 /// Soft cap on concurrent Pi sessions. Each session is its own bun + node
 /// subprocess holding ~150–300 MB RSS plus a live LLM connection, so we
 /// guard against accidental fork-bombs (a misbehaving caller spawning
@@ -1376,7 +1319,6 @@ pub async fn pi_start_inner(
     state: &PiState,
     session_id: &str,
     project_dir: String,
-    user_token: Option<String>,
     provider_config: Option<PiProviderConfig>,
 ) -> Result<PiInfo, String> {
     let project_dir = project_dir.trim().to_string();
@@ -1391,14 +1333,13 @@ pub async fn pi_start_inner(
     // Ensure screenpipe skills exist in project
     ensure_screenpipe_skill(&project_dir)?;
 
-    // Install web-search extension only for screenpipe-cloud presets
-    ensure_web_search_extension(&project_dir, provider_config.as_ref())?;
+    remove_web_search_extension(&project_dir)?;
 
     // MCP bridge: lets the agent reach user-registered MCP servers.
     ensure_mcp_bridge_extension(&project_dir)?;
 
     // Ensure Pi is configured with the user's provider
-    ensure_pi_config(user_token.as_deref(), provider_config.as_ref()).await?;
+    ensure_pi_config(provider_config.as_ref()).await?;
 
     // Determine which Pi provider and model to use
     let (pi_provider, pi_model) = match &provider_config {
@@ -1408,14 +1349,18 @@ pub async fn pi_start_inner(
                 "openai-chatgpt" => "openai-chatgpt",
                 "native-ollama" => "ollama",
                 "anthropic" => "anthropic-byok",
-                // "custom" requires a valid URL; fall back to screenpipe cloud if missing
+                // "custom" requires a valid URL; fall back to local Ollama if missing
                 "custom" if !config.url.is_empty() => "custom",
-                "screenpipe-cloud" | "pi" | _ => "screenpipe",
+                "screenpipe-cloud" | "pi" | _ => "ollama",
             };
-            let model = resolve_screenpipe_model(&config.model, provider_name);
+            let model = if matches!(config.provider.as_str(), "screenpipe-cloud" | "pi") {
+                LOCAL_OLLAMA_MODEL.to_string()
+            } else {
+                config.model.clone()
+            };
             (provider_name.to_string(), model)
         }
-        None => ("screenpipe".to_string(), "auto".to_string()),
+        None => ("ollama".to_string(), LOCAL_OLLAMA_MODEL.to_string()),
     };
 
     let sid = session_id.to_string();
@@ -1666,10 +1611,6 @@ pub async fn pi_start_inner(
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    if let Some(ref token) = user_token {
-        cmd.env("SCREENPIPE_API_KEY", token);
     }
 
     // Pass local API config so the Pi agent can authenticate to the runtime local API.
@@ -2505,9 +2446,13 @@ pub async fn pi_set_model(
         "native-ollama" => "ollama",
         "anthropic" => "anthropic-byok",
         "custom" if !provider_config.url.is_empty() => "custom",
-        "screenpipe-cloud" | "pi" | _ => "screenpipe",
+        "screenpipe-cloud" | "pi" | _ => "ollama",
     };
-    let pi_model = resolve_screenpipe_model(&provider_config.model, pi_provider);
+    let pi_model = if matches!(provider_config.provider.as_str(), "screenpipe-cloud" | "pi") {
+        LOCAL_OLLAMA_MODEL.to_string()
+    } else {
+        provider_config.model.clone()
+    };
 
     let queue = {
         let mut pool = state.0.lock().await;
@@ -2549,7 +2494,6 @@ pub async fn pi_set_model(
 pub async fn pi_update_config(
     app: AppHandle,
     state: State<'_, PiState>,
-    user_token: Option<String>,
     provider_config: Option<PiProviderConfig>,
 ) -> Result<(), String> {
     info!(
@@ -2565,15 +2509,7 @@ pub async fn pi_update_config(
         .to_string();
 
     // Restart Pi for the "chat" session with the new provider/model
-    pi_start_inner(
-        app,
-        &state,
-        "chat",
-        project_dir,
-        user_token,
-        provider_config,
-    )
-    .await?;
+    pi_start_inner(app, &state, "chat", project_dir, provider_config).await?;
 
     Ok(())
 }
@@ -3415,7 +3351,9 @@ error: InstallFailed extracting tarball"#;
 
     // -- build_models_json tests --
 
-    use super::{build_models_json, PiProviderConfig};
+    use super::{
+        build_models_json, PiProviderConfig, LOCAL_OLLAMA_MODEL, LOCAL_OLLAMA_URL,
+    };
 
     fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
         PiProviderConfig {
@@ -3429,44 +3367,33 @@ error: InstallFailed extracting tarball"#;
     }
 
     #[tokio::test]
-    async fn test_build_models_json_default_has_screenpipe_provider() {
-        let config = build_models_json(None, None).await;
+    async fn test_build_models_json_default_has_local_ollama_provider() {
+        let config = build_models_json(None).await;
         let providers = config["providers"].as_object().unwrap();
-        assert!(providers.contains_key("screenpipe"));
+        assert!(providers.contains_key("ollama"));
         assert_eq!(providers.len(), 1);
 
-        let sp = &providers["screenpipe"];
-        assert_eq!(sp["baseUrl"], "https://api.screenpipe.com/v1");
-        assert_eq!(sp["api"], "openai-completions");
-        assert_eq!(sp["apiKey"], "SCREENPIPE_API_KEY");
-        assert_eq!(sp["authHeader"], true);
-        assert!(sp["models"].as_array().unwrap().len() > 0);
+        let ollama = &providers["ollama"];
+        assert_eq!(ollama["baseUrl"], LOCAL_OLLAMA_URL);
+        assert_eq!(ollama["models"][0]["id"], LOCAL_OLLAMA_MODEL);
     }
 
     #[tokio::test]
-    async fn test_build_models_json_with_user_token() {
-        let config = build_models_json(Some("tok_abc123"), None).await;
-        let sp = &config["providers"]["screenpipe"];
-        assert_eq!(sp["apiKey"], "tok_abc123");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_screenpipe_cloud_no_extra_provider() {
+    async fn test_build_models_json_legacy_cloud_maps_to_local_ollama() {
         let pc = make_provider_config("screenpipe-cloud", "auto");
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
-        // screenpipe-cloud maps to "" (empty), so only the screenpipe provider is added
         assert_eq!(providers.len(), 1);
-        assert!(providers.contains_key("screenpipe"));
+        assert_eq!(providers["ollama"]["baseUrl"], LOCAL_OLLAMA_URL);
+        assert_eq!(providers["ollama"]["models"][0]["id"], LOCAL_OLLAMA_MODEL);
     }
 
     #[tokio::test]
     async fn test_build_models_json_openai_adds_second_provider() {
         let pc = make_provider_config("openai", "gpt-4o");
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
-        assert_eq!(providers.len(), 2);
-        assert!(providers.contains_key("screenpipe"));
+        assert_eq!(providers.len(), 1);
         assert!(providers.contains_key("openai-byok"));
 
         let openai = &providers["openai-byok"];
@@ -3481,7 +3408,7 @@ error: InstallFailed extracting tarball"#;
     #[tokio::test]
     async fn test_build_models_json_ollama_provider() {
         let pc = make_provider_config("native-ollama", "llama3");
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
         assert!(providers.contains_key("ollama"));
         assert_eq!(providers["ollama"]["baseUrl"], "http://localhost:11434/v1");
@@ -3490,7 +3417,7 @@ error: InstallFailed extracting tarball"#;
     #[tokio::test]
     async fn test_build_models_json_anthropic_provider() {
         let pc = make_provider_config("anthropic", "claude-sonnet-4-5");
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
         assert!(providers.contains_key("anthropic-byok"));
         assert_eq!(
@@ -3504,9 +3431,9 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_custom_with_empty_url_skipped() {
         // custom provider with empty URL should be skipped (would invalidate schema)
         let pc = make_provider_config("custom", "my-model");
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
-        assert_eq!(providers.len(), 1); // only screenpipe
+        assert_eq!(providers.len(), 0);
         assert!(!providers.contains_key("custom"));
     }
 
@@ -3514,9 +3441,9 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_custom_with_url() {
         let mut pc = make_provider_config("custom", "my-model");
         pc.url = "http://my-server:8080/v1".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
-        assert_eq!(providers.len(), 2);
+        assert_eq!(providers.len(), 1);
         assert!(providers.contains_key("custom"));
         assert_eq!(providers["custom"]["baseUrl"], "http://my-server:8080/v1");
     }
@@ -3528,7 +3455,7 @@ error: InstallFailed extracting tarball"#;
         // defaults to max_completion_tokens which works for most of these.
         let mut pc = make_provider_config("custom", "my-model");
         pc.url = "http://localhost:8080/v1".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert!(
             model.get("compat").is_none(),
@@ -3540,7 +3467,7 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_azure_openai_forces_max_completion_tokens() {
         let mut pc = make_provider_config("custom", "gpt-4o");
         pc.url = "https://myresource.openai.azure.com/openai/deployments/gpt-4o".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert_eq!(
             model["compat"]["maxTokensField"], "max_completion_tokens",
@@ -3552,7 +3479,7 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_azure_foundry_forces_max_completion_tokens() {
         let mut pc = make_provider_config("custom", "gpt-5-mini");
         pc.url = "https://myresource.services.ai.azure.com/api/projects/proj".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
     }
@@ -3561,7 +3488,7 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_azure_cognitive_services_forces_max_completion_tokens() {
         let mut pc = make_provider_config("custom", "my-deployment");
         pc.url = "https://myresource.cognitiveservices.azure.com/".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
     }
@@ -3572,7 +3499,7 @@ error: InstallFailed extracting tarball"#;
         // max_completion_tokens. Detect by model ID.
         let mut pc = make_provider_config("custom", "gpt-5");
         pc.url = "https://my-proxy.example.com/v1".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
     }
@@ -3581,7 +3508,7 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_o3_model_forces_max_completion_tokens() {
         let mut pc = make_provider_config("custom", "o3-mini");
         pc.url = "https://my-proxy.example.com/v1".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
     }
@@ -3592,7 +3519,7 @@ error: InstallFailed extracting tarball"#;
         // and Pi's default is already max_completion_tokens for non-chutes URLs.
         let mut pc = make_provider_config("custom", "gpt-4o");
         pc.url = "https://my-proxy.example.com/v1".to_string();
-        let config = build_models_json(None, Some(&pc)).await;
+        let config = build_models_json(Some(&pc)).await;
         let model = &config["providers"]["custom"]["models"][0];
         assert!(model.get("compat").is_none());
     }
@@ -3603,14 +3530,14 @@ error: InstallFailed extracting tarball"#;
         // provider, build_models_json always produces a clean config with only
         // the providers we explicitly add. This is a pure function so there is
         // no file to corrupt — the test verifies the output shape is always valid.
-        let config = build_models_json(Some("tok"), None).await;
+        let config = build_models_json(None).await;
         let providers = config["providers"].as_object().unwrap();
 
-        // Only "screenpipe" — no leftover providers
+        // Only local Ollama — no hosted or stale providers.
         assert_eq!(providers.len(), 1);
 
         // Every model has required fields for pi-coding-agent schema
-        let models = providers["screenpipe"]["models"].as_array().unwrap();
+        let models = providers["ollama"]["models"].as_array().unwrap();
         for m in models {
             assert!(m["id"].as_str().unwrap().len() > 0, "model missing id");
             assert!(m["cost"]["input"].is_number(), "model missing cost.input");

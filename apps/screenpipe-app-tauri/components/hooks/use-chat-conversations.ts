@@ -560,7 +560,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           const aiTitle = await titleCreatedByAI(
             rawContent,
             selectedPreset,
-            null,
             async (partial) => {
               try {
                 const { useChatStore } = await import("@/lib/stores/chat-store");

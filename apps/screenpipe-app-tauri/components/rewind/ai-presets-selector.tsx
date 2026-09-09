@@ -192,65 +192,6 @@ export function AIProviderConfig({
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [idError, setIdError] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
-  const { isEnterprise, policy: enterprisePolicy } = useEnterprisePolicy();
-  const aiPresetPolicy = enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY;
-  const [piAvailable, setPiAvailable] = useState(false);
-  const [piModels, setPiModels] = useState<{ id: string; name: string; free?: boolean; cost_tier?: string; recommended_for?: string[]; warning?: string; health?: { status: string; error_rate_5m: number } }[]>([]);
-
-  // Fetch PI models from gateway (single source of truth)
-  useEffect(() => {
-    if (selectedProvider !== "screenpipe-cloud") return;
-    const fetchPiModels = async () => {
-      try {
-        const token = "";
-        const resp = await fetch("https://api.screenpipe.com/v1/models", {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          const models = (data.data || [])
-            .map((m: any) => ({
-            id: m.id,
-            name: m.name || m.id,
-            free: m.free,
-            cost_tier: m.cost_tier,
-            recommended_for: m.recommended_for,
-            warning: m.warning,
-            health: m.health,
-            }))
-            .filter((m: { id: string }, idx: number, arr: { id: string }[]) => arr.findIndex((x) => x.id === m.id) === idx);
-          setPiModels(models);
-        }
-      } catch {
-        // gateway down — model list stays empty, user sees empty dropdown
-      }
-    };
-    fetchPiModels();
-  }, [selectedProvider]);
-
-  // Check Pi availability (installed at app startup by Rust background thread)
-  useEffect(() => {
-    const checkPi = async () => {
-      try {
-        const result = await commands.piCheck();
-        if (result.status === "ok" && result.data.available) {
-          setPiAvailable(true);
-        }
-      } catch (e) {
-        console.error("Failed to check pi:", e);
-      }
-    };
-    if (isEnterprise) {
-      setPiAvailable(aiPresetPolicy.allow_screenpipe_cloud);
-      return;
-    }
-    if (!isEnterprise) {
-      checkPi();
-    }
-    // Re-check periodically in case background install finishes
-    const interval = isEnterprise ? null : setInterval(checkPi, 5000);
-    return () => { if (interval) clearInterval(interval); };
-  }, [isEnterprise, aiPresetPolicy.allow_screenpipe_cloud]);
   const [formData, setFormData] = useState<AIPreset>({
     provider: defaultPreset?.provider || "openai",
     apiKey: defaultPreset?.apiKey || "",
@@ -485,29 +426,7 @@ export function AIProviderConfig({
           />
         </div>
 
-        <div className={cn(
-          "grid gap-2",
-          piAvailable ? "grid-cols-3" : "grid-cols-4"
-        )}>
-          {piAvailable && (
-            <Button
-              type="button"
-              variant={selectedProvider === "screenpipe-cloud" ? "default" : "outline"}
-              className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
-              onClick={() => {
-                setSelectedProvider("screenpipe-cloud");
-                setFormData({
-                  ...formData,
-                  provider: "screenpipe-cloud",
-                  url: "",
-                  model: "auto",
-                });
-              }}
-            >
-              <Icons.terminal className="h-3.5 w-3.5" />
-              <span>screenpipe cloud</span>
-            </Button>
-          )}
+        <div className="grid gap-2 grid-cols-4">
 
           <Button
             type="button"
@@ -843,50 +762,6 @@ export function AIProviderConfig({
           </div>
         )}
 
-        {selectedProvider === "screenpipe-cloud" && (
-          <div className="space-y-1">
-            <Label htmlFor="model" className="text-xs">model</Label>
-            <Select
-              value={formData.model}
-              onValueChange={async (value) => {
-                setFormData({ ...formData, model: value });
-              }}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue placeholder="select model" />
-              </SelectTrigger>
-              <SelectContent>
-                {piModels.map((m) => {
-                  const costLabel = m.cost_tier === 'low' ? '$' : m.cost_tier === 'medium' ? '$$' : m.cost_tier === 'high' ? '$$$' : m.cost_tier === 'very_high' ? '$$$$' : '';
-                  return (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-center gap-1.5">
-                      {m.health?.status === 'down' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-500" title="overloaded" />}
-                      {m.health?.status === 'degraded' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-500" title="degraded" />}
-                      {m.name}{m.free ? " (free)" : ""}
-                      {costLabel && <span className="text-[9px] font-medium text-muted-foreground">{costLabel}</span>}
-                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded px-1">pipes</span>}
-                      {m.health?.status === 'down' && <span className="text-[9px] text-red-400 ml-1">overloaded</span>}
-                    </span>
-                  </SelectItem>
-                  );
-                })}
-              </SelectContent>
-            </Select>
-            {(() => {
-              const selectedModel = piModels.find((m) => m.id === formData.model);
-              if (selectedModel?.warning) {
-                return (
-                  <p className="text-[10px] text-muted-foreground mt-1">
-                    ! {selectedModel.warning}
-                  </p>
-                );
-              }
-              return null;
-            })()}
-          </div>
-        )}
-
         <button
           type="button"
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -898,7 +773,6 @@ export function AIProviderConfig({
 
         {showAdvanced && (
           <div className="space-y-1.5">
-            {selectedProvider !== "screenpipe-cloud" && (
             <div className="space-y-1">
               <Label htmlFor="maxTokens" className="text-xs">max output tokens</Label>
               <Input
@@ -914,7 +788,6 @@ export function AIProviderConfig({
                 className="h-6 text-[10px]"
               />
             </div>
-            )}
             <div className="space-y-1">
               <Label htmlFor="prompt" className="text-xs">prompt</Label>
               <Textarea
@@ -996,11 +869,7 @@ export const AIPresetDialog = ({
       prompt: providerData.prompt,
     };
 
-    // Screenpipe Cloud: max output is defined per model in the gateway catalog (see screenpipe_cloud_models in Rust).
-    // Do not persist or override maxTokens from this dialog — avoids defaulting to 4096 and matches Settings.
-    if (providerData.provider !== "screenpipe-cloud") {
-      (newPreset as any).maxTokens = (providerData as any).maxTokens ?? 4096;
-    }
+    (newPreset as any).maxTokens = (providerData as any).maxTokens ?? 4096;
 
     // Add apiKey for providers that require it
     if (
@@ -1021,9 +890,7 @@ export const AIPresetDialog = ({
         url: preset.url,
         model: preset.model,
         maxContextChars: preset.maxContextChars,
-        ...(preset.provider !== "screenpipe-cloud"
-          ? { maxTokens: (preset as any).maxTokens ?? 4096 }
-          : {}),
+        maxTokens: (preset as any).maxTokens ?? 4096,
         prompt: preset.prompt,
         defaultPreset: preset.defaultPreset,
         apiKey: preset.apiKey || null,

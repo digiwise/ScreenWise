@@ -1147,3 +1147,78 @@ Verification on Windows on 2026-09-08:
   root workspace with the normal release environment.
 - `git diff --check`: passed. The complete source diff and all three lockfiles
   were inspected before commit.
+
+### Hosted Screenpipe AI gateway boundary — 2026-09-09
+
+The Screenpipe product account is gone, but the desktop and core Pi runtimes
+still construct an implicit `screenpipe-cloud` provider backed by
+`api.screenpipe.com`, write its product token into Pi configuration and process
+environment, install a gateway-only web-search extension, and expose hosted
+model discovery, usage, media analysis, OCR analysis, and suggestions in the
+desktop UI. The independently deployable `packages/ai-gateway` worker remains
+the implementation for those hosted chat, search, transcription, voice,
+provider-proxy, usage, and subscription endpoints.
+
+This boundary is separable from local Pi orchestration: Pi installation,
+sessions, local Screenpipe API skills, and the existing `native-ollama`
+provider use only the authenticated loopback recorder API and Ollama at
+`http://localhost:11434/v1`. Existing persisted `screenpipe-cloud`, `pi`, or
+`pi-agent` presets can be accepted as legacy input and mapped non-destructively
+to a local Ollama preset rather than retaining a hidden network fallback or
+deleting settings history. Direct OpenAI, Anthropic, ChatGPT OAuth, arbitrary
+remote-model, and hosted Tinfoil redaction paths are distinct later removal
+scopes; deterministic local regex/ONNX redaction is not part of this change.
+
+The previously removed external transcription transports and workflow
+classifier have not reappeared in the recorder runtime. Their remaining legacy
+serialized setting names and test fixtures do not provide implementations and
+will be handled in compatibility-aware cleanup commits after this gateway
+boundary.
+
+Post-change evidence:
+
+- Removed the independently deployed `packages/ai-gateway` worker and its own
+  Bun lockfile, plus all desktop/core hosted model discovery, token propagation,
+  quota/subscription UI, cloud media/OCR analysis, hosted web search, and cloud
+  suggestion paths. No active source retains `api.screenpipe.com`,
+  `api.screenpi.pe`, `SCREENPIPE_API_URL`, the removed commands, or their
+  generated bindings; matches left in captured-text test data are inert fixtures.
+- Pi remains available with a local default at
+  `http://localhost:11434/v1` / `ministral-3:latest`. Legacy hosted preset IDs
+  and providers are read non-destructively and resolved to that local provider;
+  the obsolete `screenpipe` entries are removed from Pi `models.json` and
+  `auth.json` while unrelated third-party providers and credentials are kept.
+- Local recorder OCR, the local API bearer token/secret store, deterministic
+  local redaction, persisted settings, and historical database fields were not
+  removed. Direct OpenAI, Anthropic, ChatGPT OAuth, generic remote endpoints,
+  hosted Tinfoil, external-transcription compatibility, and desktop pipes remain
+  isolated for their own commits. Litepipe was not consulted.
+- Root and desktop `Cargo.lock` changes remove only the now-unused direct
+  `arc-swap` edges from `screenpipe-core` and `screenpipe-app`; the transitive
+  package remains for retained crates. Their reviewed SHA-256 values are
+  `24406636290302B382F08F98DBA4BFE32E7881B3CD5C4761955D47A50FF4D1FE` and
+  `4A5E7E23BD4BEA7B34F3265FC3FFB5FA3B62A0B2FEC793C3D022C08B97C0DCCB`.
+  The desktop Bun lockfile is unchanged at
+  `758A49562E49967F8B91F1169D64DA7C74242051CF1544889734BE0E47A3701D`.
+
+Verification on Windows on 2026-09-09:
+
+- `cargo fmt --all -- --check`: passed from the root workspace.
+- Locked/offline root checks for `screenpipe-core` and `screenpipe-engine`, and
+  the locked/offline desktop check: passed in Developer PowerShell with the
+  documented normal Ninja/OpenBLAS/ORT environment.
+- `tauri_bindings_are_current`: 1 passed with Ninja Multi-Config, the transient
+  `knf-rs-sys` dev CRT override, and OpenBLAS on runtime `PATH`.
+- Desktop Pi model configuration tests: 15 passed; the legacy preset settings
+  migration regression: 1 passed; local suggestion tests: 9 passed with 3
+  benchmarks ignored. Engine preset tests: 9 passed.
+- Direct TypeScript `tsc --noEmit`: passed. The first direct Vitest run exposed
+  three stale hosted-account quota-copy assertions (533 passed); after replacing
+  them with provider-neutral assertions, the full rerun passed 42 files and 535
+  tests. Direct Next production build passed with only the existing `unpdf`
+  `import.meta` warning.
+- `cargo build --release --locked --offline`: passed in 11m 29s from the root
+  workspace with the documented release environment and only known warnings.
+- `git diff --check`: passed. Modified-source diffs, generated bindings and
+  capability schema, deletion inventory, dependency manifests, both Cargo
+  lockfiles, and the desktop Bun lockfile were inspected before commit.

@@ -46,8 +46,7 @@ pub struct ExecutionHandle {
 #[async_trait::async_trait]
 pub trait AgentExecutor: Send + Sync {
     /// Execute `prompt` using `model` with the given `working_dir` as cwd.
-    /// `provider` overrides the default provider (e.g. `"anthropic"`, `"openai"`).
-    /// If `None`, uses screenpipe cloud as default.
+    /// `provider` overrides the local Ollama default (e.g. `"anthropic"`, `"openai"`).
     /// `shared_pid` is set synchronously right after the subprocess spawns,
     /// enabling the caller to kill the process on timeout with no race.
     /// `continue_session` — when `true`, the agent resumes its last session for
@@ -119,16 +118,4 @@ pub trait AgentExecutor: Send + Sync {
 
     /// Human-readable agent name, e.g. `"pi"`, `"claude-code"`.
     fn name(&self) -> &str;
-
-    /// Optional cloud auth token for screenpipe provider proxy.
-    /// Defaults to `None`; override in agents that support cloud auth.
-    ///
-    /// Returns an owned `Option<String>` (not `Option<&str>`) so
-    /// implementations can read from interior-mutable storage (e.g. an
-    /// `Arc<RwLock>`) without holding a lock across the caller's borrow.
-    /// This lets the desktop app refresh the token at runtime without
-    /// restarting the engine.
-    fn user_token(&self) -> Option<String> {
-        None
-    }
 }

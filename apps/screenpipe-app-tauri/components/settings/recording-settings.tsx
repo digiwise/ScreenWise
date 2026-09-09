@@ -2804,7 +2804,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 <div>
                   <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                     Live meeting notes
-                    <HelpTooltip text="Streams only the active meeting into the live note. This is separate from background 24/7 recording and can use your selected transcription engine, screenpipe cloud, or a direct provider." />
+                    <HelpTooltip text="Streams only the active meeting into the live note. This is separate from background 24/7 recording and uses your selected transcription engine." />
                   </h3>
                   <p className="text-xs text-muted-foreground">Meeting-only live captions, separate from background transcription</p>
                 </div>

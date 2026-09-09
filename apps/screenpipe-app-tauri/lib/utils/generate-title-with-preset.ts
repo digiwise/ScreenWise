@@ -95,7 +95,6 @@ function buildTitleProviderConfig(preset: AIPreset): PiProviderConfig {
 async function generateTitleViaPi(
   content: string,
   preset: AIPreset,
-  userToken: string | null,
   onDelta?: (partial: string) => void,
 ): Promise<string | null> {
   // Unique session ID per call — no collisions across windows or concurrent calls
@@ -162,7 +161,7 @@ async function generateTitleViaPi(
     }
 
     // turn_end is a mid-agent boundary (e.g. between tool-call turns) —
-    // screenpipe-cloud emits it before agent_end with no content. Ignore it.
+    // turn_end may precede agent_end with no content. Ignore it.
     if (evt.type === "turn_end") return;
 
     if (evt.type === "agent_end") {
@@ -197,7 +196,7 @@ async function generateTitleViaPi(
 
   try {
     // Start dedicated Pi session
-    const startResult = await commands.piStart(sessionId, dir, userToken, providerConfig);
+    const startResult = await commands.piStart(sessionId, dir, providerConfig);
     if (startResult.status !== "ok" || !startResult.data?.running) {
       console.warn("[chat-title] pi start failed", startResult);
       return null;
@@ -241,7 +240,6 @@ async function generateTitleViaPi(
 export async function titleCreatedByAI(
   content: string,
   selectedPreset: AIPreset | null | undefined,
-  userToken?: string | null,
   onDelta?: (partial: string) => void,
 ): Promise<string | null> {
   if (!selectedPreset) return null;
@@ -249,7 +247,7 @@ export async function titleCreatedByAI(
   if (!trimmed) return null;
 
   try {
-    return await generateTitleViaPi(trimmed, selectedPreset, userToken ?? null, onDelta);
+    return await generateTitleViaPi(trimmed, selectedPreset, onDelta);
   } catch (error) {
     console.warn("[chat-title] failed", {
       provider: selectedPreset.provider,

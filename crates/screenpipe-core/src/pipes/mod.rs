@@ -15,10 +15,7 @@ pub mod permissions;
 pub mod preset_fallback;
 pub mod sync;
 
-use crate::agents::{
-    pi::{PiExecutor, SCREENPIPE_API_URL},
-    AgentExecutor, ExecutionHandle,
-};
+use crate::agents::{pi::PiExecutor, AgentExecutor, ExecutionHandle};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, Utc};
 use cron::Schedule as CronSchedule;
@@ -79,10 +76,10 @@ pub struct PipeConfig {
     /// Agent CLI to use.  Default: `"pi"`.
     #[serde(default = "default_agent", skip_serializing_if = "is_default_agent")]
     pub agent: String,
-    /// LLM model passed to the agent.  Default: `"claude-haiku-4-5"`.
+    /// LLM model passed to the agent. Default: the configured local Ollama model.
     #[serde(default = "default_model", skip_serializing_if = "is_default_model")]
     pub model: String,
-    /// LLM provider override.  Default: none (uses screenpipe cloud).
+    /// LLM provider override. Default: none (uses the local Ollama preset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// AI preset id(s) from `~/.screenpipe/store.bin` → `settings.aiPresets`.
@@ -935,24 +932,24 @@ fn resolve_preset(pipes_dir: &Path, preset_id: &str) -> Option<ResolvedPreset> {
     let store_path = pipes_dir.parent()?.join("store.bin");
 
     if !store_path.exists() {
-        // Bootstrap for CLI users who don't have the app.
-        // Default to screenpipe cloud — user needs SCREENPIPE_API_KEY env var.
-        // Mirrors the app's first-install seed (use-settings.tsx makeDefaultPresets):
-        // non-pro Sonnet for chat, Haiku for pipes. Users can swap to Opus 4.7 later.
+        // Bootstrap for CLI users who don't have the app. The retained default
+        // is a local Ollama model and never falls back to a hosted provider.
         let default_store = serde_json::json!({
             "settings": {
                 "aiPresets": [
                     {
                         "id": "chat",
-                        "model": "claude-sonnet-4-5",
-                        "provider": "screenpipe-cloud",
+                        "url": "http://localhost:11434/v1",
+                        "model": "ministral-3:latest",
+                        "provider": "native-ollama",
                         "defaultPreset": true,
                         "maxContextChars": 200000
                     },
                     {
                         "id": "pipes",
-                        "model": "claude-haiku-4-5",
-                        "provider": "screenpipe-cloud",
+                        "url": "http://localhost:11434/v1",
+                        "model": "ministral-3:latest",
+                        "provider": "native-ollama",
                         "defaultPreset": false,
                         "maxContextChars": 200000
                     }
@@ -968,7 +965,7 @@ fn resolve_preset(pipes_dir: &Path, preset_id: &str) -> Option<ResolvedPreset> {
                 let _ =
                     std::fs::set_permissions(&store_path, std::fs::Permissions::from_mode(0o600));
             }
-            info!("created store.bin with default presets (chat: sonnet, pipes: haiku)");
+            info!("created store.bin with local Ollama presets");
         }
     }
 
@@ -977,7 +974,7 @@ fn resolve_preset(pipes_dir: &Path, preset_id: &str) -> Option<ResolvedPreset> {
 
     // Normalize legacy preset IDs to current names
     let normalized_id = match preset_id {
-        "pi-agent" => "screenpipe-cloud",
+        "pi-agent" | "screenpipe-cloud" => "default",
         "auto" => "default",
         other => other,
     };
@@ -1001,14 +998,20 @@ fn resolve_preset(pipes_dir: &Path, preset_id: &str) -> Option<ResolvedPreset> {
             })
     }?;
 
-    let model = preset.get("model")?.as_str()?.to_string();
+    let stored_provider = preset.get("provider").and_then(|v| v.as_str());
+    let legacy_cloud = matches!(stored_provider, Some("screenpipe-cloud") | Some("pi"));
+    let model = if legacy_cloud {
+        "ministral-3:latest".to_string()
+    } else {
+        preset.get("model")?.as_str()?.to_string()
+    };
 
     // Map app provider types to pipe provider strings
     let provider = preset
         .get("provider")
         .and_then(|v| v.as_str())
         .and_then(|p| match p {
-            "screenpipe-cloud" | "pi" => Some("screenpipe"),
+            "screenpipe-cloud" | "pi" => Some("ollama"),
             "native-ollama" => Some("ollama"),
             "openai" => Some("openai"),
             "openai-chatgpt" => Some("openai-chatgpt"),
@@ -1018,17 +1021,24 @@ fn resolve_preset(pipes_dir: &Path, preset_id: &str) -> Option<ResolvedPreset> {
         })
         .map(|s| s.to_string());
 
-    let url = preset
-        .get("url")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let url = if legacy_cloud {
+        Some("http://localhost:11434/v1".to_string())
+    } else {
+        preset
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
 
     let mut api_key = preset
         .get("apiKey")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    if legacy_cloud {
+        api_key = None;
+    }
 
     // ChatGPT OAuth: read token from secrets store (primary) or legacy file (fallback),
     // auto-refreshing if expired.
@@ -1982,10 +1992,7 @@ impl PipeManager {
         // Pre-configure pi
         let mut pipe_token: Option<String> = None;
         if config.agent == "pi" {
-            let cloud_token = executor.user_token();
             if let Err(e) = PiExecutor::ensure_pi_config(
-                cloud_token.as_deref(),
-                SCREENPIPE_API_URL,
                 run_provider.as_deref(),
                 Some(&run_model),
                 run_provider_url.as_deref(),
@@ -2377,7 +2384,7 @@ impl PipeManager {
             } else {
                 // No preset in pipe config — use the user's default preset
                 // so pipes respect the user's AI settings instead of silently
-                // falling through to screenpipe cloud.
+                // falling through to an implicit provider.
                 match resolve_preset(&self.pipes_dir, "default") {
                     Some(resolved) => {
                         info!(
@@ -2486,8 +2493,6 @@ impl PipeManager {
             let mut pipe_token: Option<String> = None;
             if config.agent == "pi" {
                 if let Err(e) = PiExecutor::ensure_pi_config(
-                    None,
-                    SCREENPIPE_API_URL,
                     run_provider.as_deref(),
                     Some(&run_model),
                     run_provider_url.as_deref(),
@@ -3510,7 +3515,7 @@ impl PipeManager {
                     } else {
                         // No preset in pipe config — use the user's default preset
                         // so scheduled pipes respect the user's AI settings instead
-                        // of silently falling through to screenpipe cloud.
+                        // of silently falling through to an implicit provider.
                         match resolve_preset(&pipes_dir, "default") {
                             Some(resolved) => {
                                 info!(
@@ -3538,10 +3543,7 @@ impl PipeManager {
                     // Pre-configure pi with the pipe's provider
                     let mut pipe_token: Option<String> = None;
                     if config.agent == "pi" {
-                        let cloud_token = executor.user_token();
                         if let Err(e) = PiExecutor::ensure_pi_config(
-                            cloud_token.as_deref(),
-                            SCREENPIPE_API_URL,
                             provider.as_deref(),
                             Some(&model),
                             provider_url.as_deref(),

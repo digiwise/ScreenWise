@@ -1229,7 +1229,7 @@ pub enum ModelCommand {
     Create {
         /// Preset id (letters, digits, '-', '_'; max 64 chars)
         id: String,
-        /// Provider: openai | anthropic | native-ollama | custom | screenpipe-cloud
+        /// Provider: openai | anthropic | native-ollama | custom
         #[arg(long)]
         provider: String,
         /// Model name (e.g. claude-sonnet-4-5, gpt-4o, llama3.2)
@@ -1238,7 +1238,7 @@ pub enum ModelCommand {
         /// Base URL (required for native-ollama and custom)
         #[arg(long)]
         url: Option<String>,
-        /// API key (required for openai/anthropic; forbidden for ollama/cloud)
+        /// API key (required for openai/anthropic; forbidden for ollama)
         #[arg(long)]
         api_key: Option<String>,
         /// Optional system prompt prepended to pipe bodies

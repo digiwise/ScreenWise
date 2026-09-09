@@ -1492,7 +1492,6 @@ async fn main() {
             let suggestions_state_clone = suggestions::SuggestionsState {
                 cache: suggestions_state.cache.clone(),
                 scheduler_handle: suggestions_state.scheduler_handle.clone(),
-                enhanced_ai: suggestions_state.enhanced_ai.clone(),
             };
             let app_handle_for_suggestions = app_handle.clone();
             tauri::async_runtime::spawn(async move {

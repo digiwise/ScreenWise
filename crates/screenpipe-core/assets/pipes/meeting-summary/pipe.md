@@ -2,7 +2,7 @@
 schedule: manual
 enabled: true
 preset:
-  - screenpipe-cloud
+  - local-ollama
 trigger:
   events:
     - meeting_ended
