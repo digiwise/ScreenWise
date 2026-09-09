@@ -160,7 +160,7 @@ async function applyAppUpdatePolicy(policy: EnterpriseAppUpdatePolicy): Promise<
  * the recording engine honors them. The admin sets these in the workspace
  * policy (lockedSettings.usePiiRemoval / piiBackend / piiRedactionLabels); we
  * write them into `settings` the same way the AI-preset + app-update policies
- * do, so the on-device ONNX + Tinfoil PII workers pick them up. The matching UI
+ * do, so the on-device ONNX PII workers pick them up. The matching UI
  * controls are disabled separately so the employee can't override a forced
  * value. Keys map 1:1 to the engine's RecordingSettings fields
  * (use_pii_removal, pii_backend, pii_redaction_labels).
@@ -174,7 +174,7 @@ async function applyPiiPolicy(lockedSettings: Record<string, unknown>): Promise<
   }
 
   const backend = lockedSettings.piiBackend;
-  if (backend === "local" || backend === "tinfoil") {
+  if (backend === "local") {
     updates.piiBackend = backend;
   }
 

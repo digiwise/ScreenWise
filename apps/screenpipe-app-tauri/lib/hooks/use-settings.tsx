@@ -18,10 +18,6 @@ export type VadSensitivity = "low" | "medium" | "high";
 
 export type AIProviderType =
 	| "native-ollama"
-	| "openai"
-	| "openai-chatgpt"
-	| "anthropic"
-	| "custom"
 	| "embedded";
 
 export type EmbeddedLLMConfig = {
@@ -44,26 +40,7 @@ export type AIPreset = {
 	model: string;
 	defaultPreset: boolean;
 	prompt: string;
-} & (
-	| {
-			provider: "openai";
-			apiKey: string;
-	  }
-	| {
-			provider: "native-ollama";
-	  }
-	| {
-			provider: "anthropic";
-			apiKey: string;
-	  }
-	| {
-			provider: "custom";
-			apiKey: string;
-	  }
-	| {
-			provider: "openai-chatgpt";
-	  }
-);
+} & { provider: "native-ollama" };
 
 export type UpdateChannel = "stable" | "beta";
 
@@ -592,12 +569,14 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// Retired hosted presets remain readable but execute locally.
+		// Retired hosted and direct remote-provider presets remain readable but
+		// execute locally. Keep the preset identity, prompt, and ordering while
+		// removing the remote endpoint/key from the active configuration.
 		if (settings.aiPresets?.some((p: any) =>
-			["screenpipe-cloud", "pi", "claude-code", "opencode"].includes(p.provider)
+			["screenpipe-cloud", "pi", "claude-code", "opencode", "openai", "openai-chatgpt", "anthropic", "custom"].includes(p.provider)
 		)) {
 			settings.aiPresets = settings.aiPresets.map((p: any) =>
-				["screenpipe-cloud", "pi", "claude-code", "opencode"].includes(p.provider)
+				["screenpipe-cloud", "pi", "claude-code", "opencode", "openai", "openai-chatgpt", "anthropic", "custom"].includes(p.provider)
 					? {
 						...p,
 						provider: "native-ollama",

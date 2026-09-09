@@ -349,12 +349,9 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub async_image_pii_redaction: bool,
 
-    /// Backend for the AI PII workers — `local` (on-device ONNX,
-    /// privacy by construction, slower on weak hardware) or
-    /// `tinfoil` (screenpipe-hosted confidential-compute enclave on
-    /// H200, fast everywhere, requires network). Single flag for
-    /// both text + image — flipping it swaps the inner adapter for
-    /// both worker types.
+    /// Backend compatibility flag for the AI PII workers. `local` is the
+    /// only active backend; legacy `tinfoil`, `cloud`, and `enclave` values
+    /// are accepted and resolved locally so old settings remain readable.
     #[arg(long, default_value = "local")]
     pub pii_backend: String,
 
@@ -1229,18 +1226,15 @@ pub enum ModelCommand {
     Create {
         /// Preset id (letters, digits, '-', '_'; max 64 chars)
         id: String,
-        /// Provider: openai | anthropic | native-ollama | custom
+        /// Provider: native-ollama
         #[arg(long)]
         provider: String,
-        /// Model name (e.g. claude-sonnet-4-5, gpt-4o, llama3.2)
+        /// Local Ollama model name (e.g. ministral-3:latest, llama3.2)
         #[arg(long)]
         model: String,
-        /// Base URL (required for native-ollama and custom)
+        /// Ollama base URL (only http://localhost:11434/v1 is supported)
         #[arg(long)]
         url: Option<String>,
-        /// API key (required for openai/anthropic; forbidden for ollama)
-        #[arg(long)]
-        api_key: Option<String>,
         /// Optional system prompt prepended to pipe bodies
         #[arg(long)]
         prompt: Option<String>,
@@ -1262,12 +1256,9 @@ pub enum ModelCommand {
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
-        /// Empty string clears url
+        /// Ollama base URL (only http://localhost:11434/v1 is supported)
         #[arg(long)]
         url: Option<String>,
-        /// Empty string clears api key
-        #[arg(long)]
-        api_key: Option<String>,
         /// Empty string clears prompt
         #[arg(long)]
         prompt: Option<String>,

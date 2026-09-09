@@ -3078,10 +3078,7 @@ export function StandaloneChat({
   // decide between a hot-swap (`pi_set_model`) and a full respawn. Update
   // this ref on every Pi start/restart/swap.
   const piRunningConfigRef = useRef<{
-    provider: string;
     model: string;
-    url: string;
-    apiKey: string | null;
     maxTokens: number;
     systemPrompt: string | null;
   } | null>(null);
@@ -4625,22 +4622,16 @@ export function StandaloneChat({
     const connectionsCtx = buildConnectionsContext(connections);
     const systemPrompt = `${buildSystemPrompt()}\n\n${presetPrompt}${connectionsCtx}`.trim() || null;
     return {
-      provider: p.provider,
-      url: p.url || "",
       model: p.model || "",
-      apiKey: ("apiKey" in p ? (p.apiKey as string) : null) || null,
       maxTokens: (p as any).maxTokens ?? 4096,
       systemPrompt,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePreset?.provider, activePreset?.url, activePreset?.model, activePreset?.apiKey, (activePreset as any)?.maxTokens, activePreset?.prompt, connections]);
+  }, [activePreset?.model, (activePreset as any)?.maxTokens, activePreset?.prompt, connections]);
 
   const setRunningConfigFromProviderConfig = useCallback((providerConfig: NonNullable<ReturnType<typeof buildProviderConfig>>) => {
     piRunningConfigRef.current = {
-      provider: providerConfig.provider,
       model: providerConfig.model,
-      url: providerConfig.url,
-      apiKey: providerConfig.apiKey,
       maxTokens: providerConfig.maxTokens,
       systemPrompt: providerConfig.systemPrompt,
     };
@@ -4726,10 +4717,9 @@ export function StandaloneChat({
 
   // Apply a preset change to the running Pi process.
   //
-  // - If ONLY provider/model changed: `pi_set_model` — keeps the subprocess
-  //   alive and preserves the full conversation, so the user can switch
-  //   haiku ↔ sonnet ↔ opus mid-session without losing context.
-  // - If any other spawn-time field changed (url, apiKey, maxTokens, systemPrompt):
+  // - If ONLY the model changed: `pi_set_model` — keeps the subprocess
+  //   alive and preserves the full conversation while switching local models.
+  // - If any other spawn-time field changed (maxTokens, systemPrompt):
   //   restart the current Pi session — those are baked into Pi's CLI args
   //   and models.json, so the subprocess has to be respawned to see them.
   //
@@ -4744,22 +4734,17 @@ export function StandaloneChat({
     const providerConfig = buildProviderConfig(preset);
     if (!providerConfig) return;
 
-    // Compare against the currently-running config. If we only know
-    // provider+model (older ref shape), we can still decide on the hot-swap
-    // path as long as the non-tracked fields are unchanged from the last
-    // full restart — which is exactly the invariant we maintain here by
-    // updating the ref on every hot-swap/restart.
+    // Compare against the currently-running local Pi config. The ref is
+    // updated on every hot-swap/restart, so it remains authoritative even
+    // when a session was started by crash recovery.
     const running = piRunningConfigRef.current;
-    const providerChanged = !running || running.provider !== providerConfig.provider;
     const modelChanged = !running || running.model !== providerConfig.model;
     const spawnTimeFieldsChanged =
       !running ||
-      running.url !== providerConfig.url ||
-      running.apiKey !== providerConfig.apiKey ||
       running.maxTokens !== providerConfig.maxTokens ||
       running.systemPrompt !== providerConfig.systemPrompt;
 
-    if (!providerChanged && !modelChanged && !spawnTimeFieldsChanged) {
+    if (!modelChanged && !spawnTimeFieldsChanged) {
       // Preset save that didn't actually change anything Pi cares about.
       return;
     }
@@ -4779,9 +4764,9 @@ export function StandaloneChat({
       return switchPromise;
     };
 
-    if (!spawnTimeFieldsChanged && (providerChanged || modelChanged)) {
+    if (!spawnTimeFieldsChanged && modelChanged) {
       // Hot-swap path — preserves conversation state.
-      console.log("[Pi] Hot-swap model:", providerConfig.provider, providerConfig.model);
+      console.log("[Pi] Hot-swap model:", providerConfig.model);
       enqueuePresetSwitch(async () => {
         try {
           await commands.piSetModel(piSessionIdRef.current, providerConfig);
@@ -4799,7 +4784,7 @@ export function StandaloneChat({
     }
 
     // Full restart — spawn-time field changed.
-    console.log("[Pi] Full restart (spawn-time field changed):", providerConfig.provider, providerConfig.model);
+    console.log("[Pi] Full restart (spawn-time field changed):", providerConfig.model);
     enqueuePresetSwitch(async () => {
       try {
         await restartCurrentPiSession(providerConfig);
@@ -5726,10 +5711,7 @@ export function StandaloneChat({
                 // Keep running-config ref in sync so preset watcher doesn't re-trigger
                 if (providerConfig) {
                   piRunningConfigRef.current = {
-                    provider: providerConfig.provider,
                     model: providerConfig.model,
-                    url: providerConfig.url,
-                    apiKey: providerConfig.apiKey,
                     maxTokens: providerConfig.maxTokens,
                     systemPrompt: providerConfig.systemPrompt,
                   };
@@ -6371,13 +6353,11 @@ export function StandaloneChat({
               setRunningConfigFromProviderConfig(providerConfig);
             }
           } else {
-            const providerLabel = providerConfig?.provider || "AI";
-            toast({ title: `failed to start AI assistant (${providerLabel})`, description: result.status === "error" ? result.error : "Unknown error", variant: "destructive" });
+            toast({ title: "failed to start AI assistant", description: result.status === "error" ? result.error : "Unknown error", variant: "destructive" });
             return;
           }
         } catch (e) {
-          const providerLabel = providerConfig?.provider || "AI";
-          toast({ title: `failed to start AI assistant (${providerLabel})`, description: String(e), variant: "destructive" });
+          toast({ title: "failed to start AI assistant", description: String(e), variant: "destructive" });
           return;
         } finally {
           setPiStarting(false);

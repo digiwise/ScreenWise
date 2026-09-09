@@ -46,6 +46,8 @@ const VALID_PROVIDERS = new Set<EnterpriseAiPresetProvider>([
   "custom",
 ]);
 
+const DIRECT_REMOTE_PROVIDERS = new Set(["openai", "openai-chatgpt", "anthropic", "custom"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
 }
@@ -57,12 +59,12 @@ function stringValue(value: unknown, fallback = ""): string {
 function normalizeManagedPreset(value: unknown, index: number): EnterpriseManagedAiPreset | null {
   if (!isRecord(value)) return null;
   const rawProvider = stringValue(value.provider);
-  const provider = (rawProvider === "screenpipe-cloud" || rawProvider === "pi"
+  const provider = (rawProvider === "screenpipe-cloud" || rawProvider === "pi" || DIRECT_REMOTE_PROVIDERS.has(rawProvider)
     ? "native-ollama"
     : rawProvider) as EnterpriseAiPresetProvider;
   if (!VALID_PROVIDERS.has(provider)) return null;
 
-  const model = rawProvider === "screenpipe-cloud" || rawProvider === "pi"
+  const model = rawProvider === "screenpipe-cloud" || rawProvider === "pi" || DIRECT_REMOTE_PROVIDERS.has(rawProvider)
     ? "ministral-3:latest"
     : stringValue(value.model);
   if (!model) return null;
@@ -70,7 +72,7 @@ function normalizeManagedPreset(value: unknown, index: number): EnterpriseManage
   return {
     id: stringValue(value.id, `enterprise-managed-${index + 1}`),
     provider,
-    url: rawProvider === "screenpipe-cloud" || rawProvider === "pi"
+    url: rawProvider === "screenpipe-cloud" || rawProvider === "pi" || DIRECT_REMOTE_PROVIDERS.has(rawProvider)
       ? "http://localhost:11434/v1"
       : stringValue(value.url),
     model,

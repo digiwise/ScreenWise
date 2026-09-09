@@ -82,10 +82,8 @@ function validateTitleCandidate(text: string | null | undefined): string | null 
 
 function buildTitleProviderConfig(preset: AIPreset): PiProviderConfig {
   return {
-    provider: preset.provider,
-    url: preset.url || "",
     model: preset.model || "",
-    apiKey: ("apiKey" in preset ? (preset.apiKey as string) : null) || null,
+    maxTokens: 4096,
     systemPrompt: null,
   };
 }
@@ -212,7 +210,6 @@ async function generateTitleViaPi(
     // Arm timeout
     timeoutId = setTimeout(() => {
       console.warn("[chat-title] timed out", {
-        provider: preset.provider,
         model: preset.model || "<missing-model>",
       });
       settle(null);
@@ -250,7 +247,6 @@ export async function titleCreatedByAI(
     return await generateTitleViaPi(trimmed, selectedPreset, onDelta);
   } catch (error) {
     console.warn("[chat-title] failed", {
-      provider: selectedPreset.provider,
       model: selectedPreset.model || "<missing-model>",
       error,
     });

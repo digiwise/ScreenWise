@@ -8,22 +8,16 @@ import type { SettingsField } from "./settings-search";
 /** Settings search index for this section. Co-located with the component so adding a field here means updating one file. See `SettingsField` in `./settings-search` for the schema. */
 export const searchIndex: SettingsField[] = [
   { label: "AI presets", keywords: ["preset"] },
-  { label: "API key", keywords: ["openai", "anthropic", "key"] },
-  { label: "Model", keywords: ["gpt", "claude", "gemini", "llm"] },
+  { label: "Model", keywords: ["llm", "ollama"] },
   { label: "Embedding" },
 ];
-import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { Button } from "../ui/button";
 import {
   DEFAULT_PROMPT,
   useSettings,
 } from "@/lib/hooks/use-settings";
-import {
-  buildChatTestBody,
-  shouldRetryWithMaxCompletionTokens,
-} from "@/lib/utils/chat-test-body";
+import { buildChatTestBody } from "@/lib/utils/chat-test-body";
 import { Label } from "../ui/label";
 import { Input } from "../ui/input";
 import { ValidatedInput } from "../ui/validated-input";
@@ -31,8 +25,6 @@ import { ValidatedTextarea } from "../ui/validated-textarea";
 import {
   ArrowLeft,
   ChevronsUpDown,
-  Eye,
-  EyeOff,
   Loader2,
   Plus,
   RefreshCw,
@@ -106,7 +98,6 @@ import { AIPreset, commands } from "@/lib/utils/tauri";
 import {
   validatePresetName,
   validateUrl,
-  validateApiKey,
   debounce,
   FieldValidationResult
 } from "@/lib/utils/validation";
@@ -124,16 +115,6 @@ const formatPresetName = (name: string): string => {
     return `Preset ${name.slice(0, 8)}...`;
   }
   return name;
-};
-
-const isLocalhostUrl = (url?: string): boolean => {
-  if (!url) return false;
-  try {
-    const hostname = new URL(url).hostname.toLowerCase();
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  } catch {
-    return false;
-  }
 };
 
 type DiagnosticStatus = "pass" | "fail" | "skip" | "pending" | "running";
@@ -159,7 +140,7 @@ const INITIAL_DIAGNOSTICS: DiagnosticResults = {
 };
 
 export interface AIProviderCardProps {
-  type: "openai" | "openai-chatgpt" | "native-ollama" | "anthropic" | "custom" | "embedded";
+  type: "native-ollama";
   title: string;
   description: string;
   imageSrc: string;
@@ -255,17 +236,11 @@ const AISection = ({
     Partial<AIPreset> | undefined
   >(preset);
   const [isLoading, setIsLoading] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "done">("idle");
   const [testResults, setTestResults] = useState<DiagnosticResults>(INITIAL_DIAGNOSTICS);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const diagnosticsAbortRef = useRef<AbortController | null>(null);
-  const [chatgptLoggedIn, setChatgptLoggedIn] = useState(false);
-  const [chatgptLoading, setChatgptLoading] = useState(false);
-  const [chatgptChecking, setChatgptChecking] = useState(
-    () => settingsPreset?.provider === "openai-chatgpt"
-  );
 
   // Filter presets the same way the UI does so hidden presets don't block creation
   const visiblePresets = useMemo(
@@ -301,13 +276,6 @@ const AISection = ({
         }
       }
       
-      // Validate API key
-      if (presetData.apiKey && presetData.provider) {
-        const apiKeyValidation = validateApiKey(presetData.apiKey, presetData.provider);
-        if (!apiKeyValidation.isValid && apiKeyValidation.error) {
-          errors.apiKey = apiKeyValidation.error;
-        }
-      }
       
       setValidationErrors(errors);
     }, 300),
@@ -320,27 +288,6 @@ const AISection = ({
       debouncedValidatePreset(settingsPreset);
     }
   }, [settingsPreset, debouncedValidatePreset]);
-
-  // Check ChatGPT OAuth status when provider is selected
-  useEffect(() => {
-    if (settingsPreset?.provider === "openai-chatgpt") {
-      setChatgptChecking(true);
-      const timeout = setTimeout(() => setChatgptChecking(false), 5000);
-      commands.chatgptOauthStatus().then((res) => {
-        clearTimeout(timeout);
-        if (res.status === "ok") {
-          setChatgptLoggedIn(res.data.logged_in);
-        }
-        setChatgptChecking(false);
-      }).catch(() => {
-        clearTimeout(timeout);
-        setChatgptChecking(false);
-      });
-      return () => clearTimeout(timeout);
-    } else {
-      setChatgptChecking(false);
-    }
-  }, [settingsPreset?.provider]);
 
 
   const isFormValid = useMemo(() => {
@@ -467,10 +414,6 @@ const AISection = ({
     setSettingsPreset(prev => ({ ...prev, ...presetsObject }));
   }, []);
 
-  const handleApiKeyChange = useCallback((value: string, isValid: boolean) => {
-    updateSettingsPreset({ apiKey: value });
-  }, [updateSettingsPreset]);
-
   // Auto-set max output tokens based on model name
   const getDefaultMaxTokens = useCallback((model: string): number | null => {
     const m = model.toLowerCase();
@@ -521,21 +464,14 @@ const AISection = ({
   }, [updateSettingsPreset]);
 
   const handleAiProviderChange = useCallback((newValue: AIPreset["provider"]) => {
-    // No-op if same provider — avoids resetting UI state (e.g. chatgptChecking) unnecessarily
+    // No-op if same provider.
     if (newValue === settingsPreset?.provider) return;
 
     // Clear stale diagnostic results so previous provider's errors don't bleed through
     setTestStatus("idle");
     setTestResults(INITIAL_DIAGNOSTICS);
     setDiagnosticsOpen(false);
-    // Reset ChatGPT auth UI — the status-check effect re-runs when provider dep changes
-    setChatgptLoggedIn(false);
-    // chatgptChecking is managed by the status-check effect, not here
-
     const defaultNames: Record<string, string> = {
-      "openai-chatgpt": "chatgpt",
-      "openai": "openai",
-      "anthropic": "claude",
       "native-ollama": "ollama",
     };
 
@@ -543,22 +479,8 @@ const AISection = ({
     let newModel = settingsPreset?.model;
 
     switch (newValue) {
-      case "openai":
-        newUrl = "https://api.openai.com/v1";
-        break;
       case "native-ollama":
         newUrl = "http://localhost:11434/v1";
-        break;
-      case "custom":
-        newUrl = settingsPreset?.url || "";
-        break;
-      case "openai-chatgpt":
-        newUrl = "https://api.openai.com/v1";
-        newModel = "gpt-5.5";
-        break;
-      case "anthropic":
-        newUrl = "https://api.anthropic.com";
-        newModel = "claude-sonnet-4-6";
         break;
     }
 
@@ -582,7 +504,6 @@ const AISection = ({
     diagnosticsAbortRef.current?.abort();
     const abort = new AbortController();
     diagnosticsAbortRef.current = abort;
-    const isChatGpt = settingsPreset?.provider === "openai-chatgpt";
 
     setTestStatus("testing");
     setTestResults(INITIAL_DIAGNOSTICS);
@@ -604,41 +525,10 @@ const AISection = ({
       setTestStatus("done");
     };
 
-    // Determine models URL
-    const isAnthropic = settingsPreset?.provider === "anthropic";
-    let modelsUrl: string;
-    if (settingsPreset?.provider === "native-ollama") {
-      modelsUrl = "http://localhost:11434/api/tags";
-    } else if (settingsPreset?.provider === "openai" || settingsPreset?.provider === "openai-chatgpt") {
-      modelsUrl = "https://api.openai.com/v1/models";
-    } else if (isAnthropic) {
-      modelsUrl = "https://api.anthropic.com/v1/models";
-    } else {
-      modelsUrl = `${settingsPreset?.url}/models`;
-    }
+    // Only the local Ollama provider is active here.
+    const modelsUrl = "http://localhost:11434/api/tags";
 
     const headers: Record<string, string> = {};
-    if (settingsPreset?.provider === "openai-chatgpt") {
-      // Get OAuth token for ChatGPT provider
-      try {
-        const tokenResult = await commands.chatgptOauthGetToken();
-        if (tokenResult.status === "ok") {
-          headers["Authorization"] = `Bearer ${tokenResult.data}`;
-        } else {
-          skipRemaining("auth", "Could not get ChatGPT token. Try signing out and back in.");
-          return;
-        }
-      } catch (err) {
-        skipRemaining("auth", `Could not get ChatGPT token: ${err}. You may need to rebuild the app.`);
-        return;
-      }
-    } else if (isAnthropic && settingsPreset?.apiKey) {
-      headers["x-api-key"] = settingsPreset.apiKey;
-      headers["anthropic-version"] = "2023-06-01";
-      headers["anthropic-dangerous-direct-browser-access"] = "true";
-    } else if (settingsPreset?.apiKey) {
-      headers["Authorization"] = `Bearer ${settingsPreset.apiKey}`;
-    }
 
     // Step 1+2+3: Fetch models endpoint (tests endpoint, auth, and models in one call)
     setTestResults((prev) => ({
@@ -646,24 +536,10 @@ const AISection = ({
       endpoint: { status: "running", message: "Connecting..." },
     }));
 
-    // Anthropic: skip /v1/models (may not be available for all keys) and go straight to chat test
     let modelsResponse: Response | null = null;
-    if (isAnthropic) {
-      setTestResults((prev) => ({
-        ...prev,
-        endpoint: { status: "pass", message: "api.anthropic.com" },
-        auth: { status: "pass", message: "Will verify with chat test" },
-        models: { status: "pass", message: "Using known models" },
-        chat: { status: "running", message: "Sending test message..." },
-      }));
-    } else {
-      // Local custom providers often do not implement browser CORS preflight on /models.
-      const modelsFetchFn =
-        settingsPreset?.provider === "custom" && isLocalhostUrl(settingsPreset?.url)
-          ? tauriFetch
-          : fetch;
+    {
       try {
-        modelsResponse = await modelsFetchFn(modelsUrl, {
+        modelsResponse = await fetch(modelsUrl, {
           headers,
           signal: abort.signal,
         });
@@ -672,8 +548,6 @@ const AISection = ({
         const hint =
           settingsPreset?.provider === "native-ollama"
             ? "Is Ollama running? Try: `ollama serve`"
-            : settingsPreset?.provider === "custom"
-            ? "Verify the URL is correct and the server is running"
             : "Check your network connection";
         skipRemaining("endpoint", `Connection failed: ${hint}`);
         return;
@@ -684,25 +558,13 @@ const AISection = ({
       // Step 1 pass
       setTestResults((prev) => ({
         ...prev,
-        endpoint: { status: "pass", message: isChatGpt ? "Reachable (OAuth)" : `GET ${modelsResponse!.status}` },
+        endpoint: { status: "pass", message: `GET ${modelsResponse!.status}` },
         auth: { status: "running", message: "Checking..." },
       }));
 
       // Step 2: Auth check
-      // ChatGPT OAuth tokens lack model.read scope so /v1/models returns 403 — skip to chat test
-      if (settingsPreset?.provider === "openai-chatgpt" && (modelsResponse!.status === 403 || modelsResponse!.status === 401)) {
-        setTestResults((prev) => ({
-          ...prev,
-          auth: { status: "pass", message: "OAuth token present" },
-          models: { status: "pass", message: "Using known models (API scope limited)" },
-          chat: { status: "running", message: "Sending test message..." },
-        }));
-      } else if (modelsResponse!.status === 401 || modelsResponse!.status === 403) {
-        const hint =
-          settingsPreset?.provider === "openai"
-            ? "Check your API key at platform.openai.com"
-            : "Check your API key is valid and has credits";
-        skipRemaining("auth", `${modelsResponse!.status} Unauthorized. ${hint}`);
+      if (modelsResponse!.status === 401 || modelsResponse!.status === 403) {
+        skipRemaining("auth", `${modelsResponse!.status} Unauthorized. Is Ollama running?`);
         return;
       } else if (!modelsResponse!.ok) {
         skipRemaining("auth", `Unexpected status ${modelsResponse!.status}`);
@@ -715,7 +577,7 @@ const AISection = ({
         }));
       }
 
-      // Step 3: Parse models (skip for openai-chatgpt when /v1/models returned 403)
+          // Step 3: Parse the local model list.
       if (modelsResponse!.ok) {
         let modelCount = 0;
         try {
@@ -733,7 +595,7 @@ const AISection = ({
               .map((m: any) => ({
               id: m.id,
               name: m.id,
-              provider: settingsPreset?.provider || "custom",
+              provider: "ollama",
               }))
               .filter((m: any, idx: number, arr: any[]) => arr.findIndex((x: any) => x.id === m.id) === idx);
             modelCount = apiModels.length;
@@ -755,48 +617,21 @@ const AISection = ({
       }
     }
 
-    // Step 4: Test chat completion (or Codex Responses API for ChatGPT OAuth)
+    // Step 4: Test the local chat completion.
     let chatUrl: string;
-    if (settingsPreset?.provider === "native-ollama") {
-      chatUrl = "http://localhost:11434/v1/chat/completions";
-    } else if (settingsPreset?.provider === "openai") {
-      chatUrl = "https://api.openai.com/v1/chat/completions";
-    } else if (isChatGpt) {
-      chatUrl = "https://chatgpt.com/backend-api/codex/responses";
-    } else if (isAnthropic) {
-      chatUrl = "https://api.anthropic.com/v1/messages";
-    } else {
-      chatUrl = `${settingsPreset?.url}/chat/completions`;
-    }
+    chatUrl = "http://localhost:11434/v1/chat/completions";
 
     // For OpenAI-compatible endpoints, start with `max_tokens` (broadest
     // compatibility) but retry with `max_completion_tokens` if the endpoint
     // rejects it (GPT-5, o-series, Azure Foundry, etc.).
-    const chatBody: any = isChatGpt
-      ? { model: settingsPreset?.model || "", instructions: "reply briefly", input: [{ role: "user", content: "say hi" }], store: false, stream: true }
-      : isAnthropic
-      ? { model: settingsPreset?.model || "", messages: [{ role: "user", content: "say hi" }], max_tokens: 50 }
-      : buildChatTestBody(settingsPreset?.model || "", "say hi", 50, "max_tokens");
+    const chatBody: any = buildChatTestBody(settingsPreset?.model || "", "say hi", 50, "max_tokens");
 
-    // For ChatGPT Codex endpoint, extract account ID from JWT and add required headers
     const chatHeaders: Record<string, string> = {
       "Content-Type": "application/json",
       ...headers,
     };
-    if (isChatGpt && headers["Authorization"]) {
-      try {
-        const token = headers["Authorization"].replace("Bearer ", "");
-        const payload = JSON.parse(atob(token.split(".")[1]));
-        const accountId = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-        if (accountId) {
-          chatHeaders["chatgpt-account-id"] = accountId;
-        }
-      } catch { /* ignore JWT parse errors */ }
-      chatHeaders["OpenAI-Beta"] = "responses=experimental";
-    }
 
-    // Use tauriFetch for chatgpt.com and Anthropic to bypass CORS
-    const fetchFn = (isChatGpt || isAnthropic) ? tauriFetch : fetch;
+    const fetchFn = fetch;
 
     const chatStart = performance.now();
     try {
@@ -809,24 +644,6 @@ const AISection = ({
 
       // Retry with max_completion_tokens for newer OpenAI-compatible endpoints
       // (GPT-5, o-series, Azure Foundry) that reject max_tokens. Only for the
-      // generic OpenAI-compatible path — Anthropic/ChatGPT use different params.
-      if (!chatResponse.ok && !isChatGpt && !isAnthropic) {
-        const errText = await chatResponse.clone().text().catch(() => "");
-        if (shouldRetryWithMaxCompletionTokens(errText)) {
-          const retryBody = buildChatTestBody(
-            settingsPreset?.model || "",
-            "say hi",
-            50,
-            "max_completion_tokens",
-          );
-          chatResponse = await fetchFn(chatUrl, {
-            method: "POST",
-            headers: chatHeaders,
-            body: JSON.stringify(retryBody),
-            signal: abort.signal,
-          });
-        }
-      }
 
       const latencyMs = Math.round(performance.now() - chatStart);
 
@@ -845,16 +662,8 @@ const AISection = ({
       }
 
       let reply: string;
-      if (isChatGpt) {
-        // Streaming SSE — just confirm we got a 200 response
-        reply = "Stream started OK";
-      } else if (isAnthropic) {
-        const chatData = await chatResponse.json();
-        reply = chatData.content?.[0]?.text?.slice(0, 100) || "No response";
-      } else {
-        const chatData = await chatResponse.json();
-        reply = chatData.choices?.[0]?.message?.content?.slice(0, 100) || "No response";
-      }
+      const chatData = await chatResponse.json();
+      reply = chatData.choices?.[0]?.message?.content?.slice(0, 100) || "No response";
 
       if (abort.signal.aborted) return;
 
@@ -880,13 +689,7 @@ const AISection = ({
     }
 
     setTestStatus("done");
-  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.apiKey, settingsPreset?.model]);
-
-  const isApiKeyRequired =
-    settingsPreset?.provider !== "openai-chatgpt" &&
-    settingsPreset?.provider !== "anthropic" &&
-    settingsPreset?.url !== "http://localhost:11434/v1" &&
-    settingsPreset?.url !== "embedded";
+  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.model]);
 
   const fetchModels = useCallback(async () => {
     setIsLoadingModels(true);
@@ -909,144 +712,6 @@ const AISection = ({
           );
           break;
 
-        case "openai":
-          const r = await fetch("https://api.openai.com/v1/models", {
-            headers: {
-              Authorization: `Bearer ${settingsPreset?.apiKey}`,
-            },
-          });
-          if (!r.ok) {
-            toast({
-              title: "Error fetching models",
-              description: "Please check your API key",
-              variant: "destructive",
-            });
-            return;
-          }
-          const d = await r.json();
-          const models = d.data.map((model: { id: string }) => ({
-            id: model.id,
-            name: model.id,
-            provider: "openai",
-          }));
-          setModels(models);
-          break;
-        case "custom":
-          try {
-            const customFetchFn = isLocalhostUrl(settingsPreset?.url) ? tauriFetch : fetch;
-            const customResponse = await customFetchFn(
-              `${settingsPreset?.url}/models`,
-              {
-                headers: settingsPreset.apiKey
-                  ? { Authorization: `Bearer ${settingsPreset?.apiKey}` }
-                  : {},
-              }
-            );
-            if (!customResponse.ok) {
-              console.warn("failed to fetch custom models");
-              return;
-            }
-            const customData = await customResponse.json();
-            setModels(
-              (customData.data || []).map((model: { id: string }) => ({
-                id: model.id,
-                name: model.id,
-                provider: "custom",
-              }))
-            );
-          } catch (error) {
-            console.error(
-              "Failed to fetch custom models, allowing manual input:",
-              error
-            );
-            setModels([]);
-          }
-          break;
-
-        case "anthropic": {
-          try {
-            const anthropicResp = await tauriFetch("https://api.anthropic.com/v1/models", {
-              headers: {
-                "x-api-key": settingsPreset?.apiKey || "",
-                "anthropic-version": "2023-06-01",
-                "anthropic-dangerous-direct-browser-access": "true",
-              },
-            });
-            if (anthropicResp.ok) {
-              const anthropicData = await anthropicResp.json();
-              setModels(
-                (anthropicData.data || []).map((m: any) => ({
-                  id: m.id,
-                  name: m.display_name || m.id,
-                  provider: "anthropic",
-                }))
-              );
-            } else {
-              // Fallback to hardcoded models
-              setModels([
-                { id: "claude-fable-5", name: "Claude Fable 5", provider: "anthropic" },
-                { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic" },
-                { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.5", provider: "anthropic" },
-                { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", provider: "anthropic" },
-              ]);
-            }
-          } catch {
-            setModels([
-              { id: "claude-fable-5", name: "Claude Fable 5", provider: "anthropic" },
-              { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic" },
-              { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.5", provider: "anthropic" },
-              { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", provider: "anthropic" },
-            ]);
-          }
-          break;
-        }
-
-        case "openai-chatgpt": {
-          // Try /v1/models with OAuth token; fall back to known models if it fails.
-          let loaded = false;
-          try {
-            const tokenResult = await commands.chatgptOauthGetToken();
-            if (tokenResult.status === "ok") {
-              const chatgptResp = await fetch("https://api.openai.com/v1/models", {
-                headers: { Authorization: `Bearer ${tokenResult.data}` },
-              });
-              console.log("[chatgpt] /v1/models status:", chatgptResp.status);
-              if (chatgptResp.ok) {
-                const chatgptData = await chatgptResp.json();
-                const chatgptModels = (chatgptData.data || [])
-                  .map((m: { id: string }) => ({
-                    id: m.id,
-                    name: m.id,
-                    provider: "openai-chatgpt",
-                  }))
-                  .filter((m: { id: string }, idx: number, arr: { id: string }[]) => arr.findIndex((x) => x.id === m.id) === idx);
-                console.log("[chatgpt] fetched", chatgptModels.length, "models from API");
-                if (chatgptModels.length > 0) {
-                  setModels(chatgptModels);
-                  loaded = true;
-                }
-              } else {
-                const body = await chatgptResp.text();
-                console.warn("[chatgpt] /v1/models failed:", chatgptResp.status, body);
-              }
-            } else {
-              console.warn("[chatgpt] get_token failed:", tokenResult.status === "error" ? tokenResult.error : "unknown");
-            }
-          } catch (err) {
-            console.error("[chatgpt] model fetch error:", err);
-          }
-          if (!loaded) {
-            // Codex models available via ChatGPT Plus/Pro subscription
-            setModels([
-              "gpt-5.5", "gpt-5.5-codex",
-              "gpt-5.4", "gpt-5.3-codex",
-              "gpt-5.2-codex", "gpt-5.2", "gpt-5.1-codex-max",
-              "gpt-5.1", "gpt-5.1-codex-mini",
-            ].map((id) => ({ id, name: id, provider: "openai-chatgpt" })));
-          }
-          break;
-        }
-
         default:
           setModels([]);
       }
@@ -1060,42 +725,24 @@ const AISection = ({
       setIsLoadingModels(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.apiKey, chatgptLoggedIn]);
-
-  const apiKey = useMemo(() => {
-    if (settingsPreset && "apiKey" in settingsPreset) {
-      return settingsPreset?.apiKey;
-    }
-    return "";
-  }, [settingsPreset]);
+  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.model]);
 
   useEffect(() => {
-    if (
-      (settingsPreset?.provider === "openai" ||
-        settingsPreset?.provider === "anthropic" ||
-        settingsPreset?.provider === "custom") &&
-      !settingsPreset?.apiKey
-    )
-      return;
     fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchModels]);
 
-  // Auto-trigger diagnostics when provider + url + apiKey are set (debounced)
+  // Auto-trigger diagnostics when the local provider is configured.
   useEffect(() => {
     if (!settingsPreset?.provider) return;
 
-    const needsApiKey =
-      settingsPreset.provider === "openai" || settingsPreset.provider === "anthropic" || settingsPreset.provider === "custom";
-    if (needsApiKey && !settingsPreset.apiKey) return;
-
-    if (settingsPreset.provider === "openai-chatgpt" || settingsPreset.provider === "native-ollama" || settingsPreset.url) {
+    if (settingsPreset.provider === "native-ollama") {
       const timer = setTimeout(() => {
         runDiagnostics();
       }, 1000);
       return () => clearTimeout(timer);
     }
-  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.apiKey, runDiagnostics, chatgptLoggedIn]);
+  }, [settingsPreset?.provider, settingsPreset?.url, runDiagnostics]);
 
   // Cleanup abort controller on unmount
   useEffect(() => {
@@ -1127,37 +774,6 @@ const AISection = ({
         </div>
         <div className="grid grid-cols-2 gap-4 mb-4 mt-4">
           <AIProviderCard
-            type="openai-chatgpt"
-            title="ChatGPT"
-            description="Sign in with your ChatGPT Plus/Pro subscription"
-            imageSrc="/images/openai.png"
-            selected={settingsPreset?.provider === "openai-chatgpt"}
-            onClick={() => handleAiProviderChange("openai-chatgpt")}
-          />
-
-          <AIProviderCard
-            type="anthropic"
-            title="Claude API"
-            description="Use your Anthropic API key"
-            imageSrc="/images/claude-ai.svg"
-            selected={(settingsPreset?.provider as string) === "anthropic"}
-            onClick={() => {
-              if ((settingsPreset?.provider as string) !== "anthropic") {
-                handleAiProviderChange("anthropic");
-              }
-            }}
-          />
-
-          <AIProviderCard
-            type="custom"
-            title="Custom"
-            description="Connect to your own AI provider or self-hosted models"
-            imageSrc="/images/custom.png"
-            selected={settingsPreset?.provider === "custom"}
-            onClick={() => handleAiProviderChange("custom")}
-          />
-
-          <AIProviderCard
             type="native-ollama"
             title="Ollama"
             description="Run AI models locally using your existing Ollama installation"
@@ -1183,143 +799,6 @@ const AISection = ({
         helperText="Only letters, numbers, spaces, hyphens, and underscores allowed"
       />
 
-      {settingsPreset?.provider === "custom" && (
-        <ValidatedInput
-          id="customAiUrl"
-          label="Custom URL"
-          value={settingsPreset?.url || ""}
-          onChange={(value, isValid) => updateSettingsPreset({ url: value })}
-          validation={validateUrl}
-          placeholder="Enter custom AI URL"
-          required={true}
-          helperText="Enter the base URL for your custom AI provider"
-        />
-      )}
-
-
-      {(settingsPreset?.provider === "anthropic" || settingsPreset?.provider === "custom" || (isApiKeyRequired &&
-        settingsPreset?.provider === "openai")) && (
-          <div className="w-full">
-            <div className="flex flex-col gap-4 mb-4 w-full">
-              <Label htmlFor="aiApiKey" className="flex items-center gap-1">
-                API Key
-                <span className="text-destructive">*</span>
-                {validationErrors.apiKey && (
-                  <AlertCircle className="h-4 w-4 text-destructive ml-1" />
-                )}
-              </Label>
-              <div className="flex-grow relative">
-                <ValidatedInput
-                  id="aiApiKey"
-                  type={showApiKey ? "text" : "password"}
-                  value={settingsPreset?.apiKey || ""}
-                  onChange={handleApiKeyChange}
-                  validation={(value) => validateApiKey(value, settingsPreset?.provider || "openai")}
-                  placeholder="Enter your AI API key"
-                  required={true}
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-0 top-0 h-full"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                >
-                  {showApiKey ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-              {settingsPreset?.provider === "anthropic" && (
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 w-fit"
-                  onClick={() => openUrl("https://console.anthropic.com/settings/keys")}
-                >
-                  Get your API key at console.anthropic.com
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-      {settingsPreset?.provider === "openai-chatgpt" && (
-        <div className="w-full">
-          <div className="flex flex-col gap-4 mb-4 w-full">
-            <Label className="flex items-center gap-1">
-              ChatGPT Account
-            </Label>
-            <div className="flex items-center gap-3">
-              {chatgptChecking ? (
-                <Button type="button" variant="outline" disabled>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Checking connection...
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  variant={chatgptLoggedIn ? "outline" : "default"}
-                  disabled={chatgptLoading}
-                  onClick={async () => {
-                    if (chatgptLoggedIn) {
-                      setChatgptLoading(true);
-                      await commands.chatgptOauthLogout();
-                      setChatgptLoggedIn(false);
-                      setChatgptLoading(false);
-                    } else {
-                      setChatgptLoading(true);
-                      try {
-                        const res = await commands.chatgptOauthLogin();
-                        if (res.status === "ok" && res.data) {
-                          setChatgptLoggedIn(true);
-                          toast({
-                            title: "ChatGPT connected",
-                            description: "Click \"Create preset\" below to save and start using it.",
-                          });
-                        } else if (res.status === "error") {
-                          const msg = String(res.error || "unknown error");
-                          console.error("chatgpt oauth failed:", msg);
-                          toast({
-                            title: "ChatGPT sign-in failed",
-                            description: msg.includes("invalid_state")
-                              ? "Auth session expired — please try signing in again."
-                              : msg.includes("not logged in") || msg.includes("timed out")
-                              ? "Sign-in timed out or was cancelled. Please try again."
-                              : msg.slice(0, 120),
-                            variant: "destructive",
-                          });
-                        }
-                      } catch (e) {
-                        console.error("chatgpt oauth failed:", e);
-                        toast({
-                          title: "ChatGPT sign-in failed",
-                          description: "An unexpected error occurred. Please try again.",
-                          variant: "destructive",
-                        });
-                      }
-                      setChatgptLoading(false);
-                    }
-                  }}
-                >
-                  {chatgptLoading ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : chatgptLoggedIn ? (
-                    <CheckCircle2 className="h-4 w-4 mr-2" />
-                  ) : null}
-                  {chatgptLoggedIn ? "Sign out" : "Sign in with ChatGPT"}
-                </Button>
-              )}
-              {chatgptLoggedIn && !chatgptChecking && (
-                <span className="text-sm text-muted-foreground">Connected</span>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
       <div className="w-full">
         <div className="flex flex-col gap-4 mb-4 w-full">
           <Label htmlFor="aiModel" className="flex items-center gap-1">
@@ -1342,15 +821,9 @@ const AISection = ({
                   "w-full justify-between",
                   !settingsPreset?.model && "text-muted-foreground"
                 )}
-                disabled={
-                  settingsPreset?.provider === "openai" &&
-                  !settingsPreset?.apiKey
-                }
+                disabled={false}
               >
-                {settingsPreset?.provider === "openai" &&
-                !settingsPreset?.apiKey
-                  ? "API key required to fetch models"
-                  : settingsPreset?.model || "Select model..."}
+                {settingsPreset?.model || "Select model..."}
                 <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
@@ -1497,7 +970,7 @@ const AISection = ({
               </p>
               <p>
                 GPU strongly recommended. without a dedicated GPU, local models will be very slow and pipes may time out.
-                for best results consider screenpipe cloud or groq as custom provider.
+                for best results, use a local Ollama model.
               </p>
             </div>
           )}
@@ -1719,11 +1192,7 @@ const AISection = ({
 };
 
 const providerImageSrc: Record<string, string> = {
-  openai: "/images/openai.png",
-  "openai-chatgpt": "/images/openai.png",
-  anthropic: "/images/claude-ai.svg",
   "native-ollama": "/images/ollama.png",
-  custom: "/images/custom.png",
 };
 
 // Sortable preset card for drag-and-drop reordering
@@ -1740,7 +1209,6 @@ function SortablePresetCard({
   isTeamAdmin,
   readOnly = false,
   defaultLocked = false,
-  chatgptTokenExpired = false,
 }: {
   preset: AIPreset;
   isDefault: boolean;
@@ -1754,7 +1222,6 @@ function SortablePresetCard({
   isTeamAdmin?: boolean;
   readOnly?: boolean;
   defaultLocked?: boolean;
-  chatgptTokenExpired?: boolean;
 }) {
   const {
     attributes,
@@ -1820,18 +1287,6 @@ function SortablePresetCard({
             {!hasValidation && (
               <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />
             )}
-            {chatgptTokenExpired && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <AlertCircle className="h-3.5 w-3.5 text-yellow-500 shrink-0 cursor-help" />
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    ChatGPT session expired — open Connections to reconnect
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
           </div>
           {hasValidation ? (
             <CheckCircle2 className="h-4 w-4 text-foreground/50 shrink-0" />
@@ -1894,7 +1349,6 @@ export const AIPresets = () => {
     [settings.aiPresets, isEnterprise, aiPresetPolicy]
   );
   const canManageEmployeePresets = !isEnterprise || aiPresetPolicy.allow_employee_custom_presets;
-  const [chatgptTokenValid, setChatgptTokenValid] = useState<boolean | null>(null);
   const team = useTeam();
   const isTeamAdmin = !!team.team && team.role === "admin";
 
@@ -1928,21 +1382,6 @@ export const AIPresets = () => {
     },
     [settings.aiPresets, updateSettings]
   );
-
-  useEffect(() => {
-  const hasChatGptPreset = settings.aiPresets?.some(
-    (p) => p.provider === "openai-chatgpt"
-  );
-  if (!hasChatGptPreset) {
-    setChatgptTokenValid(null);
-    return;
-  }
-  commands.chatgptOauthCheckToken().then((res) => {
-    setChatgptTokenValid(res.status === "ok" ? res.data : null);
-  }).catch(() => {
-    setChatgptTokenValid(null);
-  });
-}, [settings.aiPresets]);
 
 useEffect(() => {
   if (!createPresetsDialog) {
@@ -2053,9 +1492,6 @@ useEffect(() => {
         aiUrl: selectedPreset.url,
       };
 
-      if ("apiKey" in selectedPreset) {
-        updateData.openaiApiKey = selectedPreset.apiKey;
-      }
 
       await updateSettings(updateData);
 
@@ -2179,8 +1615,7 @@ useEffect(() => {
                   key={preset.id}
                   preset={preset}
                   isDefault={preset.defaultPreset}
-                  hasValidation={!!(preset.provider && preset.model && (preset.url || preset.provider === "openai-chatgpt"))}
-                  chatgptTokenExpired={preset.provider === "openai-chatgpt" && chatgptTokenValid === false}
+                  hasValidation={!!(preset.provider && preset.model && preset.url)}
                   onEdit={() => {
                     setSelectedPreset(preset);
                     setIsDuplicating(false);

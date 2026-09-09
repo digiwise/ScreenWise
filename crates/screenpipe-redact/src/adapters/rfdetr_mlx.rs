@@ -461,8 +461,7 @@ mod tests {
     #[test]
     fn default_path_under_screenpipe_dir() {
         let p = RfdetrMlxConfig::default_model_path();
-        let s = p.to_string_lossy();
-        assert!(s.contains(".screenpipe/models/rfdetr_v9.safetensors"));
+        assert!(p.ends_with(Path::new(".screenpipe/models/rfdetr_v9.safetensors")));
     }
 
     #[test]

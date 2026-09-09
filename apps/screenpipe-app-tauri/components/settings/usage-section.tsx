@@ -319,11 +319,10 @@ export function UsageSection() {
       case "ollama":
         return "Ollama";
       case "openai-chatgpt":
-        return "ChatGPT";
       case "openai":
-        return "OpenAI";
       case "anthropic":
-        return "Anthropic";
+      case "custom":
+        return "Ollama (migrated)";
       default:
         return p;
     }

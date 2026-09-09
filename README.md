@@ -191,7 +191,7 @@ Minimum requirements: 8 GB RAM recommended. ~5–10 GB disk space per month. CPU
 Instead of recording every second, screenpipe listens for meaningful events — app switches, clicks, typing pauses, scrolling — and captures a screenshot only when something actually changes. Each capture pairs a screenshot with the accessibility tree (the structured text the OS already knows about: buttons, labels, text fields). If accessibility data isn't available (e.g. remote desktops, games), it falls back to OCR. This gives you maximum data quality with minimal CPU and storage — no more processing thousands of identical frames.
 
 ### Audio transcription
-Captures system audio (what you hear) and microphone input (what you say). Real-time speech-to-text using Whisper (Large-V3-Turbo) running locally on your device, or Deepgram for cloud transcription. Speaker identification and diarization. Works with any audio source — Zoom, Google Meet, Teams, or any other application.
+Captures system audio (what you hear) and microphone input (what you say). Speech-to-text runs locally on your device. Speaker identification and diarization work with audio from Zoom, Google Meet, Teams, or other applications.
 
 On macOS 14.4+, you can exclude specific apps from system-audio capture by listing their bundle IDs in `~/.screenpipe/audio-exclusions.json`. Enable Experimental CoreAudio System Audio in Settings → Recording first; the picker UI only appears once that flag is on.
 
@@ -279,7 +279,7 @@ Existing lifetime licenses remain valid; new lifetime purchases are no longer so
 - **AI coding assistants**: Cursor, Claude Code, Cline, Continue, OpenCode, Gemini CLI
 - **AI chat assistants**: ChatGPT (via MCP), Claude Desktop (via MCP), any MCP-compatible client
 - **Note-taking**: Obsidian, Notion
-- **Local AI**: Ollama, any OpenAI-compatible model server
+- **Local AI**: Ollama at the fixed loopback endpoint
 - **Automation**: Custom pipes (scheduled AI agents as markdown files)
 
 ## Teams & enterprise
@@ -297,7 +297,7 @@ screenpipe Teams lets organizations deploy AI agents across their team with full
 ## Technical architecture
 
 1. **Event-driven capture**: Listens for OS events (app switch, click, typing pause, scroll, clipboard). When something meaningful happens, captures a screenshot + accessibility tree together with the same timestamp. Falls back to OCR when accessibility data isn't available. Idle fallback captures periodically when nothing is happening.
-2. **Audio processing**: Whisper (local) or Deepgram (cloud) for speech-to-text. Speaker identification and diarization.
+2. **Audio processing**: Local speech-to-text, speaker identification, and diarization.
 3. **Storage**: Local SQLite with FTS5 full-text search. Screenshots saved as JPEGs on disk (~300 MB/8hr vs ~2 GB with continuous recording).
 4. **API layer**: REST API on localhost:3030. Search, frames, audio, elements, health, pipe management.
 5. **Plugin layer**: Pipes — scheduled AI agents as markdown files. Agent executes prompts with access to screenpipe API.

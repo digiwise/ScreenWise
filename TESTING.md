@@ -117,13 +117,8 @@ commits: `28e5c247`
 - [ ] **disable audio setting** — toggling "disable audio" stops all audio recording. re-enabling restarts it.
 - [ ] **Metal GPU for whisper** — transcription uses GPU acceleration on macOS (`f882caef`). verify with Activity Monitor GPU tab.
 - [ ] **Qwen3-asr OpenBLAS** — On Linux/Windows, verify that qwen3-asr uses OpenBLAS for improved transcription performance. (`e64ee25f4`)
-- [ ] **Batch transcription mode** — Verify that batch transcription mode works correctly with both cloud and Deepgram engines.
-- [ ] **Cloud transcription batch capping** — Send large audio chunks (>200s) to cloud transcription. Verify they are correctly capped/split and do not trigger Cloudflare 413 errors. (`792145ac6`)
+- [ ] **Batch transcription mode** — Verify that batch transcription mode works correctly with the retained local engines.
 - [ ] **Lower RMS threshold for batch mode output devices** — In batch transcription mode, verify that output devices correctly use a lower RMS threshold.
-- [ ] **OpenAI-compatible STT connection test** — Configure OpenAI-compatible STT, then use the connection test feature. Verify it accurately reports connection status.
-- [ ] **OpenAI-compatible STT editable model input** — When using OpenAI-compatible STT, verify that the model input fields are editable.
-- [ ] **OpenAI-compatible STT with custom vocabulary** — Configure OpenAI-compatible STT with a custom vocabulary. Verify that transcription accuracy improves when this vocabulary is present in the audio. Verify that vocabulary is sent as both prompt and context. (`d3a4b6bcc`)
-- [ ] **OpenAI-compatible transcription engine support** — Enable and configure the OpenAI-compatible transcription engine. Verify that audio is correctly captured and transcribed using this engine.
 - [ ] **"transcribing..." only for recent chunks** — Verify that the "transcribing..." caption/indicator only appears for audio chunks that are less than 2 minutes old. (`b70116b`)
 - [ ] **no transcribing caption on old silent chunks** — Verify that old silent audio chunks do not trigger or display a "transcribing..." caption. (`54a550f4`)
 - [ ] **silent chunks deleted, not stored** — After periods of silence, verify that no empty transcription rows are stored in the database for silent audio chunks, and they are instead correctly deleted. (`cb2cc205`)
@@ -322,7 +317,7 @@ commits: `eea0c865`, `cc09de61`, `e61501da`, `d25191d7`, `60096fb9`
 commits: `8a5f51dd`, `0b0d8090`, `7e58564e`, `2522a7e2`, `f3e55dbc`, `79f2913f`
 
 - [ ] **Ollama not running** — creating an Ollama preset shows free-text input fields (not stuck loading). user can type model name manually (`8a5f51dd`).
-- [ ] **custom provider preset** — user can add a custom API endpoint. model name is free-text input with optional autocomplete.
+- [ ] **local Ollama preset** — the endpoint is fixed to `http://localhost:11434/v1`; model name remains free-text with optional local autocomplete.
 - [ ] **settings survive restart** — change any setting, quit, relaunch. setting is preserved.
 - [ ] **overlay mode switch** — change from fullscreen to window mode. setting saves. next shortcut press uses new mode.
 - [ ] **FPS setting** — change capture FPS. recording interval changes accordingly.
@@ -333,9 +328,8 @@ commits: `8a5f51dd`, `0b0d8090`, `7e58564e`, `2522a7e2`, `f3e55dbc`, `79f2913f`
 - [ ] **Billing page links to website** — Verify that the in-app billing page correctly links to the *new* website billing page.
 - [ ] **Non-pro subscriber Whisper fallback** — As a non-pro subscriber, verify that audio transcription defaults to `whisper-large-v3-turbo-quantized` and functions correctly.
 - [ ] **Pi restart on preset switch** — Switch between different AI presets. Verify that the Pi agent restarts if required by the new preset.
-- [ ] **Web search disabled for non-cloud providers** — When using a non-cloud AI provider, verify that web search functionality is correctly disabled.
-- [ ] **Credit balance in billing UI and errors** — Verify that the billing UI accurately displays the credit balance and clearly differentiates between `credits_exhausted` and other LLM-related errors.
-- [ ] **Unknown AI provider type sanitization** — Configure a malformed or unknown AI provider type (e.g., by manual config edit). Verify the app doesn't crash on startup or when navigating to settings, and gracefully handles the unknown type.
+- [ ] **No hosted web search** — Verify local Pi chat does not install or invoke the removed hosted web-search extension.
+- [ ] **Unknown AI provider type sanitization** — Configure a malformed or retired provider type by manual config edit. Verify it migrates non-destructively to fixed-loopback Ollama without retaining its credential.
 - [ ] **standalone settings page** — Verify that clicking settings in the tray menu opens a standalone `/settings` page instead of a modal overlay. (`ec2a5789e`)
 - [ ] **optional API auth** — Enable API auth in settings (or via `--api-auth`). Verify that remote access to the API requires the configured token. (`09f18141a`, `cfc1a74e1`)
 - [ ] **privacy settings reordering** — Verify that the Security section appears first in the Privacy settings tab. (`4718785b6`)
@@ -345,7 +339,7 @@ commits: `8a5f51dd`, `0b0d8090`, `7e58564e`, `2522a7e2`, `f3e55dbc`, `79f2913f`
 commits: `8a5f51dd`, `0b0d8090`
 
 - [ ] **Ollama not running** — creating an Ollama preset shows free-text input fields (not stuck loading). user can type model name manually (`8a5f51dd`).
-- [ ] **custom provider preset** — user can add a custom API endpoint. model name is free-text input with optional autocomplete.
+- [ ] **local Ollama preset** — the endpoint is fixed to `http://localhost:11434/v1`; model name remains free-text with optional local autocomplete.
 - [ ] **settings survive restart** — change any setting, quit, relaunch. setting is preserved.
 - [ ] **overlay mode switch** — change from fullscreen to window mode. setting saves. next shortcut press uses new mode.
 - [ ] **FPS setting** — change capture FPS. recording interval changes accordingly.
@@ -670,11 +664,11 @@ commits: `fa887407`, `815f52e6`, `60840155`, `e66c3ff8`, `c905ffbf`, `01147096`,
 - [ ] **Faster Pipes page loading** — Verify that the "Pipes" page loads significantly faster, especially when there are a large number of pipes configured.
 - [ ] **Instant pipe enable toggle UI update** — Toggle a pipe's enable status. Verify that the UI updates instantly due to optimistic updates, even if the backend operation takes a moment.
 - [ ] **Pipe execution shows parsed text** — Execute a pipe that outputs JSON. Verify that the output displayed to the user is correctly parsed text, not raw JSON.
-- [ ] **Surface LLM errors in chat UI** — Interact with the chat UI using an AI provider under conditions that would cause LLM errors (e.g., exhausted credits, rate limits). Verify these errors are clearly surfaced to the user.
-- [ ] **Pipe preset bug fixes and credit drain prevention** — Thoroughly test creating, editing, and switching pipe presets to ensure no bugs, especially those that might lead to unexpected cloud credit usage or misconfiguration.
+- [ ] **Surface local model errors in chat UI** — Stop Ollama or select an unavailable local model. Verify the error is clearly surfaced to the user.
+- [ ] **Pipe preset local-only migration** — Verify retired provider presets are mapped to fixed-loopback Ollama without retaining provider credentials.
 - [ ] **pipe UI improvements** — Verify the overall improvements to the Pipes UI, ensuring a better user experience. (`2e68400c`)
 - [ ] **proper spinner icon for pipe refresh button** — Verify that the pipe refresh button displays the correct spinner icon during loading states. (`b709af2f`)
-- [ ] **ChatGPT OAuth provider in pipes** — Configure ChatGPT OAuth provider. Verify that pipes using ChatGPT work correctly.
+- [ ] **Retired pipe provider compatibility** — A pipe referencing a retired ChatGPT/provider preset remains readable and executes through local Ollama.
 - [ ] **Reduced excessive Pi restarts** — When changing AI preset values or other settings, verify that excessive Pi restarts are reduced. Monitor logs for unnecessary restart messages.
 - [ ] **Invalid UTF-8 in Pi streaming** — Execute a pipe that outputs invalid UTF-8 characters to stdout/stderr. Verify that Pi streaming correctly handles these without crashing or displaying garbled output.
 - [ ] **Auto-abort stuck Pi agent** — Verify that the Pi agent is auto-aborted if stuck before sending a new message. (`602419151`)
@@ -754,7 +748,7 @@ commits: `274a968af`, `dc575e48e`, `81aabbf18`, `d5e071854`, `db08f8c06`, `f4225
 
 ### 21. Privacy & Incognito Detection
 
-- [ ] **PII Filter** — Toggle the PII filter in chat or search. Verify that sensitive information is filtered using Tinfoil. (`fec0f1023`)
+- [ ] **PII Filter** — Toggle the PII filter in chat or search. Verify that deterministic local regex/ONNX filtering redacts sensitive information without a hosted request. (`fec0f1023`)
 
 
 commits: `ad431b513`, `d9722bccc`, `4df21e83d`

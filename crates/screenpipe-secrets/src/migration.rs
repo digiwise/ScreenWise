@@ -94,10 +94,9 @@ pub async fn migrate_legacy_secrets(
                         if let Err(e) = store.set(&store_key, &contents).await {
                             report.errors.push(format!("{}: {}", filename, e));
                         } else {
-                            // Keep the legacy file — Phase 1 per module doc. Readers
-                            // (e.g. chatgpt_oauth::read_tokens) still consult the file;
-                            // deleting it here breaks OAuth restore across restarts.
-                            // Phase 2 (reader migration to SecretStore) can delete later.
+                            // Keep the legacy file so migrations remain non-destructive.
+                            // A later, explicitly reviewed cleanup can delete it after
+                            // all legacy readers and rollback requirements are retired.
                             report
                                 .migrated
                                 .push(format!("{} -> {}", filename, store_key));

@@ -437,10 +437,7 @@ export function PrivacySection() {
   const aiPiiRemovalEnabled = piiMode === "smart";
 
   // Where the AI workers run — one switch covers both modalities.
-  const piiBackend = (settings.piiBackend as "local" | "tinfoil" | undefined) ?? "local";
-  const handlePiiBackendChange = (next: "local" | "tinfoil") => {
-    handleSettingsChange({ piiBackend: next } as any, true);
-  };
+  const piiBackend = "local" as const;
 
   // Which PII classes the AI workers actually remove. Secret is the
   // always-on baseline (the backend forces it in too — see
@@ -1081,7 +1078,7 @@ export function PrivacySection() {
                     className="mt-0.5"
                     checked={piiBackend === "local"}
                     disabled={!!managedPiiBackend}
-                    onChange={() => handlePiiBackendChange("local")}
+                    onChange={() => {}}
                   />
                   <span>
                     <span className="font-medium text-foreground">Local</span>
@@ -1090,23 +1087,6 @@ export function PrivacySection() {
                     </span>
                   </span>
                 </label>
-                <label className={`flex items-start gap-2 text-xs ${managedPiiBackend ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
-                  <input
-                    type="radio"
-                    name="piiBackend"
-                    className="mt-0.5"
-                    checked={piiBackend === "tinfoil"}
-                    disabled={!!managedPiiBackend}
-                    onChange={() => handlePiiBackendChange("tinfoil")}
-                  />
-                  <span>
-                    <span className="font-medium text-foreground">Cloud (enclave)</span>
-                    <span className="text-muted-foreground">
-                      {" "}— screenpipe&apos;s confidential-compute enclave. Fast everywhere; your device cryptographically verifies the enclave is running the open-source build before sending anything.
-                    </span>
-                  </span>
-                </label>
-
                 <p className="text-xs font-medium text-foreground pt-2">
                   Fields to redact
                 </p>

@@ -465,23 +465,10 @@ export default function EngineStartup({
       const preset =
         (presets.find((p: any) => p.defaultPreset) as any) ?? (presets[0] as any);
 
-      let endpoint = "";
-      let model = "claude-haiku-4-5";
-      let auth: Record<string, string> = {};
-
-      if (
-        (preset?.provider === "openai" || preset?.provider === "custom" || preset?.provider === "anthropic") &&
-        preset.apiKey &&
-        preset.url
-      ) {
-        endpoint = `${preset.url.replace(/\/$/, "")}/chat/completions`;
-        model = preset.model;
-        auth = { Authorization: `Bearer ${preset.apiKey}` };
-      } else {
-        // No configured provider can serve this optional onboarding summary.
-        summaryStartedRef.current = false;
-        return;
-      }
+      const endpoint = "http://localhost:11434/v1/chat/completions";
+      const model = preset?.provider === "native-ollama" && preset.model
+        ? preset.model
+        : "ministral-3:latest";
 
       const controller = new AbortController();
       summaryAbortRef.current = controller;
@@ -505,7 +492,7 @@ if the input is sparse, just describe what little you have warmly. don't apologi
       try {
         const resp = await fetch(endpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...auth },
+          headers: { "Content-Type": "application/json" },
           signal: controller.signal,
           body: JSON.stringify({
             model,

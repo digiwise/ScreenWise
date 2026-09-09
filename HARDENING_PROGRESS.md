@@ -1222,3 +1222,95 @@ Verification on Windows on 2026-09-09:
 - `git diff --check`: passed. Modified-source diffs, generated bindings and
   capability schema, deletion inventory, dependency manifests, both Cargo
   lockfiles, and the desktop Bun lockfile were inspected before commit.
+
+### Remaining external AI/provider boundary — 2026-09-09
+
+After removal of the Screenpipe gateway, direct OpenAI and Anthropic API-key
+providers, the arbitrary OpenAI-compatible `custom` provider, ChatGPT OAuth,
+and hosted Tinfoil text/image redaction remain reachable. The model providers
+span desktop/core Pi configuration, pipe preset resolution, the engine preset
+CLI, settings and rewind editors, startup validation, model-catalog fetches,
+generated types, and persisted enterprise preset policy. ChatGPT additionally
+has native OAuth commands, secret-store tokens, onboarding/connections UI, and
+refresh/model-discovery clients. Tinfoil has selectable settings, desktop worker
+construction, engine/config flags, a remote redaction adapter crate surface,
+environment credentials, an example probe, and a pinned SDK dependency. All can
+send recorded content or credentials to external services and are outside the
+local Windows-first product.
+
+This boundary does not require removing Pi: `native-ollama` already has a
+complete local configuration and process path through
+`http://localhost:11434/v1`. Existing remote presets and privacy-backend values
+must remain deserializable, so they will be migrated or interpreted as local
+without deleting stored settings. Deterministic regex and ONNX redaction remain.
+The separate OpenAI-compatible audio-transcription configuration is excluded,
+as are ordinary URL privacy filters and the local API bearer secret. Shared HTTP
+clients and broad desktop HTTPS capability still serve retained or
+later-removal subsystems; only provider-specific edges can be narrowed here.
+
+Post-change evidence:
+
+- Removed the native ChatGPT OAuth module, token refresh/client commands,
+  onboarding and connection UI, preset helper, generated command/type bindings,
+  and provider-specific capability URLs. Searches find provider endpoints only
+  inside compatibility fixtures that prove old settings are migrated locally.
+- Removed direct OpenAI, Anthropic, and arbitrary custom-model selection,
+  credential injection, model discovery, and request paths from desktop, core
+  Pi, pipe preset resolution, and engine preset CLI code. ScreenWise now writes
+  and launches only the fixed loopback Ollama provider at
+  `http://localhost:11434/v1`; the editor no longer promises a configurable
+  endpoint that the runtime would ignore.
+- Existing hosted/direct/unknown presets remain readable. Store, pipe, and CLI
+  boundaries map them to `native-ollama` / `ministral-3:latest`, force the
+  loopback URL, and clear or ignore provider credentials without deleting the
+  historical record or touching the local API bearer token.
+- Removed hosted Tinfoil text/image clients, examples, configuration branches,
+  endpoint/key handling, and the pinned Rust SDK. Legacy `piiBackend` strings
+  deserialize but resolve to deterministic local regex plus ONNX/OPF redaction;
+  no database or settings migration was made destructive.
+- The retained Pi distribution still requires `@anthropic-ai/sdk` as an eager
+  package dependency even when running Ollama, so removing that JavaScript
+  package would remove local Pi rather than a selectable provider. ScreenWise
+  always passes `--provider ollama` and removes its known legacy remote entries
+  from Pi configuration. It preserves unrelated user-managed entries in the
+  shared Pi config; fully isolating Pi into an app-owned provider registry is a
+  later retained-capability architecture decision.
+- The inbound, authenticated localhost OpenAI-compatible audio transcription
+  endpoint is retained; it is not an outbound transcription provider. The
+  previously removed external transcription transports and workflow classifier
+  have not reappeared. Broad HTTPS capability remains until the separately
+  reachable integration and enterprise clients are removed. Litepipe was not
+  consulted.
+- Root and desktop `Cargo.lock` changes contain removals only: the Tinfoil SDK
+  plus its now-orphaned dependency graph. No package version changed. Reviewed
+  SHA-256 values are
+  `8C58CF60F1D1E51346CDBEF830666D56E43502BC7A9F593D45D20A1A30242E94`
+  and
+  `4CE096095FF1430E626D3EB4AD755C6C48EF9606138DA4098836710B5F15CB0E`.
+  The desktop Bun lockfile is unchanged at
+  `758A49562E49967F8B91F1169D64DA7C74242051CF1544889734BE0E47A3701D`.
+
+Verification on Windows on 2026-09-10:
+
+- `cargo fmt --all -- --check`: passed from the root workspace.
+- Locked/offline root checks for `screenpipe-core` and `screenpipe-engine`, and
+  the locked/offline desktop check: passed in Developer PowerShell with the
+  documented normal Ninja/OpenBLAS/ORT environment.
+- `tauri_bindings_are_current`: 1 passed with Ninja Multi-Config, the transient
+  `knf-rs-sys` dev CRT override, and OpenBLAS on runtime `PATH`.
+- Desktop Pi tests: 24 passed and 1 environment/process test was ignored.
+  Desktop store tests: 19 passed. Engine preset tests: 9 passed, including the
+  legacy-provider migration regression.
+- The first full `screenpipe-redact` run exposed two Windows-only path
+  assertions and scheduler-dependent in-memory SQLite worker tests. The path
+  checks now compare path components, and the worker fixture uses one in-memory
+  connection plus a bounded readiness wait. The full rerun passed 90 library
+  tests and 3 worker integration tests; 1 doc test was ignored.
+- Direct TypeScript `tsc --noEmit`: passed. A Bun-hosted direct Vitest attempt
+  reproduced the checkout's launcher/runtime interop problem (`z.object` was
+  undefined in one suite; 41 files and 533 tests passed before exit 1). Running
+  the installed Vitest entrypoint with Node passed all 42 files and 533 tests.
+  The installed Next entrypoint production build passed with only the existing
+  `unpdf` `import.meta` warning.
+- `cargo build --release --locked --offline`: passed in 10m 19s from the root
+  workspace with the documented release environment and only known warnings.

@@ -987,14 +987,8 @@ fn ensure_mcp_bridge_extension(project_dir: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PiProviderConfig {
-    /// Provider type: "openai", "native-ollama", "custom"
-    pub provider: String,
-    /// Base URL for the provider API
-    pub url: String,
-    /// Model ID to use
+    /// Local Ollama model ID to use.
     pub model: String,
-    /// Optional API key for the provider
-    pub api_key: Option<String>,
     /// Max output tokens (default 4096)
     #[serde(default = "default_max_tokens")]
     pub max_tokens: i32,
@@ -1009,115 +1003,28 @@ fn default_max_tokens() -> i32 {
 
 /// Build the providers to add/update in models.json for pi-coding-agent.
 ///
-/// Returns a map of provider entries to merge into the existing models.json.
-/// We merge instead of rebuilding from scratch to avoid a race condition where
-/// concurrent pipes overwrite each other's providers.
+/// The ScreenWise-managed Pi runtime exposes only local Ollama.
 async fn build_models_json(provider_config: Option<&PiProviderConfig>) -> serde_json::Value {
-    let mut providers_map = serde_json::Map::new();
-    let mut resolved_config = provider_config.cloned().unwrap_or(PiProviderConfig {
-        provider: "native-ollama".to_string(),
-        url: LOCAL_OLLAMA_URL.to_string(),
+    let resolved_config = provider_config.cloned().unwrap_or(PiProviderConfig {
         model: LOCAL_OLLAMA_MODEL.to_string(),
-        api_key: None,
         max_tokens: default_max_tokens(),
         system_prompt: None,
     });
-    if matches!(resolved_config.provider.as_str(), "screenpipe-cloud" | "pi") {
-        resolved_config.provider = "native-ollama".to_string();
-        resolved_config.url = LOCAL_OLLAMA_URL.to_string();
-        resolved_config.model = LOCAL_OLLAMA_MODEL.to_string();
-        resolved_config.api_key = None;
-    }
-
-    // Add only the selected provider. Existing unrelated user-managed entries
-    // remain in models.json when this map is merged below.
-    if let Some(config) = Some(&resolved_config) {
-        let provider_name = match config.provider.as_str() {
-            "openai" => "openai-byok",
-            "openai-chatgpt" => "openai-chatgpt",
-            "native-ollama" => "ollama",
-            "anthropic" => "anthropic-byok",
-            "custom" => "custom",
-            _ => "",
-        };
-
-        if !provider_name.is_empty() {
-            let base_url = if config.provider == "native-ollama" && config.url.is_empty() {
-                "http://localhost:11434/v1".to_string()
-            } else if config.provider == "openai-chatgpt" {
-                "https://chatgpt.com/backend-api".to_string()
-            } else if config.provider == "anthropic" && config.url.is_empty() {
-                "https://api.anthropic.com".to_string()
-            } else if config.provider == "openai" && config.url.is_empty() {
-                "https://api.openai.com/v1".to_string()
-            } else {
-                config.url.clone()
-            };
-
-            if base_url.is_empty() {
-                warn!(
-                    "skipping pi provider '{}': no baseUrl configured (would invalidate models.json)",
-                    provider_name
-                );
-            } else {
-                let api_key = match config.provider.as_str() {
-                    "native-ollama" => "ollama".to_string(),
-                    "openai" => "OPENAI_API_KEY".to_string(),
-                    "openai-chatgpt" => "OPENAI_CHATGPT_TOKEN".to_string(),
-                    "anthropic" => "ANTHROPIC_API_KEY".to_string(),
-                    "custom" => "CUSTOM_API_KEY".to_string(),
-                    _ => "".to_string(),
-                };
-
-                let wire_api = if config.provider == "openai-chatgpt" {
-                    "openai-codex-responses"
-                } else if config.provider == "anthropic" {
-                    "anthropic-messages"
-                } else {
-                    "openai-completions"
-                };
-
-                // Detect endpoints that require `max_completion_tokens` instead
-                // of `max_tokens`. Azure Foundry, Azure OpenAI (newer deployments),
-                // and GPT-5 / o-series models all reject `max_tokens`.
-                let requires_max_completion_tokens = base_url.contains("azure.com")
-                    || base_url.contains("openai.azure.com")
-                    || base_url.contains("services.ai.azure.com")
-                    || base_url.contains("cognitiveservices.azure.com")
-                    || config.model.starts_with("gpt-5")
-                    || config.model.starts_with("o1")
-                    || config.model.starts_with("o3")
-                    || config.model.starts_with("o4");
-
-                let mut model_def = serde_json::Map::new();
-                model_def.insert("id".into(), json!(config.model));
-                model_def.insert("name".into(), json!(config.model));
-                model_def.insert("input".into(), json!(["text", "image"]));
-                model_def.insert("maxTokens".into(), json!(config.max_tokens));
-                model_def.insert(
-                    "cost".into(),
-                    json!({"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}),
-                );
-                if requires_max_completion_tokens && wire_api == "openai-completions" {
-                    model_def.insert(
-                        "compat".into(),
-                        json!({"maxTokensField": "max_completion_tokens"}),
-                    );
-                }
-
-                let user_provider = json!({
-                    "baseUrl": base_url,
-                    "api": wire_api,
-                    "apiKey": api_key,
-                    "models": [ serde_json::Value::Object(model_def) ]
-                });
-
-                providers_map.insert(provider_name.to_string(), user_provider);
-            }
+    let model = json!({
+        "id": resolved_config.model,
+        "name": resolved_config.model,
+        "input": ["text", "image"],
+        "maxTokens": resolved_config.max_tokens,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+    });
+    json!({"providers": {
+        "ollama": {
+            "baseUrl": LOCAL_OLLAMA_URL,
+            "api": "openai-completions",
+            "apiKey": "ollama",
+            "models": [model]
         }
-    }
-
-    json!({"providers": providers_map})
+    }})
 }
 
 /// Write Pi's provider config while preserving unrelated user providers.
@@ -1144,13 +1051,21 @@ async fn ensure_pi_config(provider_config: Option<&PiProviderConfig>) -> Result<
         models_config = json!({"providers": {}});
     }
 
-    // Remove the retired hosted provider from configurations written by
-    // earlier releases while preserving every unrelated provider.
+    // Remove ScreenWise-managed remote providers written by earlier releases;
+    // unrelated keys that the user manages outside ScreenWise are not rewritten.
     if let Some(providers) = models_config
         .get_mut("providers")
         .and_then(|p| p.as_object_mut())
     {
-        providers.remove("screenpipe");
+        for retired in [
+            "screenpipe",
+            "openai-byok",
+            "openai-chatgpt",
+            "anthropic-byok",
+            "custom",
+        ] {
+            providers.remove(retired);
+        }
     }
 
     // Merge new providers into existing ones (add/update, don't remove others)
@@ -1170,8 +1085,9 @@ async fn ensure_pi_config(provider_config: Option<&PiProviderConfig>) -> Result<
     std::fs::write(&models_path, models_str)
         .map_err(|e| format!("Failed to write pi models config: {}", e))?;
 
-    // Remove only the obsolete Screenpipe product credential. Third-party
-    // provider credentials in Pi's auth file remain untouched.
+    // Remove only the obsolete Screenpipe product credential. User-managed Pi
+    // credentials remain untouched; retired app OAuth secrets stay inert in
+    // the local secret store so this compatibility cleanup is non-destructive.
     let auth_path = config_dir.join("auth.json");
     if auth_path.exists() {
         let content = std::fs::read_to_string(&auth_path)
@@ -1341,27 +1257,12 @@ pub async fn pi_start_inner(
     // Ensure Pi is configured with the user's provider
     ensure_pi_config(provider_config.as_ref()).await?;
 
-    // Determine which Pi provider and model to use
-    let (pi_provider, pi_model) = match &provider_config {
-        Some(config) => {
-            let provider_name = match config.provider.as_str() {
-                "openai" => "openai-byok",
-                "openai-chatgpt" => "openai-chatgpt",
-                "native-ollama" => "ollama",
-                "anthropic" => "anthropic-byok",
-                // "custom" requires a valid URL; fall back to local Ollama if missing
-                "custom" if !config.url.is_empty() => "custom",
-                "screenpipe-cloud" | "pi" | _ => "ollama",
-            };
-            let model = if matches!(config.provider.as_str(), "screenpipe-cloud" | "pi") {
-                LOCAL_OLLAMA_MODEL.to_string()
-            } else {
-                config.model.clone()
-            };
-            (provider_name.to_string(), model)
-        }
-        None => ("ollama".to_string(), LOCAL_OLLAMA_MODEL.to_string()),
-    };
+    let pi_provider = "ollama".to_string();
+    let pi_model = provider_config
+        .as_ref()
+        .map(|config| config.model.clone())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| LOCAL_OLLAMA_MODEL.to_string());
 
     let sid = session_id.to_string();
     let mut pool = state.0.lock().await;
@@ -1578,17 +1479,15 @@ pub async fn pi_start_inner(
         }
     }
 
-    // For local/small models (Ollama, custom), explicitly tell them to read the
+    // For local Ollama models, explicitly tell them to read the
     // screenpipe-api skill file — they often skip reading skills on their own.
-    let is_local_model = matches!(pi_provider.as_str(), "ollama" | "custom");
+    let is_local_model = pi_provider == "ollama";
     if is_local_model {
         let api_hint = "IMPORTANT: You MUST read the screenpipe-api skill file BEFORE making any API calls. It contains authentication instructions, endpoint docs, and examples. Without reading it first, your API calls will fail with 403 unauthorized.";
         cmd.args(["--append-system-prompt", api_hint]);
     }
 
-    // Append the user's AI preset system prompt (enables Anthropic prompt caching —
-    // Pi's built-in system prompt + this text form the cached prefix, reducing
-    // input costs by 90% on subsequent messages in the same conversation)
+    // Append the user's AI preset system prompt.
     if let Some(ref config) = provider_config {
         if let Some(ref prompt) = config.system_prompt {
             if !prompt.is_empty() {
@@ -1637,42 +1536,6 @@ pub async fn pi_start_inner(
     // screenpipe-core.
     if let Ok(p) = screenpipe_core::agents::bash_env::ensure_wrapper_in_default_dir() {
         cmd.env("BASH_ENV", p);
-    }
-
-    // Pass the user's API key as env var for non-screenpipe providers
-    if let Some(ref config) = provider_config {
-        // ChatGPT OAuth: inject token from secret store (no api_key in config)
-        if config.provider == "openai-chatgpt" {
-            match crate::chatgpt_oauth::get_valid_token().await {
-                Ok(token) => {
-                    cmd.env("OPENAI_CHATGPT_TOKEN", token);
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "ChatGPT OAuth token unavailable: {}. Please sign in again.",
-                        e
-                    ));
-                }
-            }
-        }
-
-        if let Some(ref api_key) = config.api_key {
-            if !api_key.is_empty() {
-                // Pi resolves apiKey from env vars, so set it
-                match config.provider.as_str() {
-                    "openai" => {
-                        cmd.env("OPENAI_API_KEY", api_key);
-                    }
-                    "anthropic" => {
-                        cmd.env("ANTHROPIC_API_KEY", api_key);
-                    }
-                    "custom" => {
-                        cmd.env("CUSTOM_API_KEY", api_key);
-                    }
-                    _ => {}
-                }
-            }
-        }
     }
 
     // Backstop: if local_api_context_from_app couldn't resolve a key earlier
@@ -2437,18 +2300,8 @@ pub async fn pi_set_model(
 ) -> Result<(), String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
 
-    // Map frontend provider name → Pi's internal registry name. Must stay in
-    // sync with the mapping in `pi_start_inner` (line ~1045) — a mismatch
-    // means Pi can't find the model and returns "Model not found".
-    let pi_provider = match provider_config.provider.as_str() {
-        "openai" => "openai-byok",
-        "openai-chatgpt" => "openai-chatgpt",
-        "native-ollama" => "ollama",
-        "anthropic" => "anthropic-byok",
-        "custom" if !provider_config.url.is_empty() => "custom",
-        "screenpipe-cloud" | "pi" | _ => "ollama",
-    };
-    let pi_model = if matches!(provider_config.provider.as_str(), "screenpipe-cloud" | "pi") {
+    let pi_provider = "ollama";
+    let pi_model = if provider_config.model.is_empty() {
         LOCAL_OLLAMA_MODEL.to_string()
     } else {
         provider_config.model.clone()
@@ -2497,8 +2350,7 @@ pub async fn pi_update_config(
     provider_config: Option<PiProviderConfig>,
 ) -> Result<(), String> {
     info!(
-        "Pi preset changed (provider: {:?}, model: {:?}) — restarting chat session",
-        provider_config.as_ref().map(|c| &c.provider),
+        "Pi local Ollama preset changed (model: {:?}) — restarting chat session",
         provider_config.as_ref().map(|c| &c.model),
     );
 
@@ -3355,12 +3207,9 @@ error: InstallFailed extracting tarball"#;
         build_models_json, PiProviderConfig, LOCAL_OLLAMA_MODEL, LOCAL_OLLAMA_URL,
     };
 
-    fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
+    fn make_provider_config(model: &str) -> PiProviderConfig {
         PiProviderConfig {
-            provider: provider.to_string(),
-            url: String::new(),
             model: model.to_string(),
-            api_key: None,
             max_tokens: 4096,
             system_prompt: None,
         }
@@ -3379,149 +3228,14 @@ error: InstallFailed extracting tarball"#;
     }
 
     #[tokio::test]
-    async fn test_build_models_json_legacy_cloud_maps_to_local_ollama() {
-        let pc = make_provider_config("screenpipe-cloud", "auto");
+    async fn test_build_models_json_configured_model_stays_on_loopback_ollama() {
+        let pc = make_provider_config("llama3");
         let config = build_models_json(Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers["ollama"]["baseUrl"], LOCAL_OLLAMA_URL);
-        assert_eq!(providers["ollama"]["models"][0]["id"], LOCAL_OLLAMA_MODEL);
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_openai_adds_second_provider() {
-        let pc = make_provider_config("openai", "gpt-4o");
-        let config = build_models_json(Some(&pc)).await;
-        let providers = config["providers"].as_object().unwrap();
-        assert_eq!(providers.len(), 1);
-        assert!(providers.contains_key("openai-byok"));
-
-        let openai = &providers["openai-byok"];
-        assert_eq!(openai["baseUrl"], "https://api.openai.com/v1");
-        assert_eq!(openai["api"], "openai-completions");
-        assert_eq!(openai["apiKey"], "OPENAI_API_KEY");
-        let models = openai["models"].as_array().unwrap();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0]["id"], "gpt-4o");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_ollama_provider() {
-        let pc = make_provider_config("native-ollama", "llama3");
-        let config = build_models_json(Some(&pc)).await;
-        let providers = config["providers"].as_object().unwrap();
         assert!(providers.contains_key("ollama"));
-        assert_eq!(providers["ollama"]["baseUrl"], "http://localhost:11434/v1");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_anthropic_provider() {
-        let pc = make_provider_config("anthropic", "claude-sonnet-4-5");
-        let config = build_models_json(Some(&pc)).await;
-        let providers = config["providers"].as_object().unwrap();
-        assert!(providers.contains_key("anthropic-byok"));
-        assert_eq!(
-            providers["anthropic-byok"]["baseUrl"],
-            "https://api.anthropic.com"
-        );
-        assert_eq!(providers["anthropic-byok"]["api"], "anthropic-messages");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_custom_with_empty_url_skipped() {
-        // custom provider with empty URL should be skipped (would invalidate schema)
-        let pc = make_provider_config("custom", "my-model");
-        let config = build_models_json(Some(&pc)).await;
-        let providers = config["providers"].as_object().unwrap();
-        assert_eq!(providers.len(), 0);
-        assert!(!providers.contains_key("custom"));
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_custom_with_url() {
-        let mut pc = make_provider_config("custom", "my-model");
-        pc.url = "http://my-server:8080/v1".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let providers = config["providers"].as_object().unwrap();
-        assert_eq!(providers.len(), 1);
-        assert!(providers.contains_key("custom"));
-        assert_eq!(providers["custom"]["baseUrl"], "http://my-server:8080/v1");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_custom_generic_no_compat_override() {
-        // Plain OpenAI-compatible endpoints (Ollama, vLLM, OpenRouter-like)
-        // should NOT have compat.maxTokensField set — Pi's auto-detection
-        // defaults to max_completion_tokens which works for most of these.
-        let mut pc = make_provider_config("custom", "my-model");
-        pc.url = "http://localhost:8080/v1".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert!(
-            model.get("compat").is_none(),
-            "generic custom should not have compat"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_azure_openai_forces_max_completion_tokens() {
-        let mut pc = make_provider_config("custom", "gpt-4o");
-        pc.url = "https://myresource.openai.azure.com/openai/deployments/gpt-4o".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert_eq!(
-            model["compat"]["maxTokensField"], "max_completion_tokens",
-            "Azure OpenAI must use max_completion_tokens"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_azure_foundry_forces_max_completion_tokens() {
-        let mut pc = make_provider_config("custom", "gpt-5-mini");
-        pc.url = "https://myresource.services.ai.azure.com/api/projects/proj".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_azure_cognitive_services_forces_max_completion_tokens() {
-        let mut pc = make_provider_config("custom", "my-deployment");
-        pc.url = "https://myresource.cognitiveservices.azure.com/".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_gpt5_model_forces_max_completion_tokens() {
-        // Even on a generic OpenAI-compatible proxy, GPT-5 models require
-        // max_completion_tokens. Detect by model ID.
-        let mut pc = make_provider_config("custom", "gpt-5");
-        pc.url = "https://my-proxy.example.com/v1".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_o3_model_forces_max_completion_tokens() {
-        let mut pc = make_provider_config("custom", "o3-mini");
-        pc.url = "https://my-proxy.example.com/v1".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert_eq!(model["compat"]["maxTokensField"], "max_completion_tokens");
-    }
-
-    #[tokio::test]
-    async fn test_build_models_json_regular_gpt4_no_compat_override() {
-        // gpt-4 and gpt-4o should NOT be forced — they work with both field names
-        // and Pi's default is already max_completion_tokens for non-chutes URLs.
-        let mut pc = make_provider_config("custom", "gpt-4o");
-        pc.url = "https://my-proxy.example.com/v1".to_string();
-        let config = build_models_json(Some(&pc)).await;
-        let model = &config["providers"]["custom"]["models"][0];
-        assert!(model.get("compat").is_none());
+        assert_eq!(providers["ollama"]["baseUrl"], LOCAL_OLLAMA_URL);
+        assert_eq!(providers["ollama"]["models"][0]["id"], "llama3");
     }
 
     #[tokio::test]

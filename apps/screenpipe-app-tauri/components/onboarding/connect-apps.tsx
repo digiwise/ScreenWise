@@ -279,7 +279,7 @@ interface Integration {
   name: string;
   valueProp: string;
   ahaCopy?: string;
-  type: "oauth" | "mcp" | "chatgpt" | "claude" | "codex" | "obsidian";
+  type: "oauth" | "mcp" | "claude" | "codex" | "obsidian";
 }
 
 type CardState = "idle" | "connecting" | "connected" | "error";
@@ -327,14 +327,6 @@ const INTEGRATIONS: Integration[] = [
     valueProp: "give Cursor AI full memory of your work",
     type: "mcp",
   },
-  {
-    id: "chatgpt",
-    cardKey: "chatgpt",
-    name: "ChatGPT",
-    valueProp: "use ChatGPT Plus as screenpipe's AI brain",
-    ahaCopy: "ChatGPT connected",
-    type: "chatgpt",
-  },
 ];
 
 const ICONS: Record<string, React.ReactNode> = {
@@ -348,7 +340,6 @@ const ICONS: Record<string, React.ReactNode> = {
   ),
   obsidian: <ObsidianIcon className="w-5 h-5" />,
   cursor: <CursorIcon className="w-5 h-5 rounded" />,
-  chatgpt: <ChatGptIcon className="w-5 h-5" />,
   claude: (
     // eslint-disable-next-line @next/next/no-img-element
     <img src="/images/claude-ai.svg" alt="Claude" className="w-5 h-5 rounded" />
@@ -482,15 +473,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
         })
       );
 
-      // ChatGPT (separate OAuth flow)
-      try {
-        const res = await commands.chatgptOauthStatus();
-        if (res.status === "ok" && res.data.logged_in) {
-          stateUpdates["chatgpt"] = "connected";
-          nameUpdates["chatgpt"] = "ChatGPT Plus";
-        }
-      } catch { /* ignore */ }
-
       // Cursor MCP
       try {
         if (await isCursorMcpInstalled()) stateUpdates["cursor"] = "connected";
@@ -540,17 +522,6 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
       setCardState(integration.cardKey, "connecting");
 
       try {
-        if (integration.type === "chatgpt") {
-          const res = await commands.chatgptOauthLogin();
-          if (res.status === "ok" && res.data) {
-            setCardState(integration.cardKey, "connected");
-            setDisplayNames((prev) => ({ ...prev, [integration.cardKey]: "ChatGPT Plus" }));
-          } else {
-            setCardState(integration.cardKey, "idle");
-          }
-          return;
-        }
-
         if (integration.type === "mcp") {
           await installCursorMcp();
           setCardState(integration.cardKey, "connected");

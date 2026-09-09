@@ -80,7 +80,6 @@ export function useHardcodedTiles(): HardcodedTile[] {
   const [claudeInstalled, setClaudeInstalled] = useState(false);
   const [cursorInstalled, setCursorInstalled] = useState(false);
   const [codexInstalled, setCodexInstalled] = useState(false);
-  const [chatgptConnected, setChatgptConnected] = useState(false);
   const [calendarConnected, setCalendarConnected] = useState(false);
 
   useEffect(() => {
@@ -90,10 +89,6 @@ export function useHardcodedTiles(): HardcodedTile[] {
 
     isCursorMcpInstalled().then(setCursorInstalled).catch(() => {});
     isCodexMcpInstalled().then(setCodexInstalled).catch(() => {});
-
-    commands.chatgptOauthStatus()
-      .then(res => setChatgptConnected(res.status === "ok" && res.data.logged_in))
-      .catch(() => {});
 
     getStore()
       .then(store => store.get<boolean>("calendarUserDisconnected"))
@@ -107,7 +102,6 @@ export function useHardcodedTiles(): HardcodedTile[] {
     { id: "codex", name: "Codex", icon: "codex", connected: codexInstalled },
     { id: "claude-code", name: "Claude Code", icon: "claude-code", connected: false },
     { id: "warp", name: "Warp", icon: "warp", connected: false },
-    { id: "chatgpt", name: "ChatGPT", icon: "chatgpt", connected: chatgptConnected },
     ...(os === "macos" ? [
       { id: "browser-url", name: "Browser URL Capture", icon: "browser-url", connected: false },
       { id: "voice-memos", name: "Voice Memos", icon: "voice-memos", connected: false },

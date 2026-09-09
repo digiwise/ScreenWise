@@ -525,7 +525,7 @@ impl PiExecutor {
     pub async fn ensure_pi_config(
         provider: Option<&str>,
         model: Option<&str>,
-        provider_url: Option<&str>,
+        _provider_url: Option<&str>,
     ) -> Result<()> {
         let config_dir = get_pi_config_dir()?;
         std::fs::create_dir_all(&config_dir)?;
@@ -567,18 +567,21 @@ impl PiExecutor {
 
         let legacy_cloud = matches!(
             provider,
-            None | Some("screenpipe") | Some("screenpipe-cloud") | Some("pi")
+            None | Some("screenpipe")
+                | Some("screenpipe-cloud")
+                | Some("pi")
+                | Some("openai")
+                | Some("anthropic")
+                | Some("custom")
+                | Some("openai-chatgpt")
         );
         let provider = if legacy_cloud {
             Some("ollama")
         } else {
             provider
         };
-        let provider_url = if legacy_cloud {
-            Some(LOCAL_OLLAMA_URL)
-        } else {
-            provider_url
-        };
+        // Stored/provider-supplied URLs are compatibility data only. Managed
+        // execution is always pinned to the local Ollama loopback endpoint.
         let model = if legacy_cloud {
             Some(LOCAL_OLLAMA_MODEL)
         } else {
@@ -588,25 +591,8 @@ impl PiExecutor {
         // Add the selected local or user-configured provider.
         if let (Some(prov), Some(mdl)) = (provider, model) {
             let (pi_provider_name, base_url, api_key) = match prov {
-                "ollama" | "native-ollama" => {
-                    ("ollama", provider_url.unwrap_or(LOCAL_OLLAMA_URL), "ollama")
-                }
-                "openai" => (
-                    "openai-byok",
-                    provider_url.unwrap_or("https://api.openai.com/v1"),
-                    "OPENAI_API_KEY",
-                ),
-                "openai-chatgpt" => (
-                    "openai-chatgpt",
-                    "https://chatgpt.com/backend-api",
-                    "OPENAI_CHATGPT_TOKEN",
-                ),
-                "anthropic" => (
-                    "anthropic-byok",
-                    provider_url.unwrap_or("https://api.anthropic.com"),
-                    "ANTHROPIC_API_KEY",
-                ),
-                other => (other, provider_url.unwrap_or(""), "CUSTOM_API_KEY"),
+                "ollama" | "native-ollama" => ("ollama", LOCAL_OLLAMA_URL, "ollama"),
+                _ => ("ollama", LOCAL_OLLAMA_URL, "ollama"),
             };
 
             // Pi's models.json schema requires baseUrl to have minLength: 1.
@@ -618,13 +604,7 @@ impl PiExecutor {
                         pi_provider_name
                     );
             } else {
-                let wire_api = if prov == "openai-chatgpt" {
-                    "openai-codex-responses"
-                } else if prov == "anthropic" {
-                    "anthropic-messages"
-                } else {
-                    "openai-completions"
-                };
+                let wire_api = "openai-completions";
 
                 let new_model = json!({
                     "id": mdl,
@@ -634,13 +614,8 @@ impl PiExecutor {
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
                 });
 
-                // Field-level merge: preserve user-set baseUrl/apiKey when present
-                // (e.g. jeffutter's `~/.pi/agent/models.json` "ollama" pointing at his
-                // home server, or "openai-byok" with his real API key) and append our
-                // model to `models[]` instead of clobbering the array.
-                //
-                // Only overwrite a field when (a) the pipe explicitly provided it
-                // (e.g. `provider_url:` in pipe.md) or (b) no value exists yet.
+                // Merge the managed local provider and append our model without
+                // clobbering unrelated provider entries.
                 if let Some(providers) = models_config
                     .get_mut("providers")
                     .and_then(|p| p.as_object_mut())
@@ -650,12 +625,7 @@ impl PiExecutor {
                         .or_insert_with(|| json!({}));
                     if let Some(obj) = entry.as_object_mut() {
                         // baseUrl: respect user's existing unless the pipe gave a URL.
-                        let user_pinned_url = obj.contains_key("baseUrl")
-                            && obj.get("baseUrl").and_then(|v| v.as_str()).is_some()
-                            && provider_url.is_none();
-                        if !user_pinned_url {
-                            obj.insert("baseUrl".to_string(), json!(base_url));
-                        }
+                        obj.insert("baseUrl".to_string(), json!(base_url));
                         // api (wire format): always set — it's a function of model
                         // family, not a user preference.
                         obj.insert("api".to_string(), json!(wire_api));
@@ -740,7 +710,7 @@ impl PiExecutor {
         model: &str,
         working_dir: &Path,
         resolved_provider: &str,
-        provider_api_key: Option<&str>,
+        _provider_api_key: Option<&str>,
         shared_pid: Option<super::SharedPid>,
         continue_session: bool,
         pipe_system_prompt: Option<&str>,
@@ -759,31 +729,6 @@ impl PiExecutor {
             cmd.arg("--append-system-prompt").arg(sys);
         }
         cmd.arg("-p").arg(prompt);
-
-        // Pi resolves apiKey values in models.json as env var names.
-        // Set the actual key so the subprocess can find it.
-        if let Some(key) = provider_api_key {
-            if !key.is_empty() {
-                match resolved_provider {
-                    "openai" | "openai-byok" => {
-                        cmd.env("OPENAI_API_KEY", key);
-                    }
-                    "openai-chatgpt" => {
-                        cmd.env("OPENAI_CHATGPT_TOKEN", key);
-                    }
-                    "anthropic" | "anthropic-byok" => {
-                        cmd.env("ANTHROPIC_API_KEY", key);
-                    }
-                    "custom" => {
-                        cmd.env("CUSTOM_API_KEY", key);
-                    }
-                    "google" => {
-                        cmd.env("GOOGLE_API_KEY", key);
-                    }
-                    _ => {}
-                }
-            }
-        }
 
         // Canonical name: SCREENPIPE_LOCAL_API_KEY. The AUTH_KEY alias is
         // kept ONE release as a deprecated fallback for user-installed
@@ -852,7 +797,7 @@ impl PiExecutor {
         model: &str,
         working_dir: &Path,
         resolved_provider: &str,
-        provider_api_key: Option<&str>,
+        _provider_api_key: Option<&str>,
         shared_pid: Option<super::SharedPid>,
         line_tx: tokio::sync::mpsc::UnboundedSender<String>,
         continue_session: bool,
@@ -872,35 +817,11 @@ impl PiExecutor {
         }
         cmd.arg("--provider").arg(resolved_provider);
         cmd.arg("--model").arg(model);
-        // Pass pipe instructions as system prompt for Anthropic prompt caching.
         // Pi's internal system prompt + this appended text form the cached prefix.
         if let Some(sys) = pipe_system_prompt {
             cmd.arg("--append-system-prompt").arg(sys);
         }
         cmd.arg("-p").arg(prompt);
-
-        if let Some(key) = provider_api_key {
-            if !key.is_empty() {
-                match resolved_provider {
-                    "openai" | "openai-byok" => {
-                        cmd.env("OPENAI_API_KEY", key);
-                    }
-                    "openai-chatgpt" => {
-                        cmd.env("OPENAI_CHATGPT_TOKEN", key);
-                    }
-                    "anthropic" | "anthropic-byok" => {
-                        cmd.env("ANTHROPIC_API_KEY", key);
-                    }
-                    "custom" => {
-                        cmd.env("CUSTOM_API_KEY", key);
-                    }
-                    "google" => {
-                        cmd.env("GOOGLE_API_KEY", key);
-                    }
-                    _ => {}
-                }
-            }
-        }
 
         // See spawn_pi above — TODO(remove next release): drop the deprecated alias.
         if let Some(ref key) = self.api_auth_key {
@@ -1052,14 +973,18 @@ impl AgentExecutor for PiExecutor {
         shared_pid: Option<super::SharedPid>,
         continue_session: bool,
     ) -> Result<AgentOutput> {
-        let uses_legacy_cloud_default = matches!(
-            provider,
-            None | Some("screenpipe") | Some("screenpipe-cloud") | Some("pi")
-        );
+        let uses_legacy_cloud_default = !matches!(provider, Some("ollama") | Some("native-ollama"));
         let resolved_provider = match provider {
-            None | Some("screenpipe") | Some("screenpipe-cloud") | Some("pi") => "ollama",
+            None
+            | Some("screenpipe")
+            | Some("screenpipe-cloud")
+            | Some("pi")
+            | Some("openai")
+            | Some("anthropic")
+            | Some("custom")
+            | Some("openai-chatgpt") => "ollama",
             Some("native-ollama") => "ollama",
-            Some(provider) => provider,
+            Some(_) => "ollama",
         }
         .to_string();
 
@@ -1155,14 +1080,18 @@ impl AgentExecutor for PiExecutor {
         pipe_system_prompt: Option<&str>,
         session_owner: Option<&str>,
     ) -> Result<AgentOutput> {
-        let uses_legacy_cloud_default = matches!(
-            provider,
-            None | Some("screenpipe") | Some("screenpipe-cloud") | Some("pi")
-        );
+        let uses_legacy_cloud_default = !matches!(provider, Some("ollama") | Some("native-ollama"));
         let resolved_provider = match provider {
-            None | Some("screenpipe") | Some("screenpipe-cloud") | Some("pi") => "ollama",
+            None
+            | Some("screenpipe")
+            | Some("screenpipe-cloud")
+            | Some("pi")
+            | Some("openai")
+            | Some("anthropic")
+            | Some("custom")
+            | Some("openai-chatgpt") => "ollama",
             Some("native-ollama") => "ollama",
-            Some(provider) => provider,
+            Some(_) => "ollama",
         }
         .to_string();
         let resolved_model = if uses_legacy_cloud_default {

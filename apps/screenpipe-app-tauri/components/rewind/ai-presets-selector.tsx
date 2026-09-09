@@ -32,8 +32,6 @@ import {
   Terminal,
   Loader2,
   HelpCircle,
-  Eye,
-  EyeOff,
   Settings,
   LogIn,
 } from "lucide-react";
@@ -56,7 +54,6 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AIPreset, commands } from "@/lib/utils/tauri";
-import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
 import {
   DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
@@ -74,17 +71,6 @@ const formatPresetName = (name: string): string => {
 };
 
 export const Icons = {
-  openai: (props: any) => (
-    <svg
-      fill="currentColor"
-      viewBox="0 0 24 24"
-      role="img"
-      xmlns="http://www.w3.org/2000/svg"
-      {...props}
-    >
-      <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.0264 1.1706a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4929 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0264 1.1706a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0788 3.7951-5.8144-3.3543 2.0264-1.1706a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4068-.6813zm2.0834-3.0089-.142-.0852-4.7782-2.7913a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1658a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654 2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
-    </svg>
-  ),
   settings: Settings,
   terminal: Terminal,
   spinner: Loader2,
@@ -98,21 +84,13 @@ interface BaseRecommendedPreset {
   prompt: string;
 }
 
-type RecommendedPreset = BaseRecommendedPreset &
-  (
-    | {
-        provider: "openai";
-      }
-    | {
-        provider: "native-ollama";
-      }
-  );
+type RecommendedPreset = BaseRecommendedPreset & { provider: "native-ollama" };
 
 interface AIProviderConfigProps {
   onSubmit: (data: AIPreset) => void;
   defaultPreset?: AIPreset;
 }
-interface OpenAIModel {
+interface OllamaModel {
   id: string;
   created?: number;
   owned_by?: string;
@@ -125,83 +103,27 @@ export const DEFAULT_PROMPT = `Rules:
 - Always answer my question/intent, do not make up things
 `;
 
-function ChatGptSignInButton() {
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const { settings, updateSettings } = useSettings();
-
-  useEffect(() => {
-    commands.chatgptOauthStatus().then((res) => {
-      if (res.status === "ok") setLoggedIn(res.data.logged_in);
-    });
-  }, []);
-
-  return (
-    <Button
-      type="button"
-      variant={loggedIn ? "outline" : "default"}
-      disabled={loading}
-      className="h-7 text-xs w-full"
-      onClick={async () => {
-        if (loggedIn) {
-          setLoading(true);
-          await commands.chatgptOauthLogout();
-          setLoggedIn(false);
-          setLoading(false);
-        } else {
-          setLoading(true);
-          try {
-            const res = await commands.chatgptOauthLogin();
-            if (res.status === "ok" && res.data) {
-              setLoggedIn(true);
-              // auto-create a ChatGPT preset on first connection
-              await ensureChatGptPreset(
-                settings.aiPresets || [],
-                (presets) => updateSettings({ aiPresets: presets })
-              );
-            }
-          } catch (e) {
-            console.error("chatgpt oauth failed:", e);
-          }
-          setLoading(false);
-        }
-      }}
-    >
-      {loading ? (
-        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-      ) : loggedIn ? (
-        <Check className="h-3 w-3 mr-1 text-green-500" />
-      ) : (
-        <LogIn className="h-3 w-3 mr-1" />
-      )}
-      {loggedIn ? "signed in — sign out" : "sign in with chatgpt"}
-    </Button>
-  );
-}
-
 export function AIProviderConfig({
   onSubmit,
   defaultPreset,
 }: AIProviderConfigProps) {
   const [selectedProvider, setSelectedProvider] = useState<
     AIPreset["provider"]
-  >(defaultPreset?.provider || "openai");
+  >(defaultPreset?.provider || "native-ollama");
   const { settings } = useSettings();
   const [isLoading, setIsLoading] = useState(false);
-  const [openaiModels, setOpenAIModels] = useState<OpenAIModel[]>([]);
+  const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [idError, setIdError] = useState<string | null>(null);
-  const [showApiKey, setShowApiKey] = useState(false);
   const [formData, setFormData] = useState<AIPreset>({
-    provider: defaultPreset?.provider || "openai",
-    apiKey: defaultPreset?.apiKey || "",
-    url: defaultPreset?.url || "",
+    provider: defaultPreset?.provider || "native-ollama",
+    url: "http://localhost:11434/v1",
     model: defaultPreset?.model || "",
     maxContextChars: defaultPreset?.maxContextChars || 512000,
     prompt: defaultPreset?.prompt || DEFAULT_PROMPT,
     id: defaultPreset?.id || "",
     defaultPreset: defaultPreset?.defaultPreset || false,
-  });
+  } as AIPreset);
 
   const validateId = (id: string | undefined): boolean => {
     if (!id?.trim()) {
@@ -236,30 +158,6 @@ export function AIProviderConfig({
     validateId(value);
   };
 
-  const fetchOpenAIModels = async (baseUrl: string, apiKey: string) => {
-    setIsLoadingModels(true);
-    try {
-      const response = await fetch(`${baseUrl}/models`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error("failed to fetch models");
-      }
-
-      const data = await response.json();
-      setOpenAIModels(data.data || []);
-    } catch (error) {
-      console.error("error fetching models:", error);
-      setOpenAIModels([]);
-    } finally {
-      setIsLoadingModels(false);
-    }
-  };
-
   const fetchOllamaModels = async (baseUrl: string) => {
     setIsLoadingModels(true);
     try {
@@ -270,100 +168,24 @@ export function AIProviderConfig({
       }
 
       const data = (await response.json()) as {
-        data: OpenAIModel[];
+        data: OllamaModel[];
       };
-      setOpenAIModels(data.data || []);
+      setOllamaModels(data.data || []);
     } catch (error) {
       console.error("error fetching ollama models:", error);
-      setOpenAIModels([]);
+      setOllamaModels([]);
     } finally {
       setIsLoadingModels(false);
     }
   };
 
   useEffect(() => {
-    setOpenAIModels([]);
-    if (selectedProvider === "openai" && formData.apiKey) {
-      // Fetch the live model catalog from the user's OpenAI account so the
-      // dropdown reflects whatever they actually have access to (gpt-5*,
-      // gpt-4.1, o-series, etc). Fall back to a curated list when the
-      // request fails (offline / bad key) so the dropdown still has
-      // something usable instead of an empty menu.
-      (async () => {
-        setIsLoadingModels(true);
-        try {
-          const resp = await fetch("https://api.openai.com/v1/models", {
-            headers: {
-              Authorization: `Bearer ${formData.apiKey}`,
-              "Content-Type": "application/json",
-            },
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data?.data?.length > 0) {
-              setOpenAIModels(data.data);
-              setIsLoadingModels(false);
-              return;
-            }
-          }
-        } catch {
-          /* fall through to fallback */
-        }
-        setOpenAIModels([
-          { id: "gpt-5" },
-          { id: "gpt-5-mini" },
-          { id: "gpt-5-nano" },
-          { id: "gpt-4.1" },
-          { id: "gpt-4.1-mini" },
-          { id: "gpt-4o" },
-          { id: "gpt-4o-mini" },
-          { id: "o3-mini" },
-          { id: "o1-mini" },
-          { id: "gpt-4" },
-          { id: "gpt-3.5-turbo" },
-        ]);
-        setIsLoadingModels(false);
-      })();
-    } else if (selectedProvider === "native-ollama") {
+    setOllamaModels([]);
+    if (selectedProvider === "native-ollama") {
       const baseUrl = "http://localhost:11434/v1";
       fetchOllamaModels(baseUrl);
-    } else if (
-      selectedProvider === "custom" &&
-      formData.url &&
-      formData.apiKey
-    ) {
-      fetchOpenAIModels(formData.url, formData.apiKey);
-    } else if (selectedProvider === "openai-chatgpt") {
-      // Try fetching from API, fall back to known models
-      (async () => {
-        setIsLoadingModels(true);
-        try {
-          const tokenResult = await commands.chatgptOauthGetToken();
-          if (tokenResult.status === "ok") {
-            const resp = await fetch("https://api.openai.com/v1/models", {
-              headers: { Authorization: `Bearer ${tokenResult.data}` },
-            });
-            if (resp.ok) {
-              const data = await resp.json();
-              const uniqueModels = (data.data as { id: string }[]).filter((m, idx, arr) => arr.findIndex((x) => x.id === m.id) === idx);
-              if (uniqueModels.length > 0) {
-                setOpenAIModels(uniqueModels);
-                setIsLoadingModels(false);
-                return;
-              }
-            }
-          }
-        } catch { /* ignore */ }
-        // Fallback: Codex models available via ChatGPT subscription
-        setOpenAIModels([
-          { id: "gpt-5.4" }, { id: "gpt-5.3-codex" },
-          { id: "gpt-5.2-codex" }, { id: "gpt-5.2" }, { id: "gpt-5.1-codex-max" },
-          { id: "gpt-5.1" }, { id: "gpt-5.1-codex-mini" },
-        ]);
-        setIsLoadingModels(false);
-      })();
     }
-  }, [selectedProvider, formData.apiKey, formData.url]);
+  }, [selectedProvider]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -377,6 +199,7 @@ export function AIProviderConfig({
       onSubmit({
         ...formData,
         id: formData.id?.trim() || "",
+        url: "http://localhost:11434/v1",
       });
     } finally {
       setIsLoading(false);
@@ -430,24 +253,6 @@ export function AIProviderConfig({
 
           <Button
             type="button"
-            variant={selectedProvider === "openai-chatgpt" ? "default" : "outline"}
-            className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
-            onClick={() => {
-              setSelectedProvider("openai-chatgpt");
-              setFormData({
-                ...formData,
-                provider: "openai-chatgpt",
-                url: "https://api.openai.com/v1",
-                model: "gpt-5.5",
-              });
-            }}
-          >
-            <Icons.openai className="h-3.5 w-3.5" />
-            <span>chatgpt</span>
-          </Button>
-
-          <Button
-            type="button"
             variant={
               selectedProvider === "native-ollama" ? "default" : "outline"
             }
@@ -465,123 +270,13 @@ export function AIProviderConfig({
             <span>ollama</span>
           </Button>
 
-          <Button
-            type="button"
-            variant={selectedProvider === "custom" ? "default" : "outline"}
-            className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
-            onClick={() => {
-              setSelectedProvider("custom");
-              setFormData({
-                ...formData,
-                provider: "custom",
-                url: "http://localhost:11434/v1",
-              });
-            }}
-          >
-            <Icons.settings className="h-3.5 w-3.5" />
-            <span>custom</span>
-          </Button>
-
-          <Button
-            type="button"
-            variant={(selectedProvider as string) === "anthropic" ? "default" : "outline"}
-            className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
-            onClick={() => {
-              if ((selectedProvider as string) !== "anthropic") {
-                setSelectedProvider("anthropic");
-                setFormData({
-                  ...formData,
-                  provider: "anthropic",
-                  url: "",
-                  model: "claude-sonnet-4-6",
-                });
-              }
-            }}
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/images/claude-ai.svg" alt="Claude API" className="h-3.5 w-3.5 rounded-sm" />
-            <span>claude api</span>
-          </Button>
         </div>
-
-        {selectedProvider === "openai" && (
-          <div className="space-y-1">
-            <div className="space-y-1">
-              <Label htmlFor="apiKey" className="text-xs">api key</Label>
-              <div className="relative">
-                <Input
-                  id="apiKey"
-                  type={showApiKey ? "text" : "password"}
-                  placeholder="sk-..."
-                  value={formData.apiKey || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, apiKey: e.target.value })
-                  }
-                  className="pr-10 h-8 text-sm"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                >
-                  {showApiKey ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="model" className="text-xs">model</Label>
-              <Select
-                value={formData.model}
-                onValueChange={(value) =>
-                  setFormData({ ...formData, model: value })
-                }
-              >
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue
-                    placeholder={
-                      isLoadingModels ? "loading models..." : "select model"
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {openaiModels.length > 0 ? (
-                    openaiModels.map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.id}
-                      </SelectItem>
-                    ))
-                  ) : (
-                    <SelectItem value="no-models" disabled>
-                      {isLoadingModels ? "loading..." : "no models found"}
-                    </SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        )}
 
         {selectedProvider === "native-ollama" && (
           <div className="space-y-1">
-            <div className="space-y-1">
-              <Label htmlFor="baseUrl" className="text-xs">base url</Label>
-              <Input
-                id="baseUrl"
-                type="text"
-                placeholder="http://localhost:11434"
-                value={formData.url || ""}
-                onChange={(e) =>
-                  setFormData({ ...formData, url: e.target.value })
-                }
-                className="h-8 text-sm"
-              />
-            </div>
+            <p className="text-[10px] text-muted-foreground">
+              local endpoint: http://localhost:11434/v1
+            </p>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
               <div className="relative">
@@ -596,15 +291,15 @@ export function AIProviderConfig({
                   }
                   className="h-8 text-sm"
                 />
-                {openaiModels.length > 0 && (
+                {ollamaModels.length > 0 && (
                   <datalist id="ollama-models">
-                    {openaiModels.map((model) => (
+                    {ollamaModels.map((model) => (
                       <option key={model.id} value={model.id} />
                     ))}
                   </datalist>
                 )}
               </div>
-              {!isLoadingModels && openaiModels.length === 0 && (
+              {!isLoadingModels && ollamaModels.length === 0 && (
                 <p className="text-[10px] text-muted-foreground">
                   ollama not detected — type model name manually
                 </p>
@@ -616,151 +311,7 @@ export function AIProviderConfig({
           </div>
         )}
 
-        {selectedProvider === "custom" && (
-          <div className="space-y-1">
-            <div className="space-y-1">
-              <Label htmlFor="baseUrl" className="text-xs">base url</Label>
-              <Input
-                id="baseUrl"
-                type="text"
-                placeholder="https://api.example.com/v1"
-                value={formData.url || ""}
-                onChange={(e) =>
-                  setFormData({ ...formData, url: e.target.value })
-                }
-                className="h-8 text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="apiKey" className="text-xs">api key</Label>
-              <div className="relative">
-                <Input
-                  id="apiKey"
-                  type={showApiKey ? "text" : "password"}
-                  placeholder="your-api-key"
-                  value={formData.apiKey || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, apiKey: e.target.value })
-                  }
-                  className="pr-10 h-8 text-sm"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-0 top-0 h-full px-2 py-1 hover:bg-transparent"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                >
-                  {showApiKey ? (
-                    <EyeOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Eye className="h-3.5 w-3.5" />
-                  )}
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="model" className="text-xs">model</Label>
-              <div className="relative">
-                <Input
-                  id="model"
-                  type="text"
-                  list="custom-models"
-                  placeholder={isLoadingModels ? "loading..." : "type or select model"}
-                  value={formData.model || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, model: e.target.value })
-                  }
-                  className="h-8 text-sm"
-                />
-                {openaiModels.length > 0 && (
-                  <datalist id="custom-models">
-                    {openaiModels.map((model) => (
-                      <option key={model.id} value={model.id} />
-                    ))}
-                  </datalist>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
 
-        {selectedProvider === "openai-chatgpt" && (
-          <div className="space-y-1">
-            <div className="space-y-1">
-              <Label className="text-xs">chatgpt account</Label>
-              <ChatGptSignInButton />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="model" className="text-xs">model</Label>
-              <Input
-                id="model"
-                type="text"
-                list="chatgpt-models"
-                placeholder="gpt-5.5"
-                value={formData.model || ""}
-                onChange={(e) =>
-                  setFormData({ ...formData, model: e.target.value })
-                }
-                className="h-8 text-sm"
-              />
-              {openaiModels.length > 0 && (
-                <datalist id="chatgpt-models">
-                  {openaiModels.map((model) => (
-                    <option key={model.id} value={model.id} />
-                  ))}
-                </datalist>
-              )}
-            </div>
-          </div>
-        )}
-
-        {selectedProvider === "anthropic" && (
-          <div className="space-y-1">
-            {selectedProvider === "anthropic" && (
-              <div className="space-y-1 pt-1">
-                <Label htmlFor="anthropicApiKey" className="text-xs">api key</Label>
-                <div className="relative">
-                  <Input
-                    id="anthropicApiKey"
-                    type={showApiKey ? "text" : "password"}
-                    placeholder="sk-ant-..."
-                    value={formData.apiKey || ""}
-                    onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-                    className="pr-10 h-8 text-sm"
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-0 top-0 h-full px-2 py-1 hover:bg-transparent"
-                    onClick={() => setShowApiKey(!showApiKey)}
-                  >
-                    {showApiKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-1">
-              <Label htmlFor="model" className="text-xs">model</Label>
-              <Select
-                value={formData.model}
-                onValueChange={(value) => setFormData({ ...formData, model: value })}
-              >
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue placeholder="select model" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="claude-fable-5">claude fable 5</SelectItem>
-                  <SelectItem value="claude-opus-4-8">claude opus 4.8</SelectItem>
-                  <SelectItem value="claude-sonnet-4-6">claude sonnet 4.5</SelectItem>
-                  <SelectItem value="claude-haiku-4-5-20251001">claude haiku 4.5</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        )}
 
         <button
           type="button"
@@ -871,14 +422,6 @@ export const AIPresetDialog = ({
 
     (newPreset as any).maxTokens = (providerData as any).maxTokens ?? 4096;
 
-    // Add apiKey for providers that require it
-    if (
-      providerData.provider === "openai" ||
-      providerData.provider === "custom" ||
-      providerData.provider === "anthropic"
-    ) {
-      (newPreset as any).apiKey = providerData.apiKey;
-    }
 
     onSave(newPreset);
   };
@@ -893,8 +436,7 @@ export const AIPresetDialog = ({
         maxTokens: (preset as any).maxTokens ?? 4096,
         prompt: preset.prompt,
         defaultPreset: preset.defaultPreset,
-        apiKey: preset.apiKey || null,
-      }
+      } as AIPreset
     : undefined;
 
   return (
@@ -1379,12 +921,7 @@ export const AIPresetsSelector = ({
                                   const fullPreset = {
                                     ...preset,
                                     id: `${preset.id}`,
-                                    url:
-                                      preset.provider === "openai"
-                                        ? "https://api.openai.com/v1"
-                                        : preset.provider === "native-ollama"
-                                          ? "http://localhost:11434/v1"
-                                          : "",
+                                    url: "http://localhost:11434/v1",
                                     defaultPreset: false,
                                   } as AIPreset;
                                   setSelectedPresetToEdit(fullPreset);

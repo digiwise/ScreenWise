@@ -8,10 +8,6 @@
   "remote": {
     "urls": [
       "http://localhost:*",
-      "https://api.openai.com/*",
-      "https://*.openai.com/*",
-      "https://*.anthropic.com/*",
-      "https://*.ollama.ai/*",
       "https://*"
     ]
   },

@@ -20,6 +20,9 @@ use serde_json::{json, Value};
 
 use super::store_file::{read_store, write_store};
 
+const LOCAL_OLLAMA_URL: &str = "http://localhost:11434/v1";
+const DEFAULT_LOCAL_MODEL: &str = "ministral-3:latest";
+
 // ---------------------------------------------------------------------------
 // Provider model
 // ---------------------------------------------------------------------------
@@ -28,50 +31,21 @@ use super::store_file::{read_store, write_store};
 /// stored on disk and consumed by `resolve_preset` in `screenpipe-core`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    OpenAi,
-    Anthropic,
     NativeOllama,
-    Custom,
-    /// CLI refuses to write this — token lives in the encrypted secrets store
-    /// and is established by the OAuth login flow, not a flag.
-    OpenAiChatGpt,
 }
 
 impl Provider {
     pub fn parse(s: &str) -> Result<Self> {
         match s {
-            "openai" => Ok(Provider::OpenAi),
-            "anthropic" => Ok(Provider::Anthropic),
             "native-ollama" | "ollama" => Ok(Provider::NativeOllama),
-            "custom" => Ok(Provider::Custom),
-            "openai-chatgpt" => Ok(Provider::OpenAiChatGpt),
-            other => bail!(
-                "unknown provider '{}'. Valid: openai, anthropic, native-ollama, custom",
-                other
-            ),
+            other => bail!("unknown provider '{}'. Valid: native-ollama", other),
         }
     }
 
     pub fn as_canonical(self) -> &'static str {
         match self {
-            Provider::OpenAi => "openai",
-            Provider::Anthropic => "anthropic",
             Provider::NativeOllama => "native-ollama",
-            Provider::Custom => "custom",
-            Provider::OpenAiChatGpt => "openai-chatgpt",
         }
-    }
-
-    fn requires_url(self) -> bool {
-        matches!(self, Provider::NativeOllama | Provider::Custom)
-    }
-
-    fn requires_api_key(self) -> bool {
-        matches!(self, Provider::OpenAi | Provider::Anthropic)
-    }
-
-    fn forbids_api_key(self) -> bool {
-        matches!(self, Provider::NativeOllama | Provider::OpenAiChatGpt)
     }
 }
 
@@ -86,7 +60,6 @@ pub struct PresetInput {
     pub provider: Provider,
     pub model: String,
     pub url: Option<String>,
-    pub api_key: Option<String>,
     pub prompt: Option<String>,
     pub max_context_chars: Option<i64>,
     pub max_tokens: Option<i64>,
@@ -99,7 +72,6 @@ pub struct PresetPatch {
     pub provider: Option<Provider>,
     pub model: Option<String>,
     pub url: Option<String>,
-    pub api_key: Option<String>,
     pub prompt: Option<String>,
     pub max_context_chars: Option<i64>,
     pub max_tokens: Option<i64>,
@@ -160,37 +132,6 @@ pub fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_url(url: &str) -> Result<()> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        bail!("url must start with http:// or https:// (got '{}')", url);
-    }
-    Ok(())
-}
-
-fn validate_api_key_shape(provider: Provider, key: &str) -> Result<()> {
-    match provider {
-        Provider::OpenAi => {
-            if !key.starts_with("sk-") {
-                bail!(
-                    "openai api keys start with 'sk-' (got prefix '{}')",
-                    &key[..key.len().min(6)]
-                );
-            }
-        }
-        Provider::Anthropic => {
-            if !key.starts_with("sk-ant-") {
-                bail!(
-                    "anthropic api keys start with 'sk-ant-' (got prefix '{}')",
-                    &key[..key.len().min(8)]
-                );
-            }
-        }
-        // custom / others: free-form
-        _ => {}
-    }
-    Ok(())
-}
-
 fn validate_max_context_chars(v: i64) -> Result<()> {
     if !(1000..=2_000_000).contains(&v) {
         bail!(
@@ -208,60 +149,36 @@ fn validate_max_tokens(v: i64) -> Result<()> {
     Ok(())
 }
 
-/// Validate the resolved (provider, url, api_key) tuple against per-provider rules.
-fn validate_provider_combo(
-    provider: Provider,
-    url: Option<&str>,
-    api_key: Option<&str>,
-) -> Result<()> {
-    if provider == Provider::OpenAiChatGpt {
-        bail!(
-            "provider 'openai-chatgpt' uses OAuth and cannot be configured via CLI — \
-             run the desktop app's ChatGPT login flow, then reference the auto-created preset"
-        );
-    }
-
-    if provider.requires_url() && url.map(str::is_empty).unwrap_or(true) {
-        let hint = if provider == Provider::NativeOllama {
-            " (e.g. --url http://localhost:11434/v1)"
-        } else {
-            ""
-        };
-        bail!(
-            "provider '{}' requires --url{}",
-            provider.as_canonical(),
-            hint
-        );
-    }
-    if provider.requires_api_key() && api_key.map(str::is_empty).unwrap_or(true) {
-        bail!(
-            "provider '{}' requires --api-key (or set it later via `pipe models update`)",
-            provider.as_canonical()
-        );
-    }
-    if provider.forbids_api_key() && api_key.map(|s| !s.is_empty()).unwrap_or(false) {
-        let reason = match provider {
-            Provider::NativeOllama => "local ollama doesn't authenticate",
-            _ => "this provider does not accept --api-key",
-        };
-        bail!(
-            "provider '{}' does not accept --api-key — {}",
-            provider.as_canonical(),
-            reason
-        );
-    }
-
-    if let Some(u) = url {
-        if !u.is_empty() {
-            validate_url(u)?;
-        }
-    }
-    if let Some(k) = api_key {
-        if !k.is_empty() {
-            validate_api_key_shape(provider, k)?;
+/// Validate the resolved provider and local Ollama URL.
+fn validate_provider_combo(_provider: Provider, url: Option<&str>) -> Result<()> {
+    if let Some(url) = url.filter(|url| !url.is_empty()) {
+        if url != LOCAL_OLLAMA_URL {
+            bail!(
+                "only the local Ollama endpoint {} is supported",
+                LOCAL_OLLAMA_URL
+            );
         }
     }
     Ok(())
+}
+
+fn apply_local_provider_fields(
+    target: &mut serde_json::Map<String, Value>,
+    model: Option<String>,
+    replace_legacy_model: bool,
+) {
+    target.insert(
+        "provider".into(),
+        json!(Provider::NativeOllama.as_canonical()),
+    );
+    if let Some(model) = model {
+        target.insert("model".into(), json!(model));
+    } else if replace_legacy_model {
+        target.insert("model".into(), json!(DEFAULT_LOCAL_MODEL));
+    }
+    target.insert("url".into(), json!(LOCAL_OLLAMA_URL));
+    target.remove("apiKey");
+    target.remove("api_key");
 }
 
 // ---------------------------------------------------------------------------
@@ -294,11 +211,7 @@ pub fn create(input: PresetInput) -> Result<()> {
     if let Some(t) = input.max_tokens {
         validate_max_tokens(t)?;
     }
-    validate_provider_combo(
-        input.provider,
-        input.url.as_deref(),
-        input.api_key.as_deref(),
-    )?;
+    validate_provider_combo(input.provider, input.url.as_deref())?;
 
     let mut store = read_store()?;
     if !store.is_object() {
@@ -323,12 +236,7 @@ pub fn create(input: PresetInput) -> Result<()> {
         "defaultPreset": input.set_default,
     });
 
-    if let Some(u) = input.url.filter(|s| !s.is_empty()) {
-        new_preset["url"] = json!(u);
-    }
-    if let Some(k) = input.api_key.filter(|s| !s.is_empty()) {
-        new_preset["apiKey"] = json!(k);
-    }
+    new_preset["url"] = json!(LOCAL_OLLAMA_URL);
     if let Some(p) = input.prompt {
         new_preset["prompt"] = json!(p);
     }
@@ -367,37 +275,21 @@ pub fn update(id: &str, patch: PresetPatch) -> Result<()> {
 
     // Snapshot fields after the patch so we can re-validate the combo.
     let current = arr[idx].clone();
+    let stored_provider = current
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let legacy_provider = !matches!(stored_provider, "native-ollama" | "ollama");
     let new_provider = match patch.provider {
         Some(p) => p,
-        None => Provider::parse(
-            current
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-        )
+        None => Provider::parse(if legacy_provider {
+            "native-ollama"
+        } else {
+            stored_provider
+        })
         .with_context(|| format!("preset '{}' has invalid provider on disk", id))?,
     };
-    let new_url = patch
-        .url
-        .clone()
-        .or_else(|| {
-            current
-                .get("url")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .filter(|s| !s.is_empty());
-    let new_api_key = patch
-        .api_key
-        .clone()
-        .or_else(|| {
-            current
-                .get("apiKey")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .filter(|s| !s.is_empty());
-
+    let requested_url = patch.url.as_deref().filter(|url| !url.is_empty());
     if let Some(ref m) = patch.model {
         if m.trim().is_empty() {
             bail!("--model cannot be empty");
@@ -409,33 +301,14 @@ pub fn update(id: &str, patch: PresetPatch) -> Result<()> {
     if let Some(t) = patch.max_tokens {
         validate_max_tokens(t)?;
     }
-    validate_provider_combo(new_provider, new_url.as_deref(), new_api_key.as_deref())?;
+    validate_provider_combo(new_provider, requested_url)?;
 
     // All checks passed — apply.
     let target = arr[idx]
         .as_object_mut()
         .ok_or_else(|| anyhow!("preset '{}' is not an object", id))?;
 
-    if let Some(p) = patch.provider {
-        target.insert("provider".into(), json!(p.as_canonical()));
-    }
-    if let Some(m) = patch.model {
-        target.insert("model".into(), json!(m));
-    }
-    if let Some(u) = patch.url {
-        if u.is_empty() {
-            target.remove("url");
-        } else {
-            target.insert("url".into(), json!(u));
-        }
-    }
-    if let Some(k) = patch.api_key {
-        if k.is_empty() {
-            target.remove("apiKey");
-        } else {
-            target.insert("apiKey".into(), json!(k));
-        }
-    }
+    apply_local_provider_fields(target, patch.model, legacy_provider);
     if let Some(p) = patch.prompt {
         if p.is_empty() {
             target.remove("prompt");
@@ -643,39 +516,35 @@ mod tests {
 
     #[test]
     fn provider_combos() {
-        assert!(validate_provider_combo(
-            Provider::NativeOllama,
-            Some("http://localhost:11434/v1"),
-            None
-        )
-        .is_ok());
-        assert!(validate_provider_combo(Provider::NativeOllama, None, None).is_err());
-        assert!(validate_provider_combo(
-            Provider::NativeOllama,
-            Some("http://x"),
-            Some("anything")
-        )
-        .is_err());
-
-        assert!(validate_provider_combo(Provider::OpenAi, None, Some("sk-abc")).is_ok());
-        assert!(validate_provider_combo(Provider::OpenAi, None, None).is_err());
-        assert!(validate_provider_combo(Provider::OpenAi, None, Some("nope")).is_err());
-
-        assert!(validate_provider_combo(Provider::Anthropic, None, Some("sk-ant-x")).is_ok());
-        assert!(validate_provider_combo(Provider::Anthropic, None, Some("sk-x")).is_err());
-
-        assert!(validate_provider_combo(Provider::Custom, Some("http://x"), Some("k")).is_ok());
-        assert!(validate_provider_combo(Provider::Custom, None, Some("k")).is_err());
-
-        assert!(validate_provider_combo(Provider::OpenAiChatGpt, None, None).is_err());
+        assert!(validate_provider_combo(Provider::NativeOllama, Some(LOCAL_OLLAMA_URL)).is_ok());
+        assert!(validate_provider_combo(Provider::NativeOllama, None).is_ok());
+        assert!(validate_provider_combo(Provider::NativeOllama, Some("http://x")).is_err());
+        assert!(validate_provider_combo(Provider::NativeOllama, Some("")).is_ok());
     }
 
     #[test]
-    fn url_validation() {
-        assert!(validate_url("http://localhost:11434/v1").is_ok());
-        assert!(validate_url("https://api.openai.com").is_ok());
-        assert!(validate_url("ftp://x").is_err());
-        assert!(validate_url("just-text").is_err());
+    fn legacy_provider_records_migrate_to_local_ollama() {
+        for provider in [
+            "openai",
+            "openai-chatgpt",
+            "anthropic",
+            "custom",
+            "screenpipe-cloud",
+            "pi",
+            "unknown-provider",
+        ] {
+            let mut preset = json!({
+                "provider": provider,
+                "model": "remote-model",
+                "url": "https://remote.example/v1",
+                "apiKey": "secret"
+            });
+            apply_local_provider_fields(preset.as_object_mut().unwrap(), None, true);
+            assert_eq!(preset["provider"], "native-ollama");
+            assert_eq!(preset["model"], DEFAULT_LOCAL_MODEL);
+            assert_eq!(preset["url"], LOCAL_OLLAMA_URL);
+            assert!(preset.get("apiKey").is_none());
+        }
     }
 
     #[test]

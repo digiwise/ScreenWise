@@ -529,8 +529,7 @@ mod tests {
     #[test]
     fn default_path_lives_under_screenpipe_dir() {
         let p = RfdetrConfig::default_model_path();
-        let s = p.to_string_lossy();
-        assert!(s.contains(".screenpipe/models/rfdetr_v12.onnx"));
+        assert!(p.ends_with(Path::new(".screenpipe/models/rfdetr_v12.onnx")));
     }
 
     #[test]

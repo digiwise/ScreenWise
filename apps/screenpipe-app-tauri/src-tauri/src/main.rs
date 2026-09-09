@@ -34,7 +34,6 @@ mod agent_event_emitter;
 mod audio_exclusions;
 mod calendar;
 mod capture_session;
-mod chatgpt_oauth;
 #[allow(deprecated)]
 mod commands;
 mod disk_usage;
@@ -352,7 +351,6 @@ macro_rules! define_specta_builder {
             .typ::<suggestions::Suggestion>()
             .typ::<hardware::HardwareCapability>()
             .typ::<enterprise_install_metadata::EnterpriseInstallMetadata>()
-            .typ::<chatgpt_oauth::ChatGptOAuthStatus>()
             .typ::<oauth::OAuthStatus>()
     }};
 }

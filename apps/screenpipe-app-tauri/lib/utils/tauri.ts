@@ -101,54 +101,6 @@ async calendarStatus() : Promise<Result<CalendarStatus, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async chatgptOauthCheckToken() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_check_token") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async chatgptOauthGetToken() : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_get_token") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async chatgptOauthLogin() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_login") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async chatgptOauthLogout() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_logout") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async chatgptOauthModels() : Promise<Result<string[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_models") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async chatgptOauthStatus() : Promise<Result<ChatGptOAuthStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Check only accessibility permission
  * Use this for polling to check if user has granted accessibility permission
@@ -1907,7 +1859,7 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 /** user-defined types **/
 
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
-export type AIProviderType = "openai" | "openai-chatgpt" | "native-ollama" | "custom" | "anthropic"
+export type AIProviderType = "native-ollama"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
 export type BootPhaseSnapshot = {
 /**
@@ -1959,7 +1911,6 @@ endDisplay: string; attendees: string[]; location: string | null; meetingUrl: st
  */
 source?: string }
 export type CalendarStatus = { available: boolean; authorized: boolean; authorizationStatus: string; calendarCount: number }
-export type ChatGptOAuthStatus = { logged_in: boolean }
 /**
  * A skill folder discovered somewhere on the user's device.
  */
@@ -2051,21 +2002,9 @@ export type PiInfo = { running: boolean; projectDir: string | null; pid: number 
  */
 export type PiProviderConfig = {
 /**
- * Provider type: "openai", "native-ollama", "custom"
- */
-provider: string;
-/**
- * Base URL for the provider API
- */
-url: string;
-/**
- * Model ID to use
+ * Local Ollama model ID to use.
  */
 model: string;
-/**
- * Optional API key for the provider
- */
-apiKey: string | null;
 /**
  * Max output tokens (default 4096)
  */
@@ -2435,18 +2374,10 @@ asyncImagePiiRedaction?: boolean;
  * construction — pixels and text never leave the box. Slower,
  * especially on weak hardware (~1-3 s per text row, ~60-180 ms
  * per frame).
- * - `"tinfoil"`: send to the screenpipe Tinfoil enclave (H200,
- * confidential compute). Much faster (~30-100 ms per row /
- * frame). Data leaves the device but is end-to-end encrypted
- * into an attested confidential-compute enclave that even
- * Tinfoil ops can't read into. Requires network +
- * `SCREENPIPE_PRIVACY_FILTER_API_KEY` (or the cloud auth key).
- *
- * Note on attestation: the proper attested-transport client
- * (Tinfoil's secure-client SDK) is Go/Python/JS-only at time of
- * writing. The Rust adapter currently uses plain HTTPS — which
- * gives confidentiality vs. the network but NOT vs. a malicious
- * Tinfoil operator. Tracked separately; structured for swap-in.
+ * Legacy values such as `"tinfoil"`, `"cloud"`, and `"enclave"` are
+ * accepted when reading existing settings and resolve to local mode.
+ * New installations use `"local"`; captured data never leaves the
+ * device for PII redaction.
  */
 piiBackend?: string;
 /**

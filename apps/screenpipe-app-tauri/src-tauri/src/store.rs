@@ -733,16 +733,8 @@ fn default_overlay_mode() -> String {
 #[derive(Serialize, Deserialize, Type, Clone, Default)]
 pub enum AIProviderType {
     #[default]
-    #[serde(rename = "openai")]
-    OpenAI,
-    #[serde(rename = "openai-chatgpt")]
-    OpenAIChatGPT,
     #[serde(rename = "native-ollama")]
     NativeOllama,
-    #[serde(rename = "custom")]
-    Custom,
-    #[serde(rename = "anthropic")]
-    Anthropic,
 }
 
 #[derive(Serialize, Deserialize, Type, Clone)]
@@ -1015,28 +1007,35 @@ impl SettingsStore {
                 );
             }
 
-            // Sanitize unknown provider types in aiPresets to prevent deserialization failures
-            let known_providers = [
-                "openai",
-                "openai-chatgpt",
-                "native-ollama",
-                "custom",
-                "anthropic",
-            ];
+            // Sanitize retired or unknown provider types in aiPresets to keep
+            // historical settings readable without retaining remote execution.
+            let known_providers = ["native-ollama"];
             if let Some(presets) = obj.get_mut("aiPresets") {
                 if let Some(arr) = presets.as_array_mut() {
                     for preset in arr.iter_mut() {
-                        let legacy_cloud = preset
+                        let retired_provider = preset
                             .get("provider")
                             .and_then(|p| p.as_str())
                             .map(|provider| {
                                 matches!(
                                     provider,
-                                    "screenpipe-cloud" | "pi" | "claude-code" | "opencode"
+                                    "screenpipe-cloud"
+                                        | "pi"
+                                        | "claude-code"
+                                        | "opencode"
+                                        | "openai"
+                                        | "openai-chatgpt"
+                                        | "anthropic"
+                                        | "custom"
                                 )
                             })
                             .unwrap_or(false);
-                        if legacy_cloud {
+                        let unknown_provider = preset
+                            .get("provider")
+                            .and_then(|p| p.as_str())
+                            .map(|provider| !known_providers.contains(&provider))
+                            .unwrap_or(false);
+                        if retired_provider || unknown_provider {
                             if let Some(obj) = preset.as_object_mut() {
                                 obj.insert(
                                     "provider".to_string(),
@@ -1053,20 +1052,6 @@ impl SettingsStore {
                                 obj.insert("apiKey".to_string(), Value::Null);
                             }
                             continue;
-                        }
-                        if let Some(provider) = preset.get("provider").and_then(|p| p.as_str()) {
-                            if !known_providers.contains(&provider) {
-                                tracing::warn!(
-                                    "unknown AI provider '{}' in preset, falling back to 'custom'",
-                                    provider
-                                );
-                                if let Some(obj) = preset.as_object_mut() {
-                                    obj.insert(
-                                        "provider".to_string(),
-                                        Value::String("custom".to_string()),
-                                    );
-                                }
-                            }
                         }
                     }
                 }
@@ -1471,7 +1456,7 @@ mod tests {
 
     fn presets_n(n: usize) -> Vec<Value> {
         (0..n)
-            .map(|i| json!({"id": format!("p{}", i), "model": "x", "provider": "screenpipe-cloud"}))
+            .map(|i| json!({"id": format!("p{}", i), "model": "x", "provider": "native-ollama"}))
             .collect()
     }
 
@@ -1640,7 +1625,7 @@ mod tests {
         let presets = sanitized2.get("aiPresets").unwrap().as_array().unwrap();
         assert_eq!(
             presets[0].get("provider").unwrap().as_str().unwrap(),
-            "custom"
+            "native-ollama"
         );
     }
 
@@ -1661,6 +1646,26 @@ mod tests {
         assert_eq!(preset["url"], "http://localhost:11434/v1");
         assert_eq!(preset["model"], "ministral-3:latest");
         assert!(preset["apiKey"].is_null());
+    }
+
+    #[test]
+    fn test_sanitize_direct_remote_presets_to_local_ollama() {
+        let stored = json!({
+            "aiPresets": [
+                {"provider": "openai", "url": "https://api.openai.com/v1", "model": "gpt-4o", "apiKey": "sk-old"},
+                {"provider": "openai-chatgpt", "url": "https://chatgpt.com/backend-api", "model": "gpt-5", "apiKey": "oauth-old"},
+                {"provider": "anthropic", "url": "https://api.anthropic.com", "model": "claude", "apiKey": "sk-ant-old"},
+                {"provider": "custom", "url": "https://models.example/v1", "model": "remote", "apiKey": "old"}
+            ]
+        });
+
+        let sanitized = SettingsStore::sanitize_legacy_fields(stored);
+        for preset in sanitized["aiPresets"].as_array().unwrap() {
+            assert_eq!(preset["provider"], "native-ollama");
+            assert_eq!(preset["url"], "http://localhost:11434/v1");
+            assert_eq!(preset["model"], "ministral-3:latest");
+            assert!(preset["apiKey"].is_null());
+        }
     }
 
     #[test]

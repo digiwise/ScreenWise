@@ -370,18 +370,10 @@ pub struct RecordingSettings {
     ///   construction — pixels and text never leave the box. Slower,
     ///   especially on weak hardware (~1-3 s per text row, ~60-180 ms
     ///   per frame).
-    /// - `"tinfoil"`: send to the screenpipe Tinfoil enclave (H200,
-    ///   confidential compute). Much faster (~30-100 ms per row /
-    ///   frame). Data leaves the device but is end-to-end encrypted
-    ///   into an attested confidential-compute enclave that even
-    ///   Tinfoil ops can't read into. Requires network +
-    ///   `SCREENPIPE_PRIVACY_FILTER_API_KEY` (or the cloud auth key).
-    ///
-    /// Note on attestation: the proper attested-transport client
-    /// (Tinfoil's secure-client SDK) is Go/Python/JS-only at time of
-    /// writing. The Rust adapter currently uses plain HTTPS — which
-    /// gives confidentiality vs. the network but NOT vs. a malicious
-    /// Tinfoil operator. Tracked separately; structured for swap-in.
+    /// Legacy values such as `"tinfoil"`, `"cloud"`, and `"enclave"` are
+    /// accepted when reading existing settings and resolve to local mode.
+    /// New installations use `"local"`; captured data never leaves the
+    /// device for PII redaction.
     #[serde(rename = "piiBackend", default = "default_pii_backend")]
     pub pii_backend: String,
 

@@ -518,28 +518,15 @@ impl ServerCore {
         // own toggle. Both off by default; users opt in through
         // Settings → Privacy → "AI PII removal".
         //
-        // The single `pii_backend` config flag selects the inner
-        // adapter for BOTH modalities:
-        //   - "local"   → on-device ONNX models for both text and image
-        //   - "tinfoil" → confidential-compute enclave (H200) for both
-        let backend = config.pii_backend.as_str();
-        let use_tinfoil = matches!(backend, "tinfoil" | "cloud" | "enclave");
+        // The persisted backend string is retained for settings-file
+        // compatibility, but every value resolves to local redaction.
 
         // User-selected redaction classes (the `piiRedactionLabels`
         // setting, default ["secret"]). Local adapters return spans and
         // we filter client-side via the text/image policies built from
-        // this list; the tinfoil adapters forward the raw list so the
-        // enclave filters server-side. `secret` is always included
+        // this list. `secret` is always included
         // regardless (see screenpipe_redact::parse_allow_list).
         let pii_labels = config.pii_redaction_labels.clone();
-
-        // Cloud Clerk JWT — same token used for the cloud transcription
-        // bearer (see line 96). Tinfoil's enclave is on the screenpipe
-        // cloud auth boundary, so the user's signed-in token is what
-        // authenticates redactor requests. Without this the worker logs
-        // "no api key — requests will be un-authenticated" on every
-        // restart even when the user is signed in.
-        let tinfoil_api_key = config.user_id.clone().filter(|s| !s.is_empty());
 
         // One shutdown signal, shared across both worker spawn paths and
         // stored on Self for `shutdown()` to fire on app quit.
@@ -548,7 +535,6 @@ impl ServerCore {
         if config.async_pii_redaction {
             use screenpipe_redact::adapters::onnx::{OnnxConfig, OnnxRedactor};
             use screenpipe_redact::adapters::opf::{OpfAdapter, OpfConfig};
-            use screenpipe_redact::adapters::tinfoil::{TinfoilConfig, TinfoilRedactor};
             use screenpipe_redact::pipeline::{Pipeline, PipelineConfig};
             use screenpipe_redact::worker::{Worker, WorkerConfig, ALL_TARGET_TABLES};
             use screenpipe_redact::Redactor;
@@ -560,7 +546,6 @@ impl ServerCore {
             //                 huggingface.co/screenpipe/pii-text-redactor
             //                 in the background; until the download
             //                 finishes the worker runs regex-only.
-            //   - "tinfoil" → Tinfoil confidential-compute enclave.
             //
             // The worker is destructive-only: it overwrites the source
             // columns (`text` / `transcription` / `text_content` /
@@ -568,33 +553,7 @@ impl ServerCore {
             // `*_redacted_at`. That's what the user-facing "AI PII
             // removal" toggle means. The 20260507 migration drops the
             // dead duplicate columns the old non-destructive mode used.
-            if use_tinfoil {
-                let ai: Arc<dyn Redactor> = Arc::new(TinfoilRedactor::new(TinfoilConfig {
-                    api_key: tinfoil_api_key.clone(),
-                    labels: pii_labels.clone(),
-                    ..Default::default()
-                }));
-                info!(
-                    model = ai.name(),
-                    version = ai.version(),
-                    has_api_key = tinfoil_api_key.is_some(),
-                    "starting async text-PII reconciliation worker (backend=tinfoil)"
-                );
-                let pipeline = Pipeline::regex_then_ai(
-                    ai,
-                    PipelineConfig {
-                        policy: TextRedactionPolicy::from_labels(&pii_labels),
-                        ..Default::default()
-                    },
-                );
-                let pipeline_arc = Arc::new(pipeline) as Arc<dyn Redactor>;
-                let cfg = WorkerConfig {
-                    tables: ALL_TARGET_TABLES.to_vec(),
-                    ..Default::default()
-                };
-                let _ = Worker::new(db.pool.clone(), pipeline_arc, cfg)
-                    .spawn_with_shutdown(redact_shutdown.clone());
-            } else {
+            {
                 // Local mode: spawn the download+load off the boot path
                 // so a slow first-run HF pull doesn't block the app
                 // launch. The worker is created inside the spawned
@@ -658,10 +617,8 @@ impl ServerCore {
                                 }
                                 Err(e) => {
                                     warn!(
-                                        "couldn't load OPF redactor either ({e}); running \
-                                         text-PII worker in regex-only mode. Switch backend \
-                                         to 'tinfoil' in Settings → Privacy → AI PII removal \
-                                         to use the cloud enclave instead."
+                                         "couldn't load OPF redactor either ({e}); running \
+                                         text-PII worker in regex-only mode."
                                     );
                                     Pipeline::regex_only_with_policy(policy.clone())
                                 }
@@ -680,36 +637,12 @@ impl ServerCore {
 
         if config.async_image_pii_redaction {
             use screenpipe_redact::adapters::rfdetr::{RfdetrConfig, RfdetrRedactor};
-            use screenpipe_redact::adapters::tinfoil_image::{
-                TinfoilImageConfig, TinfoilImageRedactor,
-            };
             use screenpipe_redact::image::worker::{ImageWorker, ImageWorkerConfig};
             use screenpipe_redact::ImageRedactionPolicy;
             use screenpipe_redact::ImageRedactor;
 
             let pool = db.pool.clone();
-            if use_tinfoil {
-                let detector = Arc::new(TinfoilImageRedactor::new(TinfoilImageConfig {
-                    api_key: tinfoil_api_key.clone(),
-                    labels: pii_labels.clone(),
-                    ..Default::default()
-                })) as Arc<dyn ImageRedactor>;
-                info!(
-                    model = detector.name(),
-                    version = detector.version(),
-                    has_api_key = tinfoil_api_key.is_some(),
-                    "starting async image-PII worker (backend=tinfoil)"
-                );
-                let _ = ImageWorker::new(
-                    pool,
-                    detector,
-                    ImageWorkerConfig {
-                        policy: ImageRedactionPolicy::from_labels(&pii_labels),
-                        ..Default::default()
-                    },
-                )
-                .spawn_with_shutdown(redact_shutdown.clone());
-            } else {
+            {
                 // Local mode: rfdetr ONNX. First-run downloads ~108 MB
                 // from huggingface.co/screenpipe/pii-image-redactor and
                 // verifies SHA-256 before landing in ~/.screenpipe/models/.
@@ -739,8 +672,7 @@ impl ServerCore {
                         Err(e) => {
                             warn!(
                                 "image-PII (local) enabled but couldn't load local rfdetr image \
-                                 model; skipping: {e}. switch to backend=tinfoil in Settings to \
-                                 use the cloud enclave instead."
+                                 model; skipping: {e}."
                             );
                         }
                     }

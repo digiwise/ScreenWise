@@ -46,7 +46,7 @@ pub struct ExecutionHandle {
 #[async_trait::async_trait]
 pub trait AgentExecutor: Send + Sync {
     /// Execute `prompt` using `model` with the given `working_dir` as cwd.
-    /// `provider` overrides the local Ollama default (e.g. `"anthropic"`, `"openai"`).
+    /// `provider` overrides the local Ollama default.
     /// `shared_pid` is set synchronously right after the subprocess spawns,
     /// enabling the caller to kill the process on timeout with no race.
     /// `continue_session` — when `true`, the agent resumes its last session for
