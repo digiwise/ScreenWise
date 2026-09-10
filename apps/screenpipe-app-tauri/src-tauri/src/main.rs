@@ -40,16 +40,13 @@ mod embedded_server;
 mod enterprise_install_metadata;
 mod enterprise_policy;
 mod enterprise_sync;
-mod google_calendar;
 mod hardware;
-mod ics_calendar;
 mod livetext;
 #[cfg(target_os = "macos")]
 mod livetext_ffi;
 mod meeting_export;
 mod meeting_live_notes;
 mod meeting_stall_notifications;
-mod oauth;
 mod owned_browser;
 // Cross-platform shape: macOS reads Arc/Chrome/Brave/Edge cookies and
 // injects via WKHTTPCookieStore; other platforms compile to a stub
@@ -62,7 +59,6 @@ mod permissions;
 mod pi;
 mod pi_command_queue;
 mod recording;
-mod remote_sync_commands;
 mod retention;
 mod secrets;
 mod server;
@@ -344,12 +340,10 @@ macro_rules! define_specta_builder {
             .typ::<OnboardingStore>()
             .typ::<calendar::CalendarStatus>()
             .typ::<calendar::CalendarEventItem>()
-            .typ::<store::IcsCalendarEntry>()
             .typ::<suggestions::CachedSuggestions>()
             .typ::<suggestions::Suggestion>()
             .typ::<hardware::HardwareCapability>()
             .typ::<enterprise_install_metadata::EnterpriseInstallMetadata>()
-            .typ::<oauth::OAuthStatus>()
     }};
 }
 
@@ -742,12 +736,9 @@ async fn main() {
     #[cfg(target_os = "macos")]
     let app = app.plugin(tauri_nspanel::init());
 
-    let sync_scheduler = screenpipe_connect::sync_scheduler::SyncScheduler::new();
-
     let app = app.manage(recording_state)
         .manage(pi_state)
         .manage(suggestions_state)
-        .manage(sync_scheduler)
         .invoke_handler(tauri_helper::tauri_collect_commands!())
         .setup(move |app| {
             //deep link register_all
@@ -1483,21 +1474,6 @@ async fn main() {
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 calendar::start_calendar_events_publisher().await;
-            });
-
-            // Start ICS calendar poller (polls ICS feeds every 10 min)
-            let ics_app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-                ics_calendar::start_ics_calendar_poller(ics_app_handle).await;
-            });
-
-            // Start Google Calendar publisher (polls /connections/google-calendar/events
-            // every 60s and pushes into the calendar_events bus). Required for the
-            // 2-3 min prewarm toast to work for users on gmail/gcal.
-            let gcal_app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                google_calendar::start_google_calendar_publisher(gcal_app_handle).await;
             });
 
             // Enterprise telemetry sync (no-op stub on consumer builds).

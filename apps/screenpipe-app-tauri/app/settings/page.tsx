@@ -92,10 +92,11 @@ function SettingsContent() {
     serialize: (v) => v,
   });
 
-  // Connections moved to the main sidebar — redirect any old deep-link to home.
+  // Retired connection pages map to ordinary local settings rather than
+  // exposing third-party integration configuration.
   useEffect(() => {
     const raw = new URLSearchParams(window.location.search).get("section");
-    if (raw === "connections") router.replace("/?section=connections");
+    if (raw === "connections") router.replace("/settings?section=general");
   }, [router]);
 
   // Enterprise guard: if the active section is hidden by policy, redirect to the

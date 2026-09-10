@@ -963,23 +963,17 @@ fn remove_web_search_extension(project_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Install the MCP bridge extension. Registers proxy tools that route
-/// `mcp_call` / `mcp_list_tools` requests through the local
-/// `/mcp-servers/*` API. Always installed — does nothing when zero
-/// servers are registered.
-fn ensure_mcp_bridge_extension(project_dir: &str) -> Result<(), String> {
-    let ext_dir = std::path::Path::new(project_dir)
+/// Remove the retired arbitrary MCP proxy extension from existing chat projects.
+fn remove_mcp_bridge_extension(project_dir: &str) -> Result<(), String> {
+    let ext_path = std::path::Path::new(project_dir)
         .join(".pi")
-        .join("extensions");
-    std::fs::create_dir_all(&ext_dir)
-        .map_err(|e| format!("Failed to create extensions dir: {}", e))?;
-
-    let ext_path = ext_dir.join("mcp-bridge.ts");
-    let ext_content = include_str!("../assets/extensions/mcp-bridge.ts");
-    std::fs::write(&ext_path, ext_content)
-        .map_err(|e| format!("Failed to write mcp-bridge extension: {}", e))?;
-
-    debug!("mcp-bridge extension installed at {:?}", ext_path);
+        .join("extensions")
+        .join("mcp-bridge.ts");
+    if ext_path.exists() {
+        std::fs::remove_file(&ext_path)
+            .map_err(|e| format!("Failed to remove mcp-bridge extension: {}", e))?;
+        info!("Retired MCP bridge extension removed");
+    }
     Ok(())
 }
 
@@ -1250,9 +1244,7 @@ pub async fn pi_start_inner(
     ensure_screenpipe_skill(&project_dir)?;
 
     remove_web_search_extension(&project_dir)?;
-
-    // MCP bridge: lets the agent reach user-registered MCP servers.
-    ensure_mcp_bridge_extension(&project_dir)?;
+    remove_mcp_bridge_extension(&project_dir)?;
 
     // Ensure Pi is configured with the user's provider
     ensure_pi_config(provider_config.as_ref()).await?;
@@ -1538,14 +1530,10 @@ pub async fn pi_start_inner(
         cmd.env("BASH_ENV", p);
     }
 
-    // Backstop: if local_api_context_from_app couldn't resolve a key earlier
-    // (line ~1477) but the disk-backed store has one, set it here so
-    // mcp-bridge.ts can authenticate its GET /mcp-servers calls. Sets the
-    // canonical name + the deprecated alias for old pipe.md files on disk.
-    // TODO(remove next release): drop SCREENPIPE_API_AUTH_KEY alias.
+    // Backstop: if local_api_context_from_app couldn't resolve a key earlier,
+    // set the disk-backed local API token for authenticated local tool calls.
     if let Some(key) = crate::store::resolved_api_auth_key() {
         cmd.env("SCREENPIPE_LOCAL_API_KEY", &key);
-        cmd.env("SCREENPIPE_API_AUTH_KEY", key); // deprecated alias
     }
 
     // Spawn process
@@ -2260,22 +2248,6 @@ pub async fn pi_new_session(
 #[specta::specta]
 pub async fn pi_check() -> Result<PiCheckResult, String> {
     let path = find_pi_executable();
-    Ok(PiCheckResult {
-        available: path.is_some(),
-        path,
-    })
-}
-
-/// Locate the bundled bun binary so the frontend can write absolute-path
-/// MCP configs (e.g. `{ command: <bun>, args: ["x", "screenpipe-mcp@latest"] }`)
-/// instead of `npx -y screenpipe-mcp`. npx requires a global Node install
-/// — many Claude Desktop users don't have it, and the silent first-run
-/// `npx` download often blows past Claude's MCP startup timeout. Using
-/// the bun we already ship sidesteps both failure modes.
-#[tauri::command]
-#[specta::specta]
-pub async fn bun_check() -> Result<PiCheckResult, String> {
-    let path = find_bun_executable();
     Ok(PiCheckResult {
         available: path.is_some(),
         path,

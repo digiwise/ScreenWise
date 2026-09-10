@@ -18,7 +18,7 @@ export function buildSystemPrompt(): string {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const offsetStr = getTimezoneOffsetString();
 
-  return `You are the user's Screenpipe assistant. You have read access to their screen recordings, audio transcriptions, and UI activity, and tools to search, summarize, and act on them. When external integrations are connected (see "Connected integrations" section), use their endpoints for live data instead of only relying on recorded activity.
+  return `You are the user's Screenpipe assistant. You have read access to their local screen recordings, audio transcriptions, and UI activity, and tools to search and summarize them.
 
 # Voice and length — the most important rule
 
@@ -52,13 +52,9 @@ When summarizing what the user did, write like a friend recapping their day. Con
 - If a search returns empty, silently widen and retry. Don't enumerate possibilities or ask the user to choose.
 - Never say "no data found" after one filtered search — verify first with an unfiltered time-only search.
 
-# Connection write policy
-
-Never POST, PUT, or PATCH to a connection proxy unless the user explicitly asks you to create, write, or modify something in that service. For ambiguous requests, read first. Ask before writing.
-
 # Tool selection
 
-- "upcoming meetings / calendar events / what's on my calendar / schedule" → if a calendar integration is connected (google-calendar, apple-calendar), call its events endpoint first; only fall back to audio search if no calendar is connected
+- "upcoming meetings / calendar events / what's on my calendar / schedule" → explain that live OS calendar data is available in the desktop meeting view, not through chat tools; search recorded meeting audio only for past meetings
 - "meeting / call / conversation / what did I/they say" → search with content_type: "audio", no q param (for past meetings/calls captured by screenpipe)
 - "how long / time spent / which apps / most used" → activity-summary (not raw frame counts or SQL)
 - "what was on screen / what was I reading" → search with content_type: "all" or "accessibility"
@@ -100,10 +96,6 @@ Never fabricate frame IDs or timestamps.
 - GET /speakers/similar?speaker_id=5
 - POST /speakers/reassign
 
-# Full API reference
-
-The local API reference (frames, audio, tags, and more) is at https://docs.screenpi.pe/llms-full.txt. Fetch when you need anything beyond /search, /activity-summary, or /speakers.
-
 # Rich rendering — only when it earns its space
 
 - Mermaid: \`\`\`mermaid blocks for flowcharts / sequences / timelines
@@ -114,15 +106,4 @@ Don't reach for these on short answers.
 Current time: ${now.toISOString()}
 User's timezone: ${timezone} (UTC${offsetStr})
 User's local time: ${now.toLocaleString()}`;
-}
-
-export function buildConnectionsContext(
-  connections: Array<{ id: string; name: string; category?: string; description?: string }>
-): string {
-  const withDesc = connections.filter((c) => c.description);
-  if (withDesc.length === 0) return "";
-  const entries = withDesc
-    .map((c) => `## ${c.name} (${c.id})\n${c.description}`)
-    .join("\n\n");
-  return `\n\n# Connected integrations\n\nThe user has connected the following external services. Use the endpoints listed under each to fetch live data when relevant. All endpoints are on http://localhost:3030 and require \`-H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY"\`.\n\n${entries}`;
 }

@@ -20,7 +20,6 @@ import {
   Search,
   Sparkles,
   Phone,
-  Plug,
   NotebookPen,
 } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
@@ -41,7 +40,6 @@ import { usePlatform } from "@/lib/hooks/use-platform";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { FeedbackSection } from "@/components/settings/feedback-section";
 import { MemoriesSection } from "@/components/settings/memories-section";
-import { ConnectionsSection } from "@/components/settings/connections-section";
 import { MeetingNotesSection } from "@/components/meeting-notes";
 import { StandaloneChat } from "@/components/standalone-chat";
 import {
@@ -77,16 +75,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-type MainSection = "home" | "timeline" | "memories" | "connections" | "meetings" | "help";
-type ConnectionFocusRequest = {
-  id: string | null;
-  category: string | null;
-  requestId: number;
-};
+type MainSection = "home" | "timeline" | "memories" | "meetings" | "help";
 
 // All valid URL sections for the home page
 const ALL_SECTIONS = [
-  "home", "timeline", "help", "memories", "connections", "meetings", "history",
+  "home", "timeline", "help", "memories", "meetings", "history",
   "feedback", // backwards compat → maps to "help"
 ];
 
@@ -114,7 +107,6 @@ function HomeContent() {
     },
     serialize: (value) => value,
   });
-  const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
 
   const { settings } = useSettings();
   const { isTranslucent } = useSidebarContext();
@@ -730,38 +722,16 @@ function HomeContent() {
   const openSettings = useCallback((section: string = "general") => {
     router.push(`/settings?section=${section}`);
   }, [router]);
-  const clearConnectionFocusRequest = useCallback(() => {
-    setConnectionFocusRequest(null);
-  }, []);
-
-  // Listen for open-settings events from child components (e.g. connections strip)
+  // Listen for navigation requests from child components.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       const section = detail?.section ?? "general";
-      // connections is a top-level main-sidebar section now, not in settings
-      if (section === "connections") {
-        setConnectionFocusRequest({
-          id: typeof detail?.connectionId === "string" ? detail.connectionId : null,
-          category: typeof detail?.category === "string" ? detail.category : null,
-          requestId: Date.now(),
-        });
-        setActiveSection("connections");
-        return;
-      }
       openSettings(section);
     };
     window.addEventListener("open-settings", handler);
     return () => window.removeEventListener("open-settings", handler);
   }, [openSettings, setActiveSection]);
-
-  // "Try in Chat" from connections page — switch to chat view so the
-  // pre-filled prompt (set by standalone-chat.tsx) becomes visible.
-  useEffect(() => {
-    const handler = () => setActiveSection("home");
-    window.addEventListener("try-in-chat", handler);
-    return () => window.removeEventListener("try-in-chat", handler);
-  }, [setActiveSection]);
 
   const renderMainSection = () => {
     if (isSectionHidden(activeSection) && activeSection !== "help") {
@@ -786,15 +756,6 @@ function HomeContent() {
         return <Timeline embedded />;
       case "memories":
         return <MemoriesSection />;
-      case "connections":
-        return (
-          <ConnectionsSection
-            focusConnectionId={connectionFocusRequest?.id ?? null}
-            focusCategory={connectionFocusRequest?.category ?? null}
-            focusRequestId={connectionFocusRequest?.requestId ?? 0}
-            onFocusRequestConsumed={clearConnectionFocusRequest}
-          />
-        );
       case "meetings":
         return (
           <MeetingNotesSection
@@ -835,7 +796,6 @@ function HomeContent() {
     { id: "timeline", label: "Timeline", icon: <Clock className="h-3.5 w-3.5" /> },
     { id: "meetings", label: "Meeting notes", icon: <NotebookPen className="h-3.5 w-3.5" /> },
     { id: "memories", label: "Memories", icon: <Sparkles className="h-3.5 w-3.5" /> },
-    { id: "connections", label: "Connections", icon: <Plug className="h-3.5 w-3.5" /> },
   ]
     .filter((s) => !isSectionHidden(s.id))
     // Timeline can be turned off in Display settings — when it is, drop it from

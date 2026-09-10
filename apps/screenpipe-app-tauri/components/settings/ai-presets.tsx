@@ -95,6 +95,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { AIPreset, commands } from "@/lib/utils/tauri";
+import { SkillsCard } from "./skills-card";
 import {
   validatePresetName,
   validateUrl,
@@ -1570,6 +1571,10 @@ useEffect(() => {
             </Button>
           )}
         </div>
+        <section aria-label="Local agent skills">
+          <h2 className="mb-2 text-sm font-medium">Local agent skills</h2>
+          <SkillsCard />
+        </section>
       </div>
     );
   }
@@ -1636,6 +1641,10 @@ useEffect(() => {
         </SortableContext>
       </DndContext>
 
+      <section aria-label="Local agent skills">
+        <h2 className="mb-2 text-sm font-medium">Local agent skills</h2>
+        <SkillsCard />
+      </section>
       <AlertDialog
         open={!!presetToDelete}
         onOpenChange={() => setPresetToDelete(null)}

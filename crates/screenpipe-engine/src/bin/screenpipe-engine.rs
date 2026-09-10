@@ -1007,23 +1007,6 @@ async fn main() -> anyhow::Result<()> {
                     info!("fixed permissions on {} credential files", fixed);
                 }
 
-                // Run legacy migration
-                match screenpipe_secrets::migrate_legacy_secrets(&store, &local_data_dir).await {
-                    Ok(report) => {
-                        if !report.migrated.is_empty() {
-                            info!(
-                                "migrated {} legacy secrets: {:?}",
-                                report.migrated.len(),
-                                report.migrated
-                            );
-                        }
-                        if !report.errors.is_empty() {
-                            warn!("secret migration errors: {:?}", report.errors);
-                        }
-                    }
-                    Err(e) => warn!("legacy secret migration failed: {}", e),
-                }
-
                 server.secret_store = Some(Arc::new(store));
             }
             Err(e) => {

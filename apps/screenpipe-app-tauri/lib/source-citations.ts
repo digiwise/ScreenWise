@@ -5,7 +5,6 @@
 export type SourceCitationKind =
   | "screenpipe"
   | "database"
-  | "connector"
   | "web"
   | "file"
   | "memory"
@@ -305,8 +304,8 @@ function screenpipeApiCitation(call: string): SourceCitation {
   const query = extractQuery(call);
   const title = screenpipeTitle(path);
   const kind = screenpipeKind(path);
-  // Only local screen captures map to a moment on the timeline. Memory/db/
-  // connector endpoints aren't time-anchored screen data, so leave them inert.
+  // Only local screen captures map to a moment on the timeline. Memory and
+  // database endpoints aren't time-anchored screen data, so leave them inert.
   const params = queryParams(query);
   const timestamp = kind === "screenpipe" ? navTimestamp(params.start_time) : undefined;
   const searchText = path === "/search" ? params.q : undefined;
@@ -324,7 +323,6 @@ function screenpipeApiCitation(call: string): SourceCitation {
 function screenpipeKind(path: string): SourceCitationKind {
   if (path === "/raw_sql") return "database";
   if (path === "/memories") return "memory";
-  if (path.startsWith("/connections/")) return "connector";
   return "screenpipe";
 }
 
@@ -333,17 +331,10 @@ function screenpipeTitle(path: string): string {
   if (path === "/activity-summary") return "Activity summary";
   if (path === "/raw_sql") return "Local database query";
   if (path === "/memories") return "Screenpipe memories";
-  if (path.startsWith("/connections/perplexity/")) return "Perplexity search";
-  if (path.startsWith("/connections/google-calendar/") || path.startsWith("/connections/calendar/")) {
-    return "Google Calendar events";
-  }
-  if (path.startsWith("/connections/notion")) return "Notion connection";
-  if (path.startsWith("/connections/obsidian")) return "Obsidian connection";
   if (path.startsWith("/meetings")) return "Meeting data";
   if (path.startsWith("/frames")) return "Frame data";
   if (path.startsWith("/speakers")) return "Speaker data";
   if (path === "/health") return "Screenpipe health";
-  if (path.startsWith("/connections/")) return `${titleCase(path.split("/")[2] ?? "connector")} connection`;
   return "Screenpipe API";
 }
 
@@ -371,17 +362,6 @@ function screenpipeSubtitle(path: string, query: string): string | undefined {
     return params.q ? `memory query: ${truncate(params.q, 60)}` : limitSubtitle(params.limit);
   }
 
-  if (path.startsWith("/connections/perplexity/")) {
-    return "external web context via Screenpipe connection";
-  }
-
-  if (path.startsWith("/connections/google-calendar/") || path.startsWith("/connections/calendar/")) {
-    return timeRange(params.start_time ?? params.start, params.end_time ?? params.end) ?? limitSubtitle(params.limit);
-  }
-
-  if (path.startsWith("/connections/")) {
-    return "external app connection";
-  }
 
   if (params.limit) {
     return limitSubtitle(params.limit);
@@ -699,7 +679,7 @@ function stableId(parts: Array<string | undefined>): string {
 }
 
 function isSourceKind(kind: string): kind is SourceCitationKind {
-  return ["screenpipe", "database", "connector", "web", "file", "memory", "command"].includes(kind);
+  return ["screenpipe", "database", "web", "file", "memory", "command"].includes(kind);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

@@ -1192,64 +1192,6 @@ pub async fn get_disk_usage(
     }
 }
 
-/// Open Google Calendar OAuth inside an in-app WebView.
-/// Intercepts the screenpipe:// deep-link redirect so we do not rely on Safari
-/// custom-scheme support.
-#[allow(dead_code)] // invoked via Tauri IPC, not direct Rust calls
-#[tauri::command]
-#[specta::specta]
-pub async fn open_google_calendar_auth_window(
-    app_handle: tauri::AppHandle,
-    auth_url: String,
-) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    let label = "google-calendar-auth";
-
-    // If already open, just focus it
-    if let Some(w) = app_handle.get_webview_window(label) {
-        let _ = w.show();
-        let _ = w.set_focus();
-        return Ok(());
-    }
-
-    let app_for_nav = app_handle.clone();
-
-    let parsed_url = auth_url.parse().map_err(|e| format!("invalid url: {e}"))?;
-    let mut builder =
-        WebviewWindowBuilder::new(&app_handle, label, WebviewUrl::External(parsed_url))
-            .title("connect google calendar")
-            .inner_size(500.0, 700.0)
-            .focused(true);
-
-    #[cfg(target_os = "macos")]
-    {
-        builder = builder.hidden_title(true);
-    }
-
-    builder = builder.on_navigation(move |url| {
-        if url.scheme() == "screenpipe" {
-            info!("google calendar auth window intercepted deep link: {}", url);
-            let _ = app_for_nav.emit("deep-link-received", url.to_string());
-            if let Some(w) = app_for_nav.get_webview_window("google-calendar-auth") {
-                let _ = w.close();
-            }
-            false // block navigation to custom scheme
-        } else {
-            true // allow all https navigations (Google OAuth, etc.)
-        }
-    });
-    builder
-        .build()
-        .map(crate::window::finalize_webview_window)
-        .map_err(|e| {
-            log_webview_build_failure(label, &auth_url, &e);
-            e.to_string()
-        })?;
-
-    Ok(())
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn show_window(

@@ -296,46 +296,8 @@ impl ServerCore {
                     if fixed > 0 {
                         info!("fixed permissions on {} credential files", fixed);
                     }
-                    match screenpipe_secrets::migrate_legacy_secrets(&store, &config.data_dir).await
-                    {
-                        Ok(report) => {
-                            if !report.migrated.is_empty() {
-                                info!("migrated {} legacy secrets", report.migrated.len());
-                            }
-                        }
-                        Err(e) => warn!("legacy secret migration failed: {}", e),
-                    }
-
-                    // One-shot cleanup for users upgrading from pre-v2.4.53:
-                    // drop any `oauth:{id}` default-slot entry that's been
-                    // shadowed by a same-integration `oauth:{id}:{name}`
-                    // instance entry. Without this, read paths with
-                    // instance=None keep hitting the stale default and
-                    // reporting "not connected" even though a healthy
-                    // instanced entry sits right next to it.
-                    match screenpipe_connect::oauth::sweep_shadowed_default_slots(&store).await {
-                        Ok(n) if n > 0 => {
-                            info!("oauth: swept {} shadowed default-slot entry(ies)", n);
-                        }
-                        Ok(_) => {}
-                        Err(e) => warn!("oauth: sweep_shadowed_default_slots failed: {}", e),
-                    }
 
                     let store_arc = Arc::new(store);
-
-                    // Background OAuth refresh scheduler. Keeps refresh-token
-                    // sliding windows alive on providers like Zoom (15h
-                    // inactivity expiry) — without this, a token can rot
-                    // overnight and recovery requires manual reconnect.
-                    // Owner-held so the JoinHandle isn't dropped (which would
-                    // cancel the task) and so `/health` can surface metrics
-                    // later via `server.oauth_refresher.snapshot()`.
-                    let refresher = Arc::new(
-                        screenpipe_connect::oauth_refresh_scheduler::OAuthRefreshScheduler::new(),
-                    );
-                    refresher.start(store_arc.clone());
-                    server.oauth_refresher = Some(refresher);
-
                     server.secret_store = Some(store_arc);
                 }
                 Err(e) => {

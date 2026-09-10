@@ -121,7 +121,7 @@ async-trait = "0.1"
 hostname = "0.4"
 
 # Shared local core utilities and secret storage.
-screenpipe-core = { path = "../../../crates/screenpipe-core", features = ["secrets"] }
+screenpipe-core = { path = "../../../crates/screenpipe-core" }
 
 # Embedded screenpipe server
 screenpipe-config = { path = "../../../crates/screenpipe-config", features = ["specta"] }
@@ -131,7 +131,7 @@ screenpipe-a11y = { path = "../../../crates/screenpipe-a11y" }
 screenpipe-audio = { path = "../../../crates/screenpipe-audio" }
 screenpipe-db = { path = "../../../crates/screenpipe-db" }
 screenpipe-vault = { path = "../../../crates/screenpipe-vault" }
-screenpipe-connect = { path = "../../../crates/screenpipe-connect", features = ["specta"] }
+screenpipe-connect = { path = "../../../crates/screenpipe-connect" }
 screenpipe-secrets = { path = "../../../crates/screenpipe-secrets" }
 screenpipe-events = { path = "../../../crates/screenpipe-events" }
 eventkit-rs = { git = "https://github.com/divanshu-go/eventkit-rs", rev = "9dd52787c8435d734ed443e2d5641f45b0177cae", default-features = false, features = ["events"] }

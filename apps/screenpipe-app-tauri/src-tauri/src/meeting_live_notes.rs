@@ -471,7 +471,7 @@ fn build_hd_action(app: &AppHandle, meeting_id: Option<i64>) -> Option<serde_jso
     }))
 }
 
-async fn fetch_fresh_calendar_events(app: &AppHandle) -> Vec<CalendarEventSignal> {
+async fn fetch_fresh_calendar_events(_app: &AppHandle) -> Vec<CalendarEventSignal> {
     let mut events = Vec::new();
 
     match crate::calendar::calendar_get_events(Some(1), Some(1)).await {
@@ -479,58 +479,10 @@ async fn fetch_fresh_calendar_events(app: &AppHandle) -> Vec<CalendarEventSignal
         Err(err) => debug!("meeting live notes: native calendar refresh failed: {err}"),
     }
 
-    match crate::ics_calendar::ics_calendar_get_upcoming(app.clone(), Some(1), Some(1)).await {
-        Ok(items) => events.extend(items.into_iter().map(CalendarEventSignal::from)),
-        Err(err) => debug!("meeting live notes: ICS calendar refresh failed: {err}"),
-    }
-
-    events.extend(fetch_google_calendar_events(app).await);
-
     events
         .into_iter()
         .filter(|event| !event.is_all_day)
         .collect()
-}
-
-async fn fetch_google_calendar_events(app: &AppHandle) -> Vec<CalendarEventSignal> {
-    let Some((port, api_key)) = local_api_config(app).await else {
-        return Vec::new();
-    };
-
-    let url = format!(
-        "http://127.0.0.1:{port}/connections/google-calendar/events?hours_back=1&hours_ahead=1"
-    );
-    let client = reqwest::Client::new();
-    let mut req = client.get(url);
-    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
-        req = req.bearer_auth(key);
-    }
-
-    let Ok(resp) = req.send().await else {
-        return Vec::new();
-    };
-    if !resp.status().is_success() {
-        debug!(
-            "meeting live notes: Google Calendar refresh returned {}",
-            resp.status()
-        );
-        return Vec::new();
-    }
-
-    match resp.json::<Vec<CalendarEventSignal>>().await {
-        Ok(events) => events,
-        Err(err) => {
-            warn!("meeting live notes: failed to parse Google Calendar events: {err}");
-            Vec::new()
-        }
-    }
-}
-
-async fn local_api_config(app: &AppHandle) -> Option<(u16, Option<String>)> {
-    let state = app.try_state::<crate::recording::RecordingState>()?;
-    let guard = state.server.lock().await;
-    let core = guard.as_ref()?;
-    Some((core.port, core.local_api_key.clone()))
 }
 
 fn find_calendar_match(

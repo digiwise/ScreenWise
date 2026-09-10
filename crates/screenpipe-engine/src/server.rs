@@ -199,13 +199,8 @@ pub struct SCServer {
     pub api_auth: bool,
     /// API key for remote auth validation
     pub api_auth_key: Option<String>,
-    /// Unified credential store for OAuth tokens, API keys, etc.
+    /// Local secret store, including the local API bearer token.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
-    /// Background OAuth refresh scheduler. Owned here so its JoinHandle
-    /// isn't dropped (which would cancel the task) and so future
-    /// observability endpoints can call `.snapshot()` to inspect metrics.
-    pub oauth_refresher:
-        Option<Arc<screenpipe_connect::oauth_refresh_scheduler::OAuthRefreshScheduler>>,
     /// Shared high-FPS controller. Set before `start()` so AppState and
     /// the per-monitor capture loops point at the same instance.
     pub high_fps_controller: Option<Arc<crate::high_fps_controller::HighFpsController>>,
@@ -254,7 +249,6 @@ impl SCServer {
             api_auth: false,
             api_auth_key: None,
             secret_store: None,
-            oauth_refresher: None,
             high_fps_controller: None,
             timeline_disabled: false,
             advertise_mdns: should_advertise_mdns(addr),

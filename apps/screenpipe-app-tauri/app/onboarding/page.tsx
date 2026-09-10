@@ -8,17 +8,15 @@ import React, { useState, useEffect } from "react";
 import { useToast } from "@/components/ui/use-toast";
 import PermissionsStep from "@/components/onboarding/permissions-step";
 import EngineStartup from "@/components/onboarding/engine-startup";
-import ConnectApps from "@/components/onboarding/connect-apps";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { commands } from "@/lib/utils/tauri";
 
-type SlideKey = "permissions" | "engine" | "connect-apps";
+type SlideKey = "permissions" | "engine";
 
 const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
   {
     permissions: { width: 500, height: 560 },
     engine: { width: 500, height: 620 },
-    "connect-apps": { width: 500, height: 680 },
   };
 
 const setWindowSizeForSlide = async (slide: SlideKey) => {
@@ -51,13 +49,13 @@ export default function OnboardingPage() {
           login: "permissions",
           permissions: "permissions",
           engine: "engine",
-          "connect-apps": "connect-apps",
-          integrations: "connect-apps",
-          connections: "connect-apps",
+          "connect-apps": "engine",
+          integrations: "engine",
+          connections: "engine",
           // backwards compat with old onboarding
-          pipe: "connect-apps",
-          read: "connect-apps",
-          shortcut: "connect-apps",
+          pipe: "engine",
+          read: "engine",
+          shortcut: "engine",
           encrypt: "engine",
           welcome: "permissions",
           intro: "permissions",
@@ -101,7 +99,6 @@ export default function OnboardingPage() {
     const stepOrder: SlideKey[] = [
       "permissions",
       "engine",
-      "connect-apps",
     ];
     const currentIdx = stepOrder.indexOf(currentSlide);
 
@@ -159,9 +156,6 @@ export default function OnboardingPage() {
           )}
           {currentSlide === "engine" && (
             <EngineStartup handleNextSlide={handleNextSlide} />
-          )}
-          {currentSlide === "connect-apps" && (
-            <ConnectApps handleNextSlide={handleNextSlide} />
           )}
         </div>
       </div>

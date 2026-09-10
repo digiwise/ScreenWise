@@ -70,32 +70,6 @@ describe("source citations", () => {
     expect(citations[0].subtitle).toContain("query: pricing");
   });
 
-  it("names connector calls instead of collapsing them to generic screenpipe api", () => {
-    const citations = sourceCitationsFromMessage({
-      contentBlocks: [
-        {
-          type: "tool",
-          toolCall: {
-            toolName: "bash",
-            args: {
-              command:
-                'curl -s -X POST "http://localhost:3030/connections/perplexity/proxy/chat/completions"',
-            },
-            result: '{"choices":[]}',
-            isRunning: false,
-          },
-        },
-      ],
-    });
-
-    expect(citations).toHaveLength(1);
-    expect(citations[0]).toMatchObject({
-      kind: "connector",
-      title: "Perplexity search",
-      subtitle: "external web context via Screenpipe connection",
-    });
-  });
-
   it("labels screenpipe memory endpoint citations as memory", () => {
     const citations = sourceCitationsFromMessage({
       contentBlocks: [
@@ -119,40 +93,6 @@ describe("source citations", () => {
       kind: "memory",
       title: "Screenpipe memories",
       subtitle: "memory query: Jill Benaglio",
-    });
-  });
-
-  it("pulls structured result links out of bash tool output", () => {
-    const citations = sourceCitationsFromMessage({
-      contentBlocks: [
-        {
-          type: "tool",
-          toolCall: {
-            toolName: "bash",
-            args: {
-              command:
-                'curl -s "http://localhost:3030/connections/perplexity/proxy/chat/completions"',
-            },
-            result: JSON.stringify({
-              search_results: [
-                { title: "Screenpipe docs", url: "https://docs.screenpi.pe/chat" },
-              ],
-            }),
-            isRunning: false,
-          },
-        },
-      ],
-    });
-
-    expect(citations).toHaveLength(2);
-    expect(citations[0]).toMatchObject({
-      kind: "connector",
-      title: "Perplexity search",
-    });
-    expect(citations[1]).toMatchObject({
-      kind: "web",
-      title: "Screenpipe docs",
-      href: "https://docs.screenpi.pe/chat",
     });
   });
 

@@ -1290,42 +1290,6 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
     Ok(onboarding)
 }
 
-// ─── ICS Calendar Settings ───────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
-pub struct IcsCalendarEntry {
-    pub name: String,
-    pub url: String,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IcsCalendarSettingsStore {
-    pub entries: Vec<IcsCalendarEntry>,
-}
-
-impl IcsCalendarSettingsStore {
-    pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
-        let store = get_store(app, None).map_err(|e| e.to_string())?;
-        if store.is_empty() {
-            return Ok(None);
-        }
-        let settings = serde_json::from_value(store.get("ics_calendars").unwrap_or(Value::Null));
-        match settings {
-            Ok(settings) => Ok(settings),
-            Err(_) => Ok(None),
-        }
-    }
-
-    pub fn save(&self, app: &AppHandle) -> Result<(), String> {
-        let store = get_store(app, None).map_err(|e| e.to_string())?;
-        store.set("ics_calendars", json!(self));
-        store.save().map_err(|e| e.to_string())?;
-        reencrypt_store_file(app);
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

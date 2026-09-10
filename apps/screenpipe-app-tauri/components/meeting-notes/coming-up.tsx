@@ -7,7 +7,6 @@ import React, { useState } from "react";
 import {
   ArrowRight,
   CalendarDays,
-  Link2,
   Loader2,
   Settings2,
 } from "lucide-react";
@@ -174,10 +173,6 @@ function sourceLabel(
   switch (source) {
     case "native":
       return platformNativeCalendarLabel(platform);
-    case "google":
-      return "Google Calendar";
-    case "ics":
-      return "ICS";
   }
 }
 
@@ -228,7 +223,7 @@ function ComingUpEmptyState({
           {loading ? (
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           ) : needsConnection ? (
-            <Link2 className="h-4 w-4 text-muted-foreground" />
+            <CalendarDays className="h-4 w-4 text-muted-foreground" />
           ) : (
             <CalendarDays className="h-4 w-4 text-muted-foreground" />
           )}

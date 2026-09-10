@@ -15,22 +15,6 @@ async awaitSafeRestart(timeoutSecs: number | null) : Promise<string> {
     return await TAURI_INVOKE("await_safe_restart", { timeoutSecs });
 },
 /**
- * Locate the bundled bun binary so the frontend can write absolute-path
- * MCP configs (e.g. `{ command: <bun>, args: ["x", "screenpipe-mcp@latest"] }`)
- * instead of `npx -y screenpipe-mcp`. npx requires a global Node install
- * — many Claude Desktop users don't have it, and the silent first-run
- * `npx` download often blows past Claude's MCP startup timeout. Using
- * the bun we already ship sidesteps both failure modes.
- */
-async bunCheck() : Promise<Result<PiCheckResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("bun_check") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Request Calendar permission (shows one-time macOS popup).
  * Returns "granted", "denied", or an error message.
  */
@@ -574,38 +558,6 @@ async hideShortcutReminder() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async icsCalendarGetEntries() : Promise<Result<IcsCalendarEntry[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("ics_calendar_get_entries") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async icsCalendarGetUpcoming(hoursBack: number | null, hoursAhead: number | null) : Promise<Result<CalendarEventItem[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("ics_calendar_get_upcoming", { hoursBack, hoursAhead }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async icsCalendarSaveEntries(entries: IcsCalendarEntry[]) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("ics_calendar_save_entries", { entries }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async icsCalendarTestUrl(url: string) : Promise<Result<number, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("ics_calendar_test_url", { url }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Copy a skill folder into the screenpipe store. `source_path` is the folder
  * that directly contains `SKILL.md` (from a scan result or the folder picker).
@@ -732,79 +684,6 @@ async livetextSetGuardRect(key: string, x: number, y: number, w: number, h: numb
 async livetextUpdatePosition(frameId: string, x: number, y: number, w: number, h: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("livetext_update_position", { frameId, x, y, w, h }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Cancel any in-flight OAuth flow(s) for the given integration.
- * Dropping the stored sender makes the awaiting `oauth_connect` call fail fast
- * with "OAuth channel closed before code was received" instead of hanging for
- * the full 120s timeout.
- */
-async oauthCancel(integrationId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("oauth_cancel", { integrationId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Start the OAuth flow for any integration that has `oauth_config()` set.
- * `integration_id` must match the integration's `def().id`.
- * `instance` is an optional name for multi-account support (e.g. email address).
- */
-async oauthConnect(integrationId: string, instance: string | null) : Promise<Result<OAuthStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("oauth_connect", { integrationId, instance }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Remove the stored OAuth token for the given integration instance.
- */
-async oauthDisconnect(integrationId: string, instance: string | null) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("oauth_disconnect", { integrationId, instance }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * List all connected OAuth instances for a given integration.
- */
-async oauthListInstances(integrationId: string) : Promise<Result<OAuthInstanceInfo[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("oauth_list_instances", { integrationId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Check whether a valid (non-expired) OAuth token exists for the given integration.
- */
-async oauthStatus(integrationId: string, instance: string | null) : Promise<Result<OAuthStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("oauth_status", { integrationId, instance }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Open Google Calendar OAuth inside an in-app WebView.
- * Intercepts the screenpipe:// deep-link redirect so we do not rely on Safari
- * custom-scheme support.
- */
-async openGoogleCalendarAuthWindow(authUrl: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_google_calendar_auth_window", { authUrl }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1205,63 +1084,6 @@ async regenerateApiAuthKey() : Promise<Result<string, string>> {
 async registerWindowShortcuts() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("register_window_shortcuts") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async remoteSyncDiscoverHosts() : Promise<Result<DiscoveredHost[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remote_sync_discover_hosts") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async remoteSyncNow(config: RemoteSyncConfig, dataDir: string | null) : Promise<Result<RemoteSyncResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remote_sync_now", { config, dataDir }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get the scheduler status (last sync time, last error, is running).
- */
-async remoteSyncSchedulerStatus() : Promise<Result<SchedulerStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remote_sync_scheduler_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Start the background sync scheduler. Runs sync on an interval regardless of UI state.
- */
-async remoteSyncStartScheduler(config: RemoteSyncConfig, dataDir: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remote_sync_start_scheduler", { config, dataDir }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Stop the background sync scheduler.
- */
-async remoteSyncStopScheduler() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remote_sync_stop_scheduler") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async remoteSyncTest(config: RemoteSyncConfig) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remote_sync_test", { config }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1891,21 +1713,11 @@ source: string;
  * True when a skill of the same normalized name is already imported.
  */
 imported: boolean }
-/**
- * An SSH host discovered from ~/.ssh/config or ~/.ssh/known_hosts.
- */
-export type DiscoveredHost = { host: string; port: number; user: string | null; key_path: string | null; source: string;
-/**
- * Human-friendly alias from SSH config `Host` directive (e.g. "my-server").
- * Only set when `HostName` resolves to an IP different from the alias.
- */
-alias?: string | null }
 export type E2eAgentStreamResult = { emitted_deltas: number; emit_ms: number }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type EnterpriseInstallMetadata = { install_source: string; update_manager: string; managed: boolean; detected_by: string[] }
 export type ExcludedApp = { bundleId: string; name: string | null; icon: string | null }
 export type HardwareCapability = { hasGpu: boolean; cpuCores: number; totalMemoryGb: number; recommendedEngine: string; reason: string }
-export type IcsCalendarEntry = { name: string; url: string; enabled: boolean }
 /**
  * A skill currently sitting in the screenpipe store.
  */
@@ -1919,15 +1731,6 @@ export type KeychainStatus = { state: string }
 export type LogFile = { name: string; path: string; modified_at: number }
 export type MeetingExportSummary = { output_path: string; frame_count: number; audio_chunk_count: number; duration_secs: number; file_size_bytes: number }
 export type MonitorDevice = { id: number; stableId: string; name: string; isDefault: boolean; width: number; height: number }
-export type OAuthInstanceInfo = { instance: string | null; display_name: string | null }
-export type OAuthStatus = { connected: boolean; display_name: string | null;
-/**
- * True when a token row exists in the secret store but we can't read it
- * (keychain key unavailable — usually a dev↔prod bundle ACL split). The
- * UI should surface this as "needs attention" rather than "not connected"
- * since the user can't fix it by reconnecting in the broken bundle.
- */
-needs_attention?: boolean }
 export type OSPermission = "screenRecording" | "microphone" | "accessibility" | "automation" | "inputMonitoring" | "calendar"
 export type OSPermissionStatus = "notNeeded" | "empty" | "granted" | "denied"
 export type OSPermissionsCheck = { screenRecording: OSPermissionStatus; microphone: OSPermissionStatus; accessibility: OSPermissionStatus }
@@ -1992,14 +1795,6 @@ preview: string;
  */
 queuedAtMs: number }
 /**
- * Configuration for remote sync.
- */
-export type RemoteSyncConfig = { host: string; port: number; user: string; key_path: string; remote_path: string; interval_minutes: number; enabled: boolean }
-/**
- * Result of a sync operation.
- */
-export type RemoteSyncResult = { ok: boolean; files_transferred: number; bytes_transferred: number; error: string | null }
-/**
  * A single schedule rule: a day-of-week + time range + what to record.
  */
 export type ScheduleRule = {
@@ -2019,7 +1814,6 @@ endTime: string;
  * What to record: "all", "audio_only", "screen_only"
  */
 recordMode: string }
-export type SchedulerStatus = { running: boolean; last_sync: string | null; last_error: string | null }
 export type SettingsStore =
 /**
  * All recording/capture config lives here. Flattened so the JSON shape

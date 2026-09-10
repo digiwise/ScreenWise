@@ -1380,3 +1380,63 @@ serialized compatibility fields; this removal will not delete user data.
   skill binding successfully. `cargo fmt --all -- --check`, `git diff --check`,
   and `cargo build --release --locked --offline` passed; the release build took
   9m 17s with only established unrelated warnings.
+
+### Third-party connections and calendars boundary — 2026-09-10
+
+The engine connections facade is already removed, but `screenpipe-connect`
+still compiles a large external-service registry, provider credential models,
+OAuth clients, remote proxy/sync helpers, and Google/calendar transports. The
+desktop still registers OAuth, Google Calendar, ICS/webcal, calendar polling,
+remote-sync commands, schedulers, settings, and frontend entry points. These
+paths retain hosted and third-party network destinations, credentials, and
+generated command bindings despite no longer serving the Windows-first local
+recorder.
+
+The retained browser module is a distinct local capability: engine routes and
+Pi chat use `BrowserRegistry`/`OwnedBrowser` for user-directed browser capture
+and control. Native Windows/macOS calendar reads are also local OS integration,
+and opt-in mDNS is local-network discovery. This commit will therefore remove
+generic connectors, third-party OAuth, remote sync, Google/ICS calendar
+transports, and the outgoing arbitrary MCP proxy while keeping those three
+local capabilities in `screenpipe-connect`. Ordinary URL/window privacy
+filters, local meeting detection, recorder settings, the local secret store,
+and local API bearer authentication remain out of scope. Historical
+connection/calendar settings and secrets will be ignored, not migrated or
+deleted.
+
+### Third-party connections and calendars removal complete — 2026-09-10
+
+- Removed the generic service registry and its provider implementations,
+  credential/OAuth lifecycle, remote proxy and sync clients/schedulers,
+  Google Calendar and ICS/webcal transports, WhatsApp gateway, outgoing
+  user-defined MCP proxy, desktop command/startup surfaces, navigation,
+  onboarding, settings, chat discovery, citations, and generated bindings.
+- Retained `screenpipe-connect` only for owned-browser control, native
+  Windows/macOS calendar access, and opt-in local-network mDNS. A final review
+  found that Coming Up still called an already-removed calendar HTTP route;
+  it now uses the retained `calendar_get_events` Tauri command and has focused
+  success/failure coverage. Local Pi/Ollama, URL/window privacy filtering,
+  local API bearer authentication, and the encrypted local secret store remain.
+- Removed legacy OAuth/connection secret import and refresh at startup without
+  deleting old files, settings, SQLite rows, or keys. Permission hardening for
+  existing secret-like files remains. Historical chat citation metadata still
+  normalizes through its compatibility path.
+- Removed the desktop helper that would have registered an unpinned
+  `screenpipe-mcp@latest` process with the local bearer token. The audited local
+  API/browser skill now documents only existing local routes and local
+  transcription engines; generated skill content was refreshed with Bun.
+- Root lock resolution removed 64 package records and desktop lock resolution
+  removed 59. A tuple/source/checksum comparison found no added packages and no
+  surviving package version, source, or checksum changes. All five Bun
+  lockfiles are unchanged.
+- `cargo fmt --all -- --check`, `git diff --check`, and the root default-member
+  `cargo check --locked --offline` passed. Locked offline library tests for
+  connect, core, secrets, and engine passed 691 tests with 2 ignored. The
+  isolated Ninja Multi-Config `tauri_bindings_are_current` test passed with the
+  documented CRT override and OpenBLAS runtime path.
+- Direct TypeScript checking passed; direct Vitest passed all 32 files and 378
+  tests after deleting stale connection-prompt assertions. The installed Next
+  production entrypoint passed with only the existing `unpdf` `import.meta`
+  warning. `cargo build --release --locked --offline` passed in 8m 04s in the
+  documented Visual Studio Developer PowerShell/Ninja release environment with
+  only established unrelated warnings.

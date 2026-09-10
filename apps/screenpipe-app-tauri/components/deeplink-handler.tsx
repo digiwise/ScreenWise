@@ -43,28 +43,6 @@ export function DeeplinkHandler() {
     const processDeepLinkUrl = async (url: string) => {
       const parsedUrl = new URL(url);
 
-      // Handle Google Calendar OAuth callback
-      if (
-        parsedUrl.host === "auth" &&
-        parsedUrl.pathname?.includes("google-calendar")
-      ) {
-        const success = parsedUrl.searchParams.get("success") === "true";
-        const error = parsedUrl.searchParams.get("error");
-        await emit("google-calendar-auth-result", { success, error });
-        // Bring the settings window to the front so the user lands back
-        // where they started (instead of staring at the timeline).
-        await openSettingsWindow();
-        toast({
-          title: success
-            ? "google calendar connected!"
-            : "google calendar connection failed",
-          description: success
-            ? "your google calendar is now linked"
-            : error || "something went wrong",
-          variant: success ? undefined : "destructive",
-        });
-      }
-
       if (url.includes("settings") || url.includes("home")) {
         await openSettingsWindow();
       }

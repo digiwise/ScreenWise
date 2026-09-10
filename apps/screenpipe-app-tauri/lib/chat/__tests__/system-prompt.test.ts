@@ -7,7 +7,7 @@
 // existing contract so future refactors can't silently change it.
 
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt, buildConnectionsContext } from "../system-prompt";
+import { buildSystemPrompt } from "../system-prompt";
 
 describe("buildSystemPrompt", () => {
   const prompt = buildSystemPrompt();
@@ -20,12 +20,10 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("# Voice and length");
     expect(prompt).toContain("# Flip to technical mode");
     expect(prompt).toContain("# Activity recaps");
-    expect(prompt).toContain("# Connection write policy");
     expect(prompt).toContain("# Tool selection");
     expect(prompt).toContain("# Local server auth");
     expect(prompt).toContain("# Search rules");
     expect(prompt).toContain("# Speakers");
-    expect(prompt).toContain("# Full API reference");
   });
 
   it("injects the current time, timezone, and local time footer", () => {
@@ -46,42 +44,5 @@ describe("buildSystemPrompt", () => {
     // at minimum both must carry a Current time line
     expect(a).toContain("Current time: ");
     expect(b).toContain("Current time: ");
-  });
-});
-
-describe("buildConnectionsContext", () => {
-  it("returns an empty string when no connections have descriptions", () => {
-    expect(buildConnectionsContext([])).toBe("");
-    expect(
-      buildConnectionsContext([{ id: "gcal", name: "Google Calendar" }]),
-    ).toBe("");
-  });
-
-  it("renders only the connections that have a description", () => {
-    const out = buildConnectionsContext([
-      { id: "gcal", name: "Google Calendar", description: "Read events" },
-      { id: "slack", name: "Slack" }, // no description → omitted
-    ]);
-    expect(out).toContain("# Connected integrations");
-    expect(out).toContain("## Google Calendar (gcal)");
-    expect(out).toContain("Read events");
-    expect(out).not.toContain("Slack");
-  });
-
-  it("includes the localhost bearer-token reminder", () => {
-    const out = buildConnectionsContext([
-      { id: "gcal", name: "Google Calendar", description: "Read events" },
-    ]);
-    expect(out).toContain("http://localhost:3030");
-    expect(out).toContain("SCREENPIPE_LOCAL_API_KEY");
-  });
-
-  it("joins multiple described connections with a blank line", () => {
-    const out = buildConnectionsContext([
-      { id: "a", name: "A", description: "desc-a" },
-      { id: "b", name: "B", description: "desc-b" },
-    ]);
-    expect(out).toContain("## A (a)\ndesc-a");
-    expect(out).toContain("## B (b)\ndesc-b");
   });
 });

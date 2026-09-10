@@ -66,7 +66,6 @@ import { useChatStore } from "@/lib/stores/chat-store";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
 import { statusForEvent } from "@/lib/stores/pi-event-router";
 import { deriveFallbackConversationTitle } from "@/lib/utils/chat-title";
-import { buildChipModelContent, buildChipDisplayContent, parseConnectionChip } from "@/lib/utils/connection-chip";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { usePlatform } from "@/lib/hooks/use-platform";
@@ -89,7 +88,7 @@ import {
 } from "@/lib/chat-utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { useAutoSuggestions, type Suggestion } from "@/lib/hooks/use-auto-suggestions";
-import { SummaryCards, type ConnectionSetupSuggestion } from "@/components/chat/summary-cards";
+import { SummaryCards } from "@/components/chat/summary-cards";
 import { type CustomTemplate } from "@/lib/summary-templates";
 import {
   buildDailyLimitMessage,
@@ -98,7 +97,7 @@ import {
   parseRateLimitWaitSeconds,
   PI_MAX_RATE_LIMIT_RETRIES,
 } from "@/lib/chat/quota-errors";
-import { buildSystemPrompt, buildConnectionsContext } from "@/lib/chat/system-prompt";
+import { buildSystemPrompt } from "@/lib/chat/system-prompt";
 import {
   classifyCurl,
   endpointFamily,
@@ -115,7 +114,6 @@ import {
   type WebTargetPresentation,
 } from "@/lib/chat/tool-presentation";
 import { localFetch, getApiBaseUrl } from "@/lib/api";
-import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connections-events";
 import {
   computeChatCitationPlan,
   formatSourceCitationsMarkdown,
@@ -123,7 +121,6 @@ import {
   type SourceCitation,
 } from "@/lib/source-citations";
 import { getFaviconUrl } from "@/components/rewind/timeline/favicon-utils";
-import { IntegrationIcon, INTEGRATION_ICON_KEYS } from "@/components/settings/connections-section";
 import {
   formatSteerShortcut,
   getComposerPrimaryAction,
@@ -168,8 +165,6 @@ const EMPTY_QUEUED_PROMPTS: PiQueuedPrompt[] = [];
 const FOLLOW_UP_GENERATION_DELAY_MS = 10_000;
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
-const CONNECTION_SUGGESTION_LIMIT = 3;
-const VISIBLE_SUGGESTION_LIMIT = 2;
 const LARGE_CONTEXT_CHAR_THRESHOLD = 160_000;
 const LARGE_CONTEXT_CHUNK_CHARS = 24_000;
 const LARGE_CONTEXT_PREVIEW_HEAD_CHARS = 3_000;
@@ -178,385 +173,6 @@ const LARGE_CONTEXT_PROMPT_TAG = "screenpipe-large-context";
 const PASTED_TEXT_ATTACHMENT_CHAR_THRESHOLD = 8_000;
 const PASTED_TEXT_SHOW_IN_FIELD_MAX_CHARS = 20_000;
 const PASTED_TEXT_DOC_BASE_NAME = "Pasted text";
-
-type ConnectedIntegration = {
-  id: string;
-  name: string;
-  icon?: string;
-  category?: string;
-  description?: string;
-};
-
-type ConnectionListItem = ConnectedIntegration & { connected: boolean };
-type ActivityAppItem = { name: string; count: number; app_name?: string };
-
-function normalizeConnectionForPlatform<T extends ConnectedIntegration>(connection: T, isWindows: boolean): T {
-  if (isWindows && connection.id === "apple-calendar") {
-    return {
-      ...connection,
-      name: "Windows Calendar",
-      icon: "windows-calendar",
-    };
-  }
-  return connection;
-}
-
-function connectionMentionTag(connection: ConnectedIntegration, isWindows: boolean) {
-  if (isWindows && connection.id === "apple-calendar") return "@windows-calendar";
-  return `@${connection.id}`;
-}
-
-type PreviewCalendarEvent = {
-  title?: string;
-  start?: string;
-  attendees?: string[];
-  isAllDay?: boolean;
-  is_all_day?: boolean;
-};
-
-const CONNECTION_READ_HINTS = [
-  "read",
-  "query",
-  "search",
-  "access",
-  "list",
-  "fetch",
-  "get ",
-  "events",
-  "notes",
-  "transcripts",
-  "tickets",
-  "issues",
-  "contacts",
-  "deals",
-  "recordings",
-];
-
-function connectionCanSupportReadSuggestion(connection: ConnectedIntegration): boolean {
-  const haystack = `${connection.id} ${connection.name} ${connection.category ?? ""} ${connection.description ?? ""}`.toLowerCase();
-  if (connection.category?.toLowerCase() === "browser") return true;
-  if (haystack.includes("calendar")) return true;
-  return CONNECTION_READ_HINTS.some((hint) => haystack.includes(hint));
-}
-
-function compactSuggestionPart(text: string, max = 48): string {
-  const clean = text.replace(/\s+/g, " ").trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, max - 3).trim()}...`;
-}
-
-function personNameFromAttendee(attendee: string): string | null {
-  const raw = attendee.split("<")[0].trim() || attendee.split("@")[0].trim();
-  const local = raw.includes("@") ? raw.split("@")[0] : raw;
-  const parts = local
-    .replace(/[._-]+/g, " ")
-    .split(/\s+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .filter((p) => !["me", "you", "no-reply", "noreply", "calendar"].includes(p.toLowerCase()));
-  if (parts.length === 0) return null;
-  return parts
-    .slice(0, 2)
-    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-    .join(" ");
-}
-
-function uniqueCompactList(items: string[], maxItems = 4): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const item of items) {
-    const key = item.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(item);
-    if (result.length >= maxItems) break;
-  }
-  return result;
-}
-
-function isTomorrow(date: Date): boolean {
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return (
-    date.getFullYear() === tomorrow.getFullYear() &&
-    date.getMonth() === tomorrow.getMonth() &&
-    date.getDate() === tomorrow.getDate()
-  );
-}
-
-function joinNames(names: string[]): string {
-  if (names.length <= 2) return names.join(" and ");
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
-}
-
-async function fetchCalendarPreviewSuggestion(connection: ConnectedIntegration): Promise<Suggestion | null> {
-  const lower = `${connection.id} ${connection.name}`.toLowerCase();
-  const endpoint = lower.includes("google")
-    ? "/connections/google-calendar/events?hours_back=0&hours_ahead=48"
-    : "/connections/calendar/events?hours_back=0&hours_ahead=48";
-
-  try {
-    const res = await localFetch(endpoint);
-    if (!res.ok) return null;
-    const body = await res.json();
-    const rawEvents: PreviewCalendarEvent[] = Array.isArray(body) ? body : body.data ?? [];
-    const events = rawEvents
-      .filter((event) => event.start && !(event.isAllDay ?? event.is_all_day))
-      .map((event) => ({ ...event, startDate: new Date(event.start as string) }))
-      .filter((event) => Number.isFinite(event.startDate.getTime()) && event.startDate.getTime() >= Date.now() - 30 * 60 * 1000)
-      .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
-    if (events.length === 0) return null;
-
-    const tomorrowEvents = events.filter((event) => isTomorrow(event.startDate));
-    const chosen = (tomorrowEvents.length > 0 ? tomorrowEvents : events).slice(0, 3);
-    const names = uniqueCompactList(
-      chosen.flatMap((event) => (event.attendees ?? []).map(personNameFromAttendee).filter((name): name is string => Boolean(name))),
-      4
-    );
-    const titles = uniqueCompactList(
-      chosen.map((event) => event.title?.trim()).filter((title): title is string => Boolean(title && title !== "(No title)")),
-      2
-    );
-    const descriptor = names.length >= 2
-      ? `${joinNames(names)} call briefs`
-      : titles.length > 0
-        ? `${compactSuggestionPart(titles[0], 42)} brief`
-        : "meeting briefs";
-    const day = tomorrowEvents.length > 0 ? "tomorrow's" : "upcoming";
-
-    return {
-      text: `Prep ${day} ${descriptor} from ${connection.name}`,
-      preview: titles.length > 0 ? titles.join(", ") : `uses ${connection.name}`,
-      priority: 1,
-      connectionIcon: connection.icon || connection.id,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function cleanEmailSubject(subject: string): string {
-  return compactSuggestionPart(
-    subject
-      .replace(/^\s*(re|fwd?):\s*/i, "")
-      .replace(/\s+/g, " ")
-      .trim(),
-    48
-  );
-}
-
-async function fetchGmailPreviewSuggestion(connection: ConnectedIntegration): Promise<Suggestion | null> {
-  try {
-    const query = encodeURIComponent("newer_than:14d (invite OR kickoff OR prep OR meeting)");
-    const listRes = await localFetch(`/connections/gmail/messages?maxResults=3&q=${query}`);
-    if (!listRes.ok) return null;
-    const listBody = await listRes.json();
-    const firstId = listBody?.data?.messages?.[0]?.id;
-    if (!firstId) return null;
-
-    const detailRes = await localFetch(`/connections/gmail/messages/${encodeURIComponent(firstId)}`);
-    if (!detailRes.ok) return null;
-    const detailBody = await detailRes.json();
-    const subject = detailBody?.data?.subject || detailBody?.data?.snippet;
-    if (!subject) return null;
-
-    return {
-      text: `Turn "${cleanEmailSubject(String(subject))}" into concrete prep notes`,
-      preview: `from ${connection.name}`,
-      priority: 2,
-      connectionIcon: connection.icon || connection.id,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function fetchConnectionPreviewSuggestions(connections: ConnectedIntegration[]): Promise<Suggestion[]> {
-  const tasks = connections.map((connection) => {
-    const lower = `${connection.id} ${connection.name}`.toLowerCase();
-    if (lower.includes("calendar")) return fetchCalendarPreviewSuggestion(connection);
-    if (lower.includes("gmail")) return fetchGmailPreviewSuggestion(connection);
-    return Promise.resolve(null);
-  });
-  const suggestions = await Promise.all(tasks);
-  return suggestions.filter((suggestion): suggestion is Suggestion => Boolean(suggestion));
-}
-
-function suggestionForConnection(connection: ConnectedIntegration): Suggestion | null {
-  if (!connectionCanSupportReadSuggestion(connection)) return null;
-
-  const id = normalizeAppKey(connection.id);
-  const name = connection.name || connection.id;
-  const lower = `${id} ${name}`.toLowerCase();
-  const base: Pick<Suggestion, "connectionIcon" | "preview" | "priority"> = {
-    connectionIcon: connection.icon || connection.id,
-    preview: `uses ${name}`,
-    priority: 2,
-  };
-
-  if (lower.includes("calendar")) {
-    return { ...base, text: `Prep upcoming meeting briefs from ${name}`, priority: 1 };
-  }
-  if (lower.includes("gmail") || lower.includes("email") || lower.includes("outlook") || lower.includes("microsoft365") || lower.includes("microsoft 365")) {
-    return { ...base, text: `Turn recent ${name} invites into concrete prep notes` };
-  }
-  if (lower.includes("docs") || lower.includes("sheets") || lower.includes("notion") || lower.includes("obsidian") || lower.includes("logseq")) {
-    return { ...base, text: `Turn recent ${name} files into a prep sheet` };
-  }
-  if (lower.includes("linear") || lower.includes("github") || lower.includes("jira") || lower.includes("trello") || lower.includes("asana") || lower.includes("clickup") || lower.includes("monday")) {
-    return { ...base, text: `Find open tasks tied to this work in ${name}` };
-  }
-  if (lower.includes("sentry")) {
-    return { ...base, text: `Find the issue driving recent ${name} events` };
-  }
-  if (lower.includes("posthog")) {
-    return { ...base, text: `Find the trend behind recent ${name} activity` };
-  }
-  if (lower.includes("hubspot") || lower.includes("salesforce") || lower.includes("intercom") || lower.includes("zendesk") || lower.includes("pipedrive")) {
-    return { ...base, text: `Prep customer call briefs from ${name}` };
-  }
-  if (lower.includes("zoom") || lower.includes("granola") || lower.includes("fireflies") || lower.includes("otter") || lower.includes("bee") || lower.includes("limitless")) {
-    return { ...base, text: `Pull recent meeting briefs from ${name}` };
-  }
-  if (connection.category?.toLowerCase() === "browser" || lower.includes("browser")) {
-    return { ...base, text: `Read the current page with ${name}` };
-  }
-  if (lower.includes("stripe") || lower.includes("quickbooks") || lower.includes("brex")) {
-    return { ...base, text: `Summarize recent ${name} data for this work` };
-  }
-
-  return { ...base, text: `Search ${name} for context on this work` };
-}
-
-function mergeConnectionSuggestions(
-  autoSuggestions: Suggestion[],
-  connections: ConnectedIntegration[],
-  previewSuggestions: Suggestion[] = [],
-  rotationSeed = 0
-): Suggestion[] {
-  const rotateVisible = (suggestions: Suggestion[]) => {
-    if (suggestions.length <= VISIBLE_SUGGESTION_LIMIT || rotationSeed <= 0) {
-      return suggestions.slice(0, VISIBLE_SUGGESTION_LIMIT);
-    }
-
-    const offset = rotationSeed % suggestions.length;
-    const rotated = [...suggestions.slice(offset), ...suggestions.slice(0, offset)];
-    return rotated.slice(0, VISIBLE_SUGGESTION_LIMIT);
-  };
-
-  const previewIcons = new Set(previewSuggestions.map((s) => s.connectionIcon).filter(Boolean));
-  const connectionSuggestions = connections
-    .filter((connection) => !previewIcons.has(connection.icon || connection.id))
-    .map(suggestionForConnection)
-    .filter((s): s is Suggestion => Boolean(s))
-    .slice(0, CONNECTION_SUGGESTION_LIMIT);
-
-  const combinedConnectionSuggestions = [...previewSuggestions, ...connectionSuggestions].slice(0, CONNECTION_SUGGESTION_LIMIT);
-  if (combinedConnectionSuggestions.length === 0) return rotateVisible(autoSuggestions);
-
-  const [first, ...rest] = autoSuggestions;
-  const merged = first
-    ? [first, ...combinedConnectionSuggestions, ...rest]
-    : combinedConnectionSuggestions;
-  const seen = new Set<string>();
-  const deduped = merged.filter((suggestion) => {
-    const key = suggestion.text.toLowerCase().replace(/\s+/g, " ").trim();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  return rotateVisible(deduped);
-}
-
-function setupDescriptionForConnection(connection: ConnectionListItem): string {
-  const lower = `${connection.id} ${connection.name} ${connection.category ?? ""}`.toLowerCase();
-  if (lower.includes("gmail") || lower.includes("email")) return "Bring email into chat";
-  if (lower.includes("slack")) return "Search team threads";
-  if (lower.includes("github")) return "Use repos and issues";
-  if (lower.includes("linear") || lower.includes("jira")) return "Track project work";
-  if (lower.includes("calendar")) return "Prep from events";
-  if (lower.includes("notion") || lower.includes("docs") || lower.includes("obsidian")) return "Search your docs";
-  if (lower.includes("browser")) return "Read current pages";
-  return connection.description ? compactSuggestionPart(connection.description, 34) : "Add more context";
-}
-
-function buildConnectionSetupSuggestions(
-  connections: ConnectionListItem[],
-  appItems: ActivityAppItem[]
-): ConnectionSetupSuggestion[] {
-  const fallbackConnectionOrder = [
-    "gmail",
-    "slack",
-    "github",
-    "github-issues",
-    "linear",
-    "google-calendar",
-    "notion",
-    "google-docs",
-    "obsidian",
-    "jira",
-    "google-sheets",
-  ];
-
-  const fallbackRank = (connection: ConnectionListItem) => {
-    const keys = [connection.id, connection.icon, connection.name]
-      .filter((key): key is string => Boolean(key))
-      .map((key) => key.toLowerCase());
-    const index = fallbackConnectionOrder.findIndex((preferred) =>
-      keys.some((key) => key === preferred || key.includes(preferred))
-    );
-    return index === -1 ? fallbackConnectionOrder.length : index;
-  };
-
-  const activityAffinity = (connection: ConnectionListItem) => {
-    const connectionText = `${connection.id} ${connection.name} ${connection.category ?? ""}`.toLowerCase();
-    const connectionParts = connectionText.split(/[\s_-]+/).filter((part) => part.length > 3);
-
-    return appItems.reduce(
-      (match, item, index) => {
-        const appText = `${item.name} ${item.app_name ?? ""}`.toLowerCase();
-        if (!appText) return match;
-
-        const isMatch =
-          appText.includes(connection.id.toLowerCase()) ||
-          appText.includes(connection.name.toLowerCase()) ||
-          connectionParts.some((part) => appText.includes(part));
-
-        if (!isMatch) return match;
-
-        return {
-          count: match.count + item.count,
-          firstSeenIndex: Math.min(match.firstSeenIndex, index),
-        };
-      },
-      { count: 0, firstSeenIndex: Number.MAX_SAFE_INTEGER }
-    );
-  };
-
-  return connections
-    .filter((connection) => !connection.connected && connection.id !== "owned-default")
-    .map((connection) => {
-      return {
-        suggestion: {
-          id: connection.id,
-          title: `Connect ${connection.name || connection.id}`,
-          description: setupDescriptionForConnection(connection),
-          icon: connection.icon || connection.id,
-        },
-        activity: activityAffinity(connection),
-        fallbackRank: fallbackRank(connection),
-      };
-    })
-    .sort((a, b) =>
-      b.activity.count - a.activity.count ||
-      a.activity.firstSeenIndex - b.activity.firstSeenIndex ||
-      a.fallbackRank - b.fallbackRank ||
-      a.suggestion.title.localeCompare(b.suggestion.title)
-    )
-    .slice(0, 2)
-    .map((entry) => entry.suggestion);
-}
 
 interface Speaker {
   id: number;
@@ -953,13 +569,6 @@ function extractAppFromToolCall(toolCall: ToolCall): string | undefined {
   return undefined;
 }
 
-function extractConnectionIconFromToolCall(toolCall: ToolCall): string | undefined {
-  if (toolCall.toolName === "bash") {
-    return classifyCurl(String(toolCall.args?.command ?? ""))?.connectionIconName;
-  }
-  return undefined;
-}
-
 function extractWebTargetFromToolCall(toolCall: ToolCall): WebTargetPresentation | undefined {
   if (toolCall.toolName === "bash") {
     return classifyCurl(String(toolCall.args?.command ?? ""))?.webTarget;
@@ -1229,7 +838,6 @@ function ToolCallRailItem({ toolCall, isLast }: { toolCall: ToolCall; isLast: bo
   const [expanded, setExpanded] = useState(false);
   const label = friendlyToolLabel(toolCall);
   const appName = extractAppFromToolCall(toolCall);
-  const connectionIconName = extractConnectionIconFromToolCall(toolCall);
   const webTarget = extractWebTargetFromToolCall(toolCall);
 
   return (
@@ -1238,9 +846,7 @@ function ToolCallRailItem({ toolCall, isLast }: { toolCall: ToolCall; isLast: bo
       <div className="flex flex-col items-center flex-shrink-0 w-5">
         {/* Dot */}
         <div className="relative flex items-center justify-center w-5 h-5">
-          {connectionIconName && !toolCall.isRunning && !toolCall.isError ? (
-            <ConnectionToolIcon name={connectionIconName} />
-          ) : toolCall.isRunning ? (
+          {toolCall.isRunning ? (
             // Pulsing hollow dot for running
             <motion.div
               className="w-2 h-2 border border-foreground"
@@ -1274,7 +880,7 @@ function ToolCallRailItem({ toolCall, isLast }: { toolCall: ToolCall; isLast: bo
         >
           {webTarget ? (
             <WebTargetIcon target={webTarget} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />
-          ) : appName && !connectionIconName && (
+          ) : appName && (
             <AppIcon name={appName} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />
           )}
           <span className="truncate flex-1 text-xs font-mono text-foreground/70 group-hover:text-foreground transition-colors duration-150">
@@ -2117,19 +1723,14 @@ function MessageContent({
   // attachment cards above already disclose what was attached, so we
   // suppress the expansion chevron in that case (label-only bubble).
   if (isUser && message.displayContent) {
-    const chipMatch = message.displayContent.match(/^\[chip:([^|]+)\|([^\]]+)\] ([\s\S]*)/);
+    const chipMatch = message.displayContent.match(/^\[chip:[^|]+\|([^\]]+)\] ([\s\S]*)/);
     if (chipMatch) {
-      const [, chipId, chipName, chipText] = chipMatch;
+      const [, chipName, chipText] = chipMatch;
       return (
         <div className="space-y-2">
           {attachmentsRow}
           <div className="flex flex-wrap gap-x-1.5 gap-y-0.5">
             <span className="inline-flex h-5 items-center gap-1 shrink-0 align-top">
-              <IntegrationIcon
-                icon={chipId}
-                className="w-4 h-4 flex items-center justify-center overflow-hidden shrink-0"
-                fallbackClassName="h-3 w-3 text-muted-foreground"
-              />
               <span className="text-sm font-mono font-semibold text-foreground/80 leading-5">{chipName}</span>
             </span>
             <span className="text-sm leading-5 break-words min-w-0">{chipText}</span>
@@ -2608,67 +2209,21 @@ export function StandaloneChat({
   hideInlineHistory?: boolean;
 } = {}) {
   const { settings, updateSettings, isSettingsLoaded, reloadStore } = useSettings();
-  const { isMac, isWindows, isLoading: isPlatformLoading } = usePlatform();
+  const { isMac } = usePlatform();
   // Drop the macOS traffic-light reservation when the window is fullscreen
   // (the buttons hide). Only relevant in standalone mode (no parent
   // className) — the embedded variant is below the host's chrome anyway.
   const isFullscreen = useIsFullscreen();
   const { items: appItems } = useSqlAutocomplete("app");
   const { suggestions: autoSuggestions, refreshing: suggestionsRefreshing, forceRefresh: refreshSuggestions } = useAutoSuggestions();
-  // Connected integrations (gmail, google-sheets, slack, etc.) surfaced in the
-  // filter popover so users can mention them directly with @id — helps the
-  // agent pick the right connection for a query instead of having to guess.
-  const [connections, setConnections] = useState<ConnectedIntegration[]>([]);
-  const [allConnectionItems, setAllConnectionItems] = useState<ConnectionListItem[]>([]);
-  const [connectionPreviewSuggestions, setConnectionPreviewSuggestions] = useState<Suggestion[]>([]);
-  const [showConnectBanner, setShowConnectBanner] = useState(() => {
-    try { return localStorage.getItem("screenpipe_connect_banner_dismissed") !== "true"; } catch { return true; }
-  });
-  const [suggestionRefreshSeed, setSuggestionRefreshSeed] = useState(0);
-  const connectionSetupSuggestions = React.useMemo(
-    () => buildConnectionSetupSuggestions(allConnectionItems, appItems),
-    [allConnectionItems, appItems]
-  );
-  const refreshConnectionState = React.useCallback(async () => {
-    if (isPlatformLoading) return;
-    try {
-      const res = await localFetch("/connections");
-      if (!res.ok) return;
-      const json = (await res.json()) as { data?: ConnectionListItem[] };
-      const allConnections = (json.data ?? []).map((connection) =>
-        normalizeConnectionForPlatform(connection, isWindows)
-      );
-      const connectedConnections = allConnections
-        .filter((connection) => connection.connected)
-        .map((connection) => ({
-          id: connection.id,
-          name: connection.name,
-          icon: connection.icon,
-          category: connection.category,
-          description: connection.description,
-        }));
-
-      setAllConnectionItems(allConnections);
-      setConnections(connectedConnections);
-    } catch {
-      // silent — connection-aware UI simply won't surface stale data
-    }
-  }, [isPlatformLoading, isWindows]);
   const visibleSuggestionSignature = React.useMemo(
     () =>
-      [...autoSuggestions, ...connectionPreviewSuggestions]
-        .map((s) => `${s.text}|${s.preview ?? ""}|${s.connectionIcon ?? ""}|${s.priority ?? ""}`)
+      autoSuggestions
+        .map((s) => `${s.text}|${s.preview ?? ""}|${s.priority ?? ""}`)
         .join("\n"),
-    [autoSuggestions, connectionPreviewSuggestions]
-  );
-  const connectionAwareSuggestions = React.useMemo(
-    () => mergeConnectionSuggestions(autoSuggestions, connections, connectionPreviewSuggestions, suggestionRefreshSeed),
-    [autoSuggestions, connections, connectionPreviewSuggestions, suggestionRefreshSeed]
+    [autoSuggestions]
   );
 
-  useEffect(() => {
-    setSuggestionRefreshSeed(0);
-  }, [visibleSuggestionSignature]);
   // Watch the input section's width so suggestion chips can collapse into
   // a popover on narrow chat columns.
   useEffect(() => {
@@ -2681,76 +2236,9 @@ export function StandaloneChat({
     return () => ro.disconnect();
   }, []);
 
-  useEffect(() => {
-    void refreshConnectionState();
-  }, [refreshConnectionState]);
-
-  // Re-fetch connections whenever the window becomes visible — picks up any
-  // integrations connected in Settings while the chat was open.
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refreshConnectionState();
-    };
-    const onFocus = () => void refreshConnectionState();
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener(CONNECTIONS_UPDATED_EVENT, onFocus);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener(CONNECTIONS_UPDATED_EVENT, onFocus);
-    };
-  }, [refreshConnectionState]);
-
-  // Pre-fill chat input when "Try in Chat" is clicked from the connections page.
-  // Always opens a new chat so the prompt never lands in an existing conversation.
-  // Uses a ref so the effect doesn't need startNewConversation as a dep (avoids
-  // re-registering the listener on every render while still calling the latest fn).
-  const tryInChatStartNewRef = useRef<(() => Promise<void> | void) | null>(null);
-  useEffect(() => {
-    const handler = async (e: Event) => {
-      const { connectionId, connectionName, prompt } = (e as CustomEvent<{
-        connectionId: string;
-        connectionName: string;
-        prompt: string;
-      }>).detail;
-      // Start a fresh conversation so the prompt doesn't pollute an existing chat.
-      await tryInChatStartNewRef.current?.();
-      setConnectionChip({ id: connectionId, name: connectionName, icon: connectionId });
-      setInput(prompt);
-      requestAnimationFrame(() => inputRef.current?.focus());
-    };
-    window.addEventListener("try-in-chat", handler);
-    return () => window.removeEventListener("try-in-chat", handler);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (connections.length === 0) {
-      setConnectionPreviewSuggestions([]);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    fetchConnectionPreviewSuggestions(connections).then((suggestions) => {
-      if (!cancelled) setConnectionPreviewSuggestions(suggestions);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [connections]);
-
   const refreshVisibleSuggestions = useCallback(() => {
-    setSuggestionRefreshSeed((seed) => seed + 1);
     void refreshSuggestions();
-
-    if (connections.length === 0) return;
-    void fetchConnectionPreviewSuggestions(connections).then((suggestions) => {
-      setConnectionPreviewSuggestions(suggestions);
-    });
-  }, [connections, refreshSuggestions]);
+  }, [refreshSuggestions]);
 
   // Custom summary templates (persisted in settings)
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
@@ -2780,7 +2268,6 @@ export function StandaloneChat({
   };
 
   const [input, setInput] = useState("");
-  const [connectionChip, setConnectionChip] = useState<{ id: string; name: string; icon: string } | null>(null);
   // Mirror `input` into a ref so the chat-switch logic in
   // useChatConversations can snapshot the outgoing composer text
   // without needing it as a dep (which would re-bind handlers every
@@ -2902,14 +2389,6 @@ export function StandaloneChat({
   const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  // Inline connection prefix: icon+name rendered as an absolute overlay on the
-  // textarea's first line. We measure its width and indent the textarea's first
-  // line so the typed text flows after the prefix. chipScrollTop tracks the
-  // textarea's scroll offset so the overlay scrolls with its line instead of
-  // staying pinned at the top once the input grows past maxHeight.
-  const chipPrefixRef = useRef<HTMLDivElement>(null);
-  const [chipPrefixWidth, setChipPrefixWidth] = useState(0);
-  const [chipScrollTop, setChipScrollTop] = useState(0);
   // Root of the chat surface. The webview drag-drop event is window-global and
   // this chat is kept mounted-but-hidden (display:none) on non-chat sections,
   // so we use this ref's visibility to ignore drops meant for another view
@@ -3113,25 +2592,6 @@ export function StandaloneChat({
     [queuedPromptsBySession, currentQueueSessionId]
   );
 
-  // Clear the connection chip whenever the active conversation changes (new chat or history switch).
-  useEffect(() => { setConnectionChip(null); }, [conversationId]);
-
-  // Measure the inline connection prefix so the textarea first line can indent
-  // past it. Re-measure on chip change and container resize.
-  React.useLayoutEffect(() => {
-    if (!connectionChip) { setChipPrefixWidth(0); setChipScrollTop(0); return; }
-    const el = chipPrefixRef.current;
-    if (!el) return;
-    const measure = () => setChipPrefixWidth(el.offsetWidth);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [connectionChip]);
-
-  useEffect(() => {
-    void refreshConnectionState();
-  }, [conversationId, refreshConnectionState]);
 
   // Drop any single-shot attachment metadata stashed for the previous
   // chat's next-send when the user navigates away. Without this, a user
@@ -3508,25 +2968,10 @@ export function StandaloneChat({
 
     const text = e.clipboardData?.getData("text/plain") ?? "";
 
-    // Reconstruct the connection chip when pasting a copied chip message
-    // (content or display form). Restoring the pill keeps the connection
-    // context intact across copy/paste, including paste into a different chat
-    // window (handler runs per-window).
-    if (!connectionChip) {
-      const parsed = parseConnectionChip(text, (id) => INTEGRATION_ICON_KEYS.has(id));
-      if (parsed) {
-        e.preventDefault();
-        setConnectionChip({ ...parsed.chip, icon: parsed.chip.id });
-        setInput((prev) => prev + parsed.prompt);
-        requestAnimationFrame(() => inputRef.current?.focus());
-        return;
-      }
-    }
-
     if (attachPastedText(text)) {
       e.preventDefault();
     }
-  }, [processImageFile, processDocFile, attachPastedText, connectionChip]);
+  }, [processImageFile, processDocFile, attachPastedText]);
 
   // Signal that this chat window is ready to receive prefill events.
   // Other windows wait for "chat-ready" before emitting "chat-prefill"
@@ -3742,7 +3187,6 @@ export function StandaloneChat({
   loadConversationRef.current = loadConversation;
   startNewConversationRef.current = startNewConversation;
   // Keep the try-in-chat ref in sync so the event handler always calls the latest fn.
-  tryInChatStartNewRef.current = startNewConversation;
 
   const openConversationLocally = useCallback(async (convId: string) => {
     const { loadConversationFile } = await import("@/lib/chat-storage");
@@ -4197,10 +3641,6 @@ export function StandaloneChat({
     const textarea = e.target;
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 150) + "px";
-    // Keep the inline connection prefix aligned with its line: typing can grow
-    // the textarea past maxHeight and scroll it without firing onScroll.
-    if (connectionChip) setChipScrollTop(textarea.scrollTop);
-
     const cursorPos = e.target.selectionStart || 0;
     const textBeforeCursor = value.slice(0, cursorPos);
     const atMatch = textBeforeCursor.match(/@([\w-]*)$/);
@@ -4245,19 +3685,6 @@ export function StandaloneChat({
       return;
     }
 
-    // Backspace at the very start of the input deletes the connection prefix
-    // (icon+name), since it sits before the typed text.
-    if (
-      (e.key === "Backspace" || e.key === "Delete") &&
-      connectionChip &&
-      e.currentTarget.selectionStart === 0 &&
-      e.currentTarget.selectionEnd === 0
-    ) {
-      e.preventDefault();
-      setConnectionChip(null);
-      return;
-    }
-
     if (isComposerSteerShortcut(e, isMac) && !showMentionDropdown) {
       e.preventDefault();
       e.stopPropagation();
@@ -4284,12 +3711,7 @@ export function StandaloneChat({
       // which is the exact silent-drop bug the pending-chips fix.
       if (pendingDocsRef.current.length > 0) return;
       if (input.trim() || pastedImages.length > 0 || attachedDocsRef.current.length > 0) {
-        const chip = connectionChip;
-        setConnectionChip(null);
-        sendMessage(
-          chip ? buildChipModelContent(chip, input.trim()) : input.trim(),
-          chip ? buildChipDisplayContent(chip, input.trim()) : undefined,
-        );
+        sendMessage(input.trim());
       }
       return;
     }
@@ -4532,15 +3954,14 @@ export function StandaloneChat({
     // This is passed via --append-system-prompt to Pi, enabling Anthropic prompt
     // caching (90% input cost reduction on subsequent messages).
     const presetPrompt = p.prompt || "";
-    const connectionsCtx = buildConnectionsContext(connections);
-    const systemPrompt = `${buildSystemPrompt()}\n\n${presetPrompt}${connectionsCtx}`.trim() || null;
+    const systemPrompt = `${buildSystemPrompt()}\n\n${presetPrompt}`.trim() || null;
     return {
       model: p.model || "",
       maxTokens: (p as any).maxTokens ?? 4096,
       systemPrompt,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePreset?.model, (activePreset as any)?.maxTokens, activePreset?.prompt, connections]);
+  }, [activePreset?.model, (activePreset as any)?.maxTokens, activePreset?.prompt]);
 
   const setRunningConfigFromProviderConfig = useCallback((providerConfig: NonNullable<ReturnType<typeof buildProviderConfig>>) => {
     piRunningConfigRef.current = {
@@ -4583,25 +4004,6 @@ export function StandaloneChat({
     piSessionSyncedRef.current = false;
     setRunningConfigFromProviderConfig(providerConfig);
   }, [piInfo?.pid, piInfo?.running, setRunningConfigFromProviderConfig]);
-
-  // When connections change (e.g., user connected Google Calendar in Settings),
-  // silently restart Pi if the system prompt changed and no message is in-flight.
-  useEffect(() => {
-    if (connections.length === 0) return;
-    const config = buildProviderConfig();
-    if (!config) return;
-    const running = piRunningConfigRef.current;
-    if (!running || running.systemPrompt === config.systemPrompt) return;
-    if (piMessageIdRef.current) return; // don't interrupt an active turn
-    restartCurrentPiSession(config)
-      .then(() => {
-        if (piRunningConfigRef.current) {
-          piRunningConfigRef.current = { ...piRunningConfigRef.current, systemPrompt: config.systemPrompt };
-        }
-      })
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connections]);
 
   // Check Pi status on mount — Pi is auto-started at app boot by Rust
   useEffect(() => {
@@ -6571,17 +5973,6 @@ export function StandaloneChat({
     }
   }
 
-  const openConnectionSetup = useCallback((connectionId: string) => {
-    window.dispatchEvent(
-      new CustomEvent("open-settings", {
-        detail: {
-          section: "connections",
-          connectionId: connectionId === "connections" ? null : connectionId,
-        },
-      }),
-    );
-  }, []);
-
   async function queueFollowUpMessage(userMessage: string, displayLabel?: string) {
     if ((!canChat && !autoSendBypassRef.current) || (!activePreset && !autoSendBypassRef.current)) return;
     return enqueuePiMessage(userMessage, displayLabel);
@@ -7391,12 +6782,7 @@ export function StandaloneChat({
     e.preventDefault();
     if (pendingDocsRef.current.length > 0) return; // wait for extraction to finish
     if (!input.trim() && pastedImages.length === 0 && attachedDocsRef.current.length === 0) return;
-    const chip = connectionChip;
-    setConnectionChip(null);
-    sendMessage(
-      chip ? buildChipModelContent(chip, input.trim()) : input.trim(),
-      chip ? buildChipDisplayContent(chip, input.trim()) : undefined,
-    );
+    sendMessage(input.trim());
   };
 
   const handleStop = async () => {
@@ -7545,36 +6931,6 @@ export function StandaloneChat({
               </button>
             );
           })
-        )}
-
-        {connections.length > 0 && (
-          <>
-            <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 border-t">
-              connections
-            </div>
-            {connections.map((c) => {
-              const tag = connectionMentionTag(c, isWindows);
-              return (
-                <button
-                  key={`conn-${c.id}`}
-                  type="button"
-                  onClick={() => {
-                    setInput((prev) => `${tag} ${prev.trim()}`.trim() + " ");
-                    setAppFilterOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2"
-                >
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <ConnectionToolIcon name={c.icon || c.id} />
-                    <span className="truncate">{tag}</span>
-                  </span>
-                  <span className="text-[10px] text-muted-foreground truncate">
-                    {c.name}
-                  </span>
-                </button>
-              );
-            })}
-          </>
         )}
 
         {recentSpeakers.length > 0 && (
@@ -7933,9 +7289,7 @@ export function StandaloneChat({
         {messages.length === 0 && !isPreparingPrefill && !isLoading && !isStreaming && hasPresets && hasValidModel && (
           <SummaryCards
             onSendMessage={sendMessage}
-            onOpenConnection={openConnectionSetup}
-            connectionSetupSuggestions={connectionSetupSuggestions}
-            autoSuggestions={connectionAwareSuggestions}
+            autoSuggestions={autoSuggestions}
             suggestionsRefreshing={suggestionsRefreshing}
             onRefreshSuggestions={refreshVisibleSuggestions}
             customTemplates={customTemplates}
@@ -8409,10 +7763,10 @@ export function StandaloneChat({
             opens a popover when narrow (e.g. BrowserSidebar squeezed the
             chat column). 520px is the rough threshold below which 3 chips
             wrap to multiple rows and eat too much vertical space. */}
-        {messages.length > 0 && !isLoading && connectionAwareSuggestions.length > 0 && (
+        {messages.length > 0 && !isLoading && autoSuggestions.length > 0 && (
           inputSectionWidth >= 520 ? (
             <div className="px-5 sm:px-6 pt-2 flex flex-wrap gap-1.5 items-center">
-              {connectionAwareSuggestions.slice(0, 3).map((s, i) => (
+              {autoSuggestions.slice(0, 3).map((s, i) => (
                 <button
                   key={i}
                   type="button"
@@ -8420,11 +7774,7 @@ export function StandaloneChat({
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-muted/20 hover:bg-foreground hover:text-background border border-border/20 hover:border-foreground text-muted-foreground transition-all duration-150 cursor-pointer max-w-[280px]"
                   title={s.preview ? `${s.text} — ${s.preview}` : s.text}
                 >
-                  {s.connectionIcon ? (
-                    <ConnectionToolIcon name={s.connectionIcon} />
-                  ) : (
-                    <Sparkles className="w-3 h-3 shrink-0 text-muted-foreground/70" strokeWidth={1.5} aria-hidden />
-                  )}
+                  <Sparkles className="w-3 h-3 shrink-0 text-muted-foreground/70" strokeWidth={1.5} aria-hidden />
                   <span className="truncate">{s.text}</span>
                 </button>
               ))}
@@ -8458,7 +7808,7 @@ export function StandaloneChat({
                   sideOffset={6}
                 >
                   <div className="flex flex-col gap-0.5">
-                    {connectionAwareSuggestions.slice(0, 3).map((s, i) => (
+                    {autoSuggestions.slice(0, 3).map((s, i) => (
                       <button
                         key={i}
                         type="button"
@@ -8466,11 +7816,7 @@ export function StandaloneChat({
                         className="text-left px-2 py-1.5 text-[11px] font-mono rounded-sm hover:bg-muted text-muted-foreground hover:text-foreground transition-colors flex items-start gap-1.5"
                         title={s.preview ? `${s.text} — ${s.preview}` : s.text}
                       >
-                        {s.connectionIcon ? (
-                          <ConnectionToolIcon name={s.connectionIcon} />
-                        ) : (
-                          <Sparkles className="w-3 h-3 mt-0.5 shrink-0 text-muted-foreground/70" strokeWidth={1.5} aria-hidden />
-                        )}
+                        <Sparkles className="w-3 h-3 mt-0.5 shrink-0 text-muted-foreground/70" strokeWidth={1.5} aria-hidden />
                         <span className="line-clamp-2">{s.text}</span>
                       </button>
                     ))}
@@ -8731,45 +8077,12 @@ export function StandaloneChat({
           >
             {/* Textarea row: full width so scrollbar is above the buttons and no dead zone */}
             <div className="relative flex-1 min-w-0">
-              {/* Connection chip — inline icon + name prefix on the
-                  textarea's first line. The prefix is an absolute overlay; the
-                  textarea's first line is indented past it so typed text flows
-                  after the name. X (absolute, top-right) clears it. */}
-              {connectionChip && (
-                <>
-                  {/* Clip wrapper: matches the textarea's visible box so the
-                      prefix never bleeds above the first line when scrolled. */}
-                  <div className="pointer-events-none absolute left-3 right-7 top-2.5 bottom-2.5 z-10 overflow-hidden">
-                    <div
-                      ref={chipPrefixRef}
-                      className="absolute left-0 top-0 flex h-5 items-center gap-1.5"
-                      style={{ transform: `translateY(${-chipScrollTop}px)` }}
-                    >
-                      <IntegrationIcon
-                        icon={connectionChip.icon}
-                        className="w-4 h-4 flex items-center justify-center overflow-hidden shrink-0 bg-transparent"
-                        fallbackClassName="h-3 w-3 text-muted-foreground"
-                      />
-                      <span className="text-sm font-mono font-semibold text-foreground/80 leading-5 whitespace-nowrap">{connectionChip.name}</span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label="Remove connection context"
-                    onClick={() => setConnectionChip(null)}
-                    className="absolute right-2.5 top-2 z-10 text-muted-foreground/60 hover:text-foreground transition-colors shrink-0"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </>
-              )}
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={handleInputChange}
                 onCompositionStart={() => setIsComposing(true)}
                 onCompositionEnd={() => setIsComposing(false)}
-                onScroll={connectionChip ? (e) => setChipScrollTop(e.currentTarget.scrollTop) : undefined}
                 onKeyDown={handleKeyDown}
                 placeholder={
                   disabledReason
@@ -8784,11 +8097,10 @@ export function StandaloneChat({
                 rows={1}
                 className={cn(
                   "w-full min-h-[44px] border-0 bg-transparent px-3 text-sm font-mono placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 caret-foreground resize-none overflow-y-auto scrollbar-minimal py-2.5",
-                  connectionChip ? "pr-7" : "pr-3"
+                  "pr-3"
                 )}
                 style={{
                   maxHeight: "150px",
-                  textIndent: connectionChip && chipPrefixWidth ? `${chipPrefixWidth + 8}px` : undefined,
                 }}
               />
 
@@ -8963,48 +8275,6 @@ export function StandaloneChat({
             </div>
           </div>
 
-          {/* Connect apps nudge banner — inside the form, below the input box */}
-          {showConnectBanner && (
-            <div className="flex items-center gap-2 mt-2">
-              <button
-                type="button"
-                onClick={() => openConnectionSetup("connections")}
-                className="text-[11px] text-muted-foreground/70 hover:text-foreground transition-colors flex-1 text-left"
-              >
-                Connect your apps to get better answers
-              </button>
-              <div className="flex items-center gap-1">
-                {connections
-                  .filter((c) => INTEGRATION_ICON_KEYS.has(c.icon || c.id))
-                  .slice(0, 8)
-                  .map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      title={c.name}
-                      onClick={() => openConnectionSetup(c.id)}
-                      className="shrink-0 opacity-70 hover:opacity-100 transition-opacity"
-                    >
-                      <IntegrationIcon
-                        icon={c.icon || c.id}
-                        className="w-6 h-6 bg-muted/40 rounded-md flex items-center justify-center"
-                        fallbackClassName="h-3 w-3 text-muted-foreground"
-                      />
-                    </button>
-                  ))}
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowConnectBanner(false);
-                  try { localStorage.setItem("screenpipe_connect_banner_dismissed", "true"); } catch {}
-                }}
-                className="text-muted-foreground/50 hover:text-foreground transition-colors shrink-0"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          )}
         </form>
       </div> {/* End of max-w-4xl input wrapper */}
       </div>

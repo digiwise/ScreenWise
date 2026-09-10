@@ -1,6 +1,6 @@
 ---
 name: screenpipe-api
-description: Query the user's data via the local screenpipe REST API at localhost:3030 — screen recordings, audio, UI elements, usage analytics, and the user's persistent memory store. Use when the user asks about their screen activity, meetings, apps, productivity, media export, retranscription, connected services, OR when they ask to save / remember / store / note information so it can be retrieved later (POST /memories — survives across sessions and is queryable by Claude/external agents via the same API).
+description: Query the user's data via the local screenpipe REST API at localhost:3030 — screen recordings, audio, UI elements, usage analytics, and the user's persistent memory store. Use when the user asks about their screen activity, meetings, apps, productivity, media export, retranscription, OR when they ask to save / remember / store / note information so it can be retrieved later (POST /memories — survives across sessions and is queryable by Claude/external agents via the same API).
 ---
 
 # Screenpipe API
@@ -15,7 +15,7 @@ Local REST API at `http://localhost:3030`.
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" "http://localhost:3030/..."
 ```
 
-The `$SCREENPIPE_LOCAL_API_KEY` env var is already set in your environment. Without it you get 403. Endpoints that skip auth: `/health`, `/ws/health`, `/audio/device/status`, `/connections/oauth/callback`, `/frames/*`, and `/notify`.
+The `$SCREENPIPE_LOCAL_API_KEY` env var is already set in your environment. Without it you get 403. Endpoints that skip auth: `/health`, `/ws/health`, `/audio/device/status`, `/frames/*`, and `/notify`.
 
 ## Context Window Protection
 
@@ -183,7 +183,7 @@ curl -X POST http://localhost:3030/audio/retranscribe \
   -d '{"start": "1h ago", "end": "now"}'
 ```
 
-Optional: `engine` (one of `deepgram`, `screenpipe-cloud`, `whisper-large`, `whisper-large-v3-turbo`, `whisper-large-v3-turbo-quantized`, `qwen3-asr`, `parakeet`, `parakeet-mlx`, `openai-compatible`), `vocabulary` (array of `{"word": "...", "replacement": "..."}` for bias/replacement), `prompt` (topic context for Whisper).
+Optional: `engine` (one of `whisper-tiny`, `whisper-tiny-quantized`, `whisper-large`, `whisper-large-quantized`, `whisper-large-v3-turbo`, `whisper-large-v3-turbo-quantized`, `qwen3-asr`, `parakeet`, `parakeet-mlx`), `vocabulary` (array of `{"word": "...", "replacement": "..."}` for bias/replacement), `prompt` (topic context for Whisper).
 
 Keep ranges short (1h max). Show old vs new transcription.
 
@@ -248,53 +248,7 @@ Common patterns: `GROUP BY date(timestamp)` (daily), `GROUP BY strftime('%H:00',
 
 ---
 
-## 8. Connections — `GET /connections`
-
-```bash
-# List all integrations (Telegram, Slack, Discord, Email, Todoist, Teams, 40+)
-curl http://localhost:3030/connections
-
-# Get credentials for a connected service
-curl http://localhost:3030/connections/telegram
-```
-
-Returns credentials to use with service APIs directly:
-- **Telegram**: `bot_token` + `chat_id` → `POST https://api.telegram.org/bot{token}/sendMessage`
-- **Slack**: `webhook_url` → `POST {webhook_url}` with `{"text": "..."}`
-- **Discord**: `webhook_url` → `POST {webhook_url}` with `{"content": "..."}`
-- **Todoist**: `api_token` → `POST https://api.todoist.com/api/v1/tasks` with Bearer auth
-- **Teams**: `webhook_url` → `POST {webhook_url}` with `{"text": "..."}`
-- **Email**: `smtp_host`, `smtp_port`, `smtp_user`, `smtp_pass`, `from_address`
-
-If not connected, tell user to set up in Settings > Connections.
-
-Each entry's `description` field is self-describing — for capabilities that
-need a control surface (browsers, gateways, etc.), the description includes
-the exact endpoint and body shape. Read it before guessing.
-
-### Calendar Connections
-
-Use calendar-specific endpoints when the user asks about appointments,
-meetings, or upcoming events:
-
-```bash
-# Native Apple/Windows Calendar
-curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
-  "http://localhost:3030/connections/calendar/events?hours_back=0&hours_ahead=72"
-
-# Google Calendar
-curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
-  "http://localhost:3030/connections/google-calendar/events?hours_back=0&hours_ahead=72"
-
-# ICS/webcal subscriptions
-curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
-  "http://localhost:3030/connections/ics-calendar/events?hours_back=0&hours_ahead=72"
-```
-
-If `/connections` shows `ics-calendar.connected: true`, include ICS results
-alongside native and Google Calendar results before saying the calendar is empty.
-
-### Browser Control — `owned-default`
+## 8. Browser Control — `owned-default`
 
 You have an embedded browser you can drive directly, for the user it will displayed inside the chat. Three intent verbs;
 reach for `/eval` only when the first two aren't enough.

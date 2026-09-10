@@ -43,7 +43,7 @@ static DAEMON: OnceLock<Option<ServiceDaemon>> = OnceLock::new();
 /// and browsing open a multicast socket, which makes macOS prompt for "Local
 /// Network" access. Discovery is opt-in (CLI `--enable-mdns` /
 /// `SCREENPIPE_ENABLE_MDNS`), so screenpipe stays silent on the network unless
-/// the user wants multi-device discovery / remote sync.
+/// the user wants local-network discovery.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Enable or disable mDNS advertise + browse. Call once at startup from config.

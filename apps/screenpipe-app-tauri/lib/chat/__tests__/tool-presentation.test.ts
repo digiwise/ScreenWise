@@ -108,13 +108,6 @@ describe("classifyCurl", () => {
   it("labels activity-summary", () => {
     expect(classifyCurl(`curl ${LOCAL}/activity-summary`)?.label).toBe("Activity summary");
   });
-  it("labels a Gmail send with recipient", () => {
-    const out = classifyCurl(
-      `curl -X POST '${LOCAL}/connections/gmail/send' -d '{"to":"a@b.com"}'`,
-    );
-    expect(out?.label).toBe("Sent email to a@b.com");
-    expect(out?.connectionIconName).toBe("gmail");
-  });
   it("labels an external fetch by domain", () => {
     const out = classifyCurl("curl https://example.com/page");
     expect(out?.label).toBe("Fetched example.com");
@@ -134,9 +127,7 @@ describe("endpointFamily", () => {
     expect(endpointFamily("/raw_sql")).toBe("Database");
     expect(endpointFamily("/activity-summary")).toBe("Activity");
     expect(endpointFamily("/memories/5")).toBe("Memory");
-    expect(endpointFamily("/connections/gmail/send")).toBe("Email");
-    expect(endpointFamily("/connections/google-calendar/events")).toBe("Calendar");
-    expect(endpointFamily("/connections/slack/x")).toBe("Slack");
+    expect(endpointFamily("/connections/browsers/owned-default/snapshot")).toBe("Browser");
     expect(endpointFamily("/anything-else")).toBe("Screenpipe");
   });
 });
@@ -150,9 +141,6 @@ describe("summarizeToolResult", () => {
     expect(summarizeToolResult('{"data":[1],"pagination":{"total":42}}', "/meetings")).toBe(
       "42 meetings found",
     );
-  });
-  it("recognizes a Gmail send success", () => {
-    expect(summarizeToolResult('{"id":"abc"}', "/connections/gmail/send")).toBe("Email sent");
   });
   it("truncates non-JSON results", () => {
     expect(summarizeToolResult("plain text result", "/x")).toBe("plain text result");
