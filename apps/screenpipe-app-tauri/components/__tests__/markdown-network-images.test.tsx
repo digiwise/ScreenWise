@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const openMock = vi.hoisted(() => vi.fn(async (_url: string) => undefined));
 
-vi.mock("@tauri-apps/plugin-shell", () => ({ open: openMock }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: openMock }));
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     getLocalApiConfig: vi.fn(async () => ({

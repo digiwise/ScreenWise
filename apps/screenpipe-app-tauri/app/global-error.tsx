@@ -6,7 +6,7 @@
 
 import { useEffect } from "react";
 import { commands } from "@/lib/utils/tauri";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export default function GlobalError({
   error,

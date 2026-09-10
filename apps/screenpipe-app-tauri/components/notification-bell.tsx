@@ -68,7 +68,7 @@ async function openNotificationLink(href: string) {
     localPath = raw;
   }
 
-  const { open } = await import("@tauri-apps/plugin-shell");
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
 
   // Prefer opening markdown files in Obsidian if installed.
   if (localPath && localPath.toLowerCase().endsWith(".md")) {
@@ -85,7 +85,7 @@ async function openNotificationLink(href: string) {
     return;
   }
 
-  await open(raw);
+  await openUrl(raw);
 }
 
 function buildNotificationDisplayLabel(title: string): string {

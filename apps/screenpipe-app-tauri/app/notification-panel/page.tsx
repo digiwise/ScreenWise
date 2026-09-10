@@ -62,13 +62,13 @@ async function openNotificationLink(href: string) {
     localPath = raw;
   }
 
-  const { open } = await import("@tauri-apps/plugin-shell");
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
   if (localPath) {
     await commands.openNotePath(localPath);
     return;
   }
 
-  await open(raw);
+  await openUrl(raw);
 }
 
 export default function NotificationPanelPage() {
@@ -140,11 +140,11 @@ export default function NotificationPanelPage() {
                 } else {
                   // External URL — open in system browser
                   try {
-                    const { open } = await import("@tauri-apps/plugin-shell");
-                    await open(actionObj.url);
+                    const { openUrl } = await import("@tauri-apps/plugin-opener");
+                    await openUrl(actionObj.url);
                   } catch (e) {
                     console.error(
-                      "notification open: shell plugin unavailable",
+                      "notification open: opener plugin unavailable",
                       e
                     );
                   }
@@ -155,11 +155,11 @@ export default function NotificationPanelPage() {
             case "meeting_join": {
               if (actionObj.url) {
                 try {
-                  const { open } = await import("@tauri-apps/plugin-shell");
-                  await open(actionObj.url);
+                  const { openUrl } = await import("@tauri-apps/plugin-opener");
+                  await openUrl(actionObj.url);
                 } catch (e) {
                   console.error(
-                    "notification open: shell plugin unavailable",
+                    "notification open: opener plugin unavailable",
                     e
                   );
                 }

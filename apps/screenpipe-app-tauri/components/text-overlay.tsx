@@ -5,7 +5,7 @@
 
 import { useCallback, useMemo, memo, useState } from "react";
 import { cn } from "@/lib/utils";
-import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { commands } from "@/lib/utils/tauri";
 import type { TextPosition } from "@/lib/hooks/use-frame-text-data";
 
@@ -319,7 +319,7 @@ export const TextOverlay = memo(function TextOverlay({
 			e.preventDefault();
 			e.stopPropagation();
 			commands.closeWindow("Main").catch(() => {});
-			shellOpen(url).catch(() => {});
+			openUrl(url).catch(() => {});
 		},
 		[]
 	);

@@ -449,8 +449,8 @@ export default function ViewerPage() {
                       if (!href) return;
                       try {
                         if (await openScreenpipeViewerLink(href)) return;
-                        const { open } = await import("@tauri-apps/plugin-shell");
-                        await open(href);
+                        const { openUrl } = await import("@tauri-apps/plugin-opener");
+                        await openUrl(href);
                       } catch (err) {
                         console.error("link open failed:", err);
                       }

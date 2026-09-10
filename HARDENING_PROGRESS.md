@@ -2357,3 +2357,65 @@ Post-change evidence:
   dependency versions are unchanged. The generated Tauri capability snapshot
   contains only the reviewed localhost-origin reduction. No private smoke data
   was inspected or changed.
+
+### Desktop least-privilege capability boundary — 2026-09-11
+
+Pre-change reachability: the single desktop capability inherited broad Tauri
+v1 migration grants that no retained caller needs. It permits arbitrary
+frontend shell execution through `sh -c`, unrestricted arguments to `open`,
+`cmd`, and the historical `screenpipe` sidecar, all shell spawn operations,
+frontend process exit/restart, WebView creation/devtools, and filesystem access
+across all of the user's home, AppData, application, resource, download, and
+temporary directories. The only `sh -c` caller runs the optional macOS
+`pmset` battery check for automatic Apple Intelligence summaries; it is not
+part of Pi/Ollama. The checked-in Claude/Cursor/Codex MCP-config scanner has no
+importer, so its private configuration-file scopes are unreachable residue.
+The Rust-owned recorder processes, global shortcuts, windows, tray, and owned
+browser do not require matching frontend IPC grants.
+
+This increment will remove the unused shell, process, and CLI plugins; route
+explicit external opens through the retained opener plugin; use the existing
+native local-path opener for meeting artifacts; remove the orphaned integration
+scanner; and replace migrated/default capability sets with caller-proven
+commands and a single `$HOME/.screenpipe/**` static filesystem scope. Paths
+selected or dropped by the user keep Tauri's per-selection runtime scopes.
+Local Pi/Ollama, the authenticated recorder API, attachments and exports,
+notifications, permission flows, native shortcuts, deep links, meeting notes,
+and owned-browser navigation remain in scope.
+
+Post-change evidence:
+
+- The frontend shell, process, and unused CLI plugins are gone from their Rust
+  and TypeScript manifests, native initialization, capability catalog, and
+  generated schemas. The desktop Cargo lock removes only those three packages
+  and their shell-only `os_pipe`, `shared_child`, `sigchld`, and `signal-hook`
+  dependencies; the Bun lock removes only its two direct plugin entries and
+  nested API aliases. The root manifest and lockfile are unchanged.
+- All retained user-directed HTTP(S) opens now use the protocol-limited opener
+  plugin, while meeting artifacts use the existing Rust-owned local-path
+  command. The only custom opener scheme is the macOS System Settings link.
+  No shell/process/CLI plugin reference, `exec-sh` caller, or importer of the
+  deleted hardcoded integration scanner remains.
+- The desktop capability now grants only caller-proven event, app-version,
+  resource-close, menu, window, path, notification, store, filesystem, dialog,
+  opener, OS, and permission-flow commands. Its sole static filesystem scope is
+  `$HOME/.screenpipe/**`. The pinned installed Tauri dialog and drag/drop code
+  was inspected locally and dynamically adds user-selected paths to the
+  filesystem scope, preserving attachments and exports outside that directory.
+- Direct TypeScript checking passed. The focused runtime-policy and Markdown
+  suites passed 7/7; the full frontend Vitest suite passed 372/372 across 35
+  files; and the Next production build passed with only the established
+  `unpdf` `import.meta` warning. The separately invoked, normally excluded Bun
+  text-overlay suite passed the changed opener test and 26/28 tests overall;
+  its two failures are pre-existing unrelated DOM/class assertions and are not
+  reported as passing.
+- Root and desktop formatting checks passed. Locked/offline desktop `cargo
+  check` passed under Visual Studio Developer PowerShell and normal Ninja. The
+  binding-freshness test passed under the documented Ninja Multi-Config,
+  transient `knf-rs-sys` CRT override, and OpenBLAS runtime `PATH`, after
+  cleaning only `libsamplerate-sys`. The normal root `cargo build --release
+  --locked --offline` passed with only the two established native warnings.
+- The generated capability snapshot exactly matches the narrowed source
+  capability. Full diff, root/desktop Cargo and Bun lockfile, residual-reference,
+  and whitespace inspections found no unrelated dependency or private-smoke
+  changes.

@@ -4,7 +4,7 @@
 "use client";
 
 import * as React from "react";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ChevronDown,
   ChevronUp,

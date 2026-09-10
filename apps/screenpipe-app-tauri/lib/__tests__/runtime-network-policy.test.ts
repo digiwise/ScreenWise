@@ -69,4 +69,38 @@ describe("desktop runtime network policy", () => {
       expect(config.app.security.csp).toBeUndefined();
     }
   });
+
+  it("keeps desktop IPC permissions least-privilege", () => {
+    expect(capability.identifier).toBe("screenwise-main");
+
+    const permissionNames = capability.permissions.map(
+      (permission: string | { identifier: string }) =>
+        typeof permission === "string" ? permission : permission.identifier,
+    );
+    const forbiddenPrefixes = [
+      "shell:",
+      "process:",
+      "cli:",
+      "core:webview:",
+      "global-shortcut:",
+    ];
+    for (const prefix of forbiddenPrefixes) {
+      expect(permissionNames.some((name: string) => name.startsWith(prefix))).toBe(false);
+    }
+
+    expect(permissionNames).not.toContain("fs:default");
+    expect(permissionNames).not.toContain("core:window:default");
+    expect(permissionNames).not.toContain("dialog:default");
+    expect(permissionNames).not.toContain("notification:default");
+    expect(permissionNames).not.toContain("store:default");
+
+    const fsScopes = capability.permissions
+      .filter(
+        (permission: string | { identifier: string }) =>
+          typeof permission !== "string" && permission.identifier === "fs:scope",
+      )
+      .flatMap((permission: { allow: Array<{ path: string }> }) => permission.allow)
+      .map(({ path }: { path: string }) => path);
+    expect(fsScopes).toEqual(["$HOME/.screenpipe/**"]);
+  });
 });

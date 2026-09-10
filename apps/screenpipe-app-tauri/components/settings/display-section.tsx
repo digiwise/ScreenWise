@@ -16,7 +16,6 @@ import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { Settings } from "@/lib/hooks/use-settings";
 import { FONT_SIZE_DEFAULT, FONT_SIZE_OPTIONS } from "@/lib/utils/font-size";
-import { open } from "@tauri-apps/plugin-shell";
 import type { SettingsField } from "./settings-search";
 
 /** Settings search index for this section. Co-located with the component so adding a field here means updating one file. See `SettingsField` in `./settings-search` for the schema. */

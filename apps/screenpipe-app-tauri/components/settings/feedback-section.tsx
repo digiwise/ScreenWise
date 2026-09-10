@@ -5,7 +5,7 @@
 
 import React from "react";
 import { Github, Lightbulb, Youtube, BookOpen, Play } from "lucide-react";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 function DiscordIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -31,7 +31,7 @@ export function FeedbackSection() {
       <div className="space-y-2">
         <button
           type="button"
-          onClick={() => open("https://youtu.be/OLUMknhvxWY")}
+          onClick={() => openUrl("https://youtu.be/OLUMknhvxWY")}
           data-testid="help-getting-started"
           className="group w-full text-left flex items-center gap-3 px-3 py-3 bg-card border border-border hover:border-foreground transition-colors duration-150"
         >
@@ -73,7 +73,7 @@ export function FeedbackSection() {
               </div>
             </div>
             <button
-              onClick={() => open("https://docs.screenpi.pe")}
+              onClick={() => openUrl("https://docs.screenpi.pe")}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               docs.screenpi.pe →
@@ -91,7 +91,7 @@ export function FeedbackSection() {
               </div>
             </div>
             <button
-              onClick={() => open("https://www.youtube.com/@screen_pipe/videos")}
+              onClick={() => openUrl("https://www.youtube.com/@screen_pipe/videos")}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               youtube →
@@ -109,7 +109,7 @@ export function FeedbackSection() {
               </div>
             </div>
             <button
-              onClick={() => open("https://screenpipe.com/ideas")}
+              onClick={() => openUrl("https://screenpipe.com/ideas")}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               screenpipe.com/ideas →
@@ -127,7 +127,7 @@ export function FeedbackSection() {
               </div>
             </div>
             <button
-              onClick={() => open("https://github.com/screenpipe/screenpipe/issues")}
+              onClick={() => openUrl("https://github.com/screenpipe/screenpipe/issues")}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               open →
@@ -146,7 +146,7 @@ export function FeedbackSection() {
             </div>
             <button
               data-testid="help-discord-link"
-              onClick={() => open("https://discord.com/invite/screenpipe")}
+              onClick={() => openUrl("https://discord.com/invite/screenpipe")}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               join →

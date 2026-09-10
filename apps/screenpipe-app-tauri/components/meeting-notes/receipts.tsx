@@ -5,7 +5,8 @@
 
 import React from "react";
 import { ExternalLink, FileText, Globe, Layers } from "lucide-react";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { commands } from "@/lib/utils/tauri";
 import {
   hostFromUrl,
   pathFromUrl,
@@ -32,10 +33,7 @@ function displayPath(p: string): string {
  *  files they reference and we don't want to throw a Tauri permission
  *  toast every time someone clicks an old entry. */
 function openFile(absPath: string) {
-  // Tauri's shell-plugin requires a file:// scheme to disambiguate from
-  // shell command strings.
-  const uri = absPath.startsWith("file://") ? absPath : `file://${absPath}`;
-  void openExternal(uri).catch(() => {});
+  void commands.openNotePath(absPath).catch(() => {});
 }
 
 export function Receipts({ activity }: ReceiptsProps) {
@@ -57,7 +55,7 @@ export function Receipts({ activity }: ReceiptsProps) {
           {urls.map((w) => (
             <li key={w.browser_url}>
               <button
-                onClick={() => void openExternal(w.browser_url).catch(() => {})}
+                onClick={() => void openUrl(w.browser_url).catch(() => {})}
                 className="group w-full text-left px-3 py-2 flex items-center gap-3 hover:bg-muted/40 transition-colors"
                 title={w.browser_url}
               >

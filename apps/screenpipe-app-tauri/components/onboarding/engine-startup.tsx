@@ -12,8 +12,7 @@ import { openPermissionSettingsWithFlow } from "@/lib/utils/permission-flow";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSettings, makeDefaultPresets } from "@/lib/hooks/use-settings";
 import { localFetch } from "@/lib/api";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { ParticleStream, ProgressSteps } from "./particle-stream";
 

@@ -20,7 +20,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { platform } from "@tauri-apps/plugin-os";
-import { Command } from "@tauri-apps/plugin-shell";
 import { localFetch } from "@/lib/api";
 
 // ─── Generation lock ────────────────────────────────────────────────────────
@@ -199,22 +198,6 @@ function formatDate(dateStr: string): string {
     month: "long",
     day: "numeric",
   });
-}
-
-async function isPluggedIn(): Promise<boolean> {
-  try {
-    const os = platform();
-    if (os !== "macos") return true;
-
-    const cmd = Command.create("exec-sh", [
-      "-c",
-      "pmset -g batt | head -1",
-    ]);
-    const output = await cmd.execute();
-    return output.stdout.includes("AC Power");
-  } catch {
-    return true;
-  }
 }
 
 async function checkAiAvailable(): Promise<boolean> {
@@ -461,10 +444,6 @@ export function DailySummaryCard({
       // Persistent check — survives remounts, HMR, navigation
       if (wasAutoTriggered(todayStr)) return;
       if (loadSummary(todayStr)) return;
-
-      // Check if plugged in
-      const plugged = await isPluggedIn();
-      if (!plugged) return;
 
       // Mark BEFORE starting — prevents any other instance from also triggering
       markAutoTriggered(todayStr);

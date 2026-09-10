@@ -24,7 +24,7 @@ import { Separator } from "@/components/ui/separator";
 import { RefreshCw, AlertTriangle, WifiOff, Calendar, X } from "lucide-react";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
 
-import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { PermissionButtons } from "@/components/status/permission-buttons";
 import { PermissionBanner } from "@/components/status/permission-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";

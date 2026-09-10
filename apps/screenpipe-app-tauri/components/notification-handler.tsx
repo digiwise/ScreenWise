@@ -156,8 +156,8 @@ const NotificationHandler: React.FC = () => {
         }
 
         if (action.type === "meeting_join" && action.url) {
-          const { open } = await import("@tauri-apps/plugin-shell");
-          await open(action.url);
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(action.url);
 
           const deeplink = action.deeplink_url || action.deeplinkUrl;
           if (typeof deeplink === "string" && deeplink.startsWith("screenpipe://")) {
@@ -186,8 +186,8 @@ const NotificationHandler: React.FC = () => {
             const { emit } = await import("@tauri-apps/api/event");
             await emit("deep-link-received", action.url);
           } else {
-            const { open } = await import("@tauri-apps/plugin-shell");
-            await open(action.url);
+            const { openUrl } = await import("@tauri-apps/plugin-opener");
+            await openUrl(action.url);
           }
           return;
         }

@@ -25,7 +25,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Auto-generate chat titles" },
   { label: "Reset Onboarding", keywords: ["setup"] },
 ];
-import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export default function GeneralSettings() {
   const { settings, updateSettings } = useSettings();

@@ -31,7 +31,7 @@ import {
 import { commands } from "@/lib/utils/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { Button } from "@/components/ui/button";
@@ -663,7 +663,7 @@ export function NoteView({
           .join(" · "),
       });
       try {
-        await openExternal(target);
+        await commands.openNotePath(target);
       } catch {
         // opening the file is best-effort; the export itself succeeded.
       }
@@ -804,7 +804,7 @@ export function NoteView({
 
   const handleJoinMeeting = async (link: CalendarMeetingLink) => {
     try {
-      await openExternal(link.url);
+      await openUrl(link.url);
       setDismissedJoinUrl(link.url);
     } catch (err) {
       toast({

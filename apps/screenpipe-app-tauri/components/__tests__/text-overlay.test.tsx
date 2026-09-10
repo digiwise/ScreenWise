@@ -9,9 +9,9 @@ import {
 } from "../text-overlay";
 import type { TextPosition } from "@/lib/hooks/use-frame-text-data";
 
-// Mock @tauri-apps/plugin-shell
-vi.mock("@tauri-apps/plugin-shell", () => ({
-	open: vi.fn().mockResolvedValue(undefined),
+// Mock the OS URL opener.
+vi.mock("@tauri-apps/plugin-opener", () => ({
+	openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("TextOverlay", () => {
@@ -154,9 +154,9 @@ describe("TextOverlay", () => {
 		expect(links[0]).toHaveAttribute("href", "https://onscreen.com");
 	});
 
-	it("should use shell.open on click", async () => {
-		const { open: mockShellOpen } = await import(
-			"@tauri-apps/plugin-shell"
+	it("should use the OS URL opener on click", async () => {
+		const { openUrl: mockOpenUrl } = await import(
+			"@tauri-apps/plugin-opener"
 		);
 		const positions = [
 			createTextPosition(
@@ -179,7 +179,7 @@ describe("TextOverlay", () => {
 		);
 		const link = container.querySelector("a");
 		fireEvent.click(link!);
-		expect(mockShellOpen).toHaveBeenCalledWith("https://test.com/page");
+		expect(mockOpenUrl).toHaveBeenCalledWith("https://test.com/page");
 	});
 
 	it("should show visible underline on links", () => {

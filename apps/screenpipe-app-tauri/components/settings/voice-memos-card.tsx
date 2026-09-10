@@ -7,13 +7,13 @@ import React from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ExternalLink } from "lucide-react";
-import { Command } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export function VoiceMemosCard() {
   const openFullDiskAccess = async () => {
-    await Command.create("open", [
+    await openUrl(
       "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
-    ]).execute();
+    );
   };
 
   return (

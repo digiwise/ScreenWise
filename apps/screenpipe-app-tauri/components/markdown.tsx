@@ -229,8 +229,8 @@ export function createMediaAwareMarkdownComponents(
             aria-label={`open external image${alt ? `: ${alt}` : ""}`}
             onClick={async () => {
               try {
-                const { open } = await import("@tauri-apps/plugin-shell");
-                await open(externalUrl);
+                const { openUrl } = await import("@tauri-apps/plugin-opener");
+                await openUrl(externalUrl);
               } catch (error) {
                 console.error("failed to open external image:", error);
               }

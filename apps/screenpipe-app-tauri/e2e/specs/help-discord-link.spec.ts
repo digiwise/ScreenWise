@@ -34,7 +34,7 @@ describe("Help section: Discord community link", function () {
     await discordButton.waitForExist({ timeout: t(10_000) });
     await discordButton.waitForDisplayed({ timeout: t(10_000) });
 
-    // The button's onClick uses plugin-shell `open` so we can't assert via
+    // The button's onClick uses the OS URL opener so we can't assert via
     // `href`. Asserting the inline handler instead is brittle. The fact that
     // the testid is mounted is the regression we care about: 0f4261ceb added
     // a *visible* surface for the community link. If a refactor swaps the

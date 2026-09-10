@@ -35,7 +35,6 @@ import { AIPreset, PiQueuedPrompt } from "@/lib/utils/tauri";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 // The local Ollama runtime is accessed through the Pi agent.
-import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { save as saveDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readFile, mkdir } from "@tauri-apps/plugin-fs";
 import {

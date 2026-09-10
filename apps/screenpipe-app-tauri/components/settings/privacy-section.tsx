@@ -37,7 +37,6 @@ import { MultiSelect } from "@/components/ui/multi-select";
 import { WindowPicker } from "./window-picker";
 import { useSettings, Settings } from "@/lib/hooks/use-settings";
 import { ScheduleSettings } from "./schedule-settings";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { useToast } from "@/components/ui/use-toast";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { useInstalledApps } from "@/lib/hooks/use-installed-apps";
