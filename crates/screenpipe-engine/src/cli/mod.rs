@@ -46,17 +46,10 @@ pub enum CliAudioTranscriptionEngine {
     Disabled,
 }
 
-/// Default audio engine based on hardware tier.
-///
-/// - Low tier (≤8GB): WhisperTiny (parakeet-mlx would OOM)
-/// - Mid/High tier: Parakeet (auto-upgrades to MLX GPU when compiled in)
+/// Transcription requires an explicitly provisioned local model and therefore
+/// remains off until the operator selects an engine.
 fn default_audio_engine() -> CliAudioTranscriptionEngine {
-    let tier = screenpipe_config::detect_tier();
-    if matches!(tier, screenpipe_config::DeviceTier::Low) {
-        CliAudioTranscriptionEngine::WhisperTiny
-    } else {
-        CliAudioTranscriptionEngine::Parakeet
-    }
+    CliAudioTranscriptionEngine::Disabled
 }
 
 fn cli_engine_to_str(engine: &CliAudioTranscriptionEngine) -> &'static str {
@@ -934,7 +927,7 @@ impl RecordArgs {
             .and_then(screenpipe_config::DeviceTier::from_str_loose)
             .unwrap_or_else(screenpipe_config::detect_tier);
         if screenpipe_config::is_engine_unsafe(&settings.audio_transcription_engine, tier) {
-            let safe = screenpipe_config::best_engine_for_platform(tier);
+            let safe = "disabled";
             eprintln!(
                 "warning: {} is not supported on this platform, using {} instead",
                 settings.audio_transcription_engine, safe

@@ -287,7 +287,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Use audiopipe directly for fine-grained control over transcription options
     let _ = te; // keep engine alive (model weights cached)
-    let mut model = audiopipe::Model::from_pretrained("parakeet-tdt-0.6b-v3")?;
+    let status = screenpipe_audio::models::parakeet_model_status()?;
+    anyhow::ensure!(
+        status.ready,
+        "provision the verified local Parakeet pack before benchmarking"
+    );
+    let mut model = audiopipe::Model::from_dir(&status.directory, "parakeet")?;
 
     // Test configurations
     struct Config {

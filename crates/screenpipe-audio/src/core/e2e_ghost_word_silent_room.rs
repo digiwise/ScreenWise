@@ -73,7 +73,9 @@ async fn silent_room_no_ghost_words() {
 
     let engine_config = Arc::new(AudioTranscriptionEngine::WhisperTiny);
     if get_cached_whisper_model_path(&engine_config).is_none() {
-        eprintln!("SKIP: ggml-tiny.bin not cached. Run screenpipe once to download it.");
+        eprintln!(
+            "SKIP: ggml-tiny.bin not cached. Provision it manually before running this test."
+        );
         return;
     }
 

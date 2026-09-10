@@ -118,7 +118,7 @@ pub struct AudioManagerOptions {
     pub batch_max_duration_secs: Option<u64>,
     /// Channel capacities for recording and transcription queues.
     pub channel_config: ChannelConfig,
-    /// Disable all audio functionality (no device polling, no model downloads)
+    /// Disable all audio functionality (no device polling or model loading).
     pub is_disabled: bool,
 }
 

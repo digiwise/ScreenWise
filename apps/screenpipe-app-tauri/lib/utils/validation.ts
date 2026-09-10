@@ -61,7 +61,6 @@ export const settingsStoreSchema = z.object({
   // System Settings
   dataDir: z.string().min(1, "Data directory is required"),
   port: z.number().int().min(1024, "Port must be at least 1024").max(65535, "Port cannot exceed 65535"),
-  useChineseMirror: z.boolean(),
   usePiiRemoval: z.boolean(),
   devMode: z.boolean(),
   autoStartEnabled: z.boolean(),

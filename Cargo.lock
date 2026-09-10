@@ -6246,7 +6246,6 @@ dependencies = [
  "ort-sys",
  "rand 0.9.4",
  "realfft",
- "reqwest 0.13.3",
  "rubato",
  "samplerate",
  "screenpipe-config",
@@ -6275,7 +6274,6 @@ name = "screenpipe-audio-eval"
 version = "0.4.15"
 dependencies = [
  "anyhow",
- "audiopipe",
  "chrono",
  "clap",
  "hound",

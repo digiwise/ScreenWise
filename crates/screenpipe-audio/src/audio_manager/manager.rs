@@ -1153,8 +1153,8 @@ impl AudioManager {
         self.options.read().await.vocabulary.clone()
     }
 
-    /// Attempt to move disabled components to ready state after background model
-    /// downloads finish. Returns `true` when any runtime-capability state changed.
+    /// Attempt to move disabled components to ready state after the operator
+    /// provisions local models. Returns `true` when any capability state changed.
     pub async fn refresh_model_capabilities(&self) -> bool {
         let options = self.options.read().await;
         let audio_transcription_engine = options.transcription_engine.clone();

@@ -35,17 +35,12 @@ mod quality_regression;
 mod smart_mode_benchmark;
 mod vad_benchmark;
 
-/// Construct a SileroVad after ensuring the model is fully downloaded.
-/// Fixes a race in parallel test runs: `SileroVad::new()` on its own is
-/// non-blocking — the first caller spawns the download and returns an
-/// error, siblings see DOWNLOADING=true and error too. Here we poll until
-/// the file is on disk, then construct. Safe to call from many tests
-/// concurrently; only the first pays the download cost.
+/// Construct a SileroVad from the explicitly provisioned, verified local model.
 #[allow(dead_code)]
 pub async fn new_test_vad() -> screenpipe_audio::vad::silero::SileroVad {
     screenpipe_audio::vad::silero::SileroVad::ensure_model_available()
         .await
-        .expect("silero model prefetch failed");
+        .expect("provision the verified local Silero model before benchmarking");
     screenpipe_audio::vad::silero::SileroVad::new()
         .await
         .expect("failed to init SileroVad")

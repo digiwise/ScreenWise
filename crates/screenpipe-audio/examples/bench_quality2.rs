@@ -452,7 +452,12 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     println!("Loading parakeet model...");
-    let mut model = audiopipe::Model::from_pretrained("parakeet-tdt-0.6b-v3")?;
+    let status = screenpipe_audio::models::parakeet_model_status()?;
+    anyhow::ensure!(
+        status.ready,
+        "provision the verified local Parakeet pack before benchmarking"
+    );
+    let mut model = audiopipe::Model::from_dir(&status.directory, "parakeet")?;
     let mem_after_load = get_rss_mb();
     println!("Model loaded. Memory: {:.0} MB\n", mem_after_load);
 

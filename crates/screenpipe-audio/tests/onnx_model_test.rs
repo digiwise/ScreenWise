@@ -2,14 +2,14 @@
 /// These tests verify that the ort crate is properly configured and working
 /// on the current platform (especially important for macOS Apple Silicon).
 ///
-/// These tests are ignored by default because they require downloading large models.
+/// These tests are ignored by default because they require explicitly provisioned models.
 /// Run them locally with: cargo test -p screenpipe-audio --test onnx_model_test -- --ignored
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
     use log::LevelFilter;
     use screenpipe_audio::speaker::embedding::EmbeddingExtractor;
-    use screenpipe_audio::speaker::models::{get_or_download_model, PyannoteModel};
+    use screenpipe_audio::speaker::models::{load_local_model, PyannoteModel};
     use screenpipe_audio::vad::silero::SileroVad;
     use screenpipe_audio::vad::VadEngine;
     use std::time::Instant;
@@ -24,17 +24,17 @@ mod tests {
     /// Test that we can create an ONNX session for the embedding model
     /// This tests the core ort::Session creation which is where segfaults typically occur
     #[tokio::test]
-    #[ignore = "requires model download, run locally with --ignored"]
+    #[ignore = "requires provisioned local models, run locally with --ignored"]
     async fn test_onnx_embedding_model_loads() -> Result<()> {
         setup();
         println!("Testing ONNX embedding model loading...");
 
         let start = Instant::now();
 
-        // Download/locate the embedding model
-        let embedding_model = get_or_download_model(PyannoteModel::Embedding).await?;
+        // Verify and load the local embedding model
+        let embedding_model = load_local_model(PyannoteModel::Embedding).await?;
         println!(
-            "Model path: {:?} (downloaded in {:?})",
+            "Model path: {:?} (verified and loaded in {:?})",
             embedding_model.path,
             start.elapsed()
         );
@@ -53,17 +53,17 @@ mod tests {
 
     /// Test that we can create an ONNX session for the segmentation model
     #[tokio::test]
-    #[ignore = "requires model download, run locally with --ignored"]
+    #[ignore = "requires provisioned local models, run locally with --ignored"]
     async fn test_onnx_segmentation_model_loads() -> Result<()> {
         setup();
         println!("Testing ONNX segmentation model loading...");
 
         let start = Instant::now();
 
-        // Download/locate the segmentation model
-        let segmentation_model = get_or_download_model(PyannoteModel::Segmentation).await?;
+        // Verify and load the local segmentation model
+        let segmentation_model = load_local_model(PyannoteModel::Segmentation).await?;
         println!(
-            "Model path: {:?} (downloaded in {:?})",
+            "Model path: {:?} (verified and loaded in {:?})",
             segmentation_model.path,
             start.elapsed()
         );
@@ -87,7 +87,7 @@ mod tests {
 
     /// Test that SileroVad can initialize (uses ONNX via vad-rs crate)
     #[tokio::test]
-    #[ignore = "requires model download, run locally with --ignored"]
+    #[ignore = "requires provisioned local models, run locally with --ignored"]
     async fn test_silero_vad_initializes() -> Result<()> {
         setup();
         println!("Testing SileroVad initialization (uses ONNX via vad-rs)...");
@@ -115,13 +115,13 @@ mod tests {
 
     /// Test that EmbeddingExtractor can run inference
     #[tokio::test]
-    #[ignore = "requires model download, run locally with --ignored"]
+    #[ignore = "requires provisioned local models, run locally with --ignored"]
     async fn test_embedding_extractor_inference() -> Result<()> {
         setup();
         println!("Testing EmbeddingExtractor inference...");
 
-        // Download/locate the embedding model
-        let embedding_model = get_or_download_model(PyannoteModel::Embedding).await?;
+        // Verify and locate the embedding model
+        let embedding_model = load_local_model(PyannoteModel::Embedding).await?;
 
         // Create the extractor
         let mut extractor = EmbeddingExtractor::new(&embedding_model.path)?;
@@ -150,7 +150,7 @@ mod tests {
     /// Combined test that mimics the startup initialization sequence
     /// This tests all ONNX models in the order they're loaded during app startup
     #[tokio::test]
-    #[ignore = "requires model download, run locally with --ignored"]
+    #[ignore = "requires provisioned local models, run locally with --ignored"]
     async fn test_onnx_startup_sequence() -> Result<()> {
         setup();
         println!("Testing ONNX startup sequence (mimics app initialization)...");
@@ -162,17 +162,17 @@ mod tests {
         let _vad = SileroVad::new().await?;
         println!("  SileroVad OK ({:?})", start.elapsed());
 
-        // Step 2: Download/load embedding model
+        // Step 2: Verify/load embedding model
         println!("Step 2: Loading embedding model...");
         let start = Instant::now();
-        let embedding_model = get_or_download_model(PyannoteModel::Embedding).await?;
+        let embedding_model = load_local_model(PyannoteModel::Embedding).await?;
         let _embedding_extractor = EmbeddingExtractor::new(&embedding_model.path)?;
         println!("  EmbeddingExtractor OK ({:?})", start.elapsed());
 
-        // Step 3: Download/load segmentation model
+        // Step 3: Verify/load segmentation model
         println!("Step 3: Loading segmentation model...");
         let start = Instant::now();
-        let segmentation_model = get_or_download_model(PyannoteModel::Segmentation).await?;
+        let segmentation_model = load_local_model(PyannoteModel::Segmentation).await?;
         let _segmentation_session =
             screenpipe_audio::speaker::create_session(&segmentation_model.path)?;
         println!("  Segmentation session OK ({:?})", start.elapsed());

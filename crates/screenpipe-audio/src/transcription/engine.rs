@@ -5,7 +5,7 @@
 use crate::core::engine::AudioTranscriptionEngine;
 use crate::transcription::whisper::batch::process_with_whisper;
 use crate::transcription::whisper::model::{
-    create_whisper_context_parameters, download_whisper_model, get_cached_whisper_model_path,
+    create_whisper_context_parameters, get_cached_whisper_model_path,
 };
 use crate::transcription::{TranscriptionOutput, VocabularyEntry};
 use anyhow::{anyhow, Result};
@@ -62,7 +62,7 @@ mod mlx_memory {
 }
 
 /// Unified transcription engine that owns the runtime state for whatever backend is configured.
-/// Only the selected model is loaded — no dummy Whisper downloads for non-Whisper engines.
+/// Only the selected, explicitly provisioned model is loaded. No acquisition is initiated.
 #[derive(Clone)]
 pub enum TranscriptionEngine {
     Whisper {
@@ -122,9 +122,8 @@ impl TranscriptionEngine {
                         }
                         Err(e) if e.is_model_not_cached() => {
                             warn!(
-                                "qwen3-asr weights not in Hugging Face cache yet; transcription disabled until download completes"
+                                "qwen3-asr weights are missing from the local Hugging Face cache; provision them manually before enabling transcription"
                             );
-                            audiopipe::Model::spawn_pretrained_download(MODEL_NAME.to_string());
                             Ok(Self::Disabled)
                         }
                         Err(e) => Err(anyhow!("failed to load qwen3-asr model: {}", e)),
@@ -169,9 +168,8 @@ impl TranscriptionEngine {
                         }
                         Err(e) if e.is_model_not_cached() => {
                             warn!(
-                                "parakeet-mlx weights not in Hugging Face cache yet; transcription disabled until download completes"
+                                "parakeet-mlx weights are missing from the local Hugging Face cache; provision them manually before enabling transcription"
                             );
-                            audiopipe::Model::spawn_pretrained_download(MODEL_NAME.to_string());
                             Ok(Self::Disabled)
                         }
                         Err(e) => Err(anyhow!("failed to load parakeet-mlx model: {}", e)),
@@ -180,28 +178,37 @@ impl TranscriptionEngine {
                 #[cfg(all(feature = "parakeet", not(feature = "parakeet-mlx")))]
                 {
                     info!("transcription engine runtime: Parakeet (CPU)");
-                    const MODEL_NAME: &str = "parakeet-tdt-0.6b-v3";
-                    let load_result = tokio::task::spawn_blocking(|| {
-                        audiopipe::Model::from_pretrained_cache_only(MODEL_NAME)
+                    let load_result = tokio::task::spawn_blocking(|| -> Result<_> {
+                        let status = crate::models::parakeet_model_status()?;
+                        if !status.ready {
+                            for file in status.files.iter().filter(|file| !file.ready) {
+                                warn!(
+                                    "Parakeet transcription unavailable: {}; provision {} with SHA-256 {}",
+                                    file.error.as_deref().unwrap_or("unverified artifact"),
+                                    file.path.display(),
+                                    file.sha256,
+                                );
+                            }
+                            return Ok(None);
+                        }
+                        // The verified int8 pair is self-contained. audiopipe's
+                        // local-directory loader prefers these exact filenames.
+                        audiopipe::Model::from_dir(&status.directory, "parakeet")
+                            .map(Some)
+                            .map_err(|e| anyhow!("failed to load parakeet model: {}", e))
                     })
                     .await
                     .map_err(|e| anyhow!("parakeet model loading task panicked: {}", e))?;
                     match load_result {
-                        Ok(model) => {
+                        Ok(Some(model)) => {
                             info!("parakeet-tdt-0.6b-v3 (multilingual) model loaded successfully");
                             Ok(Self::Parakeet {
                                 model: Arc::new(StdMutex::new(model)),
                                 vocabulary,
                             })
                         }
-                        Err(e) if e.is_model_not_cached() => {
-                            warn!(
-                                "parakeet weights not in Hugging Face cache yet; transcription disabled until download completes"
-                            );
-                            audiopipe::Model::spawn_pretrained_download(MODEL_NAME.to_string());
-                            Ok(Self::Disabled)
-                        }
-                        Err(e) => Err(anyhow!("failed to load parakeet model: {}", e)),
+                        Ok(None) => Ok(Self::Disabled),
+                        Err(e) => Err(e),
                     }
                 }
                 #[cfg(not(any(feature = "parakeet", feature = "parakeet-mlx")))]
@@ -239,9 +246,8 @@ impl TranscriptionEngine {
                         }
                         Err(e) if e.is_model_not_cached() => {
                             warn!(
-                                "parakeet-mlx weights not in Hugging Face cache yet; transcription disabled until download completes"
+                                "parakeet-mlx weights are missing from the local Hugging Face cache; provision them manually before enabling transcription"
                             );
-                            audiopipe::Model::spawn_pretrained_download(MODEL_NAME.to_string());
                             Ok(Self::Disabled)
                         }
                         Err(e) => Err(anyhow!("failed to load parakeet-mlx model: {}", e)),
@@ -262,28 +268,9 @@ impl TranscriptionEngine {
                     Some(path) => path,
                     None => {
                         warn!(
-                            "whisper model is not available locally yet for {:?}; audio transcription disabled until download completes",
+                            "whisper model is missing from the local Hugging Face cache for {:?}; provision it manually before enabling transcription",
                             config
                         );
-                        let config_for_download = config.clone();
-                        tokio::spawn(async move {
-                            match tokio::task::spawn_blocking(move || {
-                                download_whisper_model(config_for_download)
-                            })
-                            .await
-                            {
-                                Ok(Ok(path)) => {
-                                    info!("whisper model downloaded in background: {:?}", path)
-                                }
-                                Ok(Err(error)) => {
-                                    warn!("whisper background download failed: {}", error)
-                                }
-                                Err(join_error) => warn!(
-                                    "whisper background download task panicked: {}",
-                                    join_error
-                                ),
-                            }
-                        });
                         return Ok(Self::Disabled);
                     }
                 };

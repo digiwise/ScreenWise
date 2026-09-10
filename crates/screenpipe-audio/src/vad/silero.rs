@@ -23,19 +23,14 @@ pub struct SileroVad {
 
 impl SileroVad {
     /// Check that the explicitly provisioned model is available.
-    pub async fn ensure_model_downloaded() -> anyhow::Result<PathBuf> {
-        Self::get_or_download_model().await
-    }
-
-    /// Check that the explicitly provisioned model is available.
     pub async fn ensure_model_available() -> anyhow::Result<PathBuf> {
-        Self::get_or_download_model().await
+        Self::local_model_path().await
     }
 
     pub async fn new() -> anyhow::Result<Self> {
         debug!("Initializing SileroVad...");
-        let model_path = Self::get_or_download_model().await?;
-        debug!("SileroVad Model downloaded to: {:?}", model_path);
+        let model_path = Self::local_model_path().await?;
+        debug!("SileroVad verified local model: {:?}", model_path);
         let vad = Vad::new(model_path, 16000).map_err(|e| {
             debug!("SileroVad Error creating Vad: {}", e);
             anyhow::anyhow!("Vad creation error: {}", e)
@@ -48,7 +43,7 @@ impl SileroVad {
         })
     }
 
-    async fn get_or_download_model() -> anyhow::Result<PathBuf> {
+    async fn local_model_path() -> anyhow::Result<PathBuf> {
         const SILERO_V5_SHA256: &str =
             "1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3";
         // Check in-memory cache

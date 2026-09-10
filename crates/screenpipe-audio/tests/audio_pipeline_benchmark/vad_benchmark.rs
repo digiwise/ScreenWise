@@ -509,7 +509,7 @@ async fn vad_debug_single_wav() {
     }
 
     // Use vad_rs::Vad directly to see raw probabilities
-    let model_path = SileroVad::ensure_model_downloaded().await.unwrap();
+    let model_path = SileroVad::ensure_model_available().await.unwrap();
     println!("\nModel path: {:?}", model_path);
 
     let mut raw_vad = Vad::new(&model_path, 16000).unwrap();

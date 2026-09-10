@@ -27,9 +27,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 use screenpipe_audio::transcription::engine::TranscriptionEngine;
-use screenpipe_audio::transcription::whisper::model::{
-    download_whisper_model, get_cached_whisper_model_path,
-};
 use screenpipe_audio_eval::{load_utterances, score_transcription, LibriUtterance};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -132,41 +129,6 @@ fn parse_models(spec: &str, default_cap: usize) -> Result<Vec<ModelSpec>> {
     Ok(out)
 }
 
-/// Ensure the model weights are on disk before constructing the engine.
-/// Whisper variants go through screenpipe's own HF helper; Parakeet goes
-/// through audiopipe directly because the engine constructor only does a
-/// cache-only check and spawns a background download otherwise.
-async fn prime_model(engine: &AudioTranscriptionEngine) -> Result<()> {
-    match engine {
-        AudioTranscriptionEngine::Parakeet => {
-            // Match the CPU model name used at engine.rs (parakeet-mlx is not
-            // available on Linux CI anyway).
-            const MODEL_NAME: &str = "parakeet-tdt-0.6b-v3";
-            if audiopipe::Model::from_pretrained_cache_only(MODEL_NAME).is_ok() {
-                return Ok(());
-            }
-            eprintln!("downloading parakeet weights: {MODEL_NAME}");
-            tokio::task::spawn_blocking(|| audiopipe::Model::from_pretrained(MODEL_NAME))
-                .await
-                .map_err(|e| anyhow::anyhow!("parakeet download task panicked: {e}"))?
-                .map_err(|e| anyhow::anyhow!("parakeet download failed: {e}"))?;
-            Ok(())
-        }
-        _ => {
-            let arc = Arc::new(engine.clone());
-            if get_cached_whisper_model_path(&arc).is_some() {
-                return Ok(());
-            }
-            let arc_for_download = arc.clone();
-            tokio::task::spawn_blocking(move || download_whisper_model(arc_for_download))
-                .await
-                .map_err(|e| anyhow::anyhow!("whisper download task panicked: {e}"))?
-                .context("download whisper model")?;
-            Ok(())
-        }
-    }
-}
-
 async fn run_model(
     spec: &ModelSpec,
     utterances: &[LibriUtterance],
@@ -175,14 +137,15 @@ async fn run_model(
         "==> model {} ({:?}) cap={} utterances",
         spec.name, spec.engine, spec.cap
     );
-    prime_model(&spec.engine).await?;
-
     let engine = TranscriptionEngine::new(Arc::new(spec.engine.clone()), Vec::new(), Vec::new())
         .await
         .with_context(|| format!("construct TranscriptionEngine for {}", spec.name))?;
 
     if matches!(engine, TranscriptionEngine::Disabled) {
-        anyhow::bail!("TranscriptionEngine resolved to Disabled for {}", spec.name);
+        anyhow::bail!(
+            "TranscriptionEngine is unavailable for {}; explicitly provision its local model before running this evaluation",
+            spec.name
+        );
     }
 
     let mut session = engine
@@ -277,8 +240,8 @@ async fn main() -> Result<()> {
         total
     );
 
-    // Per-model error isolation: a failing model (cold parakeet download,
-    // whisper variant pulled and missing, etc.) shouldn't kill the whole
+    // Per-model error isolation: a missing provisioned model, missing Vulkan,
+    // or another model-specific failure shouldn't kill the whole
     // report. Each failure becomes its own JSON row with `error`. The
     // process still exits non-zero at the end so CI flags it — but only
     // after the markdown report has a chance to render the rows that did

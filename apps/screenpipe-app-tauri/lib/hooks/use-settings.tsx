@@ -317,9 +317,9 @@ let DEFAULT_SETTINGS: Settings = {
 			isLoading: false,
 			userId: "",
 			devMode: false,
-			audioTranscriptionEngine: "whisper-large-v3-turbo-quantized",
-			meetingLiveTranscriptionEnabled: true,
-			meetingLiveTranscriptionProvider: "selected-engine",
+			audioTranscriptionEngine: "disabled",
+			meetingLiveTranscriptionEnabled: false,
+			meetingLiveTranscriptionProvider: "disabled",
 			appendTypedTextToMeetingNote: true,
 			ocrEngine: "default",
 			monitorIds: ["default"],
@@ -335,7 +335,6 @@ let DEFAULT_SETTINGS: Settings = {
 			ignoredUrls: [],
 			ignoredMeetingApps: [],
 			audioChunkDuration: 30,
-			useChineseMirror: false,
 			languages: [],
 			embeddedLLM: {
 				enabled: false,
@@ -475,17 +474,6 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		if (settings.meetingLiveTranscriptionEnabled === undefined) {
-			settings.meetingLiveTranscriptionEnabled = true;
-			needsUpdate = true;
-		}
-		const storedMeetingProvider = settings.meetingLiveTranscriptionProvider as string | undefined;
-		if (!storedMeetingProvider ||
-			storedMeetingProvider === "screenpipe-cloud" ||
-			storedMeetingProvider === "deepgram-live") {
-			settings.meetingLiveTranscriptionProvider = "selected-engine";
-			needsUpdate = true;
-		}
 		if (settings.appendTypedTextToMeetingNote === undefined) {
 			settings.appendTypedTextToMeetingNote = true;
 			needsUpdate = true;
@@ -556,24 +544,6 @@ function createSettingsStore() {
 			}
 		} catch {
 			// platform() unavailable (SSR/tests) — keep existing value
-		}
-
-		// Migration: Set default transcription engine (one-time only)
-		// - macOS → whisper-large-v3-turbo-quantized
-		// - Windows/Linux → parakeet
-		if (!(settings as any)._parakeetDefaultMigrationDone) {
-			const engine = settings.audioTranscriptionEngine;
-			const isWhisperVariant = engine?.includes("whisper");
-			if (isWhisperVariant || engine === "screenpipe-cloud" || engine === "parakeet") {
-				const { platform: getPlatform } = await import("@tauri-apps/plugin-os");
-				const os = getPlatform();
-				settings.audioTranscriptionEngine = os === "macos"
-					? "whisper-large-v3-turbo-quantized"
-					: "parakeet";
-				needsUpdate = true;
-			}
-			(settings as any)._parakeetDefaultMigrationDone = true;
-			needsUpdate = true;
 		}
 
 		// Save migrations if needed

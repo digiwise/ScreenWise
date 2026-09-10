@@ -977,10 +977,10 @@ pub async fn start_device_monitor(
                         audio_manager.refresh_model_capabilities().await;
                     if model_capabilities_changed {
                         if central_restart_exhausted.load(std::sync::atomic::Ordering::Relaxed) {
-                            info!("model capabilities changed after background download; handler restart deferred due to cooldown");
+                            info!("local model availability changed; handler restart deferred due to cooldown");
                             model_restart_pending = true;
                         } else {
-                            info!("model capabilities changed after background download; restarting central handlers");
+                            info!("local model availability changed; restarting central handlers");
                         }
                         if !central_restart_exhausted.load(std::sync::atomic::Ordering::Relaxed) {
                             if central_restarted_this_cycle {

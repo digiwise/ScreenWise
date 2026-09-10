@@ -29,7 +29,6 @@ export const searchIndex: SettingsField[] = [
   // conditional: monitor picker only renders when "Use all monitors" is off.
   { label: "Monitors", conditional: true },
   { label: "HD recording for meetings", keywords: ["hd", "meeting"] },
-  { label: "Chinese mirror", keywords: ["china", "mirror"] },
 ];
 import { Label } from "@/components/ui/label";
 import {
@@ -91,7 +90,7 @@ import {
   CommandGroup,
   CommandItem,
 } from "@/components/ui/command";
-import { commands, SettingsStore, MonitorDevice, AudioDeviceInfo, HardwareCapability } from "@/lib/utils/tauri";
+import { commands, SettingsStore, MonitorDevice, AudioDeviceInfo, HardwareCapability, type AudioModelStatus } from "@/lib/utils/tauri";
 
 import {
   useSettings,
@@ -159,7 +158,6 @@ const SERVER_RESTART_SETTINGS = new Set<keyof SettingsStore>([
   "encryptStore",
   "asyncPiiRedaction",
   "asyncImagePiiRedaction",
-  "useChineseMirror",
   "enableWorkflowEvents",
 ]);
 
@@ -1731,12 +1729,36 @@ export function RecordingSettings() {
   const audioPipeline = health?.audio_pipeline ?? null;
   const [isMacOS, setIsMacOS] = useState(false);
   const [isWindows, setIsWindows] = useState(false);
+  const [audioModelStatus, setAudioModelStatus] = useState<AudioModelStatus | null>(null);
+  const [audioModelStatusError, setAudioModelStatusError] = useState<string | null>(null);
+  const [isVerifyingAudioModel, setIsVerifyingAudioModel] = useState(false);
   const overlayData = useOverlayData();
   const [hwCapability, setHwCapability] = useState<HardwareCapability | null>(null);
 
   useEffect(() => {
     commands.getHardwareCapability().then(setHwCapability).catch(() => {});
   }, []);
+
+  const loadAudioModelStatus = useCallback(async (): Promise<AudioModelStatus | null> => {
+    setIsVerifyingAudioModel(true);
+    setAudioModelStatusError(null);
+    try {
+      const result = await commands.getAudioModelStatus();
+      if (result.status === "error") throw new Error(result.error);
+      setAudioModelStatus(result.data);
+      return result.data;
+    } catch (error) {
+      setAudioModelStatus(null);
+      setAudioModelStatusError(String(error));
+      return null;
+    } finally {
+      setIsVerifyingAudioModel(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isWindows) void loadAudioModelStatus();
+  }, [isWindows, loadAudioModelStatus]);
 
   // Add new state to track if settings have changed
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -1796,10 +1818,6 @@ export function RecordingSettings() {
       const currentPlatform = platform();
       setIsMacOS(currentPlatform === "macos");
       setIsWindows(currentPlatform === "windows");
-      // Auto-migrate macOS users off qwen3-asr (CPU-only, no Metal support)
-      if (currentPlatform === "macos" && settings.audioTranscriptionEngine === "qwen3-asr") {
-        handleSettingsChange({ audioTranscriptionEngine: "whisper-large-v3-turbo-quantized" }, true);
-      }
     };
     checkPlatform();
   }, []);
@@ -2005,6 +2023,19 @@ export function RecordingSettings() {
     value: string,
     realtime = false
   ) => {
+    if (isWindows && value === "parakeet") {
+      const status = audioModelStatus?.ready
+        ? audioModelStatus
+        : await loadAudioModelStatus();
+      if (!status?.ready) {
+        toast({
+          title: "Parakeet model pack is not ready",
+          description: "Install all three files at the listed paths and verify their SHA-256 checksums before enabling transcription.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
     const newSettings = realtime
       ? { realtimeAudioTranscriptionEngine: value }
       : { audioTranscriptionEngine: value };
@@ -2034,10 +2065,6 @@ export function RecordingSettings() {
 
   const handleDisableAudioChange = (checked: boolean) => {
     handleSettingsChange({ disableAudio: checked }, true);
-  };
-
-  const handleChineseMirrorToggle = async (checked: boolean) => {
-    handleSettingsChange({ useChineseMirror: checked }, true);
   };
 
   // Voice training
@@ -2342,6 +2369,60 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 </Select>
               </div>
             </div>
+            {isWindows && (
+              <div className="mt-2.5 ml-[26px] rounded border border-border bg-muted/30 p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-medium text-foreground">
+                      Windows Parakeet model pack
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {audioModelStatus?.ready
+                        ? "All three local files are checksum-verified. Parakeet can be enabled."
+                        : "Parakeet stays unavailable until its local files are installed and checksum-verified."}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={isVerifyingAudioModel}
+                    onClick={() => void loadAudioModelStatus()}
+                  >
+                    <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", isVerifyingAudioModel && "animate-spin")} />
+                    Verify installed model
+                  </Button>
+                </div>
+                {audioModelStatusError && (
+                  <p className="text-[11px] text-destructive">{audioModelStatusError}</p>
+                )}
+                {audioModelStatus && (
+                  <details className="text-[11px] text-muted-foreground">
+                    <summary className="cursor-pointer font-medium text-foreground">
+                      Manual download instructions
+                    </summary>
+                    <p className="mt-2">
+                      Download these files with a browser or another external tool, place them at the exact destinations below, then verify again. ScreenWise never requests these addresses itself.
+                    </p>
+                    <p className="mt-2 break-all select-text">
+                      Directory: {audioModelStatus.directory}
+                    </p>
+                    <div className="mt-2 space-y-2">
+                      {audioModelStatus.files.map((file) => (
+                        <div key={file.filename} className="border-l border-border pl-2">
+                          <p className="font-medium text-foreground">
+                            {file.filename} — {file.ready ? "verified" : "not ready"}
+                          </p>
+                          <p className="break-all select-text">Source: {file.sourceUrl}</p>
+                          <p className="break-all select-text">Destination: {file.path}</p>
+                          <p className="break-all select-text">SHA-256: {file.expectedSha256}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
         )}
@@ -2363,7 +2444,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
               </div>
               <Switch
                 id="meetingLiveTranscriptionEnabled"
-                checked={settings.meetingLiveTranscriptionEnabled ?? true}
+                checked={settings.meetingLiveTranscriptionEnabled ?? false}
                 onCheckedChange={(checked) =>
                   handleSettingsChange({
                     meetingLiveTranscriptionEnabled: checked,
@@ -2376,7 +2457,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 }
               />
             </div>
-            {(settings.meetingLiveTranscriptionEnabled ?? true) && (
+            {(settings.meetingLiveTranscriptionEnabled ?? false) && (
               <div className="mt-2.5 ml-[26px] flex flex-col gap-2">
                 <div className="flex items-center justify-between gap-3">
                   <Label className="text-xs text-muted-foreground">Live engine</Label>
@@ -3043,26 +3124,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
       </div>
               </>
 
-
-      {/* System */}
-      <div className="space-y-2 pt-2">
-        <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">System</h2>
-
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <Globe className="h-4 w-4 text-muted-foreground shrink-0" />
-                <div>
-                  <h3 className="text-sm font-medium text-foreground">Chinese mirror</h3>
-                  <p className="text-xs text-muted-foreground">For users in China</p>
-                </div>
-              </div>
-              <Switch id="useChineseMirror" checked={settings.useChineseMirror} onCheckedChange={handleChineseMirrorToggle} />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
 
       {/* Voice Training Dialog */}
       <Dialog open={voiceTraining.dialogOpen} onOpenChange={(open) => {

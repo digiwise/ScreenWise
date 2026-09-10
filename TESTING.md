@@ -841,10 +841,9 @@ grep -E "show_existing|panel.*level|Accessory|activation_policy" ~/.screenpipe/s
 grep -E "FoundationModels|apple.intelligence|fm_generate" ~/.screenpipe/screenpipe-app.*.log
 ```
 
-### 12. mainland china / great firewall
+### 12. network-blocked operation
 
-- [ ] **full app functionality behind GFW** — download, onboarding, AI chat, cloud features, and update checks must all work (or degrade gracefully) on networks subject to the Great Firewall.
-- [ ] **HF_ENDPOINT Chinese mirror** — verify model downloads work in China via the HF mirror. (`7ea1eb94e`)
+- [ ] **offline Windows recorder** — after explicit checksum-verified tool and model provisioning, confirm capture, OCR, local transcription, search, and the authenticated loopback API operate with outbound traffic blocked.
 
 ### 22. WhatsApp Gateway
 

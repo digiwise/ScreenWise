@@ -431,10 +431,6 @@ pub struct RecordingSettings {
     #[serde(rename = "powerMode", default)]
     pub power_mode: Option<String>,
 
-    /// Use Chinese mirror for Hugging Face model downloads.
-    #[serde(rename = "useChineseMirror")]
-    pub use_chinese_mirror: bool,
-
     /// Detected hardware tier ("high", "mid", "low").
     /// Set once on first launch; `None` for existing installs (treated as High).
     #[serde(
@@ -473,9 +469,7 @@ pub struct RecordingSettings {
 impl RecordingSettings {
     /// The local engine that may be started for this persisted setting.
     ///
-    /// Historical remote engine identifiers deliberately fall through to the
-    /// local fallback. This keeps an upgrade from reviving a provider merely
-    /// because an old settings file still contains its endpoint or credential.
+    /// Unsupported identifiers fail closed to disabled transcription.
     pub fn local_audio_transcription_engine(&self) -> &str {
         Self::normalize_local_audio_transcription_engine(&self.audio_transcription_engine)
     }
@@ -496,11 +490,11 @@ impl RecordingSettings {
             | "parakeet-tdt-0.6b-v2"
             | "parakeet-mlx"
             | "disabled" => engine,
-            // Local aliases accepted by the API and older desktop settings.
+            // Local aliases accepted by the API.
             "whisper-large-v3" => "whisper-large",
             "whisper-large-v3-quantized" => "whisper-large-quantized",
             "whisper-large-v3-turbo-q8" => "whisper-large-v3-turbo-quantized",
-            _ => "whisper-large-v3-turbo-quantized",
+            _ => "disabled",
         }
     }
 
@@ -535,11 +529,10 @@ impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
             disable_audio: false,
-            audio_transcription_engine: crate::best_engine_for_platform(crate::detect_tier())
-                .to_string(),
+            audio_transcription_engine: "disabled".to_string(),
             transcription_mode: "batch".to_string(),
-            meeting_live_transcription_enabled: true,
-            meeting_live_transcription_provider: "selected-engine".to_string(),
+            meeting_live_transcription_enabled: false,
+            meeting_live_transcription_provider: "disabled".to_string(),
             audio_devices: vec![],
             use_system_default_audio: true,
             experimental_coreaudio_system_audio: false,
@@ -593,7 +586,6 @@ impl Default for RecordingSettings {
             openai_compatible_raw_audio: false,
             port: 3030,
             power_mode: None,
-            use_chinese_mirror: false,
             device_tier: None,
             schedule_enabled: false,
             schedule_rules: vec![],
@@ -728,7 +720,6 @@ mod tests {
             "usePiiRemoval": false,
             "userId": "abc-123",
             "port": 3030,
-            "useChineseMirror": false,
             "analyticsEnabled": true,
             "analyticsId": "posthog-uuid",
             "enableInputCapture": true,
@@ -834,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_remote_engines_normalize_to_local_fallback() {
+    fn retired_remote_engines_fail_closed() {
         for engine in [
             "screenpipe-cloud",
             "deepgram",
@@ -848,7 +839,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 settings.local_audio_transcription_engine(),
-                "whisper-large-v3-turbo-quantized",
+                "disabled",
                 "{engine}"
             );
         }

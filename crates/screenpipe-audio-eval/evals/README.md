@@ -33,8 +33,9 @@ cargo run --release -p screenpipe-audio-eval --bin screenpipe-eval-diarization -
 ```
 
 The binary needs the pyannote ONNX models at
-`crates/screenpipe-audio/models/pyannote/`. Run screenpipe once before
-running the eval so the models are downloaded.
+`crates/screenpipe-audio/models/pyannote/`. ScreenWise does not acquire model
+files; provision the documented checksum-verified artifacts before running the
+eval.
 
 ## Composing workday fixtures
 

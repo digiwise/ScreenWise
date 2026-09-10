@@ -1804,3 +1804,103 @@ Verification on Windows on 2026-09-10:
 Audio model acquisition, build-script tool/runtime acquisition, and Pi package
 bootstrap are explicitly not claimed complete here and remain the next audited
 boundaries.
+
+### Audio model acquisition boundary — 2026-09-10
+
+Runtime reachability finds four remaining audio acquisition edges: desktop
+startup sets an optional Hugging Face mirror and launches a prefetch (including
+an incorrect Whisper fallback for Parakeet/Qwen selections); missing Whisper
+models call the Hugging Face client; missing CPU/MLX Parakeet and Qwen models
+call `audiopipe` background download; and an otherwise-unused generic model
+downloader plus ignored live-Hugging-Face tests retain network clients. Silero
+VAD and diarization are already side-effect-free local loads with pinned
+checksums from earlier commits.
+
+This boundary will remove every recorder-initiated audio model download and
+the mirror/prefetch UI/settings/bindings, without weakening local capture or
+transcription. The supported Windows pack will be Parakeet int8 at a stable
+ScreenWise local directory, verified against a pinned three-file SHA-256
+manifest before load. Whisper and Qwen have no vetted immutable manifest in
+this repository; their code will not be deleted in this safe pass, but missing
+artifacts must fail locally instead of initiating acquisition. Whether to
+retain those additional engines through new reviewed manifests or remove them
+is a separate capability-retention decision. Baseline settings/database
+compatibility is not required, so obsolete mirror state can be deleted.
+
+Owner decision recorded on 2026-09-10: ScreenWise has no baseline database or
+settings data that must be retained and will not support migration from the
+baseline Screenpipe product. Future subsystem removals may therefore delete
+dead schema, columns, settings fields, and compatibility shims when reachability
+shows they are no longer used. Such cleanup remains scoped and reviewed; this
+decision does not authorize touching the private smoke-test directories.
+
+Audio model acquisition was closed in the same boundary. Desktop startup no
+longer sets `HF_ENDPOINT` or prefetches any model, and the Chinese mirror setting
+was removed from Rust, TypeScript, UI, tests, and generated bindings. Missing
+Whisper, Qwen, and MLX weights now produce a local unavailable/disabled result
+without spawning acquisition. The unused generic HTTP downloader, live
+Hugging-Face test, and evaluation prefetch were deleted. Silero VAD and speaker
+segmentation/embedding retain their pinned local SHA-256 checks; obsolete
+download-named APIs and recovery code that deleted a provisioned file after an
+ORT load error were replaced with read-only local verification.
+
+The supported Windows transcription pack is CPU Parakeet at
+`%LOCALAPPDATA%\screenpipe\audio-models\parakeet-tdt-0.6b-v3`. Its files are
+operator-provisioned from the immutable model revision
+`8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce` and verified before load:
+
+- `encoder-model.int8.onnx` —
+  `6139D2FA7E1B086097B277C7149725EDBAB89CC7C7AE64B23C741BE4055AFF09`
+- `decoder_joint-model.int8.onnx` —
+  `EEA7483EE3D1A30375DAEDC8ED83E3960C91B098812127A0D99D1C8977667A70`
+- `vocab.txt` —
+  `D58544679EA4BC6AC563D1F545EB7D474BD6CFA467F0A6E2C1DC1C7D37E3C35D`
+
+The desktop exposes a read-only status command and manual instructions; on
+Windows it refuses a Parakeet selection until all three files verify. Fresh
+desktop and CLI settings now default transcription and meeting live notes to
+disabled, unsupported identifiers fail closed to disabled, and hardware-tier
+fallbacks no longer silently select an unverified Whisper model. This preserves
+audio capture without requiring transcription weights. The Windows high-tier
+safety check was corrected so verified CPU Parakeet is permitted while explicit
+MLX remains non-Windows and Low/Mid tiers remain guarded.
+
+No Screenpipe source outside the MIT boundary and no Litepipe source was used.
+The model metadata is an artifact manifest only; no external source code was
+adapted. Whisper/Qwen/MLX remain cache-only local implementations without a
+reviewed ScreenWise checksum manifest and are not represented as the supported
+Windows provisioning path. Their retain/remove/manifest boundary remains a
+separate capability decision.
+
+Verification on Windows on 2026-09-10:
+
+- Root and desktop `cargo fmt --all -- --check` passed, and `git diff --check`
+  passed.
+- A locked/offline root check of `screenpipe-audio` (Parakeet and Qwen features)
+  plus `screenpipe-audio-eval` passed in Visual Studio Developer PowerShell with
+  Ninja Multi-Config and the documented OpenBLAS/ORT environment.
+- `screenpipe-config` tests passed: 28 passed. Focused
+  `screenpipe-engine` recording-config tests passed: 14 passed.
+- Desktop store tests passed: 15 passed. The native binding export passed and
+  `tauri_bindings_are_current` passed alone using the exact Ninja Multi-Config,
+  transient `knf-rs-sys` CRT override, and runtime OpenBLAS `PATH` matrix.
+- Direct TypeScript typechecking passed. Vitest passed 33 files / 380 tests.
+  The production Next build passed with the existing `unpdf` `import.meta`
+  warning only.
+- `cargo build --release --locked --offline` passed from Visual Studio Developer
+  PowerShell with normal single-config Ninja in 5m25s.
+- The focused `screenpipe-audio` unit-test command did not start because the
+  already-locked dev-only `infer 0.15.0` crate source is not cached and
+  `--offline` correctly refused network access. The four new deterministic
+  provisioning tests are therefore not claimed run. The production library,
+  feature combinations, dependent engine, desktop, and release graph did
+  compile successfully.
+- Reviewed lockfile changes are limited to removing the direct
+  `screenpipe-audio -> reqwest 0.13.3` and
+  `screenpipe-audio-eval -> audiopipe` dependency edges. No retained package
+  version, source, or checksum changed. Final SHA-256 values were root Cargo
+  `CCD65FDCCDE94F9BE23068FF4C8D6CAC8A2D4D1960329747C94049E5B0766A7F`,
+  desktop Cargo
+  `996D3482DF84390D1CC0DD4919F357CFF1A79A67B66A139309D6483BA2E42B77`,
+  and unchanged Bun
+  `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.

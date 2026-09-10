@@ -112,8 +112,8 @@ async fn main() -> Result<()> {
 
     if !segmentation_model_path.exists() || !embedding_model_path.exists() {
         anyhow::bail!(
-            "missing pyannote models at {} / {}. Run screenpipe once to download them, \
-             or copy them into crates/screenpipe-audio/models/pyannote/.",
+            "missing explicitly provisioned pyannote models at {} / {}. Copy the \
+             checksum-verified local artifacts into crates/screenpipe-audio/models/pyannote/.",
             segmentation_model_path.display(),
             embedding_model_path.display()
         );

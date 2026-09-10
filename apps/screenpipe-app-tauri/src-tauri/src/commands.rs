@@ -1477,6 +1477,56 @@ pub async fn get_pii_model_status() -> Result<PiiModelStatus, String> {
     .map_err(|e| format!("PII model verification task failed: {e}"))?
 }
 
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioModelFileStatus {
+    pub filename: String,
+    pub path: String,
+    pub source_url: String,
+    pub expected_sha256: String,
+    pub ready: bool,
+    pub error: Option<String>,
+}
+
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioModelStatus {
+    pub model_id: String,
+    pub directory: String,
+    pub ready: bool,
+    pub files: Vec<AudioModelFileStatus>,
+}
+
+/// Verify the explicitly provisioned Windows Parakeet transcription pack.
+/// This command only reads local files and cannot initiate a network request.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_audio_model_status() -> Result<AudioModelStatus, String> {
+    tokio::task::spawn_blocking(|| {
+        let status =
+            screenpipe_audio::models::parakeet_model_status().map_err(|error| error.to_string())?;
+        Ok(AudioModelStatus {
+            model_id: status.model_id,
+            directory: status.directory.display().to_string(),
+            ready: status.ready,
+            files: status
+                .files
+                .into_iter()
+                .map(|file| AudioModelFileStatus {
+                    filename: file.filename,
+                    path: file.path.display().to_string(),
+                    source_url: file.source_url,
+                    expected_sha256: file.sha256,
+                    ready: file.ready,
+                    error: file.error,
+                })
+                .collect(),
+        })
+    })
+    .await
+    .map_err(|error| format!("audio model verification task failed: {error}"))?
+}
+
 // Keychain / secure storage commands
 
 #[derive(serde::Serialize, specta::Type)]

@@ -102,9 +102,6 @@ pub struct RecordingConfig {
     /// Values: "low", "balanced", "high", "max". Default: "balanced".
     pub video_quality: String,
 
-    // Misc
-    pub use_chinese_mirror: bool,
-
     /// Custom vocabulary for transcription biasing and word replacement.
     pub vocabulary: Vec<VocabularyEntry>,
 
@@ -230,7 +227,7 @@ impl RecordingConfig {
             filter_music: settings.filter_music,
             audio_transcription_engine: engine_str
                 .parse()
-                .unwrap_or(AudioTranscriptionEngine::WhisperLargeV3Turbo),
+                .unwrap_or(AudioTranscriptionEngine::Disabled),
             transcription_mode: match settings.transcription_mode.as_str() {
                 "smart" | "batch" => TranscriptionMode::Batch,
                 _ => TranscriptionMode::Realtime,
@@ -266,7 +263,6 @@ impl RecordingConfig {
             user_id: settings.effective_user_id().map(|s| s.to_string()),
             user_name: settings.user_name.clone(),
             video_quality: settings.video_quality.clone(),
-            use_chinese_mirror: settings.use_chinese_mirror,
             vocabulary: settings
                 .vocabulary
                 .iter()
@@ -502,7 +498,7 @@ mod tests {
 
         assert_eq!(
             config.audio_transcription_engine,
-            AudioTranscriptionEngine::WhisperLargeV3TurboQuantized
+            AudioTranscriptionEngine::Disabled
         );
         assert_eq!(
             config.meeting_streaming.provider,
@@ -521,7 +517,7 @@ mod tests {
 
         assert_eq!(
             config.audio_transcription_engine,
-            AudioTranscriptionEngine::WhisperLargeV3TurboQuantized
+            AudioTranscriptionEngine::Disabled
         );
     }
 

@@ -24,7 +24,13 @@ fn main() {
 
     println!("Loading model...");
     let t0 = Instant::now();
-    let mut model = audiopipe::Model::from_pretrained("parakeet-tdt-0.6b-v3")
+    let status = screenpipe_audio::models::parakeet_model_status()
+        .expect("failed to inspect local Parakeet pack");
+    assert!(
+        status.ready,
+        "provision the verified local Parakeet pack before benchmarking"
+    );
+    let mut model = audiopipe::Model::from_dir(&status.directory, "parakeet")
         .expect("failed to load parakeet model");
     let load_time = t0.elapsed();
     println!("Model loaded in {:.2}s\n", load_time.as_secs_f64());

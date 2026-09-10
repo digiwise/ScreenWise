@@ -846,12 +846,6 @@ async fn main() {
             }
             app.manage(store.clone());
 
-            // Set Chinese HuggingFace mirror early — before any model downloads
-            if store.recording.use_chinese_mirror {
-                std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
-                info!("Chinese HuggingFace mirror enabled (HF_ENDPOINT set early)");
-            }
-
             // Resolve data directory from user setting (custom dir or ~/.screenpipe)
             let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir);
             info!("Recording data directory: {}", data_dir.display());
@@ -879,79 +873,6 @@ async fn main() {
                 } else {
                     info!("E2E seed: onboarding marked complete");
                 }
-            }
-
-            // Pre-download AI models in background immediately.
-            // These downloads don't need any permissions — they just fetch files to cache.
-            // On macOS, granting screen recording permission restarts the app, killing
-            // in-progress downloads. But:
-            // - hf_hub (whisper) uses temp file + atomic rename — interrupted downloads
-            //   leave no corrupt cache entry, next launch re-downloads cleanly.
-            // - Pyannote/silero use the same atomic pattern (write to .downloading, rename).
-            // - The small models (silero 2MB, pyannote 34MB) likely complete before the
-            //   user finishes clicking through permissions (~15-20s).
-            // - The whisper model (834MB) may or may not complete, but any progress
-            //   reduces wait time after the final restart.
-            {
-                let store_for_download = store.clone();
-                tauri::async_runtime::spawn(async move {
-                    if store_for_download.recording.disable_audio {
-                        info!("audio disabled — skipping model pre-downloads");
-                        return;
-                    }
-                    // Determine which whisper model the user's config needs
-                    let engine_name = store_for_download
-                        .recording
-                        .local_audio_transcription_engine();
-                    let engine = {
-                        use screenpipe_audio::core::engine::AudioTranscriptionEngine;
-                        Some(std::sync::Arc::new(match engine_name {
-                            "whisper-tiny" => AudioTranscriptionEngine::WhisperTiny,
-                            "whisper-tiny-quantized" => AudioTranscriptionEngine::WhisperTinyQuantized,
-                            "whisper-large" => AudioTranscriptionEngine::WhisperLargeV3,
-                            "whisper-large-quantized" => AudioTranscriptionEngine::WhisperLargeV3Quantized,
-                            "whisper-large-v3-turbo" => AudioTranscriptionEngine::WhisperLargeV3Turbo,
-                            _ => AudioTranscriptionEngine::WhisperLargeV3TurboQuantized,
-                        }))
-                    };
-
-                    // Download whisper model (834MB default) — biggest download, start first
-                    if let Some(engine) = engine {
-                        let engine_clone = engine.clone();
-                        tokio::task::spawn_blocking(move || {
-                            match screenpipe_audio::transcription::whisper::model::download_whisper_model(engine_clone) {
-                                Ok(path) => info!("whisper model pre-download complete: {:?}", path),
-                                Err(e) => warn!("whisper model pre-download failed (will retry at server start): {}", e),
-                            }
-                        });
-                    }
-
-                    // Download small ONNX models in parallel — these complete in seconds
-                    let (_silero_result, _seg_result, _emb_result) = tokio::join!(
-                        async {
-                            match screenpipe_audio::vad::silero::SileroVad::ensure_model_downloaded().await {
-                                Ok(p) => info!("silero vad model pre-download complete: {:?}", p),
-                                Err(e) => warn!("silero vad pre-download failed (will retry): {}", e),
-                            }
-                        },
-                        async {
-                            match screenpipe_audio::speaker::models::get_or_download_model(
-                                screenpipe_audio::speaker::models::PyannoteModel::Segmentation
-                            ).await {
-                                Ok(p) => info!("segmentation model pre-download complete: {:?}", p),
-                                Err(e) => warn!("segmentation pre-download failed (will retry): {}", e),
-                            }
-                        },
-                        async {
-                            match screenpipe_audio::speaker::models::get_or_download_model(
-                                screenpipe_audio::speaker::models::PyannoteModel::Embedding
-                            ).await {
-                                Ok(p) => info!("embedding model pre-download complete: {:?}", p),
-                                Err(e) => warn!("embedding pre-download failed (will retry): {}", e),
-                            }
-                        },
-                    );
-                });
             }
 
             if !onboarding_store.is_completed {

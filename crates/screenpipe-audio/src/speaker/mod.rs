@@ -53,9 +53,8 @@ pub(crate) fn session_output_names(session: &ort::session::Session) -> Vec<Strin
 /// the inference code looks that name up directly. The trap: a cached model can
 /// be a *structurally identical* export whose single output node is named
 /// differently — an older pyannote segmentation export names its output "y"
-/// instead of "output". That model still loads cleanly, so the on-disk cache
-/// never self-heals (it only re-downloads on ORT *load* errors), and then it
-/// fails every single inference with "Output tensor not found". In batch mode
+/// instead of "output". That model still loads cleanly but then
+/// fails every inference with "Output tensor not found". In batch mode
 /// that silently wedges the whole transcription backlog: capture keeps running,
 /// chunks pile up, nothing is ever transcribed.
 ///
@@ -152,7 +151,7 @@ mod tests {
     fn stale_segmentation_model_with_renamed_output_still_resolves() {
         // Reproduction of the field bug: a user's cached segmentation-3.0.onnx
         // was an older export whose single output node is named "y", not
-        // "output". The model loads fine (so the cache never re-downloads), but
+        // "output". The model loads fine, but
         // the old inference code hard-coded `ort_outs.get("output")`, which
         // returns None on every chunk -> "Output tensor not found" -> the whole
         // transcription backlog wedges while screen/audio capture keeps running.

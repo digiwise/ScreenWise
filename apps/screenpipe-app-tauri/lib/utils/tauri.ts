@@ -369,6 +369,18 @@ async getAudioDevices() : Promise<Result<AudioDeviceInfo[], string>> {
 }
 },
 /**
+ * Verify the explicitly provisioned Windows Parakeet transcription pack.
+ * This command only reads local files and cannot initiate a network request.
+ */
+async getAudioModelStatus() : Promise<Result<AudioModelStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_audio_model_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read the current boot phase of the server. Used by the onboarding UI to
  * show progress ("updating database", ...) while the HTTP
  * server is not yet listening — in particular during long DB migrations
@@ -1516,6 +1528,8 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
 export type AIProviderType = "native-ollama"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
+export type AudioModelFileStatus = { filename: string; path: string; sourceUrl: string; expectedSha256: string; ready: boolean; error: string | null }
+export type AudioModelStatus = { modelId: string; directory: string; ready: boolean; files: AudioModelFileStatus[] }
 export type BootPhaseSnapshot = {
 /**
  * One of: idle | starting | migrating_database | building_audio | ready | error
@@ -2012,10 +2026,6 @@ port: number;
  * Previously stored in SettingsStore.extra["powerMode"].
  */
 powerMode?: string | null;
-/**
- * Use Chinese mirror for Hugging Face model downloads.
- */
-useChineseMirror: boolean;
 /**
  * Detected hardware tier ("high", "mid", "low").
  * Set once on first launch; `None` for existing installs (treated as High).

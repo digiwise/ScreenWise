@@ -140,8 +140,9 @@ async fn whisper_hallucination_before_after() {
 
     // ── Locate the cached Whisper tiny model ────────────────────────────────
     let engine_config = Arc::new(AudioTranscriptionEngine::WhisperTiny);
-    let model_path = get_cached_whisper_model_path(&engine_config)
-        .expect("ggml-tiny.bin not found in cache — run screenpipe once to download it, then re-run with --ignored");
+    let model_path = get_cached_whisper_model_path(&engine_config).expect(
+        "ggml-tiny.bin not found in cache — provision it manually, then re-run with --ignored",
+    );
 
     println!("using whisper model: {:?}", model_path);
 

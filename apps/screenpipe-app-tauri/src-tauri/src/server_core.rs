@@ -69,11 +69,6 @@ impl ServerCore {
         // --- Environment setup ---
         std::env::set_var("SCREENPIPE_FD_LIMIT", "8192");
 
-        if config.use_chinese_mirror {
-            std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
-            info!("Using Chinese HuggingFace mirror");
-        }
-
         // Audio transcription configuration is passed directly into
         // AudioManagerOptions. The local recorder never reads provider
         // credentials from the process environment.

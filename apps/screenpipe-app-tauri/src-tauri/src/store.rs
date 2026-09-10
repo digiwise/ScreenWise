@@ -888,7 +888,9 @@ Rules:
         Self {
             // App-specific defaults override RecordingSettings::default() where needed
             recording: screenpipe_config::RecordingSettings {
-                audio_transcription_engine: "whisper-large-v3-turbo-quantized".to_string(),
+                audio_transcription_engine: "disabled".to_string(),
+                meeting_live_transcription_enabled: false,
+                meeting_live_transcription_provider: "disabled".to_string(),
                 monitor_ids: vec!["default".to_string()],
                 audio_devices: vec!["default".to_string()],
                 use_pii_removal: true,
@@ -1247,7 +1249,7 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
             &store.recording.audio_transcription_engine,
             detected,
         ) {
-            let safe = screenpipe_config::best_engine_for_platform(detected);
+            let safe = "disabled";
             tracing::warn!(
                 "engine {} is unsafe on this platform (tier={:?}, macOS={:?}) — switching to {}",
                 store.recording.audio_transcription_engine,
@@ -1305,7 +1307,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const FALLBACK_ENGINE: &str = "whisper-large-v3-turbo-quantized";
+    const FALLBACK_ENGINE: &str = "disabled";
 
     #[test]
     fn retired_remote_engines_fall_back_even_with_legacy_credentials() {
