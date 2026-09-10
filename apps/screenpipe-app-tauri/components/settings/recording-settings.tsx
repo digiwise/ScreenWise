@@ -4,8 +4,6 @@
 
 "use client";
 
-const DEFAULT_OPENAI_COMPATIBLE_ENDPOINT = "http://127.0.0.1:8080";
-
 import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
 
@@ -13,7 +11,7 @@ import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-searc
 export const searchIndex: SettingsField[] = [
   // Mirrors the labels actually rendered by RecordingSettings. Keep in sync.
   { label: "Audio Recording", keywords: ["mic", "microphone", "audio"] },
-  { label: "Transcription engine", keywords: ["whisper", "cloud", "stt"] },
+  { label: "Transcription engine", keywords: ["whisper", "local", "stt"] },
   // conditional: rendered only when audio is enabled / engine selected.
   { label: "Live meeting notes", keywords: ["captions", "meeting", "live"], conditional: true },
   { label: "Append typed text to note", keywords: ["note", "append"], conditional: true },
@@ -63,7 +61,6 @@ import {
   EyeOff,
   Key,
   Terminal,
-  AlertCircle,
   RefreshCw,
   Loader2,
   Globe,
@@ -75,11 +72,7 @@ import {
   User,
   Users,
   UserX,
-  ChevronUp,
-  ChevronDown,
-  CheckCircle2,
   XCircle,
-  Circle,
   Upload,
   Trash2,
   Search,
@@ -134,14 +127,10 @@ import {
   validateField,
   sanitizeValue,
   debounce,
-  validateUrl,
-  FieldValidationResult
 } from "@/lib/utils/validation";
 import { AudioEqualizer } from "@/app/shortcut-reminder/audio-equalizer";
 
 import { useOverlayData } from "@/app/shortcut-reminder/use-overlay-data";
-import { useOpenAIModels } from "./hooks/use-openai-models";
-import { useTranscriptionDiagnostics } from "./hooks/use-transcription-diagnostics";
 import { useVoiceTraining } from "./hooks/use-voice-training";
 
 type PermissionsStatus = {
@@ -160,72 +149,6 @@ const getAppIconUrl = (appName: string): string => {
   return `http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`;
 };
 
-const FALLBACK_TRANSCRIPTION_ENGINE = "whisper-large-v3-turbo-quantized";
-
-const TRANSCRIPTION_ENGINE_LABELS: Record<string, string> = {
-  "screenpipe-cloud": "Screenpipe Cloud",
-  deepgram: "Deepgram",
-  "whisper-large-v3-turbo": "Whisper Turbo",
-  "whisper-large-v3-turbo-quantized": "Whisper Turbo (fast)",
-  "whisper-tiny": "Whisper Tiny",
-  "whisper-tiny-quantized": "Whisper Tiny (fast)",
-  "openai-compatible": "OpenAI Compatible",
-  "qwen3-asr": "Qwen3-ASR",
-  parakeet: "Parakeet",
-  disabled: "Disabled (capture only)",
-};
-
-type AudioEngineFallbackReason =
-  | "unavailableProvider"
-  | "missingDeepgramKey";
-
-type AudioEngineResolution = {
-  requested: string;
-  active: string;
-  fallbackReason: AudioEngineFallbackReason | null;
-};
-
-const getTranscriptionEngineLabel = (engine: string) =>
-  TRANSCRIPTION_ENGINE_LABELS[engine] ?? engine;
-
-const getAudioEngineResolution = (settings: Settings): AudioEngineResolution => {
-  const requested = settings.audioTranscriptionEngine;
-  const fallback = FALLBACK_TRANSCRIPTION_ENGINE;
-  const hasDeepgramKey = Boolean(
-    settings.deepgramApiKey && settings.deepgramApiKey !== "default"
-  );
-
-  if (requested === "screenpipe-cloud") {
-    return {
-      requested,
-      active: fallback,
-      fallbackReason: "unavailableProvider",
-    };
-  }
-
-  if (requested === "deepgram" && !hasDeepgramKey) {
-    return {
-      requested,
-      active: fallback,
-      fallbackReason: "missingDeepgramKey",
-    };
-  }
-
-  return {
-    requested,
-    active: requested,
-    fallbackReason: null,
-  };
-};
-
-const getAudioFallbackMessage = (reason: AudioEngineFallbackReason) => {
-  switch (reason) {
-    case "unavailableProvider":
-      return "Screenpipe Cloud is unavailable in local ScreenWise, so audio is being transcribed locally.";
-    case "missingDeepgramKey":
-      return "Deepgram has no API key configured, so audio is being transcribed locally.";
-  }
-};
 
 const SERVER_RESTART_SETTINGS = new Set<keyof SettingsStore>([
   "port",
@@ -1161,11 +1084,11 @@ const getAudioDeviceIcon = (name: string) => {
 
 // ─── Transcription Dictionary ────────────────────────────────────────────────
 
-const DEEPGRAM_LIMIT = 100;
+const VOCAB_ENTRY_LIMIT = 100;
 const WHISPER_CHAR_LIMIT = 800;
-// Cap stored terms at the strictest real engine limit (Deepgram cloud).
-// Whisper's offline limit is on total chars, not term count, and is surfaced separately below.
-const VOCAB_LIMIT = DEEPGRAM_LIMIT;
+// Keep the settings payload and editor bounded. Local Whisper applies its own
+// total-character limit, surfaced separately below.
+const VOCAB_LIMIT = VOCAB_ENTRY_LIMIT;
 
 function parseTerms(raw: string): string[] {
   // Auto-detect delimiter: if there are newlines, split by newlines; otherwise commas; otherwise semicolons; otherwise tabs
@@ -1282,8 +1205,7 @@ function TranscriptionDictionary({
         {/* Engine limits info */}
         {vocabularyWords.length > 0 && (
           <div className="text-[10px] text-muted-foreground/60 font-mono mb-2 px-1 flex gap-3">
-            <span>offline: {Math.min(vocabularyWords.reduce((n, e) => n + (e.replacement || e.word).length + 2, 0), WHISPER_CHAR_LIMIT)}/{WHISPER_CHAR_LIMIT} chars</span>
-            <span>cloud: {Math.min(vocabularyWords.length, DEEPGRAM_LIMIT)}/{DEEPGRAM_LIMIT} keywords</span>
+            <span>local prompt: {Math.min(vocabularyWords.reduce((n, e) => n + (e.replacement || e.word).length + 2, 0), WHISPER_CHAR_LIMIT)}/{WHISPER_CHAR_LIMIT} chars</span>
           </div>
         )}
 
@@ -1816,45 +1738,12 @@ export function RecordingSettings() {
   const audioPipeline = health?.audio_pipeline ?? null;
   const [isMacOS, setIsMacOS] = useState(false);
   const [isWindows, setIsWindows] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [showOpenAIApiKey, setShowOpenAIApiKey] = useState(false);
   const overlayData = useOverlayData();
   const [hwCapability, setHwCapability] = useState<HardwareCapability | null>(null);
-
-  // OpenAI Compatible model fetching
-  const {
-    openAIModels,
-    allOpenAIModels,
-    isLoadingModels,
-    filterText: filterTranscriptionModels,
-    setFilterText: setFilterTranscriptionModels,
-    fetchOpenAIModels,
-  } = useOpenAIModels({
-    engine: settings.audioTranscriptionEngine,
-    endpoint: settings.openaiCompatibleEndpoint || "",
-    apiKey: settings.openaiCompatibleApiKey || "",
-  });
-
-  // Transcription diagnostics
-  const {
-    txTestStatus,
-    txTestResults,
-    txDiagnosticsOpen,
-    setTxDiagnosticsOpen,
-    runTranscriptionDiagnostics,
-  } = useTranscriptionDiagnostics({ settings });
 
   useEffect(() => {
     commands.getHardwareCapability().then(setHwCapability).catch(() => {});
   }, []);
-
-  const audioEngineResolution = useMemo(
-    () => getAudioEngineResolution(settings),
-    [
-      settings.audioTranscriptionEngine,
-      settings.deepgramApiKey,
-    ]
-  );
 
   // Add new state to track if settings have changed
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -1876,12 +1765,6 @@ export function RecordingSettings() {
         const dataDirValidation = validateField("dataDir", newSettings.dataDir);
         if (!dataDirValidation.isValid && dataDirValidation.error) {
           errors.dataDir = dataDirValidation.error;
-        }
-      }
-      
-      if (newSettings.deepgramApiKey !== undefined && newSettings.deepgramApiKey.trim()) {
-        if (newSettings.deepgramApiKey.length < 10) {
-          errors.deepgramApiKey = "API key seems too short";
         }
       }
       
@@ -2042,22 +1925,6 @@ export function RecordingSettings() {
     loadDevices();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Enhanced validation for specific fields
-  const validateDeepgramApiKey = useCallback((apiKey: string): FieldValidationResult => {
-    if (!apiKey.trim()) {
-      return { isValid: false, error: "API key is required" };
-    }
-    if (apiKey.length < 10) {
-      return { isValid: false, error: "API key seems too short" };
-    }
-    return { isValid: true };
-  }, []);
-
-  // Enhanced Deepgram API key handler
-  const handleDeepgramApiKeyChange = useCallback((value: string, isValid: boolean) => {
-    handleSettingsChange({ deepgramApiKey: value }, true);
-  }, [handleSettingsChange]);
 
   // Optimized update function with better error handling
   const handleUpdate = async () => {
@@ -2453,7 +2320,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 <Mic className="h-4 w-4 text-muted-foreground shrink-0" />
                 <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                   Transcription engine
-                  <HelpTooltip text="Cloud engines send audio to a server for fast, accurate transcription. Offline engines run on your device — fully private but use more CPU/RAM." />
+                  <HelpTooltip text="Transcription runs on your device. Larger models can improve accuracy but use more CPU and memory." />
                 </h3>
               </div>
               <div className="flex items-center gap-2">
@@ -2469,10 +2336,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">cloud</SelectLabel>
-                      <SelectItem value="deepgram">Deepgram</SelectItem>
-                    </SelectGroup>
-                    <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">offline</SelectLabel>
                       <SelectItem value="whisper-large-v3-turbo">Whisper Turbo</SelectItem>
                       <SelectItem value="whisper-large-v3-turbo-quantized">Whisper Turbo (fast)</SelectItem>
@@ -2481,314 +2344,11 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                       {!isMacOS && <SelectItem value="qwen3-asr">Qwen3-ASR</SelectItem>}
                       <SelectItem value="parakeet">Parakeet{isMacOS ? " (experimental)" : ""}</SelectItem>
                     </SelectGroup>
-                    <SelectGroup>
-                      <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">other</SelectLabel>
-                      <SelectItem value="openai-compatible">OpenAI Compatible</SelectItem>
-                      <SelectItem value="disabled">Disabled (capture only)</SelectItem>
-                    </SelectGroup>
+                    <SelectItem value="disabled">Disabled (capture only)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
-            {audioEngineResolution.fallbackReason && (
-              <Alert
-                data-testid="audio-engine-fallback-alert"
-                className="mt-2 ml-[26px] border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
-              >
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle className="text-xs font-semibold">
-                  {getTranscriptionEngineLabel(audioEngineResolution.requested)} is not active
-                </AlertTitle>
-                <AlertDescription className="space-y-2 text-xs">
-                  <p>{getAudioFallbackMessage(audioEngineResolution.fallbackReason)}</p>
-                  <div className="grid gap-1">
-                    <div>
-                      Saved choice:{" "}
-                      <span className="font-medium">
-                        {getTranscriptionEngineLabel(audioEngineResolution.requested)}
-                      </span>
-                    </div>
-                    <div>
-                      Active now:{" "}
-                      <span className="font-medium">
-                        {getTranscriptionEngineLabel(audioEngineResolution.active)}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 px-2 text-xs"
-                      data-testid="audio-engine-fallback-use-whisper"
-                      onClick={() =>
-                        handleSettingsChange(
-                          { audioTranscriptionEngine: FALLBACK_TRANSCRIPTION_ENGINE },
-                          true
-                        )
-                      }
-                    >
-                      Use Whisper setting
-                    </Button>
-                  </div>
-                </AlertDescription>
-              </Alert>
-            )}
-            {settings.audioTranscriptionEngine === "deepgram" && (
-              <div className="mt-2 ml-[26px] relative">
-                <ValidatedInput
-                  id="deepgramApiKey"
-                  label=""
-                  type={showApiKey ? "text" : "password"}
-                  value={settings.deepgramApiKey || ""}
-                  onChange={handleDeepgramApiKeyChange}
-                  validation={validateDeepgramApiKey}
-                  placeholder="Deepgram API key"
-                  required={true}
-                  className="pr-8 h-7 text-xs"
-                />
-                <Button type="button" variant="ghost" size="icon" className="absolute right-0 top-0 h-7 w-7" onClick={() => setShowApiKey(!showApiKey)}>
-                  {showApiKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                </Button>
-              </div>
-            )}
-            {settings.audioTranscriptionEngine === "openai-compatible" && (
-              <div className="mt-2 ml-[26px] space-y-2">
-                {/* API Endpoint Input */}
-                <ValidatedInput
-                  id="openaiCompatibleEndpoint"
-                  label=""
-                  value={settings.openaiCompatibleEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT}
-                  onChange={(value: string) => handleSettingsChange({ openaiCompatibleEndpoint: value }, true)}
-                  onBlur={() => fetchOpenAIModels(settings.openaiCompatibleEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, settings.openaiCompatibleApiKey)}
-                  onKeyDown={(e: React.KeyboardEvent) => {
-                    if (e.key === 'Enter') {
-                      fetchOpenAIModels(settings.openaiCompatibleEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, settings.openaiCompatibleApiKey);
-                    }
-                  }}
-                  placeholder="API Endpoint (e.g., http://127.0.0.1:8080)"
-                  className="h-7 text-xs"
-                />
-                
-                {/* API Key Input */}
-                <div className="relative">
-                  <ValidatedInput
-                    id="openaiCompatibleApiKey"
-                    label=""
-                    type={showOpenAIApiKey ? "text" : "password"}
-                    value={settings.openaiCompatibleApiKey || ""}
-                    onChange={(value: string) => handleSettingsChange({ openaiCompatibleApiKey: value }, true)}
-                    placeholder="API Key (optional)"
-                    className="pr-8 h-7 text-xs"
-                  />
-                  <Button type="button" variant="ghost" size="icon" className="absolute right-0 top-0 h-7 w-7" onClick={() => setShowOpenAIApiKey(!showOpenAIApiKey)}>
-                    {showOpenAIApiKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                  </Button>
-                </div>
-                
-                {/* Model Input — editable with dropdown suggestions */}
-                <div className="space-y-1.5">
-                  <div className="relative">
-                    <Input
-                      value={settings.openaiCompatibleModel || ""}
-                      onChange={(e) => handleSettingsChange({ openaiCompatibleModel: e.target.value }, true)}
-                      placeholder={isLoadingModels ? "Loading models..." : "Model name (e.g., whisper-large-v3-turbo)"}
-                      className="h-7 text-xs pr-8"
-                    />
-                    {isLoadingModels && (
-                      <Loader2 className="h-3 w-3 animate-spin absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                    )}
-                  </div>
-                  {openAIModels.length > 0 && !openAIModels.includes('!API_Error') && (
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">
-                          Available models ({openAIModels.length})
-                        </span>
-                        {allOpenAIModels.length > 0 && (
-                          <button
-                            type="button"
-                            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                            onClick={() => setFilterTranscriptionModels(!filterTranscriptionModels)}
-                          >
-                            {filterTranscriptionModels ? "show all" : "filter STT only"}
-                          </button>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {openAIModels.map((model) => (
-                          <button
-                            key={model}
-                            type="button"
-                            className={cn(
-                              "px-2 py-0.5 rounded text-xs border transition-colors",
-                              settings.openaiCompatibleModel === model
-                                ? "bg-foreground text-background border-foreground"
-                                : "hover:bg-accent border-border"
-                            )}
-                            onClick={() => handleSettingsChange({ openaiCompatibleModel: model }, true)}
-                          >
-                            {model}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {openAIModels.includes('!API_Error') && (
-                    <p className="text-xs text-muted-foreground">Could not list models from the API — type the model name manually.</p>
-                  )}
-                  {allOpenAIModels.length === 0 && !openAIModels.includes('!API_Error') && !isLoadingModels && (
-                    <p className="text-xs text-muted-foreground">No models listed by the API — type the model name manually.</p>
-                  )}
-                </div>
-
-                {/* Raw Audio Toggle */}
-                <label className="flex items-center gap-2 text-xs cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.openaiCompatibleRawAudio || false}
-                    onChange={(e) => handleSettingsChange({ openaiCompatibleRawAudio: e.target.checked }, true)}
-                    className="rounded border-border"
-                  />
-                  <span>send raw WAV audio (instead of MP3)</span>
-                </label>
-
-                {/* Custom Headers */}
-                <div className="space-y-1">
-                  <label className="text-xs text-muted-foreground">custom headers (JSON)</label>
-                  <Input
-                    defaultValue={settings.openaiCompatibleHeaders ? JSON.stringify(settings.openaiCompatibleHeaders) : ""}
-                    onBlur={(e) => {
-                      const val = e.target.value.trim();
-                      if (!val) {
-                        handleSettingsChange({ openaiCompatibleHeaders: undefined }, true);
-                        return;
-                      }
-                      try {
-                        const parsed = JSON.parse(val);
-                        if (typeof parsed === "object" && !Array.isArray(parsed)) {
-                          handleSettingsChange({ openaiCompatibleHeaders: parsed }, true);
-                        }
-                      } catch {
-                        // Invalid JSON — don't save
-                      }
-                    }}
-                    placeholder='{"X-Custom-Header": "value"}'
-                    className="h-7 text-xs font-mono"
-                  />
-                </div>
-
-                {/* Connection Test Panel */}
-                <div className="border rounded-lg">
-                  <button
-                    type="button"
-                    className="flex items-center justify-between w-full px-3 py-2 text-xs font-medium text-left hover:bg-accent/50 transition-colors rounded-lg"
-                    onClick={() => setTxDiagnosticsOpen(!txDiagnosticsOpen)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Zap className="h-3.5 w-3.5" />
-                      <span>Connection Test</span>
-                      {txTestStatus === "done" && (
-                        <span className="text-xs text-muted-foreground">
-                          {txTestResults.transcribe.status === "pass"
-                            ? "All checks passed"
-                            : txTestResults.endpoint.status === "fail"
-                            ? "Connection failed"
-                            : txTestResults.auth.status === "fail"
-                            ? "Auth failed"
-                            : txTestResults.models.status === "fail"
-                            ? "Models failed"
-                            : txTestResults.transcribe.status === "fail"
-                            ? "Transcription failed"
-                            : ""}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {txTestStatus === "testing" && (
-                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-                      )}
-                      {txDiagnosticsOpen ? (
-                        <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
-                      ) : (
-                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                      )}
-                    </div>
-                  </button>
-
-                  {txDiagnosticsOpen && (
-                    <div className="px-3 pb-3 space-y-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={runTranscriptionDiagnostics}
-                        disabled={txTestStatus === "testing"}
-                        className="flex items-center gap-2 h-7 text-xs"
-                      >
-                        {txTestStatus === "testing" ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Zap className="h-3 w-3" />
-                        )}
-                        {txTestStatus === "testing" ? "Testing..." : "Run diagnostics"}
-                      </Button>
-
-                      <div className="space-y-1.5 text-xs">
-                        {(
-                          [
-                            ["endpoint", "1", "Endpoint reachable"],
-                            ["auth", "2", "Auth valid"],
-                            ["models", "3", "Models loaded"],
-                            ["transcribe", "4", "Test transcription"],
-                          ] as const
-                        ).map(([key, num, label]) => {
-                          const result = txTestResults[key];
-                          return (
-                            <div key={key} className="flex items-start gap-2">
-                              <div className="flex items-center gap-1.5 min-w-[150px]">
-                                {result.status === "pass" ? (
-                                  <CheckCircle2 className="h-3.5 w-3.5 text-foreground shrink-0" />
-                                ) : result.status === "fail" ? (
-                                  <XCircle className="h-3.5 w-3.5 text-destructive shrink-0" />
-                                ) : result.status === "running" ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />
-                                ) : (
-                                  <Circle className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
-                                )}
-                                <span
-                                  className={cn(
-                                    result.status === "skip" || result.status === "pending"
-                                      ? "text-muted-foreground/40"
-                                      : result.status === "fail"
-                                      ? "text-destructive"
-                                      : ""
-                                  )}
-                                >
-                                  {num}. {label}
-                                </span>
-                              </div>
-                              {result.message && (
-                                <span
-                                  className={cn(
-                                    "text-xs",
-                                    result.status === "fail"
-                                      ? "text-destructive"
-                                      : "text-muted-foreground"
-                                  )}
-                                >
-                                  {result.message}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
           </CardContent>
         </Card>
         )}
@@ -2840,14 +2400,13 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="selected-engine">Current transcription engine</SelectItem>
-                      <SelectItem value="deepgram-live">Direct Deepgram live</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 {(settings.meetingLiveTranscriptionProvider ?? "selected-engine") === "selected-engine" &&
                   settings.audioTranscriptionEngine === "disabled" && (
                   <p className="text-xs text-muted-foreground">
-                    Pick an audio transcription engine above, or choose a cloud/direct live provider.
+                    Pick an audio transcription engine above to enable live captions.
                   </p>
                 )}
               </div>
@@ -2895,36 +2454,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   }
                 />
               </div>
-              {["smart", "batch"].includes(settings.transcriptionMode ?? "realtime") &&
-                settings.audioTranscriptionEngine === "openai-compatible" && (
-                <div className="mt-2.5 pt-2.5 border-t border-border/50">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                      Max batch duration
-                      <HelpTooltip text="Maximum audio to batch before transcribing. Depends on your endpoint's file size limit. 0 = auto (~50min). Audio is compressed to MP3 before upload." />
-                    </span>
-                    <span className="text-xs font-mono text-foreground">
-                      {(settings.batchMaxDurationSecs ?? 0) === 0
-                        ? "auto"
-                        : `${Math.floor((settings.batchMaxDurationSecs ?? 0) / 60)}min`}
-                    </span>
-                  </div>
-                  <Slider
-                    value={[settings.batchMaxDurationSecs ?? 0]}
-                    onValueChange={([value]) =>
-                      handleSettingsChange({ batchMaxDurationSecs: value ?? 0 } as any, true)
-                    }
-                    min={0}
-                    max={5400}
-                    step={60}
-                    className="w-full"
-                  />
-                  <div className="flex justify-between text-[10px] text-muted-foreground mt-0.5">
-                    <span>auto</span>
-                    <span>90min</span>
-                  </div>
-                </div>
-              )}
             </CardContent>
           </Card>
         )}

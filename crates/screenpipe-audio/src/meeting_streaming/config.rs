@@ -32,11 +32,6 @@ impl MeetingStreamingProvider {
 pub struct MeetingStreamingConfig {
     pub enabled: bool,
     pub provider: MeetingStreamingProvider,
-    /// Retained as empty compatibility fields while desktop settings migration
-    /// is completed. They are never used for a network connection.
-    pub auth_token: Option<String>,
-    pub api_key: Option<String>,
-    pub endpoint: String,
     pub model: Option<String>,
     pub language: Option<String>,
     pub local_speaker_name: Option<String>,
@@ -54,9 +49,6 @@ impl Default for MeetingStreamingConfig {
         Self {
             enabled: true,
             provider,
-            auth_token: None,
-            api_key: None,
-            endpoint: String::new(),
             model: Some("selected transcription engine".to_string()),
             language: env_non_empty("SCREENPIPE_MEETING_TRANSCRIPTION_LANGUAGE"),
             local_speaker_name: env_non_empty("SCREENPIPE_MEETING_LOCAL_SPEAKER_NAME"),
@@ -90,9 +82,6 @@ impl FromStr for MeetingStreamingProvider {
 impl MeetingStreamingConfig {
     pub fn with_provider(mut self, provider: MeetingStreamingProvider) -> Self {
         self.provider = provider;
-        self.auth_token = None;
-        self.api_key = None;
-        self.endpoint.clear();
         self.model = Some("selected transcription engine".to_string());
         self
     }
@@ -100,8 +89,6 @@ impl MeetingStreamingConfig {
     pub fn from_settings(
         enabled: bool,
         provider: &str,
-        _cloud_token: Option<String>,
-        _provider_api_key_override: Option<String>,
         language: Option<String>,
         local_speaker_name: Option<String>,
     ) -> Self {

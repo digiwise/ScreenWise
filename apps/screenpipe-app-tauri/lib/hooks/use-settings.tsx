@@ -139,7 +139,7 @@ export type Settings = SettingsStore & {
 	/** Live notes for manually-started meetings. Separate from background 24/7 transcription. */
 	meetingLiveTranscriptionEnabled?: boolean;
 	/** Provider for manually-started live notes. Defaults to the selected transcription engine. */
-	meetingLiveTranscriptionProvider?: "selected-engine" | "screenpipe-cloud" | "disabled" | "deepgram-live";
+	meetingLiveTranscriptionProvider?: "selected-engine" | "disabled";
 	/** When true, the user's typed text (and edited files) captured during a meeting is auto-appended to the meeting note when the meeting stops. Default true. */
 	appendTypedTextToMeetingNote?: boolean;
 	/** User's name for speaker identification — input device audio will be labeled with this name */
@@ -148,20 +148,8 @@ export type Settings = SettingsStore & {
 	vocabularyWords?: Array<{ word: string; replacement?: string }>;
 	/** Font size for the entire app UI */
 	fontSize?: FontSize;
-	/** OpenAI-compatible transcription endpoint URL */
-	openaiCompatibleEndpoint?: string;
-	/** OpenAI-compatible transcription API key */
-	openaiCompatibleApiKey?: string;
-	/** OpenAI-compatible transcription model name */
-	openaiCompatibleModel?: string;
-	/** Custom HTTP headers for OpenAI-compatible transcription (JSON object) */
-	openaiCompatibleHeaders?: Record<string, string>;
-	/** Send raw WAV audio instead of MP3 to OpenAI-compatible endpoint */
-	openaiCompatibleRawAudio?: boolean;
 	/** Filter music-dominant audio before transcription (reduces Spotify/YouTube music noise) */
 	filterMusic?: boolean;
-	/** Maximum batch transcription duration in seconds (0 = engine default: Deepgram 5000s, OpenAI 3000s, Whisper 600s) */
-	batchMaxDurationSecs?: number;
 	/** User's power mode preference — persisted so it survives app restarts */
 	powerMode?: "auto" | "performance" | "battery_saver";
 	/** Show restart notifications when audio/vision capture stalls (default: false for now) */
@@ -329,7 +317,6 @@ export function makeDefaultPresets(): AIPreset[] {
 let DEFAULT_SETTINGS: Settings = {
 			aiPresets: makeDefaultPresets() as any,
 			deviceId: crypto.randomUUID(),
-			deepgramApiKey: "",
 			isLoading: false,
 			userId: "",
 			devMode: false,
@@ -497,7 +484,10 @@ function createSettingsStore() {
 			settings.meetingLiveTranscriptionEnabled = true;
 			needsUpdate = true;
 		}
-		if (!settings.meetingLiveTranscriptionProvider) {
+		const storedMeetingProvider = settings.meetingLiveTranscriptionProvider as string | undefined;
+		if (!storedMeetingProvider ||
+			storedMeetingProvider === "screenpipe-cloud" ||
+			storedMeetingProvider === "deepgram-live") {
 			settings.meetingLiveTranscriptionProvider = "selected-engine";
 			needsUpdate = true;
 		}

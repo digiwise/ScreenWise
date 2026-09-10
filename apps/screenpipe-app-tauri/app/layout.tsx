@@ -212,9 +212,8 @@ export default function RootLayout({
     const debouncedWrite = createDebouncer(1000);
 
     // Belt-and-suspenders: scrub well-known secret-bearing keys before they
-    // hit localStorage. Any `console.log(settings)` (recording page, agents,
-    // OAuth flows) used to leak deepgramApiKey, aiPresets[].apiKey,
-    // openaiCompatibleApiKey, and the user's Clerk JWT into feedback bundles.
+    // hit localStorage. Legacy settings objects can still contain retired
+    // provider credentials, so keep scrubbing their historical key names.
     // Scrubbing here means future debug logs can't reintroduce the leak even
     // if someone forgets and dumps an object containing these keys.
     const SECRET_KEYS = new Set([

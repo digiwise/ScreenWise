@@ -1747,8 +1747,11 @@ export type SettingsStore =
 disableAudio: boolean;
 /**
  * Audio transcription engine identifier.
- * Values: "whisper-large-v3-turbo", "whisper-large-v3-turbo-quantized",
- * "deepgram", "screenpipe-cloud", etc.
+ *
+ * The persisted value is intentionally a string for compatibility with
+ * existing `store.bin` files. Unsupported or retired values are resolved
+ * to a local engine by [`Self::local_audio_transcription_engine`] before
+ * capture starts.
  */
 audioTranscriptionEngine: string;
 /**
@@ -1808,18 +1811,12 @@ macosInputVpioEnabled?: boolean;
  */
 audioChunkDuration: number;
 /**
- * Deepgram API key for cloud transcription.
- * Empty string or "default" means not configured.
- * Kept as String (not Option) to match existing store.bin schema.
- */
-deepgramApiKey: string;
-/**
  * Filter music-dominant audio before transcription using spectral analysis.
  */
 filterMusic: boolean;
 /**
- * Maximum batch duration in seconds for batch transcription.
- * None = use engine-aware defaults (Deepgram=5000s, OpenAI=3000s, Whisper=600s).
+ * Maximum batch duration in seconds for local batch transcription.
+ * None uses the selected local engine's default.
  * Also controls the max deferral cap during active meetings.
  */
 batchMaxDurationSecs?: number | null;
@@ -2074,31 +2071,6 @@ userId: string;
  * Previously stored in SettingsStore.extra["userName"].
  */
 userName?: string | null;
-/**
- * OpenAI-compatible transcription endpoint URL.
- * Previously stored in SettingsStore.extra["openaiCompatibleEndpoint"].
- */
-openaiCompatibleEndpoint?: string | null;
-/**
- * OpenAI-compatible transcription API key.
- * Previously stored in SettingsStore.extra["openaiCompatibleApiKey"].
- */
-openaiCompatibleApiKey?: string | null;
-/**
- * OpenAI-compatible transcription model name.
- * Previously stored in SettingsStore.extra["openaiCompatibleModel"].
- */
-openaiCompatibleModel?: string | null;
-/**
- * Custom HTTP headers for OpenAI-compatible transcription requests.
- * JSON object, e.g. {"X-Custom-Header": "value"}.
- */
-openaiCompatibleHeaders?: { [key in string]: string } | null;
-/**
- * Send raw WAV audio instead of MP3 to OpenAI-compatible endpoint.
- * Some ASR providers prefer uncompressed audio for better accuracy.
- */
-openaiCompatibleRawAudio?: boolean;
 /**
  * HTTP server port for the screenpipe API.
  */

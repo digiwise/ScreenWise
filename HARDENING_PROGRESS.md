@@ -1500,3 +1500,60 @@ removal.
   took 8m 32s with only established unrelated warnings. An earlier release
   attempt was deliberately interrupted after review produced a final source
   edit and is not counted as validation.
+
+### External transcription settings residue boundary — 2026-09-10
+
+The external transcription transports removed in `a879dbebe` have not been
+reintroduced, but desktop configuration still exposes and accepts
+`screenpipe-cloud`, Deepgram, `deepgram-live`, and arbitrary
+OpenAI-compatible transcription selections, credentials, endpoints, headers,
+model discovery, and raw-audio upload controls. Startup/store resolution only
+falls back for the removed Screenpipe cloud engine or a missing Deepgram key;
+a configured Deepgram or OpenAI-compatible value can still survive as the
+selected engine even though the Windows-first recorder has no supported remote
+transport.
+
+This compatibility cleanup will remove selectable remote-provider UI and
+credential handling, normalize every removed engine/provider to a supported
+local transcription engine before startup, and keep legacy serialized fields
+readable without sending them anywhere. The authenticated local inbound
+`POST /v1/audio/transcriptions` route is a separate localhost API and remains.
+Historical database provider/engine strings and speaker labels also remain so
+old recordings and meetings stay readable. Local Whisper, Parakeet, Qwen, and
+platform-gated local engines are retained.
+
+### External transcription settings residue removal complete — 2026-09-10
+
+- Removed desktop selections, credential fields, endpoint/model discovery,
+  diagnostics, raw-audio upload controls, and stale guidance for Screenpipe
+  Cloud, Deepgram, and arbitrary remote transcription servers. Retired
+  credential fields remain deserializable for old `store.bin` files but are no
+  longer serialized or exported in the generated TypeScript settings contract.
+- Centralized normalization of persisted settings and engine overrides so only
+  supported local engines reach recorder startup. Retired and unknown values
+  resolve to local Whisper Turbo (quantized); meeting live notes use the
+  selected local engine or remain disabled. Startup persists the normalized
+  choices without deleting historical database provider/engine columns or
+  labels.
+- Removed inert meeting-streaming credential/endpoint plumbing and the retired
+  cloud-audio E2E seed. Confirmed no Deepgram transport/dependency or external
+  transcription client was reintroduced. The authenticated localhost
+  `POST /v1/audio/transcriptions` endpoint, local model acquisition, local
+  Whisper/Parakeet/Qwen paths, audio capture, and speaker/meeting behavior
+  remain.
+- `screenpipe-config` passed 29 locked offline tests. Focused engine recording
+  configuration tests passed 14 tests and `cargo check -p screenpipe-engine
+  --locked --offline` passed. The exact Ninja Multi-Config desktop suite passed
+  152 unit tests with 4 ignored plus its shutdown integration test; generated
+  bindings were regenerated and `tauri_bindings_are_current` passed.
+- Direct TypeScript checking passed. Direct Vitest passed all 32 files and 378
+  tests. The installed Next production entrypoint passed with only the existing
+  `unpdf` `import.meta` warning. Root default-member `cargo check --locked
+  --offline`, `cargo fmt --all -- --check`, and `git diff --check` passed.
+- A direct `screenpipe-audio` library-test attempt could not start offline
+  because its dev-only `infer 0.15.0` package is not cached; no network fetch or
+  dependency change was made to bypass that limitation. The changed audio
+  integration compiled in the root check and desktop test matrix. Cargo and Bun
+  lockfiles are unchanged. The documented Ninja `cargo build --release
+  --locked --offline` passed in 8m 49s with only the established unrelated
+  warnings.

@@ -1,7 +1,7 @@
 ---
 title: "screenpipe FAQ: install, permissions, and privacy"
 sidebarTitle: "faq"
-description: "Answers to common screenpipe questions on install, screen and mic permissions, Zoom and Teams transcription, AI keys, Ollama, and privacy."
+description: "Answers to common screenpipe questions on install, screen and mic permissions, local Zoom and Teams transcription, Ollama, and privacy."
 icon: "question"
 ---
 
@@ -80,9 +80,8 @@ this FAQ is organized around the questions people ask support most often: what t
 
   the parts that need a network:
 
-  - cloud transcription (deepgram, screenpipe-cloud)
-  - cloud AI providers (Claude, ChatGPT, Gemini, OpenAI)
-  - cloud archive and team sync
+  - external cloud transcription and AI providers are not part of the local recorder
+  - cloud archive and team sync are not part of the local recorder
   - login and license verification
   - connected-app proxies (Slack, Notion, HubSpot, etc.)
 
@@ -92,7 +91,7 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="does screenpipe work on Apple Silicon M1, M2, M3, M4 and Intel Macs?">
   yes on both. screenpipe ships a universal macOS build that runs natively on Apple Silicon (M1, M2, M3, M4, including Pro/Max/Ultra) and on Intel Macs.
 
-  Apple Silicon machines get better battery life and faster local whisper transcription. Intel Macs work but should prefer smaller whisper models or cloud transcription.
+  Apple Silicon machines get better battery life and faster local whisper transcription. Intel Macs should prefer smaller local whisper models.
 </Expandable>
 
 <Expandable title="does screenpipe work on Windows 11 and Windows 10?">
@@ -116,7 +115,7 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="what languages does screenpipe transcribe?">
   screenpipe transcribes most languages supported by whisper (about 100), including English, Spanish, French, German, Mandarin, Japanese, Korean, Portuguese, Russian, Arabic, and Hindi.
 
-  set your primary language in **settings → AI models → language** to skip auto-detect (faster and more accurate). for higher accuracy on accented or domain-specific speech, switch to `whisper-large-v3-turbo` or use deepgram / screenpipe-cloud transcription.
+  set your primary language in **settings → AI models → language** to skip auto-detect (faster and more accurate). for higher accuracy on accented or domain-specific speech, switch to `whisper-large-v3-turbo`.
 </Expandable>
 
 <Expandable title="how do I update screenpipe?">
@@ -182,8 +181,7 @@ this FAQ is organized around the questions people ask support most often: what t
   no. AI provider access and screenpipe licensing are separate.
 
   - screenpipe license or subscription: unlocks screenpipe app features, depending on your plan
-  - Claude/ChatGPT/OpenAI/Anthropic/Ollama: powers AI responses when you choose that model path
-  - cloud archive or cloud transcription: optional services for storage or processing
+  - Ollama or another local OpenAI-compatible server: powers local AI responses when configured
 
   if a pipe fails with an AI error, check the AI provider settings. if the app says you are free after purchase, check the screenpipe account.
 </Expandable>
@@ -370,13 +368,11 @@ this FAQ is organized around the questions people ask support most often: what t
   4. confirm the integration is connected and the token is current.
   5. test the notification or API call outside the pipe once.
 
-  for app connections, prefer screenpipe connection proxies instead of pasting secrets into prompts.
+  use the authenticated localhost API and local clients; do not paste secrets into prompts.
 </Expandable>
 
 <Expandable title="do I need an OpenAI or Anthropic API key to use screenpipe?">
-  no. screenpipe ships with **screenpipe-cloud** AI credits on every paid plan, so pipes and chat work out of the box.
-
-  bring-your-own-key (BYOK) is supported if you prefer your own quota or want to use a specific model. you can configure Anthropic, OpenAI, OpenRouter, Groq, or any OpenAI-compatible endpoint in **settings → AI models**. local models via [Ollama](/ollama) need no key at all.
+  no. screenpipe's recorder and authenticated localhost API work without provider credentials. local models via [Ollama](/ollama) need no key at all.
 </Expandable>
 
 <Expandable title="can I use Ollama or local LLMs with screenpipe?">
@@ -394,7 +390,6 @@ this FAQ is organized around the questions people ask support most often: what t
   2. add credits or enable auto-recharge.
   3. retry the pipe or chat.
 
-  alternative: switch the pipe to **screenpipe-cloud** in **settings → AI models** so it uses included credits instead of your Anthropic key. screenpipe-cloud credits and Anthropic credits are completely separate.
 </Expandable>
 
 <Expandable title="do my screenpipe cloud AI credits sync across multiple devices?">
@@ -412,7 +407,7 @@ this FAQ is organized around the questions people ask support most often: what t
   2. if it still fails, reinstall the app. on macOS that re-bundles pi-agent into `screenpipe.app/Contents/Resources/`.
   3. on the CLI: `npx screenpipe@latest pipe install pi-agent`.
 
-  if a pipe errors with `Failed to extract accountId`, set `preset: screenpipe-cloud` on the pipe — pi-agent is reading the wrong auth preset for ChatGPT tokens.
+  if a local pipe reports an account or provider preset error, remove the obsolete cloud preset and configure the local model explicitly.
 </Expandable>
 
 <Expandable title="my pipe was working but stopped firing after a screenpipe update.">
@@ -442,7 +437,7 @@ this FAQ is organized around the questions people ask support most often: what t
   - transcription engine is not overloaded
   - `curl "http://localhost:3030/search?content_type=audio&limit=1"` returns audio data
 
-  on slower machines, reduce audio chunk duration, select fewer devices, or switch to a faster/cloud transcription engine.
+  on slower machines, reduce audio chunk duration, select fewer devices, or switch to a smaller local transcription model.
 </Expandable>
 
 <Expandable title="can screenpipe identify speakers?">
@@ -470,11 +465,11 @@ this FAQ is organized around the questions people ask support most often: what t
 </Expandable>
 
 <Expandable title="can screenpipe transcribe multiple languages in one meeting?">
-  partially. whisper auto-detects the dominant language per audio chunk, so short multilingual exchanges may be tagged as one language. for accurate code-switching, set the primary language explicitly in **settings → AI models → language**, or use deepgram / screenpipe-cloud which handle mixed-language audio better than local whisper-tiny.
+  partially. whisper auto-detects the dominant language per audio chunk, so short multilingual exchanges may be tagged as one language. for accurate code-switching, set the primary language explicitly in **settings → AI models → language**.
 </Expandable>
 
 <Expandable title="how accurate is screenpipe's meeting transcription?">
-  on clear English audio with a decent microphone, `whisper-large-v3-turbo` reaches ~95% word accuracy, and deepgram or screenpipe-cloud are comparable or slightly higher. `whisper-tiny` and `whisper-base` are faster but noticeably less accurate.
+  on clear English audio with a decent microphone, `whisper-large-v3-turbo` provides the best local accuracy. `whisper-tiny` and `whisper-base` are faster but noticeably less accurate.
 
   accuracy drops on heavy accents, background noise, low input gain, or compressed bluetooth-microphone audio (HFP). pick a better engine, set the language explicitly, and use the built-in MacBook microphone instead of bluetooth for the cleanest result.
 </Expandable>
@@ -496,9 +491,7 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="is my screenpipe data private?">
   capture and storage are local by default. data leaves your machine only when you enable something that sends it out, such as:
 
-  - a cloud AI provider
-  - cloud transcription or media analysis
-  - cloud archive or sync
+  - an external provider (when a user deliberately exports data)
   - a connected-app proxy call
   - a support bundle you choose to send
 
@@ -511,7 +504,7 @@ this FAQ is organized around the questions people ask support most often: what t
   - `db.sqlite`: metadata, accessibility text, OCR fallback text, transcripts
   - `data/`: screen and audio media
 
-  if you need long-term storage, use [cloud archive](/cloud-archive) or a carefully configured local backup/sync path. for a NAS, make sure the database and active write path are reliable; slow or flaky network storage can corrupt active databases or make the app feel broken.
+  if you need long-term storage, make a carefully configured local backup. for a NAS, make sure the database and active write path are reliable; slow or flaky network storage can corrupt active databases or make the app feel broken.
 </Expandable>
 
 <Expandable title="does screenpipe work for teams or enterprise trials?">
@@ -538,9 +531,7 @@ this FAQ is organized around the questions people ask support most often: what t
 
   data only leaves your machine when you explicitly enable one of:
 
-  - a cloud AI provider (Claude, ChatGPT, Gemini, etc.) — only the text you query
-  - cloud transcription (deepgram, screenpipe-cloud) — only audio you record
-  - cloud archive or team sync — only what you choose to archive
+  - no cloud AI, transcription, archive, or team-sync service is contacted by the local recorder
   - a connection proxy (Slack, Notion, etc.) — only the API payloads
   - a support bundle you upload yourself
 
@@ -562,7 +553,7 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="can my employer see my screenpipe data?">
   on personal devices: no. screenpipe is local-first and your employer has no access unless you choose to share.
 
-  on company devices with screenpipe deployed by IT: depends on the deployment. team and enterprise plans can sync to a shared archive or surface activity to admins, but only when configured and within the bounds your IT policy allows. read [teams](/teams) and your company policy. screenpipe is designed as employee-owned AI memory, not surveillance — see [privacy data flow](/privacy-data-flow).
+  on company devices with screenpipe deployed by IT: follow the organization's stated local-device policy. screenpipe itself stores capture locally and does not provide a shared archive or admin sync.
 </Expandable>
 
 <Expandable title="is screenpipe HIPAA, SOC2, or GDPR compliant?">
@@ -592,13 +583,11 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="how long is my data retained by default?">
   indefinitely, locally, until you delete it. screenpipe does not auto-prune by default — your `~/.screenpipe/` directory grows until you remove files or run out of disk.
 
-  to keep storage in check: lower capture FPS, exclude apps you do not need, periodically delete old media in `~/.screenpipe/data/`, or use [cloud archive](/cloud-archive) to offload older months. enterprise deployments can set retention policies as part of their config.
+  to keep storage in check: lower capture FPS, exclude apps you do not need, and periodically delete old media in `~/.screenpipe/data/`.
 </Expandable>
 
 <Expandable title="does screenpipe phone home or send telemetry?">
-  the desktop app sends anonymous product analytics (page views, feature usage, crash reports) via PostHog by default. it does **not** send screen content, audio, transcripts, or file contents.
-
-  you can disable analytics in **settings → privacy → telemetry**. self-hosted enterprise builds ship with telemetry off.
+  the local recorder does not send screen content, audio, transcripts, or file contents to telemetry services.
 </Expandable>
 
 ## performance and hardware
@@ -631,20 +620,20 @@ this FAQ is organized around the questions people ask support most often: what t
 
   for battery-friendly settings:
 
-  1. **switch transcription to cloud**: settings → AI models → pick `deepgram` or `screenpipe-cloud` instead of local whisper. local whisper is the single biggest battery drain.
+  1. choose a smaller local Whisper model in **settings → AI models** when battery use matters.
   2. **lower capture FPS** to 0.5 or 1 in settings → recording.
   3. **select fewer audio devices** — one microphone, not five.
   4. **add heavy apps** (video editors, IDE builds, games) to **ignored windows**.
   5. **close the timeline view** when you are not actively reviewing video.
   6. **disable image PII removal** unless you need it — the local image model uses GPU/Neural Engine continuously.
 
-  on Apple Silicon MacBooks with these settings, expect 5-10% extra battery draw vs. a baseline workday. Intel Macs see more, and should strongly prefer cloud transcription.
+  on Apple Silicon MacBooks with these settings, expect 5-10% extra battery draw vs. a baseline workday. Intel Macs see more; choose a smaller local model when needed.
 </Expandable>
 
 <Expandable title="why is my MacBook fan spinning when running screenpipe?">
   almost always one of two things:
 
-  - **local whisper transcription** is keeping the CPU/Neural Engine hot. switch to cloud transcription in settings → AI models.
+  - **local whisper transcription** is keeping the CPU/Neural Engine hot. switch to a smaller local model in settings → AI models.
   - **a pipe is in a tight loop** or the embedded chrome timeline is open. open settings → pipes and disable any pipe you do not need; close the timeline tab.
 
   on Intel Macs, even with these tuned, fans run more than on Apple Silicon. consider cloud-only transcription on Intel.
@@ -665,13 +654,13 @@ this FAQ is organized around the questions people ask support most often: what t
   - exclude apps you do not need recorded
   - lower audio chunk duration or use mono
   - set up auto-cleanup of old media in settings → storage
-  - use [cloud archive](/cloud-archive) to offload older months
+  - make a local backup and remove older media you no longer need
 
   enterprise deployments can configure tighter retention by policy.
 </Expandable>
 
 <Expandable title="will screenpipe slow down my computer for normal work?">
-  on Apple Silicon and recent Windows laptops with the recommended settings (1 FPS, cloud transcription, one audio device, ignored heavy apps), screenpipe runs in the background without noticeable impact on typing, video calls, or browsing.
+  on Apple Silicon and recent Windows laptops with the recommended settings (1 FPS, local transcription, one audio device, ignored heavy apps), screenpipe runs in the background without noticeable impact on typing, video calls, or browsing.
 
   noticeable slowdown usually means: local whisper-large is selected on an underpowered machine, every monitor is being captured at high FPS, or PII redaction is running on every frame. see [troubleshooting](/troubleshooting) for the tuning matrix.
 </Expandable>
@@ -679,40 +668,10 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="does screenpipe support GPU acceleration on macOS, NVIDIA CUDA, or DirectML?">
   on macOS, screenpipe uses Metal and the Apple Neural Engine for local whisper and image models — nothing to configure.
 
-  on Windows and Linux with NVIDIA GPUs, screenpipe has a CUDA build that offloads whisper to the GPU, which dramatically reduces CPU use during transcription. DirectML and Vulkan backends are also available on Windows. if you do not have a supported GPU, prefer cloud transcription (deepgram or screenpipe-cloud).
+  on Windows and Linux with NVIDIA GPUs, screenpipe has a CUDA build that offloads whisper to the GPU, which dramatically reduces CPU use during transcription. DirectML and Vulkan backends are also available on Windows. without a supported GPU, choose a smaller local model.
 </Expandable>
 
 ## teams, enterprise, and deployment
-
-<Expandable title="how do I see what my team worked on this week?">
-  on the team plan, the admin dashboard shows per-member activity summaries (apps used, meetings attended, focus time) without exposing raw recordings.
-
-  for richer reporting, run a weekly digest pipe that aggregates each member's screenpipe data and posts a summary to Slack, Notion, or email. raw screen and audio data stays on the user's device unless they explicitly share. see [teams](/teams).
-</Expandable>
-
-<Expandable title="how do I add team members to screenpipe?">
-  on Team and Enterprise plans, open **settings → team → invite** in the desktop app, enter the member's email, and they receive an invite to install screenpipe with your team license already attached.
-
-  for managed fleets, use Intune, Jamf, or your MDM to deploy the installer with the license token pre-set. see [Intune deployment](/intune-deployment).
-</Expandable>
-
-<Expandable title="can I deploy screenpipe via Intune, Jamf, or another MDM?">
-  yes. screenpipe ships a silent installer for Windows (MSI) and a signed `.pkg` for macOS that work with Intune, Jamf Pro, Kandji, Mosyle, and other MDM tools.
-
-  pre-configure the license token, telemetry, cloud transcription, and recording filters via a JSON config file dropped at install time. enterprise customers get a deployment guide and a sample MDM configuration profile — see [Intune deployment](/intune-deployment) or contact [louis@screenpi.pe](mailto:louis@screenpi.pe).
-</Expandable>
-
-<Expandable title="does screenpipe support Microsoft 365 / Entra ID / SAML single sign-on (SSO)?">
-  enterprise plans support SAML and OIDC SSO through Microsoft Entra ID, Okta, Google Workspace, and other IdPs. SCIM provisioning is available on request.
-
-  contact [louis@screenpi.pe](mailto:louis@screenpi.pe) with your IdP and we will set up your tenant.
-</Expandable>
-
-<Expandable title="can I store screenpipe team data in my own Azure Blob, S3, or GCS bucket?">
-  yes. enterprise deployments can point cloud archive at your own Azure Blob Storage container, AWS S3 bucket, or Google Cloud Storage bucket so recordings never leave your cloud account.
-
-  configure the storage connection in **settings → storage → connection**, paste the container URL or bucket name and credentials, then verify with a test upload. if the connection silently fails on Windows, restart screenpipe so the new credentials are picked up — see [troubleshooting](/troubleshooting).
-</Expandable>
 
 ## common errors
 
@@ -722,7 +681,7 @@ this FAQ is organized around the questions people ask support most often: what t
   fix:
 
   1. open the pipe folder (or pipe settings) and find the front-matter.
-  2. set `preset: screenpipe-cloud`.
+  2. select the intended local model in the pipe configuration.
   3. save and re-run the pipe.
 
   if the error appears on initial login rather than in a pipe, sign out, restart the app, and sign back in with the same email used at purchase.
@@ -731,11 +690,11 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title='Anthropic error: "credit balance is too low" or "insufficient_credits".'>
   this comes from the Anthropic API, not from screenpipe. your Anthropic console balance is empty.
 
-  fix: add credits at [console.anthropic.com/billing](https://console.anthropic.com/settings/billing), or switch the pipe / chat to **screenpipe-cloud** in **settings → AI models** to use included credits instead of your own Anthropic key.
+  fix: remove the external provider configuration and select a local model such as Ollama in **settings → AI models**.
 </Expandable>
 
 <Expandable title='OpenAI error: "you exceeded your current quota" or "insufficient_quota".'>
-  same shape as the Anthropic case — your OpenAI account is out of credit. add a payment method at [platform.openai.com/billing](https://platform.openai.com/account/billing), or switch the provider to **screenpipe-cloud**, Anthropic, Ollama, or another configured model.
+  external OpenAI billing is not required for the local recorder. select Ollama or another local model in **settings → AI models**.
 </Expandable>
 
 <Expandable title='macOS error: "screenpipe.app is damaged and cannot be opened".'>

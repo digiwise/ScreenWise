@@ -74,10 +74,9 @@ impl ServerCore {
             info!("Using Chinese HuggingFace mirror");
         }
 
-        // Audio transcription provider config is passed directly into
-        // AudioManagerOptions. Do not use process env here: Deepgram used to
-        // read env via lazy_static, which made capture-level engine changes
-        // impossible after the first read.
+        // Audio transcription configuration is passed directly into
+        // AudioManagerOptions. The local recorder never reads provider
+        // credentials from the process environment.
 
         // --- Database ---
         let local_data_dir = config.data_dir.clone();

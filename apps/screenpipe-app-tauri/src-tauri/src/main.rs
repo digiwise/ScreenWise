@@ -925,19 +925,6 @@ async fn main() {
                 store.recording.disable_keyboard_capture = false;
                 info!("E2E seed: keyboard DB capture enabled");
             }
-            if e2e_flags.iter().any(|f| f == "cloud-audio-fallback") {
-                store.recording.disable_audio = false;
-                store.recording.disable_vision = true;
-                store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
-                store
-                    .extra
-                    .insert("_parakeetDefaultMigrationDone".to_string(), json!(true));
-                store
-                    .extra
-                    .insert("_proCloudMigrationDone".to_string(), json!(true));
-                info!("E2E seed: screenpipe cloud audio fallback");
-            }
-
             app.manage(store.clone());
 
             // Set Chinese HuggingFace mirror early — before any model downloads
@@ -994,19 +981,19 @@ async fn main() {
                         return;
                     }
                     // Determine which whisper model the user's config needs
-                    let engine = match store_for_download.recording.audio_transcription_engine.as_str() {
-                        "deepgram" | "screenpipe-cloud" => None, // Cloud engines don't need local model
-                        _ => {
-                            use screenpipe_audio::core::engine::AudioTranscriptionEngine;
-                            Some(std::sync::Arc::new(match store_for_download.recording.audio_transcription_engine.as_str() {
-                                "whisper-tiny" => AudioTranscriptionEngine::WhisperTiny,
-                                "whisper-tiny-quantized" => AudioTranscriptionEngine::WhisperTinyQuantized,
-                                "whisper-large-v3" => AudioTranscriptionEngine::WhisperLargeV3,
-                                "whisper-large-v3-quantized" => AudioTranscriptionEngine::WhisperLargeV3Quantized,
-                                "whisper-large-v3-turbo" => AudioTranscriptionEngine::WhisperLargeV3Turbo,
-                                _ => AudioTranscriptionEngine::WhisperLargeV3TurboQuantized, // default
-                            }))
-                        }
+                    let engine_name = store_for_download
+                        .recording
+                        .local_audio_transcription_engine();
+                    let engine = {
+                        use screenpipe_audio::core::engine::AudioTranscriptionEngine;
+                        Some(std::sync::Arc::new(match engine_name {
+                            "whisper-tiny" => AudioTranscriptionEngine::WhisperTiny,
+                            "whisper-tiny-quantized" => AudioTranscriptionEngine::WhisperTinyQuantized,
+                            "whisper-large" => AudioTranscriptionEngine::WhisperLargeV3,
+                            "whisper-large-quantized" => AudioTranscriptionEngine::WhisperLargeV3Quantized,
+                            "whisper-large-v3-turbo" => AudioTranscriptionEngine::WhisperLargeV3Turbo,
+                            _ => AudioTranscriptionEngine::WhisperLargeV3TurboQuantized,
+                        }))
                     };
 
                     // Download whisper model (834MB default) — biggest download, start first

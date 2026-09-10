@@ -20,7 +20,7 @@ for the full botless meeting workflow - live transcript, speaker cleanup, calend
 audio recording is enabled by default in the desktop app. configure audio devices and transcription engine in **settings**.
 
 - **audio devices**: select which microphones and system audio to capture
-- **transcription engine**: choose between local Whisper (private) or Deepgram (faster, cloud)
+- **transcription engine**: choose a local Whisper-compatible model (private, on-device)
 
 ## search transcriptions
 
@@ -40,13 +40,13 @@ curl "http://localhost:3030/search?content_type=audio&speaker_name=John"
 
 screenpipe automatically identifies different speakers. manage them via API:
 
-### improve speaker identification with calendar
+### improve speaker identification with native calendar
 
-connect your **Google Calendar** to significantly improve speaker identification accuracy. screenpipe uses your calendar's attendee list to automatically name speakers during meetings — if a meeting has exactly 2 attendees, the other speaker is auto-identified without manual labeling.
+connect your supported native calendar to improve speaker identification accuracy. screenpipe uses local calendar context to help name speakers during meetings — if a meeting has exactly 2 attendees, the other speaker can be auto-identified without manual labeling.
 
 to enable this:
-1. go to **settings → connections → Google Calendar**
-2. authorize screenpipe to access your calendar
+1. enable calendar access in **settings**
+2. grant the requested local calendar permission
 3. during future meetings, attendee names from your calendar will automatically label speakers
 
 this works best for 1:1 meetings and structured calls. for larger meetings (3+ attendees), calendar context is tagged to your notes for later reference.
@@ -82,21 +82,21 @@ curl "http://localhost:3030/speakers/similar?speaker_id=1"
 ## long meetings and batch sizing
 
 by default, screenpipe batches audio for transcription in chunks:
-- **Whisper/OpenAI**: 600 seconds (10 minutes)
-- **Deepgram**: up to 5000 seconds (83 minutes)
+- **Local Whisper and Qwen models**: up to 600 seconds (10 minutes)
+- **Parakeet**: 45 seconds to stay within its local encoder and quality limits
 
 if you notice meetings longer than one hour losing context between batches, you can customize the batch size in settings > advanced > `batch_max_duration_secs`. set to your meeting's typical duration to preserve context across the entire recording.
 
 in smart/batch transcription mode, large meetings may be split across multiple transcription jobs. if you need full meeting context in a single batch, consider:
 - switching to **realtime** transcription (transcription happens immediately as audio is captured, trading cost/latency for guaranteed continuity)
-- increasing `batch_max_duration_secs` to match your meeting length (supported up to engine limits: 5000s for Deepgram, 3000s for OpenAI)
+- increasing `batch_max_duration_secs` to match your meeting length
 - using [retranscription API](/api/retranscribe-data) to re-process a full meeting with custom settings
 
 ## privacy
 
 - all transcription runs locally on your device
 - audio files stored in `~/.screenpipe/data/`
-- no audio sent to cloud unless you choose deepgram
+- audio is not sent to a cloud transcription provider
 - disable audio recording in app settings
 
 questions? [join our discord](https://discord.gg/screenpipe).

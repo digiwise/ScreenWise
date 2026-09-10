@@ -777,25 +777,20 @@ impl Default for AIPreset {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum AudioEngineFallbackReason {
-    UnavailableProvider,
-    MissingDeepgramKey,
+    RetiredOrUnsupportedEngine,
 }
 
 impl AudioEngineFallbackReason {
     pub fn notification_title(&self) -> &'static str {
         match self {
-            Self::UnavailableProvider => "Screenpipe Cloud unavailable",
-            Self::MissingDeepgramKey => "Deepgram unavailable",
+            Self::RetiredOrUnsupportedEngine => "Local transcription selected",
         }
     }
 
     pub fn notification_body(&self) -> &'static str {
         match self {
-            Self::UnavailableProvider => {
-                "Screenpipe Cloud is not available in local ScreenWise, so audio is being transcribed locally with Whisper Turbo (fast)."
-            }
-            Self::MissingDeepgramKey => {
-                "Deepgram has no API key configured, so audio is being transcribed locally with Whisper Turbo (fast)."
+            Self::RetiredOrUnsupportedEngine => {
+                "This transcription engine is no longer available, so audio is being transcribed locally with Whisper Turbo (fast)."
             }
         }
     }
@@ -1134,28 +1129,21 @@ impl SettingsStore {
 
     pub fn audio_engine_resolution(&self) -> AudioEngineResolution {
         let engine = self.recording.audio_transcription_engine.clone();
-        let has_deepgram_key = !self.recording.deepgram_api_key.is_empty()
-            && self.recording.deepgram_api_key != "default";
-        let fallback = "whisper-large-v3-turbo-quantized".to_string();
+        let active = self.recording.local_audio_transcription_engine().to_string();
         let mut resolution = AudioEngineResolution {
             requested: engine.clone(),
-            active: engine.clone(),
+            active,
             fallback_reason: None,
         };
 
-        match engine.as_str() {
-            "screenpipe-cloud" => {
-                tracing::warn!("screenpipe-cloud is unavailable in local ScreenWise, falling back to whisper-large-v3-turbo-quantized");
-                resolution.active = fallback;
-                resolution.fallback_reason = Some(AudioEngineFallbackReason::UnavailableProvider);
-            }
-            "deepgram" if !has_deepgram_key => {
-                tracing::warn!("deepgram selected but no API key configured, falling back to whisper-large-v3-turbo-quantized");
-                resolution.active = fallback;
-                resolution.fallback_reason = Some(AudioEngineFallbackReason::MissingDeepgramKey);
-            }
-            _ => {}
-        };
+        if resolution.active != engine {
+            tracing::warn!(
+                requested_engine = %engine,
+                active_engine = %resolution.active,
+                "retired or unsupported transcription engine replaced with a local engine"
+            );
+            resolution.fallback_reason = Some(AudioEngineFallbackReason::RetiredOrUnsupportedEngine);
+        }
 
         resolution
     }
@@ -1216,6 +1204,33 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     // Also re-detect if the stored tier doesn't match current hardware classification
     // (e.g. tier boundaries changed in an update).
     {
+        let local_engine = store
+            .recording
+            .local_audio_transcription_engine()
+            .to_string();
+        if store.recording.audio_transcription_engine != local_engine {
+            tracing::warn!(
+                requested_engine = %store.recording.audio_transcription_engine,
+                active_engine = %local_engine,
+                "retired or unsupported transcription engine replaced with a local engine"
+            );
+            store.recording.audio_transcription_engine = local_engine;
+            should_save = true;
+        }
+
+        let local_meeting_provider = screenpipe_config::RecordingSettings::
+            normalize_meeting_live_transcription_provider(
+                &store.recording.meeting_live_transcription_provider,
+            )
+            .to_string();
+        if store.recording.meeting_live_transcription_provider != local_meeting_provider {
+            tracing::warn!(
+                "retired meeting-live provider replaced with the selected local transcription engine"
+            );
+            store.recording.meeting_live_transcription_provider = local_meeting_provider;
+            should_save = true;
+        }
+
         let detected = screenpipe_config::detect_tier();
         let stored_tier = store
             .recording
@@ -1324,33 +1339,27 @@ mod tests {
     }
 
     #[test]
-    fn screenpipe_cloud_falls_back_when_provider_is_unavailable() {
-        let mut store = SettingsStore::default();
-        store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
+    fn retired_remote_engines_fall_back_even_with_legacy_credentials() {
+        for engine in [
+            "screenpipe-cloud",
+            "deepgram",
+            "deepgram-live",
+            "openai-compatible",
+        ] {
+            let mut store = SettingsStore::default();
+            store.recording.audio_transcription_engine = engine.to_string();
+            store.recording.deepgram_api_key = "legacy-credential".to_string();
+            store.recording.openai_compatible_api_key = Some("legacy-credential".to_string());
 
-        let resolution = store.audio_engine_resolution();
+            let resolution = store.audio_engine_resolution();
 
-        assert_eq!(resolution.requested, "screenpipe-cloud");
-        assert_eq!(resolution.active, FALLBACK_ENGINE);
-        assert_eq!(
-            resolution.fallback_reason,
-            Some(AudioEngineFallbackReason::UnavailableProvider)
-        );
-    }
-
-    #[test]
-    fn deepgram_falls_back_without_api_key() {
-        let mut store = SettingsStore::default();
-        store.recording.audio_transcription_engine = "deepgram".to_string();
-        store.recording.deepgram_api_key = String::new();
-
-        let resolution = store.audio_engine_resolution();
-
-        assert_eq!(resolution.active, FALLBACK_ENGINE);
-        assert_eq!(
-            resolution.fallback_reason,
-            Some(AudioEngineFallbackReason::MissingDeepgramKey)
-        );
+            assert_eq!(resolution.requested, engine);
+            assert_eq!(resolution.active, FALLBACK_ENGINE);
+            assert_eq!(
+                resolution.fallback_reason,
+                Some(AudioEngineFallbackReason::RetiredOrUnsupportedEngine)
+            );
+        }
     }
 
     // ---- Settings-loss recovery ----

@@ -24,9 +24,6 @@ struct Args {
     #[clap(long, help = "Audio chunk duration in seconds")]
     audio_chunk_duration: f32,
 
-    #[clap(long, help = "Deepgram API key")]
-    deepgram_api_key: Option<String>,
-
     #[clap(short = 'l', long, value_enum)]
     language: Vec<Language>,
 }

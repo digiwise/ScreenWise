@@ -1724,29 +1724,17 @@ function providerLabel(
   provider: Settings["meetingLiveTranscriptionProvider"],
   selectedEngine: string,
 ) {
-  switch (provider) {
-    case "selected-engine":
-      return transcriptionEngineLabel(selectedEngine);
-    case "deepgram-live":
-      return "deepgram live";
-    case "screenpipe-cloud":
-    default:
-      return "screenpipe cloud";
-  }
+  return provider === "disabled"
+    ? "off"
+    : transcriptionEngineLabel(selectedEngine);
 }
 
 function transcriptionEngineLabel(engine: string) {
   switch (engine) {
-    case "screenpipe-cloud":
-      return "screenpipe cloud";
-    case "deepgram":
-      return "deepgram";
     case "whisper-large-v3-turbo":
       return "whisper turbo";
     case "whisper-large-v3-turbo-quantized":
       return "whisper turbo fast";
-    case "openai-compatible":
-      return "openai compatible";
     case "disabled":
       return "off";
     default:

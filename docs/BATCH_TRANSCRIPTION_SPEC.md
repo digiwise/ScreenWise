@@ -143,7 +143,6 @@ batchCpuThreshold: number (0-100, default: 70)
 | User switches from "smart" to "realtime" mid-backlog | Immediately resume real-time processing. Drain any pending backlog first. |
 | User disables audio recording | Stop capturing. Pending backlog still processes to completion. |
 | Multiple audio devices | Each device's segments enter the same channel. Processing is device-agnostic. |
-| Deepgram engine (not Whisper) | Batch mode still applies — Deepgram API calls are deferred too. Reduces API call frequency during meetings. |
 
 ## Metrics & Observability
 
@@ -153,10 +152,7 @@ Add to `AudioPipelineMetrics`:
 - `batch_pause_events: AtomicU64` — number of times batch mode activated
 - `batch_resume_events: AtomicU64` — number of times batch processing resumed
 
-PostHog events:
-- `batch_transcription_activated` — with reason (cpu_high, video_call)
-- `batch_transcription_resumed` — with pending_count, idle_duration
-- `batch_backlog_cleared` — with total_segments, total_duration
+Local metrics (no telemetry):
 
 ## Implementation Phases
 
@@ -183,4 +179,4 @@ PostHog events:
 - Live captioning / real-time subtitle display (different feature)
 - Model switching based on load (e.g., auto-downgrade to Whisper Tiny)
 - Per-device transcription scheduling
-- Cloud offloading of transcription during load
+- Cloud offloading of transcription during load (audio transcription is local-only)

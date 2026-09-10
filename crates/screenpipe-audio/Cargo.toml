@@ -24,7 +24,7 @@ cpal = { git = "https://github.com/screenpipe/cpal.git", rev = "c7a610aee5c6037c
 # Wav encoding
 hound = "3.5"
 
-# MP3 encoding for compressed cloud uploads
+# MP3 encoding for local audio processing
 mp3lame-encoder = "0.2.2"
 
 # Cli ! shouldn't be required if using as lib
@@ -59,7 +59,7 @@ tokio = { workspace = true }
 # Detect speech/silence
 webrtc-vad = "0.4.0"
 
-# Deepgram
+# Model acquisition and local model download support
 reqwest = { workspace = true }
 
 screenpipe-core = { path = "../screenpipe-core" }

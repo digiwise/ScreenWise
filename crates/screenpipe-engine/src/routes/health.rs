@@ -984,7 +984,7 @@ pub(crate) fn get_verbose_instructions(unhealthy_systems: &[&str]) -> String {
     }
 
     if unhealthy_systems.contains(&"audio") {
-        instructions.push_str("Audio system is not working properly. Check if microphone permissions are enabled and devices are connected. If audio chunks are being dropped, try switching to a smaller Whisper model or using cloud transcription.\n");
+        instructions.push_str("Audio system is not working properly. Check if microphone permissions are enabled and devices are connected. If audio chunks are being dropped, try switching to a smaller local transcription model.\n");
     }
 
     if instructions.is_empty() {

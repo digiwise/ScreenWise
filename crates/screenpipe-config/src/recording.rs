@@ -52,8 +52,11 @@ pub struct RecordingSettings {
     pub disable_audio: bool,
 
     /// Audio transcription engine identifier.
-    /// Values: "whisper-large-v3-turbo", "whisper-large-v3-turbo-quantized",
-    /// "deepgram", "screenpipe-cloud", etc.
+    ///
+    /// The persisted value is intentionally a string for compatibility with
+    /// existing `store.bin` files. Unsupported or retired values are resolved
+    /// to a local engine by [`Self::local_audio_transcription_engine`] before
+    /// capture starts.
     #[serde(rename = "audioTranscriptionEngine")]
     pub audio_transcription_engine: String,
 
@@ -116,18 +119,19 @@ pub struct RecordingSettings {
     #[serde(rename = "audioChunkDuration")]
     pub audio_chunk_duration: i32,
 
-    /// Deepgram API key for cloud transcription.
-    /// Empty string or "default" means not configured.
-    /// Kept as String (not Option) to match existing store.bin schema.
-    #[serde(rename = "deepgramApiKey")]
+    /// Retired external-transcription credential retained only so existing
+    /// settings files remain readable. It is never used by the recorder.
+    /// Kept as String (not Option) to match the existing `store.bin` schema.
+    #[serde(rename = "deepgramApiKey", skip_serializing)]
+    #[cfg_attr(feature = "specta", specta(skip))]
     pub deepgram_api_key: String,
 
     /// Filter music-dominant audio before transcription using spectral analysis.
     #[serde(rename = "filterMusic")]
     pub filter_music: bool,
 
-    /// Maximum batch duration in seconds for batch transcription.
-    /// None = use engine-aware defaults (Deepgram=5000s, OpenAI=3000s, Whisper=600s).
+    /// Maximum batch duration in seconds for local batch transcription.
+    /// None uses the selected local engine's default.
     /// Also controls the max deferral cap during active meetings.
     #[serde(rename = "batchMaxDurationSecs", default)]
     pub batch_max_duration_secs: Option<u64>,
@@ -405,29 +409,31 @@ pub struct RecordingSettings {
     #[serde(rename = "userName", default)]
     pub user_name: Option<String>,
 
-    /// OpenAI-compatible transcription endpoint URL.
-    /// Previously stored in SettingsStore.extra["openaiCompatibleEndpoint"].
-    #[serde(rename = "openaiCompatibleEndpoint", default)]
+    /// Retired remote transcription endpoint retained for deserialization only.
+    /// It is never used for a network request.
+    #[serde(rename = "openaiCompatibleEndpoint", default, skip_serializing)]
+    #[cfg_attr(feature = "specta", specta(skip))]
     pub openai_compatible_endpoint: Option<String>,
 
-    /// OpenAI-compatible transcription API key.
-    /// Previously stored in SettingsStore.extra["openaiCompatibleApiKey"].
-    #[serde(rename = "openaiCompatibleApiKey", default)]
+    /// Retired remote transcription credential retained for deserialization only.
+    /// It is never used for a network request.
+    #[serde(rename = "openaiCompatibleApiKey", default, skip_serializing)]
+    #[cfg_attr(feature = "specta", specta(skip))]
     pub openai_compatible_api_key: Option<String>,
 
-    /// OpenAI-compatible transcription model name.
-    /// Previously stored in SettingsStore.extra["openaiCompatibleModel"].
-    #[serde(rename = "openaiCompatibleModel", default)]
+    /// Retired remote transcription model retained for deserialization only.
+    #[serde(rename = "openaiCompatibleModel", default, skip_serializing)]
+    #[cfg_attr(feature = "specta", specta(skip))]
     pub openai_compatible_model: Option<String>,
 
-    /// Custom HTTP headers for OpenAI-compatible transcription requests.
-    /// JSON object, e.g. {"X-Custom-Header": "value"}.
-    #[serde(rename = "openaiCompatibleHeaders", default)]
+    /// Retired remote transcription headers retained for deserialization only.
+    #[serde(rename = "openaiCompatibleHeaders", default, skip_serializing)]
+    #[cfg_attr(feature = "specta", specta(skip))]
     pub openai_compatible_headers: Option<std::collections::HashMap<String, String>>,
 
-    /// Send raw WAV audio instead of MP3 to OpenAI-compatible endpoint.
-    /// Some ASR providers prefer uncompressed audio for better accuracy.
-    #[serde(rename = "openaiCompatibleRawAudio", default)]
+    /// Retired remote transcription option retained for deserialization only.
+    #[serde(rename = "openaiCompatibleRawAudio", default, skip_serializing)]
+    #[cfg_attr(feature = "specta", specta(skip))]
     pub openai_compatible_raw_audio: bool,
 
     // ── System ─────────────────────────────────────────────────────────
@@ -479,14 +485,44 @@ pub struct RecordingSettings {
 }
 
 impl RecordingSettings {
-    /// Returns the Deepgram API key if actually configured.
-    /// Treats empty string and "default" as not configured (matching existing behavior).
-    pub fn effective_deepgram_key(&self) -> Option<&str> {
-        let key = self.deepgram_api_key.as_str();
-        if key.is_empty() || key == "default" {
-            None
-        } else {
-            Some(key)
+    /// The local engine that may be started for this persisted setting.
+    ///
+    /// Historical remote engine identifiers deliberately fall through to the
+    /// local fallback. This keeps an upgrade from reviving a provider merely
+    /// because an old settings file still contains its endpoint or credential.
+    pub fn local_audio_transcription_engine(&self) -> &str {
+        Self::normalize_local_audio_transcription_engine(&self.audio_transcription_engine)
+    }
+
+    /// Normalize an engine identifier without depending on `screenpipe-audio`.
+    /// That dependency direction matters: the audio crate already consumes this
+    /// configuration crate.
+    pub fn normalize_local_audio_transcription_engine(engine: &str) -> &str {
+        match engine {
+            "whisper-tiny"
+            | "whisper-tiny-quantized"
+            | "whisper-large"
+            | "whisper-large-quantized"
+            | "whisper-large-v3-turbo"
+            | "whisper-large-v3-turbo-quantized"
+            | "qwen3-asr"
+            | "parakeet"
+            | "parakeet-tdt-0.6b-v2"
+            | "parakeet-mlx"
+            | "disabled" => engine,
+            // Local aliases accepted by the API and older desktop settings.
+            "whisper-large-v3" => "whisper-large",
+            "whisper-large-v3-quantized" => "whisper-large-quantized",
+            "whisper-large-v3-turbo-q8" => "whisper-large-v3-turbo-quantized",
+            _ => "whisper-large-v3-turbo-quantized",
+        }
+    }
+
+    /// Normalize a persisted meeting-live provider to the local-only choices.
+    pub fn normalize_meeting_live_transcription_provider(provider: &str) -> &'static str {
+        match provider.trim().to_ascii_lowercase().as_str() {
+            "disabled" | "off" | "none" => "disabled",
+            _ => "selected-engine",
         }
     }
 
@@ -686,6 +722,8 @@ mod tests {
     fn deserializes_real_store_bin_shape() {
         // Simulates the JSON shape of a real existing store.bin file.
         // All recording-related fields as they exist today in SettingsStore.
+        // Removed telemetry keys remain in this legacy fixture to verify that
+        // older settings files continue to deserialize as unknown fields.
         let json = r#"{
             "disableAudio": false,
             "audioTranscriptionEngine": "whisper-large-v3-turbo",
@@ -710,8 +748,6 @@ mod tests {
             "userId": "abc-123",
             "port": 3030,
             "useChineseMirror": false,
-            // Removed telemetry keys remain in this legacy fixture to verify that
-            // older settings files continue to deserialize as unknown fields.
             "analyticsEnabled": true,
             "analyticsId": "posthog-uuid",
             "enableInputCapture": true,
@@ -792,8 +828,9 @@ mod tests {
     }
 
     #[test]
-    fn helper_deepgram_key_sentinel_values() {
-        // Existing store.bin uses "" and "default" as sentinel for "not configured"
+    fn legacy_external_transcription_fields_remain_readable() {
+        // Old stores may still contain an external credential. It remains
+        // deserializable but is not interpreted as runtime configuration.
         let json = r#"{"deepgramApiKey": ""}"#;
         let s: RecordingSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.deepgram_api_key, "");
@@ -805,6 +842,61 @@ mod tests {
         let json = r#"{"deepgramApiKey": "real-api-key-123"}"#;
         let s: RecordingSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.deepgram_api_key, "real-api-key-123");
+
+        let serialized = serde_json::to_value(&s).unwrap();
+        assert!(serialized.get("deepgramApiKey").is_none());
+        assert!(serialized.get("openaiCompatibleEndpoint").is_none());
+        assert!(serialized.get("openaiCompatibleApiKey").is_none());
+        assert!(serialized.get("openaiCompatibleModel").is_none());
+        assert!(serialized.get("openaiCompatibleHeaders").is_none());
+        assert!(serialized.get("openaiCompatibleRawAudio").is_none());
+    }
+
+    #[test]
+    fn retired_remote_engines_normalize_to_local_fallback() {
+        for engine in [
+            "screenpipe-cloud",
+            "deepgram",
+            "deepgram-live",
+            "openai-compatible",
+            "openai",
+            "some-future-remote-engine",
+        ] {
+            let settings: RecordingSettings =
+                serde_json::from_str(&format!(r#"{{"audioTranscriptionEngine":"{engine}"}}"#))
+                    .unwrap();
+            assert_eq!(
+                settings.local_audio_transcription_engine(),
+                "whisper-large-v3-turbo-quantized",
+                "{engine}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_engine_aliases_normalize_to_runtime_names() {
+        assert_eq!(
+            RecordingSettings::normalize_local_audio_transcription_engine("whisper-large-v3"),
+            "whisper-large"
+        );
+        assert_eq!(
+            RecordingSettings::normalize_local_audio_transcription_engine(
+                "whisper-large-v3-turbo-q8"
+            ),
+            "whisper-large-v3-turbo-quantized"
+        );
+    }
+
+    #[test]
+    fn legacy_meeting_provider_normalizes_to_selected_local_engine() {
+        assert_eq!(
+            RecordingSettings::normalize_meeting_live_transcription_provider("deepgram-live"),
+            "selected-engine"
+        );
+        assert_eq!(
+            RecordingSettings::normalize_meeting_live_transcription_provider("disabled"),
+            "disabled"
+        );
     }
 
     #[test]

@@ -53,8 +53,8 @@ graph LR
     DB --> MCP
     FS --> REST
 
-    REST --> P[pipes / AI agents]
-    MCP --> AI[Claude · Cursor · etc.]
+    REST --> CLIENT[local clients]
+    MCP --> CLIENT
 ```
 
 ## data flow
@@ -154,7 +154,6 @@ screenpipe listens for meaningful OS events instead of polling at a fixed FPS. w
 | Windows native | OCR | Windows | fallback when accessibility is empty |
 | Tesseract | OCR | Linux | primary (accessibility support varies) |
 | Whisper | speech-to-text | local, all platforms | audio transcription |
-| Deepgram | speech-to-text | cloud API | optional cloud audio |
 
 additional processing: speaker identification, PII redaction, frame deduplication (skips identical frames).
 
@@ -178,7 +177,7 @@ REST API on `localhost:3030`:
 | `/frames/{id}/context` | accessibility text + URLs + OCR fallback for a frame |
 | `/health` | system status and metrics |
 | `/raw_sql` | direct database queries |
-| `/ai/chat/completions` | Apple Intelligence (macOS 26+) |
+| `/ai/chat/completions` | Apple Intelligence on supported macOS builds |
 
 see [API reference](/cli-reference) for the full endpoint list.
 

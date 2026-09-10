@@ -207,13 +207,15 @@ impl RecordingConfig {
     /// (enums, `Option`, `PathBuf`).
     ///
     /// `audio_engine_override`: if provided, overrides `settings.audio_transcription_engine`.
-    /// The caller is responsible for engine-fallback logic (e.g. checking subscription status).
+    /// Both persisted and override values are restricted to local engines.
     pub fn from_settings(
         settings: &screenpipe_config::RecordingSettings,
         data_dir: std::path::PathBuf,
         audio_engine_override: Option<&str>,
     ) -> Self {
-        let engine_str = audio_engine_override.unwrap_or(&settings.audio_transcription_engine);
+        let engine_str = audio_engine_override
+            .map(screenpipe_config::RecordingSettings::normalize_local_audio_transcription_engine)
+            .unwrap_or_else(|| settings.local_audio_transcription_engine());
 
         // Sync the record_while_locked preference to the shared atomic flag
         // so the audio recording loop can read it without holding a config reference.
@@ -243,9 +245,9 @@ impl RecordingConfig {
             },
             meeting_streaming: MeetingStreamingConfig::from_settings(
                 settings.meeting_live_transcription_enabled,
-                &settings.meeting_live_transcription_provider,
-                None,
-                None,
+                screenpipe_config::RecordingSettings::normalize_meeting_live_transcription_provider(
+                    &settings.meeting_live_transcription_provider,
+                ),
                 single_language_code(&settings.languages),
                 settings.effective_user_name().map(str::to_string),
             ),
@@ -494,6 +496,41 @@ mod tests {
         let c = build(&settings_with(false, false));
         assert_eq!(c.listen_address, Ipv4Addr::LOCALHOST);
         assert!(!c.api_auth);
+    }
+
+    #[test]
+    fn retired_transcription_engine_cannot_reach_runtime_config() {
+        let settings = screenpipe_config::RecordingSettings {
+            audio_transcription_engine: "openai-compatible".to_string(),
+            meeting_live_transcription_provider: "deepgram-live".to_string(),
+            ..Default::default()
+        };
+
+        let config = build(&settings);
+
+        assert_eq!(
+            config.audio_transcription_engine,
+            AudioTranscriptionEngine::WhisperLargeV3TurboQuantized
+        );
+        assert_eq!(
+            config.meeting_streaming.provider,
+            screenpipe_audio::meeting_streaming::MeetingStreamingProvider::SelectedEngine
+        );
+    }
+
+    #[test]
+    fn retired_transcription_engine_override_cannot_reach_runtime_config() {
+        let settings = screenpipe_config::RecordingSettings::default();
+        let config = RecordingConfig::from_settings(
+            &settings,
+            std::path::PathBuf::from("/tmp/sp_test"),
+            Some("deepgram"),
+        );
+
+        assert_eq!(
+            config.audio_transcription_engine,
+            AudioTranscriptionEngine::WhisperLargeV3TurboQuantized
+        );
     }
 
     #[test]

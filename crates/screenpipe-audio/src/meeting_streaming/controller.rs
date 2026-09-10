@@ -751,15 +751,16 @@ async fn readiness_error(
 ) -> Option<String> {
     match config.provider {
         MeetingStreamingProvider::Disabled => None,
-        MeetingStreamingProvider::SelectedEngine => match transcription_engine.read().await.as_ref()
-        {
-            Some(engine) if engine.config() == AudioTranscriptionEngine::Disabled => Some(
-                "Choose an audio transcription engine to use live meeting notes without ScreenPipe Cloud"
-                    .to_string(),
-            ),
-            Some(_) => None,
-            None => Some("Selected transcription engine is still loading".to_string()),
-        },
+        MeetingStreamingProvider::SelectedEngine => {
+            match transcription_engine.read().await.as_ref() {
+                Some(engine) if engine.config() == AudioTranscriptionEngine::Disabled => Some(
+                    "Choose a local audio transcription engine to use live meeting notes"
+                        .to_string(),
+                ),
+                Some(_) => None,
+                None => Some("Selected transcription engine is still loading".to_string()),
+            }
+        }
     }
 }
 
@@ -887,14 +888,7 @@ mod tests {
         let audio_tap = test_audio_tap();
         let transcription_engine = Arc::new(RwLock::new(None));
         let mut active = None;
-        let config = MeetingStreamingConfig::from_settings(
-            true,
-            "screenpipe-cloud",
-            Some("cloud-token".to_string()),
-            None,
-            None,
-            None,
-        );
+        let config = MeetingStreamingConfig::from_settings(true, "selected-engine", None, None);
 
         start_streaming_session(
             &config,
@@ -918,8 +912,9 @@ mod tests {
         let audio_tap = test_audio_tap();
         let transcription_engine = Arc::new(RwLock::new(None));
         let mut active = None;
-        let config =
-            MeetingStreamingConfig::from_settings(true, "screenpipe-cloud", None, None, None, None);
+        // A retired provider name is treated as the selected local engine;
+        // without an initialized local engine, the overlay stays inactive.
+        let config = MeetingStreamingConfig::from_settings(true, "legacy-remote", None, None);
 
         start_streaming_session(
             &config,

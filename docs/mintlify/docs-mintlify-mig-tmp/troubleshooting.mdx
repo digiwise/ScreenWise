@@ -157,7 +157,7 @@ if you notice gaps in transcription or missing audio segments, the transcription
 1. **reduce batch size:** settings → recording → audio chunk duration — try lowering from default (30-40s) to 10-15s. smaller batches process faster and drop less audio
 2. **switch to faster transcription:** settings → AI models → try `whisper-tiny` or `whisper-base` instead of `whisper-large-v3-turbo` (trades accuracy for speed)
 3. **disable unused audio devices:** settings → recording → uncheck devices you don't need — recording one device instead of multiple reduces queue pressure
-4. **use cloud transcription:** switch to **deepgram** or **screenpipe-cloud** for remote processing, which doesn't block your local system
+4. **use a smaller local model:** choose a smaller Whisper-compatible model when local processing is too slow
 5. **reduce system load:** close heavy apps or run screenpipe on a machine with better CPU/RAM
 
 if the issue persists, check logs: settings → pipes → view logs to see "dropping audio segment" warnings.
@@ -176,7 +176,7 @@ note: AirPods don't have this issue — Apple uses a proprietary codec.
 - set your language explicitly in settings (auto-detect is slower and less accurate)
 - reduce background noise
 - use a better microphone
-- try `deepgram` or `screenpipe-cloud` for cloud-based transcription (highest accuracy)
+- try a smaller local Whisper-compatible model for lower CPU/GPU use
 
 ### record only specific apps (e.g. Teams, Zoom)
 
