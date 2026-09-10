@@ -4,7 +4,6 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { LockedSetting } from "@/components/enterprise-locked-setting";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,16 +28,9 @@ export const searchIndex: SettingsField[] = [
   { label: "Auto-generate chat titles" },
   { label: "Reset Onboarding", keywords: ["setup"] },
 ];
-import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import {
-  DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
-  describeEnterpriseUpdateMode,
-  normalizeEnterpriseAppUpdatePolicy,
-} from "@ee/lib/app-update-policy";
 
 export default function GeneralSettings() {
-  const isEnterprise = useIsEnterpriseBuild();
   const { settings, updateSettings } = useSettings();
   const { toast } = useToast();
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -114,11 +106,6 @@ export default function GeneralSettings() {
       });
     }
   };
-  const enterpriseAppUpdatePolicy = normalizeEnterpriseAppUpdatePolicy(
-    settings?.enterpriseAppUpdatePolicy || DEFAULT_ENTERPRISE_APP_UPDATE_POLICY
-  );
-  const enterpriseInstallMetadata = settings?.enterpriseInstallMetadata;
-
   const getDesktopPlatform = async () => {
     try {
       const { arch, type: osType } = await import("@tauri-apps/plugin-os").then(m => ({ arch: m.arch(), type: m.type() }));
@@ -138,9 +125,7 @@ export default function GeneralSettings() {
     const platform = await getDesktopPlatform();
     if (platform) params.set("platform", platform);
 
-    const path = isEnterprise ? "/enterprise" : "/account/versions";
-    if (isEnterprise) params.set("tab", "builds");
-    const url = `https://screenpipe.com${path}?${params.toString()}`;
+    const url = `https://screenpipe.com/account/versions?${params.toString()}`;
 
     try {
       await openUrl(url);
@@ -165,7 +150,6 @@ export default function GeneralSettings() {
       </div>
 
       <div className="space-y-2">
-        <LockedSetting settingKey="auto_start">
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -185,9 +169,6 @@ export default function GeneralSettings() {
             </div>
           </CardContent>
         </Card>
-        </LockedSetting>
-
-        {!isEnterprise && (
           <Card className="border-border bg-card">
             <CardContent className="px-3 py-2.5">
               <div className="flex items-center justify-between">
@@ -209,9 +190,6 @@ export default function GeneralSettings() {
               </div>
             </CardContent>
           </Card>
-        )}
-
-        {!isEnterprise && (
           <Card className="border-border bg-card">
             <CardContent className="px-3 py-2.5">
               <div className="flex items-center justify-between">
@@ -236,36 +214,6 @@ export default function GeneralSettings() {
               </div>
             </CardContent>
           </Card>
-        )}
-
-        {isEnterprise && (
-          <Card className="border-border bg-card">
-            <CardContent className="px-3 py-2.5">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center space-x-2.5">
-                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <div>
-                    <h3 className="text-sm font-medium text-foreground">App updates</h3>
-                    <p className="text-xs text-muted-foreground">
-                      {describeEnterpriseUpdateMode(enterpriseAppUpdatePolicy)}
-                      {enterpriseInstallMetadata?.managed ? " · managed device detected" : ""}
-                    </p>
-                  </div>
-                </div>
-                <Switch
-                  id="enterprise-auto-update-toggle"
-                  checked={settings?.autoUpdate ?? enterpriseAppUpdatePolicy.default_auto_update}
-                  disabled={!enterpriseAppUpdatePolicy.allow_employee_override}
-                  onCheckedChange={(checked) =>
-                    handleSettingsChange({ autoUpdate: checked })
-                  }
-                  className="ml-4"
-                />
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -300,9 +248,7 @@ export default function GeneralSettings() {
                     Version{currentVersion ? ` ${currentVersion}` : ""}
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    {isEnterprise
-                      ? "Open builds managed by your organization"
-                      : "Open recent stable versions on screenpipe.com"}
+                    Open recent stable versions on screenpipe.com
                   </p>
                 </div>
               </div>

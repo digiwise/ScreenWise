@@ -1440,3 +1440,63 @@ deleted.
   warning. `cargo build --release --locked --offline` passed in 8m 04s in the
   documented Visual Studio Developer PowerShell/Ninja release environment with
   only established unrelated warnings.
+
+### Enterprise services and obsolete sync crate boundary — 2026-09-10
+
+Enterprise behavior remains runtime-reachable through the desktop
+`enterprise-build` feature and through hidden-UI policy code that is compiled
+even in consumer builds. The feature starts a five-minute worker that reads
+local OCR, audio, input/UI events, frames, and memories, then sends JSONL to
+Screenpipe enterprise ingest or presigned storage endpoints. The frontend also
+contains licence activation, policy/heartbeat, team-management, fleet/update
+controls, and hosted enterprise navigation. Enterprise packaging workflows,
+the separately licensed `ee` tree, bundled team skills, and local MCP team
+proxy tools retain additional hosted paths and credentials.
+
+`screenpipe-sync` now has exactly one code consumer: the enterprise upload
+implementation. Removed consumer cloud sync and archive paths no longer use
+it, so the crate, its feature edge, and its exclusive dependencies can leave
+with the enterprise boundary. The local machine-ID helper is already in
+`screenpipe-core` and remains required by local memories and database records;
+it will be preserved. Historical `machine_id`, `sync_id`, `synced_at`, team,
+enterprise, and update-policy data will remain readable or inert rather than
+being destructively migrated. The separate consumer updater, local API bearer
+authentication and secret store, native calendar, owned-browser control,
+Pi/Ollama, capture, search, privacy, and local diagnostics are outside this
+removal.
+
+### Enterprise services and obsolete sync crate removal complete — 2026-09-10
+
+- Removed enterprise telemetry/upload workers, licence/team commands, policy
+  locks, hidden-agent UI controls, fleet/update branches, hosted team APIs and
+  MCP tools, enterprise desktop/package UI, generated bindings, release/SDK
+  workflows, packaging configuration, Intune tooling, and the separately
+  licensed `ee` source/SDK tree. Consumer startup, tray/window behavior, and
+  the ordinary official-build updater remain.
+- Removed `screenpipe-sync` after confirming its last consumer was the deleted
+  enterprise upload path. The root and desktop locks only remove
+  `screenpipe-sync`, `wiremock`, `assert-json-diff`, `deadpool`, and
+  `deadpool-runtime`; there are no added lock lines or surviving package
+  version/source/checksum changes. Desktop also drops the enterprise-only
+  optional edge while the shared transitive package remains where still used.
+  Bun locks are unchanged. Removed root-workspace exclusions for the already
+  empty, untracked `screenpipe-integrations` and `screenpipe-team-memory`
+  placeholders; neither contained source or affected the resolved workspace.
+- Preserved `screenpipe-core`'s local machine-ID helper, local memory/database
+  callers, historical sync columns/migrations, local API bearer authentication,
+  the encrypted secret store, native calendar, owned browser, Pi/Ollama, and
+  all capture/search/privacy/logging paths. Historical enterprise/team settings
+  and `enterprise.json` are not deleted; they are no longer interpreted.
+  Previously generated `screenpipe-team` Pi skills are retired through the
+  existing deprecated generated-skill cleanup before a session starts.
+- Root `cargo check --locked --offline` passed. Focused Pi tests passed 3 tests.
+  The exact Ninja Multi-Config desktop suite passed 153 unit tests with 4
+  ignored plus the shutdown integration test; the isolated generated-binding
+  freshness test passed. Direct TypeScript checking passed, direct Vitest
+  passed 32 files and 378 tests, and the installed Next production entrypoint
+  passed with only the existing `unpdf` `import.meta` warning.
+- `cargo fmt --all -- --check`, `git diff --check`, and the final documented
+  Ninja `cargo build --release --locked --offline` passed; the release build
+  took 8m 32s with only established unrelated warnings. An earlier release
+  attempt was deliberately interrupted after review produced a final source
+  edit and is not counted as validation.

@@ -103,43 +103,7 @@ fn get_target_arch() -> &'static str {
 pub fn is_source_build(_app: &tauri::AppHandle) -> bool {
     // The official-build feature is only enabled during CI releases
     // Source builds will not have this feature enabled
-    !cfg!(feature = "official-build") && !cfg!(feature = "enterprise-build")
-}
-
-/// Enterprise build: updates are managed by IT (Intune/RoboPack), not in-app.
-pub fn is_enterprise_build(_app: &tauri::AppHandle) -> bool {
-    cfg!(feature = "enterprise-build")
-}
-
-fn enterprise_app_update_policy(app: &tauri::AppHandle) -> Option<serde_json::Value> {
-    SettingsStore::get(app)
-        .ok()
-        .flatten()
-        .and_then(|settings| settings.extra.get("enterpriseAppUpdatePolicy").cloned())
-}
-
-fn enterprise_update_mode(app: &tauri::AppHandle) -> Option<String> {
-    enterprise_app_update_policy(app)
-        .and_then(|policy| {
-            policy
-                .get("mode")
-                .and_then(|mode| mode.as_str())
-                .map(str::to_string)
-        })
-        .map(|mode| mode.to_lowercase())
-}
-
-fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
-    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
-    match enterprise_update_mode(app).as_deref() {
-        Some("screenpipe") => false,
-        Some("auto_detect") => metadata.managed,
-        Some("mdm") | Some("manual") => true,
-        // Missing/unknown policy → behave like a new org with the consumer
-        // banner flow. Existing orgs are explicitly pinned to "manual" via
-        // the website migration so they hit the arm above, not this one.
-        _ => false,
-    }
+    !cfg!(feature = "official-build")
 }
 
 /// Snapshot of a pending update, exposed to the frontend via
@@ -274,7 +238,6 @@ pub struct UpdatesManager {
     interval: Duration,
     update_available: Arc<Mutex<bool>>,
     app: tauri::AppHandle,
-    /// None for enterprise builds (no in-app update UI).
     update_menu_item: Option<MenuItem<Wry>>,
     update_installed: Arc<Mutex<bool>>,
     /// Latest pending update info, mirrored to the frontend on demand. None
@@ -288,19 +251,10 @@ pub struct UpdatesManager {
 
 impl UpdatesManager {
     pub fn new(app: &tauri::AppHandle, interval_minutes: u64) -> Result<Self, Error> {
-        let update_menu_item = if is_enterprise_build(app) {
-            None
+        let (menu_text, enabled) = if is_source_build(app) {
+            ("Auto-updates unavailable (source build)", true)
         } else {
-            let (menu_text, enabled) = if is_source_build(app) {
-                ("Auto-updates unavailable (source build)", true) // Enable to show info dialog
-            } else {
-                ("Screenpipe is up to date", false)
-            };
-            Some(
-                MenuItemBuilder::with_id("update_now", menu_text)
-                    .enabled(enabled)
-                    .build(app)?,
-            )
+            ("Screenpipe is up to date", false)
         };
 
         Ok(Self {
@@ -309,7 +263,11 @@ impl UpdatesManager {
             update_installed: Arc::new(Mutex::new(false)),
             pending_update: Arc::new(Mutex::new(None)),
             app: app.clone(),
-            update_menu_item,
+            update_menu_item: Some(
+                MenuItemBuilder::with_id("update_now", menu_text)
+                    .enabled(enabled)
+                    .build(app)?,
+            ),
             is_checking: AtomicBool::new(false),
         })
     }
@@ -334,16 +292,6 @@ impl UpdatesManager {
             }
         }
         let _guard = CheckGuard(&self.is_checking);
-
-        // Enterprise: default to IT-managed updates unless the dashboard policy
-        // explicitly allows the Screenpipe updater for this install context.
-        if is_enterprise_build(&self.app) && enterprise_updates_managed_locally(&self.app) {
-            info!(
-                "enterprise build, updates managed outside app (mode={:?})",
-                enterprise_update_mode(&self.app)
-            );
-            return Result::Ok(false);
-        }
 
         // Handle source/community builds
         if is_source_build(&self.app) {
@@ -373,14 +321,7 @@ impl UpdatesManager {
             current_version,
             self.app.config().identifier
         );
-        // Enterprise builds authenticate updates with their license key.
-        let mut builder = self.app.updater_builder();
-        if is_enterprise_build(&self.app) {
-            if let Some(license_key) = crate::commands::get_enterprise_license_key() {
-                builder = builder.header("X-License-Key", license_key)?;
-            }
-        }
-        let check_result = builder.build()?.check().await;
+        let check_result = self.app.updater_builder().build()?.check().await;
         match &check_result {
             Ok(Some(ref u)) => {
                 info!("update found: v{}", u.version);

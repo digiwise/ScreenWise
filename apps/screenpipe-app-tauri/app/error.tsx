@@ -31,7 +31,7 @@ export default function GlobalError({
     // Also bypass the buffered console interceptor and write straight to the
     // Rust log — the buffer flush may never fire if the error boundary
     // unmounts Providers before the 2s flush timer (which is what was happening
-    // for the enterprise #185 crash on MBP — error.tsx logged but the entry
+    // during a boot crash — error.tsx logged but the entry
     // never reached ~/.screenpipe/screenpipe-app.<date>.log).
     commands.writeBrowserLogs([
       {

@@ -54,12 +54,6 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AIPreset, commands } from "@/lib/utils/tauri";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
-import {
-  DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
-  filterPresetsForEnterprisePolicy,
-  isEnterpriseManagedPreset,
-} from "@/lib/enterprise-ai-preset-policy";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -483,15 +477,12 @@ export const AIPresetsSelector = ({
   >();
 
   const isControlled = onControlledSelect !== undefined;
-  const { isEnterprise, policy: enterprisePolicy } = useEnterprisePolicy();
-  const aiPresetPolicy = enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY;
-  const canManageEmployeePresets = !isEnterprise || aiPresetPolicy.allow_employee_custom_presets;
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const aiPresets = useMemo(() => {
     const presets = (settings?.aiPresets || []) as AIPreset[];
-    return isEnterprise ? filterPresetsForEnterprisePolicy(presets, aiPresetPolicy) : presets;
-  }, [settings?.aiPresets, isEnterprise, aiPresetPolicy]);
+    return presets;
+  }, [settings?.aiPresets]);
 
   const selectedPreset = useMemo(() => {
     if (isControlled) return controlledPresetId ?? undefined;
@@ -551,13 +542,6 @@ export const AIPresetsSelector = ({
   }, [aiPresets, selectedPreset, updateSettings, shortcutKey, onPresetSaved, isControlled, onControlledSelect]);
 
   const handleSavePreset = (preset: Partial<AIPreset>) => {
-    if (!canManageEmployeePresets) {
-      toast.error("Managed by your organization", {
-        description: "Your admin controls which AI presets are available",
-      });
-      return;
-    }
-
     if (!preset.id) {
       toast.error("Please enter a name for this preset", {
         description: "Name is required",
@@ -686,12 +670,6 @@ export const AIPresetsSelector = ({
   };
 
   const handleDuplicatePreset = (preset: AIPreset) => {
-    if (!canManageEmployeePresets || isEnterpriseManagedPreset(preset)) {
-      toast.error("Managed by your organization", {
-        description: "Your admin controls which AI presets are available",
-      });
-      return;
-    }
 
     const baseName = preset.id.replace(/ \d+$/, "");
     let counter = 2;
@@ -709,12 +687,6 @@ export const AIPresetsSelector = ({
   };
 
   const handleEditPreset = (preset: AIPreset) => {
-    if (!canManageEmployeePresets || isEnterpriseManagedPreset(preset)) {
-      toast.error("Managed by your organization", {
-        description: "Your admin controls which AI presets are available",
-      });
-      return;
-    }
 
     setSelectedPresetToEdit(preset);
     setDialogOpen(true);
@@ -723,12 +695,6 @@ export const AIPresetsSelector = ({
   const handleSetDefaultPreset = (preset: AIPreset) => {
     if (!settings?.aiPresets) return;
     if (preset.defaultPreset) return;
-    if (isEnterprise && aiPresetPolicy.lock_default_preset) {
-      toast.error("Default preset is locked", {
-        description: "Your admin controls the default AI preset",
-      });
-      return;
-    }
 
     const updatedPresets = settings.aiPresets.map((p) => ({
       ...p,
@@ -751,12 +717,6 @@ export const AIPresetsSelector = ({
 
   const handleRemovePreset = (preset: AIPreset) => {
     if (!settings?.aiPresets) return;
-    if (!canManageEmployeePresets || isEnterpriseManagedPreset(preset)) {
-      toast.error("Managed by your organization", {
-        description: "Your admin controls which AI presets are available",
-      });
-      return;
-    }
 
     if (preset.defaultPreset) {
       toast.error("Cannot delete default preset", {
@@ -876,7 +836,7 @@ export const AIPresetsSelector = ({
                     </CommandItem>
                   </CommandGroup>
                 )}
-                {canManageEmployeePresets && recommendedPresets && recommendedPresets.length > 0 && (
+                {recommendedPresets && recommendedPresets.length > 0 && (
                   <CommandGroup heading="Recommended Presets">
                     {recommendedPresets.map((preset) => (
                       <CommandItem
@@ -947,7 +907,7 @@ export const AIPresetsSelector = ({
                         // so string comparison against preset.id would fail
                         if (isControlled) {
                           onControlledSelect(preset.id);
-                        } else if (preset.id !== selectedPreset && !aiPresetPolicy.lock_default_preset) {
+                        } else if (preset.id !== selectedPreset) {
                           const updatedPresets = (settings.aiPresets || []).map((p) => ({
                             ...p,
                             defaultPreset: p.id === preset.id,
@@ -996,7 +956,7 @@ export const AIPresetsSelector = ({
                             </span>
                           </div>
                           <div className="flex items-center gap-1">
-                            {canManageEmployeePresets && !isEnterpriseManagedPreset(preset) && (
+                            {(
                               <>
                                 <Button
                                   variant="ghost"
@@ -1022,7 +982,7 @@ export const AIPresetsSelector = ({
                                 </Button>
                               </>
                             )}
-                            {!preset.defaultPreset && !aiPresetPolicy.lock_default_preset && (
+                            {!preset.defaultPreset && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -1035,7 +995,7 @@ export const AIPresetsSelector = ({
                                 <Star className="h-3.5 w-3.5" />
                               </Button>
                             )}
-                            {!preset.defaultPreset && canManageEmployeePresets && !isEnterpriseManagedPreset(preset) && (
+                            {!preset.defaultPreset && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -1054,7 +1014,7 @@ export const AIPresetsSelector = ({
                     </CommandItem>
                   ))}
                 </CommandGroup>
-                {canManageEmployeePresets && (
+                {(
                   <CommandGroup>
                     <CommandItem
                       onSelect={() => {

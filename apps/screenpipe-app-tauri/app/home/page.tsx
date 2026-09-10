@@ -9,7 +9,6 @@ import {
   Plus,
   Clock,
   HelpCircle,
-  UserPlus,
   Monitor,
   Mic,
   MicOff,
@@ -60,10 +59,6 @@ import {
   type ChatLoadConversationPayload,
   shouldActivateHomeSectionForChatLoadConversation,
 } from "@/lib/chat-utils";
-import { useTeam } from "@/lib/hooks/use-team";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
-import { EnterpriseLicensePrompt } from "@/components/enterprise-license-prompt";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { computeMeetingActive, type MeetingStatusResponse } from "@/lib/utils/meeting-state";
 import type { MeetingRecord } from "@/lib/utils/meeting-format";
 import { useRouter } from "next/navigation";
@@ -86,7 +81,7 @@ const ALL_SECTIONS = [
 // Settings sections that should redirect to /settings
 const SETTINGS_SECTIONS = new Set<string>([
   "recording", "ai", "general", "display", "shortcuts", "notifications",
-  "privacy", "storage", "team", "usage", "speakers",
+  "privacy", "storage", "usage", "speakers",
   "disk-usage", // backwards compat → maps to "storage"
 ]);
 
@@ -110,8 +105,6 @@ function HomeContent() {
 
   const { settings } = useSettings();
   const { isTranslucent } = useSidebarContext();
-  const teamState = useTeam();
-  const { isSectionHidden, isSettingLocked, needsLicenseKey, submitLicenseKey } = useEnterprisePolicy();
   const selectChatConversation = useCallback((id: string) => {
     setActiveSection("home");
     useChatStore.getState().actions.setCurrent(id);
@@ -149,13 +142,6 @@ function HomeContent() {
       router.push(`/settings?section=${section}`);
     }
   }, [activeSection, router]);
-
-  // If current section is hidden by enterprise policy, redirect to first visible one
-  useEffect(() => {
-    if (!isSectionHidden(activeSection)) return;
-    const fallback = ["home", "timeline"].find((s) => !isSectionHidden(s));
-    setActiveSection(fallback ?? "home");
-  }, [activeSection, isSectionHidden, setActiveSection]);
 
   // Timeline can be turned off in Display settings. When it is, the nav item is
   // gone, so bounce out of the (now unreachable) timeline section to chat.
@@ -365,12 +351,10 @@ function HomeContent() {
 
   // Sidebar collapse state (persisted in localStorage)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [teamPromoDismissed, setTeamPromoDismissed] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem("sidebar-collapsed");
     if (stored === "true") setSidebarCollapsed(true);
-    if (localStorage.getItem("team-promo-dismissed") === "true") setTeamPromoDismissed(true);
   }, []);
 
   const toggleSidebar = useCallback(() => {
@@ -734,14 +718,6 @@ function HomeContent() {
   }, [openSettings, setActiveSection]);
 
   const renderMainSection = () => {
-    if (isSectionHidden(activeSection) && activeSection !== "help") {
-      return (
-        <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-          <img src="/128x128.png" alt="screenpipe" className="w-16 h-16 opacity-30 mb-4" />
-          <p className="text-sm font-mono">screenpipe</p>
-        </div>
-      );
-    }
     switch (activeSection) {
       case "home":
         // Chat is rendered separately below — always-mounted so streaming
@@ -787,7 +763,7 @@ function HomeContent() {
     }
   };
 
-  // Top-level nav items (filtered by enterprise policy)
+  // Top-level nav items
   const mainSections = [
     // The first nav item doubles as "go to chat view + start a fresh
     // conversation". Each click allocates a new session id (empty
@@ -797,7 +773,6 @@ function HomeContent() {
     { id: "meetings", label: "Meeting notes", icon: <NotebookPen className="h-3.5 w-3.5" /> },
     { id: "memories", label: "Memories", icon: <Sparkles className="h-3.5 w-3.5" /> },
   ]
-    .filter((s) => !isSectionHidden(s.id))
     // Timeline can be turned off in Display settings — when it is, drop it from
     // the sidebar entirely (the "Timeline Disabled" placeholder was poor UX).
     .filter((s) => !(s.id === "timeline" && (settings.disableTimeline ?? false)));
@@ -828,8 +803,6 @@ function HomeContent() {
 
   return (
     <div className={cn("bg-transparent", isFullHeight ? "h-screen overflow-hidden" : "min-h-screen")} data-testid="home-page">
-      {/* Enterprise license key prompt */}
-      {needsLicenseKey && <EnterpriseLicensePrompt onSubmit={submitLicenseKey} />}
       {/* Drag region — always absolute so it works with full-bleed translucent layout */}
       <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
 
@@ -1194,36 +1167,7 @@ function HomeContent() {
 
               {/* Bottom items */}
               <div className={cn("space-y-0.5 border-t pt-2", isTranslucent ? "vibrant-sidebar-border" : "border-border")}>
-                {/* Team link — hide invite promo in enterprise (unless team exists) */}
-                {(!isSectionHidden("team") || teamState.team) && (() => {
-                  const teamLabel = teamState.team
-                    ? `Your team (${teamState.members.length})`
-                    : "Invite your team";
-                  const btn = (
-                    <button
-                      onClick={() => openSettings("team")}
-                      className={cn(
-                        "w-full flex items-center px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
-                        sidebarCollapsed ? "justify-center" : "space-x-2.5",
-                        isTranslucent ? "vibrant-nav-item vibrant-nav-hover" : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      <UserPlus className={cn("h-3.5 w-3.5 transition-colors flex-shrink-0", isTranslucent ? "" : "text-muted-foreground group-hover:text-foreground")} />
-                      {!sidebarCollapsed && <span className="font-medium text-xs truncate">{teamLabel}</span>}
-                    </button>
-                  );
-                  if (sidebarCollapsed) {
-                    return (
-                      <Tooltip>
-                        <TooltipTrigger asChild>{btn}</TooltipTrigger>
-                        <TooltipContent side="right" className="text-xs">{teamLabel}</TooltipContent>
-                      </Tooltip>
-                    );
-                  }
-                  return btn;
-                })()}
-
-                {/* Settings — always visible; individual sections are enterprise-filtered inside /settings */}
+                {/* Settings */}
                 {(() => {
                   const btn = (
                     <button
@@ -1258,7 +1202,7 @@ function HomeContent() {
                 })()}
 
                 {/* Help */}
-                {!isSectionHidden("help") && (() => {
+                {(() => {
                   const isActive = activeSection === "help";
                   const btn = (
                     <button

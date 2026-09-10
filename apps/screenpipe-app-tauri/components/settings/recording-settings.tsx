@@ -33,7 +33,6 @@ export const searchIndex: SettingsField[] = [
   { label: "HD recording for meetings", keywords: ["hd", "meeting"] },
   { label: "Chinese mirror", keywords: ["china", "mirror"] },
 ];
-import { LockedSetting, ManagedSwitch } from "@/components/enterprise-locked-setting";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -2369,7 +2368,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
       </Card>
 
       {/* Audio */}
-      <LockedSetting settingKey="audio_recording">
+      <>
       <div className="space-y-2 pt-2">
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">Audio</h2>
 
@@ -2384,7 +2383,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   <p className="text-xs text-muted-foreground">Capture audio from microphone and system</p>
                 </div>
               </div>
-              <ManagedSwitch settingKey="disableAudio" id="disableAudio" checked={!settings.disableAudio} onCheckedChange={(checked) => handleDisableAudioChange(!checked)} />
+              <Switch id="disableAudio" checked={!settings.disableAudio} onCheckedChange={(checked) => handleDisableAudioChange(!checked)} />
             </div>
           </CardContent>
         </Card>
@@ -3262,8 +3261,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     )}
                   </Button>
                 )}
-                <ManagedSwitch
-                  settingKey="disableMeetingDetector"
+                <Switch
                   id="disableMeetingDetector"
                   checked={!settings.disableMeetingDetector}
                   onCheckedChange={(checked) => handleSettingsChange({ disableMeetingDetector: !checked }, true)}
@@ -3364,10 +3362,10 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         )}
 
       </div>
-      </LockedSetting>
+      </>
 
       {/* Screen */}
-      <LockedSetting settingKey="screen_recording">
+              <>
       <div className="space-y-2 pt-2">
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">Screen</h2>
 
@@ -3382,7 +3380,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   <p className="text-xs text-muted-foreground">Capture screenshots from your monitors</p>
                 </div>
               </div>
-              <ManagedSwitch settingKey="disableVision" id="disableVision" checked={!settings.disableVision} onCheckedChange={(checked) => handleSettingsChange({ disableVision: !checked }, true)} />
+              <Switch id="disableVision" checked={!settings.disableVision} onCheckedChange={(checked) => handleSettingsChange({ disableVision: !checked }, true)} />
             </div>
           </CardContent>
         </Card>
@@ -3521,7 +3519,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         )}
 
       </div>
-      </LockedSetting>
+              </>
 
 
       {/* System */}

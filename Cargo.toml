@@ -22,9 +22,6 @@ default-members = [
 ]
 exclude = [
     "apps/screenpipe-app-tauri/src-tauri",
-    "crates/screenpipe-integrations",
-    "crates/screenpipe-team-memory",
-    "ee/sdk",
 ]
 resolver = "2"
 

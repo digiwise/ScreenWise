@@ -24,7 +24,7 @@ use tracing::info;
 
 /// Baseline skills screenpipe writes itself on every session. Importing a skill
 /// under one of these names would clobber them, so we reject it.
-const RESERVED_SKILL_NAMES: [&str; 3] = ["screenpipe-api", "screenpipe-cli", "screenpipe-team"];
+const RESERVED_SKILL_NAMES: [&str; 2] = ["screenpipe-api", "screenpipe-cli"];
 
 /// A skill folder discovered somewhere on the user's device.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

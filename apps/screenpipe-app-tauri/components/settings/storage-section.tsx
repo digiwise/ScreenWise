@@ -13,7 +13,6 @@ export const searchIndex: SettingsField[] = [
   { label: "Clear Cache" },
 ];
 import { DiskUsageSection } from "./disk-usage-section";
-import { LockedSetting } from "@/components/enterprise-locked-setting";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Folder, Trash2 } from "lucide-react";
@@ -89,7 +88,7 @@ export function StorageSection() {
       </p>
 
       {/* Data Directory */}
-      <LockedSetting settingKey="data_directory">
+      <>
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -134,7 +133,7 @@ export function StorageSection() {
             </div>
           </CardContent>
         </Card>
-      </LockedSetting>
+      </>
 
       {/* Clear Cache */}
       <Card className="border-border bg-card">

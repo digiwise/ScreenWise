@@ -41,7 +41,6 @@ import {
   ChevronDown,
   ChevronUp,
   GripVertical,
-  Share2,
 } from "lucide-react";
 import {
   DndContext,
@@ -80,8 +79,6 @@ import { Badge } from "../ui/badge";
 import { toast } from "../ui/use-toast";
 import { Card, CardContent } from "../ui/card";
 import { AIProviderType } from "@/lib/hooks/use-settings";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
-import { useTeam } from "@/lib/hooks/use-team";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -102,11 +99,6 @@ import {
   debounce,
   FieldValidationResult
 } from "@/lib/utils/validation";
-import {
-  DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
-  filterPresetsForEnterprisePolicy,
-  isEnterpriseManagedPreset,
-} from "@/lib/enterprise-ai-preset-policy";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -229,10 +221,6 @@ const AISection = ({
   isDuplicating?: boolean;
 }) => {
   const { settings, updateSettings } = useSettings();
-  const { isEnterprise, policy: enterprisePolicy } = useEnterprisePolicy();
-  const aiPresetPolicy = enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY;
-  const employeePresetsAllowed =
-    !isEnterprise || aiPresetPolicy.allow_employee_custom_presets || (preset ? isEnterpriseManagedPreset(preset) : false);
   const [settingsPreset, setSettingsPreset] = useState<
     Partial<AIPreset> | undefined
   >(preset);
@@ -244,13 +232,7 @@ const AISection = ({
   const diagnosticsAbortRef = useRef<AbortController | null>(null);
 
   // Filter presets the same way the UI does so hidden presets don't block creation
-  const visiblePresets = useMemo(
-    () =>
-      !isEnterprise
-        ? settings.aiPresets
-        : filterPresetsForEnterprisePolicy(settings.aiPresets, aiPresetPolicy),
-    [settings.aiPresets, isEnterprise, aiPresetPolicy]
-  );
+  const visiblePresets = settings.aiPresets;
 
   // Optimized validation with debouncing
   const debouncedValidatePreset = useMemo(
@@ -299,15 +281,6 @@ const AISection = ({
   }, [validationErrors, settingsPreset]);
 
   const updateStoreSettings = async () => {
-    if (!employeePresetsAllowed) {
-      toast({
-        title: "Managed by your organization",
-        description: "Your admin controls which AI presets are available",
-        variant: "destructive",
-      });
-      return;
-    }
-
     if (!isFormValid) {
       toast({
         title: "Validation errors",
@@ -382,7 +355,7 @@ const AISection = ({
         } as AIPreset;
 
         // Remove any hidden preset with the same name (e.g. filtered Pi preset
-        // in enterprise builds) so it doesn't ghost-block future operations
+        // outside the current list) so it doesn't ghost-block future operations
         const cleanedPresets = settings.aiPresets.filter(
           (p) => p.id.toLowerCase() !== newPreset.id.toLowerCase()
         );
@@ -1205,11 +1178,8 @@ function SortablePresetCard({
   onDuplicate,
   onSetDefault,
   onDelete,
-  onShareToTeam,
   isLoading,
-  isTeamAdmin,
   readOnly = false,
-  defaultLocked = false,
 }: {
   preset: AIPreset;
   isDefault: boolean;
@@ -1218,11 +1188,8 @@ function SortablePresetCard({
   onDuplicate: () => void;
   onSetDefault: () => void;
   onDelete: () => void;
-  onShareToTeam?: () => void;
   isLoading: boolean;
-  isTeamAdmin?: boolean;
   readOnly?: boolean;
-  defaultLocked?: boolean;
 }) {
   const {
     attributes,
@@ -1304,21 +1271,9 @@ function SortablePresetCard({
           <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={(e) => { e.stopPropagation(); onDuplicate(); }} disabled={isLoading || readOnly}>
             <Copy className="w-3 h-3 mr-1" />duplicate
           </Button>
-          <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={(e) => { e.stopPropagation(); onSetDefault(); }} disabled={isLoading || isDefault || defaultLocked}>
+          <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={(e) => { e.stopPropagation(); onSetDefault(); }} disabled={isLoading || isDefault}>
             <Star className="w-3 h-3 mr-1" />{isDefault ? "default" : "set default"}
           </Button>
-          {isTeamAdmin && onShareToTeam && !readOnly && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={(e) => { e.stopPropagation(); onShareToTeam(); }} disabled={isLoading}>
-                    <Share2 className="w-3 h-3" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>share to team (e2e encrypted)</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
           {!isDefault && !readOnly && (
             <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2 text-destructive hover:text-destructive ml-auto" onClick={(e) => { e.stopPropagation(); onDelete(); }} disabled={isLoading}>
               <Trash2 className="w-3 h-3" />
@@ -1340,27 +1295,7 @@ export const AIPresets = () => {
     null
   );
   const [isDuplicating, setIsDuplicating] = useState(false);
-  const { isEnterprise, policy: enterprisePolicy } = useEnterprisePolicy();
-  const aiPresetPolicy = enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY;
-  const visiblePresets = useMemo(
-    () =>
-      !isEnterprise
-        ? settings.aiPresets
-        : filterPresetsForEnterprisePolicy(settings.aiPresets, aiPresetPolicy),
-    [settings.aiPresets, isEnterprise, aiPresetPolicy]
-  );
-  const canManageEmployeePresets = !isEnterprise || aiPresetPolicy.allow_employee_custom_presets;
-  const team = useTeam();
-  const isTeamAdmin = !!team.team && team.role === "admin";
-
-  const sharePresetToTeam = async (preset: AIPreset) => {
-    try {
-      await team.pushConfig("ai_provider", preset.id, preset);
-      toast({ title: "shared to team", description: `"${formatPresetName(preset.id)}" is now available to all team members (e2e encrypted)` });
-    } catch (err: any) {
-      toast({ title: "failed to share to team", description: err.message, variant: "destructive" });
-    }
-  };
+  const visiblePresets = settings.aiPresets;
 
   // Drag-and-drop sensors with activation distance to avoid conflicts with clicks
   const sensors = useSensors(
@@ -1403,18 +1338,6 @@ useEffect(() => {
   const removePreset = async (id: string) => {
     setIsLoading(true);
     try {
-      const presetToRemove = settings.aiPresets.find((preset) => preset.id === id);
-      if (
-        isEnterprise &&
-        ((presetToRemove && isEnterpriseManagedPreset(presetToRemove)) || !aiPresetPolicy.allow_employee_custom_presets)
-      ) {
-        toast({
-          title: "Managed by your organization",
-          description: "Your admin controls which AI presets are available",
-          variant: "destructive",
-        });
-        return;
-      }
       const checkIfDefault = settings.aiPresets.find(
         (preset) => preset.id === id
       )?.defaultPreset;
@@ -1468,15 +1391,6 @@ useEffect(() => {
   const setDefaultPreset = async (id: string) => {
     setIsLoading(true);
     try {
-      if (isEnterprise && aiPresetPolicy.lock_default_preset) {
-        toast({
-          title: "Default preset is locked",
-          description: "Your admin controls the default AI preset",
-          variant: "destructive",
-        });
-        return;
-      }
-
       const selectedPreset = settings.aiPresets.find((p) => p.id === id);
       if (!selectedPreset) return;
 
@@ -1515,17 +1429,6 @@ useEffect(() => {
   const duplicatePreset = async (id: string) => {
     const presetToDuplicate = settings.aiPresets.find((p) => p.id === id);
     if (!presetToDuplicate) return;
-    if (
-      isEnterprise &&
-      (isEnterpriseManagedPreset(presetToDuplicate) || !aiPresetPolicy.allow_employee_custom_presets)
-    ) {
-      toast({
-        title: "Managed by your organization",
-        description: "Your admin controls which AI presets are available",
-        variant: "destructive",
-      });
-      return;
-    }
 
     // Find a unique name by appending a number
     const baseName = presetToDuplicate.id.replace(/ \d+$/, "");
@@ -1560,16 +1463,12 @@ useEffect(() => {
             No AI presets yet
           </h2>
           <p className="text-sm text-muted-foreground text-center max-w-md">
-            {canManageEmployeePresets
-              ? "Create your first AI preset to get started with intelligent features. Presets allow you to quickly switch between different AI configurations."
-              : "Your organization has not made any AI presets available on this device."}
+            Create your first AI preset to get started with intelligent features. Presets allow you to quickly switch between different AI configurations.
           </p>
-          {canManageEmployeePresets && (
-            <Button onClick={() => setCreatePresentDialog(true)} size="lg">
+          <Button onClick={() => setCreatePresentDialog(true)} size="lg">
               <Plus className="w-4 h-4 mr-2" />
               Create Your First Preset
-            </Button>
-          )}
+          </Button>
         </div>
         <section aria-label="Local agent skills">
           <h2 className="mb-2 text-sm font-medium">Local agent skills</h2>
@@ -1597,12 +1496,10 @@ useEffect(() => {
             </div>
           )}
         </div>
-        {canManageEmployeePresets && (
-          <Button onClick={() => setCreatePresentDialog(true)}>
+        <Button onClick={() => setCreatePresentDialog(true)}>
             <Plus className="w-4 h-4 mr-2" />
             Create Preset
-          </Button>
-        )}
+        </Button>
       </div>
 
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -1612,9 +1509,6 @@ useEffect(() => {
         >
           <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-3">
             {visiblePresets.map((preset) => {
-              const readOnly =
-                isEnterprise &&
-                (!aiPresetPolicy.allow_employee_custom_presets || isEnterpriseManagedPreset(preset));
               return (
                 <SortablePresetCard
                   key={preset.id}
@@ -1629,11 +1523,8 @@ useEffect(() => {
                   onDuplicate={() => duplicatePreset(preset.id)}
                   onSetDefault={() => setPresetToSetDefault(preset.id)}
                   onDelete={() => setPresetToDelete(preset.id)}
-                  onShareToTeam={isTeamAdmin ? () => sharePresetToTeam(preset) : undefined}
                   isLoading={isLoading}
-                  isTeamAdmin={isTeamAdmin}
-                  readOnly={readOnly}
-                  defaultLocked={isEnterprise && aiPresetPolicy.lock_default_preset}
+                  readOnly={false}
                 />
               );
             })}

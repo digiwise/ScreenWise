@@ -11,8 +11,6 @@ export const searchIndex: SettingsField[] = [
   { label: "Blocklist", keywords: ["ignore", "exclude", "block"] },
   { label: "PII masking", keywords: ["mask", "redact"] },
 ];
-import { LockedSetting, ManagedSwitch } from "@/components/enterprise-locked-setting";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
 import {
   Eye,
   EyeOff,
@@ -39,7 +37,6 @@ import { MultiSelect } from "@/components/ui/multi-select";
 import { WindowPicker } from "./window-picker";
 import { useSettings, Settings } from "@/lib/hooks/use-settings";
 import { ScheduleSettings } from "./schedule-settings";
-import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { useToast } from "@/components/ui/use-toast";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
@@ -271,16 +268,9 @@ function EncryptDataCard({
     </Card>
   );
 }
-
 export function PrivacySection() {
   const { settings, updateSettings } = useSettings();
-  const isEnterprise = useIsEnterpriseBuild();
   const { toast } = useToast();
-  // when the admin forces the PII backend (local/cloud) we lock the radios so
-  // the employee can't override it (the value itself is applied to settings by
-  // useEnterprisePolicy.applyPiiPolicy on every policy poll).
-  const { getManagedValue } = useEnterprisePolicy();
-  const managedPiiBackend = getManagedValue("piiBackend");
 
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -427,9 +417,7 @@ export function PrivacySection() {
     );
   };
 
-  // Kept for the ManagedSwitch path (enterprise lock on usePiiRemoval).
-  // Falls back to a Basic-mode flip; enterprise admins who pinned the
-  // legacy flag still get exactly what they pinned.
+  // Legacy boolean setting remains readable, while the UI exposes the local mode selector.
   const handlePiiRemovalChange = (checked: boolean) => {
     handlePiiModeChange(checked ? "basic" : "off");
   };
@@ -645,7 +633,7 @@ export function PrivacySection() {
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
           Security
         </h2>
-        <LockedSetting settingKey="api_auth">
+        <>
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -674,7 +662,7 @@ export function PrivacySection() {
                 click &quot;Apply &amp; Restart&quot; above for auth changes to take effect; existing browser connections keep using the old key until then
               </p>
             )}
-            <LockedSetting settingKey="api_key">
+            <>
             {(settings.apiAuth ?? true) && (
               <div className="mt-2.5 flex items-center space-x-2.5 pl-6.5">
                 <Input
@@ -787,17 +775,16 @@ export function PrivacySection() {
                 </Button>
               </div>
             )}
-            </LockedSetting>
+            </>
           </CardContent>
         </Card>
-        </LockedSetting>
+        </>
 
-        {isEnterprise && <AdminTeamTokenCard />}
 
         {/* LAN access — off by default. Toggling on force-enables api_auth
             (the backend mirrors this guard in RecordingConfig::from_settings
             so the API is never exposed to the network unauthenticated). */}
-        <LockedSetting settingKey="listen_on_lan">
+        <>
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -830,7 +817,7 @@ export function PrivacySection() {
             </div>
           </CardContent>
         </Card>
-        </LockedSetting>
+        </>
 
         <EncryptDataCard
           encryptStore={settings.encryptStore ?? true}
@@ -985,7 +972,7 @@ export function PrivacySection() {
       </div>
 
       {/* Data Protection */}
-      <LockedSetting settingKey="pii_removal">
+      <>
       <div className="space-y-2">
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
           Data protection
@@ -1014,8 +1001,7 @@ export function PrivacySection() {
                   </p>
                 </div>
               </div>
-              <ManagedSwitch
-                settingKey="usePiiRemoval"
+              <Switch
                 id="usePiiRemoval"
                 checked={piiMode !== "off"}
                 onCheckedChange={(checked) =>
@@ -1071,13 +1057,12 @@ export function PrivacySection() {
             {aiPiiRemovalEnabled && (
               <div className="mt-3 ml-6 space-y-2 border-l-2 border-border pl-3">
                 <p className="text-xs font-medium text-foreground">Where it runs</p>
-                <label className={`flex items-start gap-2 text-xs ${managedPiiBackend ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
+                <label className="flex items-start gap-2 text-xs cursor-pointer">
                   <input
                     type="radio"
                     name="piiBackend"
                     className="mt-0.5"
                     checked={piiBackend === "local"}
-                    disabled={!!managedPiiBackend}
                     onChange={() => {}}
                   />
                   <span>
@@ -1136,7 +1121,7 @@ export function PrivacySection() {
         </Card>
 
       </div>
-      </LockedSetting>
+      </>
 
       <div className="space-y-2">
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
@@ -1288,223 +1273,5 @@ export function PrivacySection() {
         action={picker === "included" ? "include" : "ignore"}
       />
     </div>
-  );
-}
-
-/**
- * Admin team API token — enterprise builds only.
- *
- * Org-wide team-query auth has two intentionally separate pieces:
- * `license_key` is org-level (every employee's machine, deployed by IT);
- * `team_api_token` is per-admin and grants the `read:devices` /
- * `read:search` / `read:records` scopes that the `screenpipe-team` pi
- * skill calls v1 endpoints with. An admin mints one at
- * https://screenpi.pe/enterprise?tab=tokens, pastes it here, and the
- * desktop persists it to ~/.screenpipe/enterprise.json. Every new pi
- * chat reads that file at boot and (un)installs the skill accordingly —
- * no app restart needed, just open a new chat. Revoke from the same
- * dashboard page to kill team access immediately.
- *
- * UX mirrors the local API key card above (Input + Eye reveal + Copy).
- */
-function AdminTeamTokenCard() {
-  const { toast } = useToast();
-  const [liveToken, setLiveToken] = useState<string | null>(null);
-  const [revealToken, setRevealToken] = useState(false);
-  const [pendingToken, setPendingToken] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const reload = useCallback(async () => {
-    try {
-      const cur = await commands.getEnterpriseTeamApiToken();
-      setLiveToken(cur ?? null);
-    } catch {
-      setLiveToken(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  const handleSave = useCallback(async () => {
-    const trimmed = (pendingToken ?? "").trim();
-    if (!trimmed) {
-      toast({ title: "paste a token first" });
-      return;
-    }
-    if (!trimmed.startsWith("sk_ent_")) {
-      toast({
-        title: "that doesn't look like an admin token",
-        description: "expected format: sk_ent_…",
-      });
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await commands.saveEnterpriseTeamConfig(null, null, trimmed);
-      if (res.status === "error") throw new Error(res.error);
-      setLiveToken(trimmed);
-      setPendingToken(null);
-      toast({
-        title: "admin token saved",
-        description: "open a new pi chat to use it — no app restart needed",
-      });
-    } catch (e) {
-      toast({
-        title: "failed to save",
-        description: e instanceof Error ? e.message : String(e),
-        variant: "destructive",
-      });
-    } finally {
-      setSaving(false);
-    }
-  }, [pendingToken, toast]);
-
-  const handleClear = useCallback(async () => {
-    setSaving(true);
-    try {
-      const res = await commands.saveEnterpriseTeamConfig(null, null, "");
-      if (res.status === "error") throw new Error(res.error);
-      setLiveToken(null);
-      setPendingToken(null);
-      setRevealToken(false);
-      toast({ title: "admin token cleared" });
-    } catch (e) {
-      toast({
-        title: "failed to clear",
-        description: e instanceof Error ? e.message : String(e),
-        variant: "destructive",
-      });
-    } finally {
-      setSaving(false);
-    }
-  }, [toast]);
-
-  const displayValue =
-    pendingToken !== null
-      ? pendingToken
-      : liveToken
-      ? revealToken
-        ? liveToken
-        : "•".repeat(Math.min(liveToken.length, 32))
-      : "";
-  const hasPending = pendingToken !== null && pendingToken !== (liveToken ?? "");
-
-  return (
-    <Card className="border-border bg-card">
-      <CardContent className="px-3 py-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2.5">
-            <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
-            <div>
-              <h3 className="text-sm font-medium text-foreground">
-                Admin Team API Token
-              </h3>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Lets the pi agent query org-wide team data (devices, search,
-                records). Mint at{" "}
-                <button
-                  className="underline text-foreground hover:text-foreground/80"
-                  onClick={() =>
-                    openUrl("https://screenpi.pe/enterprise?tab=tokens")
-                  }
-                >
-                  screenpi.pe/enterprise → api tokens
-                </button>
-                .
-              </p>
-            </div>
-          </div>
-        </div>
-        <div className="mt-2.5 flex items-center space-x-2.5 pl-6.5">
-          <Input
-            type="text"
-            // First-time users have no `liveToken` yet — they must always be able
-            // to type a fresh token in. Only lock the input when we're displaying
-            // an EXISTING token in masked form; clicking the eye unlocks edit mode.
-            readOnly={Boolean(liveToken) && !revealToken && pendingToken === null}
-            placeholder="sk_ent_…"
-            data-testid="privacy-admin-token-input"
-            value={displayValue}
-            onChange={(e) => {
-              setPendingToken(e.target.value);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && hasPending) {
-                void handleSave();
-              }
-            }}
-            onClick={(e) => (e.target as HTMLInputElement).select()}
-            className="h-8 text-xs font-mono cursor-text select-all"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 px-2 shrink-0"
-            title={revealToken ? "Hide token" : "Reveal token"}
-            onClick={() => {
-              setRevealToken((v) => !v);
-              if (pendingToken === null && liveToken) setPendingToken(liveToken);
-            }}
-            // Eye only makes sense when there's a saved token to unmask. Fresh
-            // users typing a new token don't need it.
-            disabled={!liveToken}
-            data-testid="privacy-admin-token-reveal"
-          >
-            {revealToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 px-2 shrink-0"
-            title="Copy token"
-            disabled={!liveToken}
-            data-testid="privacy-admin-token-copy"
-            onClick={async () => {
-              if (!liveToken) return;
-              try {
-                await navigator.clipboard.writeText(liveToken);
-              } catch {
-                const el = document.createElement("textarea");
-                el.value = liveToken;
-                el.style.position = "fixed";
-                el.style.opacity = "0";
-                document.body.appendChild(el);
-                el.select();
-                document.execCommand("copy");
-                document.body.removeChild(el);
-              }
-              toast({ title: "admin token copied to clipboard" });
-            }}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
-          {hasPending && (
-            <Button
-              size="sm"
-              className="h-8 text-xs"
-              disabled={saving}
-              onClick={handleSave}
-              data-testid="privacy-admin-token-save"
-            >
-              save
-            </Button>
-          )}
-          {!hasPending && liveToken && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 text-xs"
-              disabled={saving}
-              onClick={handleClear}
-              data-testid="privacy-admin-token-clear"
-            >
-              clear
-            </Button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
   );
 }

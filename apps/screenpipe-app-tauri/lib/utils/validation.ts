@@ -211,7 +211,7 @@ export const getFieldHelperText = (field: keyof SettingsStore, settings: any) =>
 
 // Preset validation
 // `visiblePresets` should be the filtered list the user actually sees,
-// so hidden presets (e.g. Pi presets in enterprise builds) don't block creation.
+  // so presets outside the current list don't block creation.
 export const validatePresetName = (name: string, visiblePresets: AIPreset[], currentId?: string): FieldValidationResult => {
   const normalizedName = name.trim();
 

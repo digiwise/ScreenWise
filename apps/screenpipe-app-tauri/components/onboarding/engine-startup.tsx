@@ -114,7 +114,7 @@ export default function EngineStartup({
   >(null);
   const [isResettingPerm, setIsResettingPerm] = useState(false);
   // Bundle id of the running app — surfaces in the stuck UI so users who
-  // switched between prod / beta / dev / enterprise builds understand why
+  // switched between prod / beta / dev builds understand why
   // an earlier grant doesn't carry over (each bundle id has its own TCC row).
   const [bundleId, setBundleId] = useState<string | null>(null);
   useEffect(() => {

@@ -5,7 +5,6 @@
 use crate::{
     native_notification, native_shortcut_reminder,
     store::{OnboardingStore, SettingsStore},
-    updates::is_enterprise_build,
     window::{RewindWindowId, ShowRewindWindow},
 };
 use tauri::{Emitter, Manager};
@@ -450,15 +449,9 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
     }
 }
 
-#[tauri::command]
-#[specta::specta]
-pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
-    is_enterprise_build(&app_handle)
-}
-
 /// Return the macOS bundle identifier of the running app
-/// (e.g. `screenpi.pe`, `screenpi.pe.beta`, `screenpi.pe.dev`,
-/// `screenpi.pe.enterprise`). The onboarding stuck-screen surfaces this so
+/// (e.g. `screenpi.pe`, `screenpi.pe.beta`, or `screenpi.pe.dev`). The
+/// onboarding stuck-screen surfaces this so
 /// users who switched build channels (prod ↔ beta ↔ dev) can see they're
 /// looking at a *different* TCC record from the one they may have already
 /// granted under a sibling bundle id.
@@ -563,195 +556,6 @@ fn persist_api_auth_key_to_settings(
     Ok(())
 }
 
-/// Read the enterprise license key from `enterprise.json`.
-/// Checks in order:
-/// 1. Next to executable (pushed via Intune/MDM to Program Files / .app bundle)
-/// 2. `~/.screenpipe/enterprise.json` (entered manually by employee via in-app prompt)
-/// Returns None if no file is found or is invalid.
-#[tauri::command]
-#[specta::specta]
-pub fn get_enterprise_license_key() -> Option<String> {
-    // Try MDM-deployed location first (next to executable)
-    if let Some(key) = read_enterprise_key_from_exe_dir() {
-        return Some(key);
-    }
-
-    // Fallback: ~/.screenpipe/enterprise.json (manually entered by employee)
-    let user_path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
-    if user_path.exists() {
-        info!(
-            "enterprise: checking user config at {}",
-            user_path.display()
-        );
-        return read_enterprise_key_from_path(&user_path);
-    }
-
-    info!("enterprise: no enterprise.json found in any location");
-    None
-}
-
-fn read_enterprise_key_from_exe_dir() -> Option<String> {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("enterprise: failed to get current_exe: {}", e);
-            return None;
-        }
-    };
-    let exe_dir = exe.parent()?;
-
-    let config_path = exe_dir.join("enterprise.json");
-
-    #[cfg(target_os = "macos")]
-    let config_path = if config_path.exists() {
-        config_path
-    } else {
-        exe_dir.join("../Resources/enterprise.json")
-    };
-
-    if !config_path.exists() {
-        info!(
-            "enterprise: no enterprise.json at {}",
-            config_path.display()
-        );
-        return None;
-    }
-
-    read_enterprise_key_from_path(&config_path)
-}
-
-fn read_enterprise_key_from_path(path: &std::path::Path) -> Option<String> {
-    info!("enterprise: found enterprise.json at {}", path.display());
-
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("enterprise: failed to read {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    let parsed: serde_json::Value = match serde_json::from_str(&contents) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("enterprise: failed to parse enterprise.json: {}", e);
-            return None;
-        }
-    };
-    let key = parsed
-        .get("license_key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    match &key {
-        Some(k) => info!(
-            "enterprise: license key loaded ({}...)",
-            &k[..k.len().min(8)]
-        ),
-        None => warn!("enterprise: enterprise.json missing 'license_key' field"),
-    }
-
-    key
-}
-
-/// Save the enterprise license key to `~/.screenpipe/enterprise.json`.
-/// Used by the in-app prompt when enterprise.json is not deployed via MDM.
-#[tauri::command]
-#[specta::specta]
-pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
-    let dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
-
-    let path = dir.join("enterprise.json");
-    let mut json = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    json["license_key"] = serde_json::Value::String(license_key);
-    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
-        .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
-
-    info!("enterprise: license key saved to {}", path.display());
-    Ok(())
-}
-
-/// Read the enterprise admin API token (`team_api_token`) from
-/// `~/.screenpipe/enterprise.json`. Returns None when the file is
-/// missing, malformed, or the field is empty.
-///
-/// Used by the Settings → Enterprise → Admin API token card to render
-/// "configured" state without round-tripping the plaintext value through
-/// the React state. The token itself is treated as a secret: the
-/// frontend only learns "yes there's a value" via this getter, never
-/// gets the value back.
-#[tauri::command]
-#[specta::specta]
-pub fn get_enterprise_team_api_token() -> Option<String> {
-    let path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    parsed
-        .get("team_api_token")
-        .and_then(|t| t.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-}
-
-/// Persist the user's enterprise admin status + team API token so the
-/// pi-agent's `screenpipe-team` skill knows whether to install itself.
-///
-/// Called by the frontend right after a policy fetch confirms admin
-/// role. Storing this alongside the license key in `enterprise.json`
-/// keeps everything pi-agent needs in one file the skill can read
-/// without a Tauri round-trip.
-///
-/// All fields are optional so callers can update one at a time —
-/// e.g. revoke admin without wiping the cached team token, or refresh
-/// just the token after a rotation. To FORCE a field to null, pass
-/// an empty string for strings or `false` for `is_admin`/`license_active`.
-#[tauri::command]
-#[specta::specta]
-pub fn save_enterprise_team_config(
-    is_admin: Option<bool>,
-    license_active: Option<bool>,
-    team_api_token: Option<String>,
-) -> Result<(), String> {
-    let dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
-
-    let path = dir.join("enterprise.json");
-    let mut json = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    if let Some(v) = is_admin {
-        json["is_admin"] = serde_json::Value::Bool(v);
-    }
-    if let Some(v) = license_active {
-        json["license_active"] = serde_json::Value::Bool(v);
-    }
-    let token_set = team_api_token.is_some();
-    if let Some(t) = team_api_token {
-        json["team_api_token"] = if t.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::String(t)
-        };
-    }
-
-    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
-        .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
-
-    info!(
-        "enterprise: team config saved to {} (is_admin set: {}, license_active set: {}, token set: {})",
-        path.display(),
-        is_admin.is_some(),
-        license_active.is_some(),
-        token_set
-    );
-    Ok(())
-}
-
 #[tauri::command]
 #[specta::specta]
 pub fn write_browser_log(level: String, message: String) {
@@ -826,11 +630,6 @@ pub fn set_tray_health_icon(app_handle: tauri::AppHandle) {
 #[specta::specta]
 pub fn show_main_window(app_handle: tauri::AppHandle) {
     info!("show_main_window called");
-    if crate::enterprise_policy::is_app_ui_hidden() {
-        info!("enterprise: suppressing main window in hidden UI mode");
-        return;
-    }
-
     set_main_close_in_progress(false);
     let window_to_show = ShowRewindWindow::Main;
 

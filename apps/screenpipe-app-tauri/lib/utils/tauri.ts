@@ -354,8 +354,8 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
 },
 /**
  * Return the macOS bundle identifier of the running app
- * (e.g. `screenpi.pe`, `screenpi.pe.beta`, `screenpi.pe.dev`,
- * `screenpi.pe.enterprise`). The onboarding stuck-screen surfaces this so
+ * (e.g. `screenpi.pe`, `screenpi.pe.beta`, or `screenpi.pe.dev`). The
+ * onboarding stuck-screen surfaces this so
  * users who switched build channels (prod ↔ beta ↔ dev) can see they're
  * looking at a *different* TCC record from the one they may have already
  * granted under a sibling bundle id.
@@ -426,33 +426,6 @@ async getDiskUsage(forceRefresh: boolean | null, dataDir: string | null) : Promi
  */
 async getE2eSeedFlags() : Promise<string[]> {
     return await TAURI_INVOKE("get_e2e_seed_flags");
-},
-async getEnterpriseInstallMetadata() : Promise<EnterpriseInstallMetadata> {
-    return await TAURI_INVOKE("get_enterprise_install_metadata");
-},
-/**
- * Read the enterprise license key from `enterprise.json`.
- * Checks in order:
- * 1. Next to executable (pushed via Intune/MDM to Program Files / .app bundle)
- * 2. `~/.screenpipe/enterprise.json` (entered manually by employee via in-app prompt)
- * Returns None if no file is found or is invalid.
- */
-async getEnterpriseLicenseKey() : Promise<string | null> {
-    return await TAURI_INVOKE("get_enterprise_license_key");
-},
-/**
- * Read the enterprise admin API token (`team_api_token`) from
- * `~/.screenpipe/enterprise.json`. Returns None when the file is
- * missing, malformed, or the field is empty.
- *
- * Used by the Settings → Enterprise → Admin API token card to render
- * "configured" state without round-tripping the plaintext value through
- * the React state. The token itself is treated as a secret: the
- * frontend only learns "yes there's a value" via this getter, never
- * gets the value back.
- */
-async getEnterpriseTeamApiToken() : Promise<string | null> {
-    return await TAURI_INVOKE("get_enterprise_team_api_token");
 },
 async getEnv(name: string) : Promise<string> {
     return await TAURI_INVOKE("get_env", { name });
@@ -570,9 +543,6 @@ async importSkill(sourcePath: string) : Promise<Result<ImportedSkill, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
-},
-async isEnterpriseBuildCmd() : Promise<boolean> {
-    return await TAURI_INVOKE("is_enterprise_build_cmd");
 },
 /**
  * Check if click-through is currently enabled (Windows only)
@@ -1221,40 +1191,6 @@ async rollbackToVersion(version: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Save the enterprise license key to `~/.screenpipe/enterprise.json`.
- * Used by the in-app prompt when enterprise.json is not deployed via MDM.
- */
-async saveEnterpriseLicenseKey(licenseKey: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_enterprise_license_key", { licenseKey }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Persist the user's enterprise admin status + team API token so the
- * pi-agent's `screenpipe-team` skill knows whether to install itself.
- *
- * Called by the frontend right after a policy fetch confirms admin
- * role. Storing this alongside the license key in `enterprise.json`
- * keeps everything pi-agent needs in one file the skill can read
- * without a Tauri round-trip.
- *
- * All fields are optional so callers can update one at a time —
- * e.g. revoke admin without wiping the cached team token, or refresh
- * just the token after a rotation. To FORCE a field to null, pass
- * an empty string for strings or `false` for `is_admin`/`license_active`.
- */
-async saveEnterpriseTeamConfig(isAdmin: boolean | null, licenseActive: boolean | null, teamApiToken: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_enterprise_team_config", { isAdmin, licenseActive, teamApiToken }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Scan the standard locations for skill folders the user could import.
  */
 async scanDeviceSkills() : Promise<Result<DeviceSkill[], string>> {
@@ -1323,12 +1259,6 @@ async setBrowserCookieAccessState(granted: boolean, disabled: boolean) : Promise
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Called by the frontend after fetching the enterprise policy.
- */
-async setEnterprisePolicy(hiddenSections: string[]) : Promise<void> {
-    await TAURI_INVOKE("set_enterprise_policy", { hiddenSections });
-},
 async setNativeTheme(theme: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_native_theme", { theme }) };
@@ -1344,14 +1274,6 @@ async setOnboardingStep(step: string) : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
-},
-/**
- * Called by the frontend after fetching the `syncStreams` block from
- * `/api/enterprise/policy`. Flat booleans rather than a struct so the
- * specta-generated TS binding stays trivial.
- */
-async setSyncStreams(frames: boolean, audio: boolean, uiEvents: boolean, memories: boolean, snapshots: boolean) : Promise<void> {
-    await TAURI_INVOKE("set_sync_streams", { frames, audio, uiEvents, memories, snapshots });
 },
 async setTrayHealthIcon() : Promise<void> {
     await TAURI_INVOKE("set_tray_health_icon");
@@ -1715,7 +1637,6 @@ source: string;
 imported: boolean }
 export type E2eAgentStreamResult = { emitted_deltas: number; emit_ms: number }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
-export type EnterpriseInstallMetadata = { install_source: string; update_manager: string; managed: boolean; detected_by: string[] }
 export type ExcludedApp = { bundleId: string; name: string | null; icon: string | null }
 export type HardwareCapability = { hasGpu: boolean; cpuCores: number; totalMemoryGb: number; recommendedEngine: string; reason: string }
 /**

@@ -9,10 +9,6 @@ import { Store } from "@tauri-apps/plugin-store";
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { SettingsStore } from "../utils/tauri";
 import type { SourceCitation } from "@/lib/source-citations";
-import type {
-	EnterpriseAppUpdatePolicy,
-	EnterpriseInstallMetadata,
-} from "@ee/lib/app-update-policy";
 import { type FontSize, applyFontSize } from "@/lib/utils/font-size";
 export type VadSensitivity = "low" | "medium" | "high";
 
@@ -148,12 +144,6 @@ export type Settings = SettingsStore & {
 	appendTypedTextToMeetingNote?: boolean;
 	/** User's name for speaker identification — input device audio will be labeled with this name */
 	userName?: string;
-	/** Filters pushed from team — merged with local filters for recording */
-	teamFilters?: {
-		ignoredWindows: string[];
-		includedWindows: string[];
-		ignoredUrls: string[];
-	};
 	/** Custom vocabulary entries for transcription biasing and word replacement */
 	vocabularyWords?: Array<{ word: string; replacement?: string }>;
 	/** Font size for the entire app UI */
@@ -224,10 +214,6 @@ export type Settings = SettingsStore & {
 		address: string;
 		label?: string;
 	}>;
-		/** Enterprise app-update policy fetched from the admin dashboard. */
-		enterpriseAppUpdatePolicy?: EnterpriseAppUpdatePolicy;
-		/** Local install/update-manager detection for enterprise fleet reporting. */
-		enterpriseInstallMetadata?: EnterpriseInstallMetadata;
 		/** Enable recording schedule — when on, recording only runs during defined time ranges */
 		scheduleEnabled?: boolean;
 	/** Per-day-of-week time ranges defining when recording is active */
@@ -273,11 +259,10 @@ export type Settings = SettingsStore & {
 }
 
 export function getEffectiveFilters(settings: Settings) {
-	const team = settings.teamFilters || { ignoredWindows: [], includedWindows: [], ignoredUrls: [] };
 	return {
-		ignoredWindows: [...new Set([...settings.ignoredWindows, ...team.ignoredWindows])],
-		includedWindows: [...new Set([...settings.includedWindows, ...team.includedWindows])],
-		ignoredUrls: [...new Set([...(settings.ignoredUrls || []), ...team.ignoredUrls])],
+		ignoredWindows: [...new Set(settings.ignoredWindows)],
+		includedWindows: [...new Set(settings.includedWindows)],
+		ignoredUrls: [...new Set(settings.ignoredUrls || [])],
 	};
 }
 
@@ -365,8 +350,6 @@ let DEFAULT_SETTINGS: Settings = {
 			includedWindows: [],
 			ignoredUrls: [],
 			ignoredMeetingApps: [],
-			teamFilters: { ignoredWindows: [], includedWindows: [], ignoredUrls: [] },
-
 			audioChunkDuration: 30,
 			useChineseMirror: false,
 			languages: [],
