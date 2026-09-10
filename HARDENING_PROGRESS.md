@@ -2294,3 +2294,66 @@ offline DB/engine checks, root formatting, and `git diff --check` also passed.
 No lockfile changed. A final exact-HEAD
 `cargo build --release --locked --offline` passed under normal Ninja in 5m35s
 with only the established audio `unused_mut` and engine `CommandExt` warnings.
+
+### Desktop WebView runtime-egress boundary — 2026-09-10
+
+Pre-change reachability confirms that the Rust recorder and retained local
+services do not initiate public Internet requests, but three desktop defense
+gaps remain. The shared Markdown renderer emits ordinary `http(s)` image
+sources as `<img>` elements, and the two notification renderers bypass the
+shared image component entirely, so displaying untrusted Markdown can trigger
+an automatic WebView request. The `localFetch` wrapper also accepts arbitrary
+absolute HTTP URLs despite every retained caller targeting the configured
+ScreenWise loopback API. Finally, the Tauri configuration has no CSP and grants
+application capabilities to every HTTPS origin; those grants do not initiate a
+request themselves but leave the runtime invariant unenforced at the WebView
+boundary.
+
+This increment will centralize all Markdown image rendering and replace public
+network images with an explicit user-open control, reject non-loopback and
+wrong-port absolute URLs in `localFetch`, add a loopback/local-resource CSP,
+and narrow remote capability access to the exact local development origin. It
+preserves packaged assets, explicitly scoped local files, data/blob media, the
+authenticated ScreenWise API, the desktop notification service, local Ollama,
+local WebSockets, and user-directed external links opened by the operating
+system. It does not change build-time dependency or artifact acquisition.
+
+Post-change evidence:
+
+- Every React Markdown surface now uses the shared media-aware renderer. Public
+  HTTP(S) images, including raw-HTML images, are rendered as an explicit
+  user-open control without an image request; remote `srcset` values are
+  discarded. Relative/scoped local files, `asset:`, Tauri asset hosts,
+  `data:image`, `blob:`, and loopback images remain available.
+- `localFetch` now parses absolute input and accepts only plain HTTP to
+  `localhost`, `127.0.0.1`, or IPv6 loopback on the configured API port. Public
+  hosts, deceptive hostnames, HTTPS, WebSocket schemes, and wrong ports fail
+  before `fetch`. Relative API routes and bearer injection are unchanged.
+- The base Tauri CSP limits connect, image, media, worker, frame, object, base,
+  and form destinations. Tauri's default compile-time nonce/hash injection
+  remains enabled for the statically exported Next scripts; no global
+  `unsafe-inline` script permission was added. Beta and production overrides
+  now inherit this policy instead of resetting it to `null`. Remote capability
+  access is limited to the exact checked-in localhost development origins on
+  ports 1420 and 3000; explicit OS-browser URL opening remains user-directed.
+- The focused network-boundary suite passed 9/9 and the full frontend Vitest
+  suite passed 371/371 across 35 files. Direct TypeScript checking and the Next
+  production build passed; Next emitted only the established `unpdf`
+  `import.meta` warning. The first policy-test run failed because Vitest's
+  transformed `import.meta.url` was not a file URL, and a later raw-image test
+  initially exposed the missing shared default URL transform; both test-harness
+  findings were corrected before the passing full run.
+- Locked/offline desktop `cargo check` passed under Visual Studio Developer
+  PowerShell and normal Ninja. The isolated binding-freshness test passed under
+  the documented Ninja Multi-Config, transient `knf-rs-sys` CRT override, and
+  OpenBLAS runtime `PATH` after cleaning only the generator-stale
+  `libsamplerate-sys` build artifacts. The normal root
+  `cargo build --release --locked --offline` passed. A supplemental separate
+  desktop release build under single-config Ninja was attempted but is not
+  counted as passed: it reached the already documented
+  `libsamplerate-sys` static-library layout failure, and no unvalidated release
+  generator/profile substitution was used.
+- Root and desktop Cargo manifests/locks, the frontend manifest/Bun lock, and
+  dependency versions are unchanged. The generated Tauri capability snapshot
+  contains only the reviewed localhost-origin reduction. No private smoke data
+  was inspected or changed.

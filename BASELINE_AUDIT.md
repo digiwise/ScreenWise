@@ -49,6 +49,7 @@ This inventory distinguishes observed baseline startup behavior from optional co
 | Pipes and pipe registry | The pipe agent, scheduler, registry/store client, API, CLI, persistence, and permissions middleware were removed. | Not required. | Local capture/search routes do not install, run, or schedule automation. |
 | Enterprise/team CLI | Direct Screenpipe enterprise device/search/record queries were removed. | Not required. | The local recorder has no team-cloud command path. |
 | mDNS multicast | Server discovery path; only when `--enable-mdns`/environment opt-in is set. | Not required. | Off by default; observed skipped for loopback-only server. |
+| Desktop WebView resources | Markdown, local API requests, and browser resource loading. | Local UI only. | Public Markdown images become explicit user-open controls, `localFetch` rejects destinations outside the configured loopback API, CSP permits only packaged/scoped local resources and loopback services, and privileged remote origins are limited to exact localhost development ports. |
 
 With FFmpeg and all pinned models pre-staged, the recorder's capture/search and
 retained Ollama/Pi paths contain no automatic public Internet request. A later

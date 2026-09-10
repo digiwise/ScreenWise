@@ -218,7 +218,7 @@ export function appendAuthToken(url: string): string {
  *
  * - Resolves paths relative to the configured base URL
  * - Auto-injects auth header when API auth is enabled
- * - Passes through full URLs unchanged (for remote device access)
+ * - Accepts absolute URLs only for the configured loopback API
  * - Waits for IPC config on first call (typically already resolved)
  */
 export async function localFetch(
@@ -227,9 +227,7 @@ export async function localFetch(
 ): Promise<Response> {
   await ensureInitialized();
 
-  const url = path.startsWith("http")
-    ? path
-    : `${getApiBaseUrl()}${path.startsWith("/") ? path : `/${path}`}`;
+  const url = resolveLocalApiUrl(path);
 
   const fetchWithCurrentAuth = () => {
     if (_authEnabled && _apiKey) {
@@ -251,6 +249,56 @@ export async function localFetch(
   return response;
 }
 
+const ABSOLUTE_URL = /^[A-Za-z][A-Za-z\d+.-]*:/;
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "[::1]" ||
+    normalized === "::1"
+  );
+}
+
+/**
+ * Resolve a ScreenWise API path without permitting a public-network escape.
+ * Absolute URLs are retained for callers that already construct local API
+ * URLs, but they must use plain HTTP, a loopback host, and the configured port.
+ */
+export function resolveLocalApiUrl(path: string, port = _port): string {
+  const baseUrl = `http://localhost:${port}`;
+  const isAbsolute = ABSOLUTE_URL.test(path) || path.startsWith("//");
+
+  if (!isAbsolute) {
+    return `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(path.startsWith("//") ? `http:${path}` : path);
+  } catch {
+    throw new Error("localFetch received an invalid absolute URL");
+  }
+
+  if (
+    parsed.protocol !== "http:" ||
+    !isLoopbackHostname(parsed.hostname) ||
+    parsed.port !== String(port)
+  ) {
+    throw new Error(
+      `localFetch only permits the configured loopback API on port ${port}`,
+    );
+  }
+
+  return parsed.href;
+}
+
 function isLocalApiUrl(url: string): boolean {
-  return url.includes(`localhost:${_port}`) || url.includes(`127.0.0.1:${_port}`);
+  try {
+    resolveLocalApiUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
 }

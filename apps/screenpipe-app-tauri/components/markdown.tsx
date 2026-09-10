@@ -12,7 +12,11 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
   const allowed = new Set(allowedHosts);
 
-  return (url: string): string => {
+  return (url: string, key: string): string => {
+    if (key === "src" && isInlineMarkdownImageSourceAllowed(url)) {
+      return url;
+    }
+
     try {
       const parsed = new URL(url);
       if (parsed.protocol === "screenpipe:" && allowed.has(parsed.host)) {
@@ -29,6 +33,51 @@ export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
 export const notificationUrlTransform = createScreenpipeUrlTransform(["view"]);
 export const viewerUrlTransform = createScreenpipeUrlTransform(["view"]);
 export const chatUrlTransform = createScreenpipeUrlTransform(["timeline", "frame", "view"]);
+const defaultScreenwiseUrlTransform = createScreenpipeUrlTransform([]);
+
+function isLoopbackImageHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "[::1]" ||
+    normalized === "::1" ||
+    normalized === "asset.localhost"
+  );
+}
+
+function externalMarkdownImageUrl(src: string): string | null {
+  try {
+    const parsed = new URL(src.startsWith("//") ? `https:${src}` : src);
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      !isLoopbackImageHost(parsed.hostname)
+    ) {
+      return parsed.href;
+    }
+  } catch {
+    // A malformed source is handled as blocked rather than loaded.
+  }
+  return null;
+}
+
+export function isInlineMarkdownImageSourceAllowed(src: string): boolean {
+  const trimmed = src.trim();
+  if (!trimmed || trimmed.startsWith("//")) return false;
+  if (/^(?:data:image\/|blob:|asset:)/i.test(trimmed)) return true;
+  if (resolveLocalPathFromMarkdownUrl(trimmed)) return true;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return isLoopbackImageHost(parsed.hostname);
+    }
+    return false;
+  } catch {
+    // Relative and absolute filesystem paths are resolved locally below.
+    return !/^[A-Za-z][A-Za-z\d+.-]*:/.test(trimmed);
+  }
+}
 
 export function screenpipeViewerPathFromHref(href: string): string | null {
   try {
@@ -166,8 +215,31 @@ export function createMediaAwareMarkdownComponents(
 
       return <a href={href} {...props}>{children}</a>;
     },
-    img({ src, alt, ...props }) {
+    img({ src, alt, srcSet: _srcSet, ...props }) {
       if (!src) return null;
+      if (!isInlineMarkdownImageSourceAllowed(src)) {
+        const externalUrl = externalMarkdownImageUrl(src);
+        if (!externalUrl) {
+          return <span className="text-xs text-muted-foreground">image source blocked</span>;
+        }
+        return (
+          <button
+            type="button"
+            className="my-2 text-xs text-muted-foreground underline underline-offset-2"
+            aria-label={`open external image${alt ? `: ${alt}` : ""}`}
+            onClick={async () => {
+              try {
+                const { open } = await import("@tauri-apps/plugin-shell");
+                await open(externalUrl);
+              } catch (error) {
+                console.error("failed to open external image:", error);
+              }
+            }}
+          >
+            external image blocked{alt ? `: ${alt}` : ""}
+          </button>
+        );
+      }
       if (isMediaFilePath(src)) {
         return <MediaComponent filePath={src} className="my-2" />;
       }
@@ -178,11 +250,12 @@ export function createMediaAwareMarkdownComponents(
       }
 
       let imgSrc = src;
-      if (src.startsWith("/")) {
+      const localPath = resolveLocalPathFromMarkdownUrl(src);
+      if (localPath) {
         try {
-          imgSrc = convertFileSrc(src);
+          imgSrc = convertFileSrc(localPath);
         } catch {
-          imgSrc = `${getApiBaseUrl()}/experimental/frames/from-file?path=${encodeURIComponent(src)}`;
+          imgSrc = `${getApiBaseUrl()}/experimental/frames/from-file?path=${encodeURIComponent(localPath)}`;
         }
       }
 
@@ -195,9 +268,9 @@ export function createMediaAwareMarkdownComponents(
           loading="lazy"
           onError={(e) => {
             const target = e.currentTarget;
-            if (src.startsWith("/") && !target.dataset.retried) {
+            if (localPath && !target.dataset.retried) {
               target.dataset.retried = "1";
-              target.src = convertFileSrc(src);
+              target.src = convertFileSrc(localPath);
             }
           }}
           {...props}
@@ -223,6 +296,7 @@ export function createMediaAwareMarkdownComponents(
 const ReactMarkdownWithMedia: FC<Options> = (props) => (
   <ReactMarkdown
     {...props}
+    urlTransform={props.urlTransform ?? defaultScreenwiseUrlTransform}
     components={createMediaAwareMarkdownComponents(props.components)}
   >
     {normalizeMarkdownChildren(props.children)}

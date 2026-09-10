@@ -93,8 +93,7 @@
           "$APPDATA/**",
           "$HOME/.screenpipe/**"
         ]
-      },
-      "csp": null
+      }
     },
     "macOSPrivateApi": true
   }
