@@ -6548,7 +6548,6 @@ dependencies = [
  "libc",
  "memory-stats",
  "once_cell",
- "reqwest 0.13.3",
  "rusty-tesseract",
  "sck-rs",
  "screenpipe-a11y",

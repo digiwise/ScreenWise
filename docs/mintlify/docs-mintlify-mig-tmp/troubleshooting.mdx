@@ -14,14 +14,12 @@ icon: "wrench"
 | symptom | first check | deeper guide |
 | --- | --- | --- |
 | app says free after purchase | sign out/in with purchase email | [FAQ](/faq) |
-| cannot find receipt | account billing area and purchase email | [FAQ](/faq) |
 | desktop timeline missing after CLI install | install desktop app, not only CLI | [getting started](/getting-started) |
 | app opens but data is empty | `curl http://localhost:3030/health` and wait 1-2 minutes | [API recipes](/api-recipes) |
 | AI tool cannot see screenpipe | MCP config, Node 18+, app running | [MCP server](/mcp-server) |
 | meeting transcript is empty | microphone, system audio, transcription engine | [meeting intelligence](/meeting-intelligence) |
 | `/api/search` returns 404 | use `/search` on `localhost:3030` | [API recipes](/api-recipes) |
-| privacy question | local/cloud path and enabled toggles | [privacy data flow](/privacy-data-flow) |
-| connected app fails | OAuth callback, token, proxy path | [connection reference](/connection-reference) |
+| privacy question | local data path and enabled toggles | [privacy data flow](/privacy-data-flow) |
 
 <img src="https://docs.screenpi.pe/public/app-screenshots/settings-storage.png" alt="screenpipe storage settings" width="1200" />
 
@@ -160,7 +158,7 @@ if you notice gaps in transcription or missing audio segments, the transcription
 4. **use a smaller local model:** choose a smaller Whisper-compatible model when local processing is too slow
 5. **reduce system load:** close heavy apps or run screenpipe on a machine with better CPU/RAM
 
-if the issue persists, check logs: settings → pipes → view logs to see "dropping audio segment" warnings.
+if the issue persists, check the app logs to see "dropping audio segment" warnings.
 
 ### bluetooth headphone audio quality drops
 
@@ -201,76 +199,14 @@ if your chat window freezes, try these fixes in order:
 1. **restart screenpipe** — closes stalled message queues
 2. **check health:** `curl http://localhost:3030/health` — if it fails, backend is stuck
 3. **verify you have data** — screenpipe needs screen/audio history; wait 1-2 minutes after startup
-4. **verify AI provider connection** — settings → model selector. for ChatGPT/Claude, sign out/back in
-5. **reduce load** — disable unused pipes (settings → pipes), switch to faster model (gpt-4o mini), check logs for "timeout" errors
+4. **verify local model** — settings → model selector. for Ollama, confirm the local server is running
+5. **reduce load** — switch to a smaller local model and check logs for "timeout" errors
 
 ### chat messages disappear
 
 if assistant replies vanish when navigating away, **update to v0.4+** — this message persistence bug was fixed. on older versions, reinstall screenpipe.
 
-### AI model connection fails
-
-1. verify subscription active: [openai.com](https://openai.com) (ChatGPT Plus/Pro) or [claude.ai](https://claude.ai) (Claude Pro)
-2. sign out/in: settings → model selector → sign out, restart, sign back in
-3. if still failing, your tokens expired — try again
-
 ---
-
-## pipes
-
-### Windows command window opens and closes when a pipe runs
-
-this usually means the pipe started and crashed immediately.
-
-1. open **settings -> pipes**.
-2. select the pipe and open logs.
-3. run the pipe manually.
-4. check that `pipe.md` exists in the pipe folder and has valid frontmatter.
-5. if the pipe calls a script, run that script from PowerShell so the error stays visible.
-6. verify the local API with `curl http://localhost:3030/health`.
-
-include the log output when asking for help. "the command window flashes" is the symptom; the useful error is usually in the pipe log or the script output.
-
-### pipe runs but produces no output
-
-1. check logs: go to **settings → pipes** → click your pipe → view logs
-2. make sure your prompt includes concrete instructions to write output or send notifications
-3. test manually: click "run" in the pipe UI and watch the logs in real-time
-4. verify screenpipe has data to work with: `curl "http://localhost:3030/search?limit=5"`
-5. confirm the prompt says what to do when no data is found, so the pipe does not silently guess
-
-### pipe doesn't run on schedule
-
-- make sure the pipe is enabled (toggle is on in **settings → pipes**)
-- check that the schedule format is correct: `every 30m`, `every 2h`, `daily`, or a cron expression
-- only one pipe runs at a time — if another pipe is running, yours will wait in the queue
-- start with manual run; only debug the schedule after manual run works
-
-### pipe fails with AI errors
-
-- check your AI provider is configured: settings → AI settings
-- if using screenpipe cloud: make sure you're signed in
-- if using your own API key: verify it's valid and has credits
-- if using ChatGPT/Claude subscription: try signing out and back in to refresh tokens
-- check the pipe logs for the specific error message
-
-### pipe can't find screen data
-
-- make sure screenpipe is actively recording (check health endpoint)
-- the pipe only searches within its schedule interval — if schedule is "every 30m", it only looks at the last 30 minutes
-- verify data exists for the time range: `curl "http://localhost:3030/search?start_time=30m+ago&limit=5"`
-- search with `content_type=all` before narrowing to `accessibility`, `ocr`, or `audio`
-- remove `window_name` filters until you confirm the exact window title stored by screenpipe
-
-### pipe notifications, sounds, or Telegram messages do not fire
-
-debug the pipeline in pieces:
-
-1. confirm the pipe starts.
-2. confirm screenpipe search returns the condition you expect.
-3. test the notification or Telegram/API call outside the pipe.
-4. reconnect the integration if tokens expired.
-5. make the prompt write a log line when it decides not to notify.
 
 ---
 
@@ -289,12 +225,6 @@ debug the pipeline in pieces:
 - try a broader query: "what apps have I been using?" instead of very specific text
 - check that screen recording permissions are granted
 
-### ChatGPT connection not working
-
-- sign out and sign back in (settings → model selector → sign out)
-- make sure your ChatGPT subscription is active
-- try restarting the screenpipe app
-
 ---
 
 ## performance
@@ -310,13 +240,12 @@ debug the pipeline in pieces:
 - screenpipe uses ~30 GB/month at 1 FPS — this is normal
 - reduce capture rate in settings
 - data is stored in `~/.screenpipe/data/` — you can delete old recordings
-- future: cloud archive offloads older data ([learn more →](/cloud-archive))
 
 ### can I store data on a NAS or external drive?
 
 you can back up `~/.screenpipe/` to external storage. be careful with active database and media writes on slow or unreliable network drives; they can make the app feel broken or risk corruption.
 
-for active long-term retention, prefer [cloud archive](/cloud-archive) or a stable local disk plus backup. if you do use a NAS, test recording, search, restart, and recovery before relying on it.
+for active long-term retention, prefer a stable local disk plus backup. if you do use a NAS, test recording, search, restart, and recovery before relying on it.
 
 ### screenpipe using too much RAM
 
@@ -340,7 +269,7 @@ some buttons disable themselves while the local engine is cold. wait for:
 curl http://localhost:3030/health
 ```
 
-then retry sync, pipe run, search, or MCP setup.
+then retry search or MCP setup.
 
 ---
 
@@ -353,10 +282,10 @@ screenpipe does not automatically redact personal information from storage by de
 | feature | what it does | where |
 | --- | --- | --- |
 | local AI PII removal | redacts sensitive data before selected AI workflows see it | settings → privacy → AI PII removal |
-| privacy filter (enclave mode) | uses a confidential enclave to redact text for cloud AI | settings → privacy → privacy filter mode |
+| local privacy filter | redacts text before local AI workflows see it | settings → privacy |
 | ignored windows | prevents screenpipe from recording specific apps (password managers, banking) | settings → recording → ignored windows |
 
-the safest setup: enable **AI PII removal**, ignore your password manager window, and use local Ollama or disabled cloud media.
+the safest setup: enable **AI PII removal**, ignore your password manager window, and use local Ollama.
 
 ### enable local PII redaction
 
@@ -382,7 +311,7 @@ it does NOT redact:
 
 PII stays in your local `~/.screenpipe/` database and timeline by default. PII redaction only affects what you send to AI models when you enable it.
 
-if you are syncing data to the cloud, archive, or a team, PII removal does not automatically apply — you must toggle it in settings, and it only affects AI workflows, not storage.
+PII removal affects AI workflows, not the underlying stored media.
 
 ---
 

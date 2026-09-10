@@ -101,9 +101,6 @@ export function AIProviderConfig({
   onSubmit,
   defaultPreset,
 }: AIProviderConfigProps) {
-  const [selectedProvider, setSelectedProvider] = useState<
-    AIPreset["provider"]
-  >(defaultPreset?.provider || "native-ollama");
   const { settings } = useSettings();
   const [isLoading, setIsLoading] = useState(false);
   const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
@@ -111,7 +108,6 @@ export function AIProviderConfig({
   const [idError, setIdError] = useState<string | null>(null);
   const [formData, setFormData] = useState<AIPreset>({
     provider: defaultPreset?.provider || "native-ollama",
-    url: "http://localhost:11434/v1",
     model: defaultPreset?.model || "",
     maxContextChars: defaultPreset?.maxContextChars || 512000,
     prompt: defaultPreset?.prompt || DEFAULT_PROMPT,
@@ -175,11 +171,8 @@ export function AIProviderConfig({
 
   useEffect(() => {
     setOllamaModels([]);
-    if (selectedProvider === "native-ollama") {
-      const baseUrl = "http://localhost:11434/v1";
-      fetchOllamaModels(baseUrl);
-    }
-  }, [selectedProvider]);
+    fetchOllamaModels("http://localhost:11434/v1");
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -193,7 +186,6 @@ export function AIProviderConfig({
       onSubmit({
         ...formData,
         id: formData.id?.trim() || "",
-        url: "http://localhost:11434/v1",
       });
     } finally {
       setIsLoading(false);
@@ -247,16 +239,12 @@ export function AIProviderConfig({
 
           <Button
             type="button"
-            variant={
-              selectedProvider === "native-ollama" ? "default" : "outline"
-            }
+            variant="default"
             className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
             onClick={() => {
-              setSelectedProvider("native-ollama");
               setFormData({
                 ...formData,
                 provider: "native-ollama",
-                url: "http://localhost:11434/v1",
               });
             }}
           >
@@ -266,8 +254,7 @@ export function AIProviderConfig({
 
         </div>
 
-        {selectedProvider === "native-ollama" && (
-          <div className="space-y-1">
+        <div className="space-y-1">
             <p className="text-[10px] text-muted-foreground">
               local endpoint: http://localhost:11434/v1
             </p>
@@ -303,9 +290,6 @@ export function AIProviderConfig({
               </p>
             </div>
           </div>
-        )}
-
-
 
         <button
           type="button"
@@ -407,7 +391,6 @@ export const AIPresetDialog = ({
     const newPreset: Partial<AIPreset> = {
       ...preset,
       provider: providerData.provider,
-      url: providerData.url,      // Fixed: was providerData.baseUrl
       model: providerData.model,  // Fixed: was providerData.modelName
       id: providerData.id,
       maxContextChars: providerData.maxContextChars,
@@ -424,7 +407,6 @@ export const AIPresetDialog = ({
     ? {
         id: preset.id,
         provider: preset.provider,
-        url: preset.url,
         model: preset.model,
         maxContextChars: preset.maxContextChars,
         maxTokens: (preset as any).maxTokens ?? 4096,
@@ -881,7 +863,6 @@ export const AIPresetsSelector = ({
                                   const fullPreset = {
                                     ...preset,
                                     id: `${preset.id}`,
-                                    url: "http://localhost:11434/v1",
                                     defaultPreset: false,
                                   } as AIPreset;
                                   setSelectedPresetToEdit(fullPreset);

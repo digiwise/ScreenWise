@@ -33,8 +33,8 @@ use crate::{
     text_similarity::is_similar_transcription, AudioChunkProcessingSnapshot, AudioChunksResponse,
     AudioDevice, AudioEntry, AudioResult, AudioResultRaw, ChunkOutcome, ContentType, DeviceType,
     Element, ElementRow, ElementSource, FrameData, FrameRow, FrameRowLight, FrameWindowData,
-    InsertUiEvent, MeetingRecord, MeetingTranscriptSegment, MemoryRecord, MemorySyncRow,
-    NewDiarizationSegment, OCREntry, OCRResult, OCRResultRaw, OcrEngine, OcrTextBlock, Order,
+    InsertUiEvent, MeetingRecord, MeetingTranscriptSegment, MemoryRecord, NewDiarizationSegment,
+    OCREntry, OCRResult, OCRResultRaw, OcrEngine, OcrTextBlock, Order,
     ReplacementAudioTranscription, SearchMatch, SearchMatchGroup, SearchResult, Speaker,
     TagContentType, TextBounds, TextPosition, TimeSeriesChunk, UiContent, UiEventRecord,
     UiEventRow, VideoMetadata, MAX_TRANSCRIPTION_ATTEMPTS,
@@ -430,11 +430,6 @@ impl DatabaseManager {
         // so we check pragma_table_info and add missing columns in Rust.
         Self::ensure_event_driven_columns(pool).await?;
 
-        // Same self-heal pattern for the cross-device memories sync columns
-        // (added in 20260506120000_add_memories_sync_columns.sql). Older DBs
-        // upgraded across that migration boundary may have skipped it.
-        Self::ensure_memories_sync_columns(pool).await?;
-
         Ok(())
     }
 
@@ -565,34 +560,6 @@ impl DatabaseManager {
             );
         }
 
-        Ok(())
-    }
-
-    /// Self-heal the `memories.sync_uuid` and `memories.sync_modified_by`
-    /// columns + uuid index. Mirror of [`ensure_event_driven_columns`] for
-    /// the cross-device memories sync feature, so DBs that upgraded across
-    /// the migration boundary without applying it converge on next launch.
-    async fn ensure_memories_sync_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-        let cols: &[(&str, &str)] = &[("sync_uuid", "TEXT"), ("sync_modified_by", "TEXT")];
-        for (col_name, col_type) in cols {
-            let row: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = ?1",
-            )
-            .bind(col_name)
-            .fetch_one(pool)
-            .await?;
-            if row.0 == 0 {
-                tracing::info!("Adding missing column memories.{}", col_name);
-                let sql = format!("ALTER TABLE memories ADD COLUMN {} {}", col_name, col_type);
-                sqlx::query(&sql).execute(pool).await?;
-            }
-        }
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_sync_uuid \
-             ON memories(sync_uuid) WHERE sync_uuid IS NOT NULL",
-        )
-        .execute(pool)
-        .await?;
         Ok(())
     }
 
@@ -738,210 +705,6 @@ impl DatabaseManager {
         crate::sqlite_error::is_sqlite_busy_error(e)
     }
 
-    /// Mark records as synced via the write coalescing queue.
-    /// This ensures sync UPDATEs go through the write semaphore and don't
-    /// bypass the write pool (which was causing WAL lock contention).
-    pub async fn mark_synced(
-        &self,
-        table: crate::write_queue::SyncTable,
-        synced_at: &str,
-        time_start: &str,
-        time_end: &str,
-    ) -> Result<(), sqlx::Error> {
-        use crate::write_queue::WriteOp;
-        self.write_queue
-            .submit(WriteOp::MarkSynced {
-                table,
-                synced_at: synced_at.to_string(),
-                time_start: time_start.to_string(),
-                time_end: time_end.to_string(),
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Insert a synced frame via the write queue. Returns the frame ID (0 if skipped due to conflict).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn sync_insert_frame(
-        &self,
-        sync_id: &str,
-        machine_id: &str,
-        timestamp: &str,
-        offset_index: i64,
-        app_name: Option<&str>,
-        window_name: Option<&str>,
-        browser_url: Option<&str>,
-        device_name: &str,
-    ) -> Result<i64, sqlx::Error> {
-        use crate::write_queue::{WriteOp, WriteResult};
-        match self
-            .write_queue
-            .submit(WriteOp::SyncInsertFrame {
-                sync_id: sync_id.to_string(),
-                machine_id: machine_id.to_string(),
-                timestamp: timestamp.to_string(),
-                offset_index,
-                app_name: app_name.map(|s| s.to_string()),
-                window_name: window_name.map(|s| s.to_string()),
-                browser_url: browser_url.map(|s| s.to_string()),
-                device_name: device_name.to_string(),
-            })
-            .await?
-        {
-            WriteResult::Id(id) => Ok(id),
-            _ => Ok(0),
-        }
-    }
-
-    /// Insert a synced OCR record via the write queue.
-    pub async fn sync_insert_ocr(
-        &self,
-        frame_id: i64,
-        text: &str,
-        focused: bool,
-        app_name: &str,
-        window_name: Option<&str>,
-        sync_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        use crate::write_queue::WriteOp;
-        self.write_queue
-            .submit(WriteOp::SyncInsertOcr {
-                frame_id,
-                text: text.to_string(),
-                focused,
-                app_name: app_name.to_string(),
-                window_name: window_name.map(|s| s.to_string()),
-                sync_id: sync_id.to_string(),
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Insert a synced transcription via the write queue. Returns the audio_chunk_id.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn sync_insert_transcription(
-        &self,
-        sync_id: &str,
-        machine_id: &str,
-        timestamp: &str,
-        transcription: &str,
-        device: &str,
-        is_input_device: bool,
-        speaker_id: Option<i64>,
-    ) -> Result<i64, sqlx::Error> {
-        use crate::write_queue::{WriteOp, WriteResult};
-        match self
-            .write_queue
-            .submit(WriteOp::SyncInsertTranscription {
-                sync_id: sync_id.to_string(),
-                machine_id: machine_id.to_string(),
-                timestamp: timestamp.to_string(),
-                transcription: transcription.to_string(),
-                device: device.to_string(),
-                is_input_device,
-                speaker_id,
-            })
-            .await?
-        {
-            WriteResult::Id(id) => Ok(id),
-            _ => Ok(0),
-        }
-    }
-
-    /// Insert a synced accessibility record via the write queue.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn sync_insert_accessibility(
-        &self,
-        sync_id: &str,
-        machine_id: &str,
-        timestamp: &str,
-        app_name: &str,
-        window_name: &str,
-        browser_url: Option<&str>,
-        text_content: &str,
-    ) -> Result<(), sqlx::Error> {
-        use crate::write_queue::WriteOp;
-        self.write_queue
-            .submit(WriteOp::SyncInsertAccessibility {
-                sync_id: sync_id.to_string(),
-                machine_id: machine_id.to_string(),
-                timestamp: timestamp.to_string(),
-                app_name: app_name.to_string(),
-                window_name: window_name.to_string(),
-                browser_url: browser_url.map(|s| s.to_string()),
-                text_content: text_content.to_string(),
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Insert a synced UI event via the write queue.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn sync_insert_ui_event(
-        &self,
-        sync_id: &str,
-        machine_id: &str,
-        timestamp: &str,
-        event_type: &str,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        browser_url: Option<&str>,
-        text_content: Option<&str>,
-        x: Option<i32>,
-        y: Option<i32>,
-        key_code: Option<i32>,
-        modifiers: Option<i32>,
-        element_role: Option<&str>,
-        element_name: Option<&str>,
-        session_id: Option<&str>,
-        relative_ms: Option<i32>,
-        delta_x: Option<i32>,
-        delta_y: Option<i32>,
-        button: Option<i32>,
-        click_count: Option<i32>,
-        text_length: Option<i32>,
-        app_pid: Option<i32>,
-        element_value: Option<&str>,
-        element_description: Option<&str>,
-        element_automation_id: Option<&str>,
-        element_bounds: Option<&str>,
-        frame_id: Option<i64>,
-    ) -> Result<(), sqlx::Error> {
-        use crate::write_queue::WriteOp;
-        self.write_queue
-            .submit(WriteOp::SyncInsertUiEvent {
-                sync_id: sync_id.to_string(),
-                machine_id: machine_id.to_string(),
-                timestamp: timestamp.to_string(),
-                event_type: event_type.to_string(),
-                app_name: app_name.map(|s| s.to_string()),
-                window_title: window_title.map(|s| s.to_string()),
-                browser_url: browser_url.map(|s| s.to_string()),
-                text_content: text_content.map(|s| s.to_string()),
-                x,
-                y,
-                key_code,
-                modifiers,
-                element_role: element_role.map(|s| s.to_string()),
-                element_name: element_name.map(|s| s.to_string()),
-                session_id: session_id.map(|s| s.to_string()),
-                relative_ms,
-                delta_x,
-                delta_y,
-                button,
-                click_count,
-                text_length,
-                app_pid,
-                element_value: element_value.map(|s| s.to_string()),
-                element_description: element_description.map(|s| s.to_string()),
-                element_automation_id: element_automation_id.map(|s| s.to_string()),
-                element_bounds: element_bounds.map(|s| s.to_string()),
-                frame_id,
-            })
-            .await?;
-        Ok(())
-    }
-
     /// Compact snapshots via the write coalescing queue.
     pub async fn compact_snapshots_queued(
         &self,
@@ -1064,7 +827,6 @@ impl DatabaseManager {
                AND transcription_attempts < ?4
                AND timestamp >= ?1
                AND timestamp <= ?2
-               AND file_path NOT LIKE 'cloud://%'
              ORDER BY timestamp ASC
              LIMIT ?3",
         )
@@ -1093,7 +855,6 @@ impl DatabaseManager {
                AND transcription_attempts < ?4
                AND timestamp >= ?2
                AND timestamp <= ?3
-               AND file_path NOT LIKE 'cloud://%'
              LIMIT 1",
         )
         .bind(chunk_id)
@@ -1118,8 +879,7 @@ impl DatabaseManager {
              WHERE transcription_status = 'pending'
                AND transcription_attempts < ?3
                AND timestamp >= ?1
-               AND timestamp <= ?2
-               AND file_path NOT LIKE 'cloud://%'",
+               AND timestamp <= ?2",
         )
         .bind(since)
         .bind(older_than)
@@ -1146,8 +906,7 @@ impl DatabaseManager {
                 MIN(CASE WHEN transcription_status = 'pending' THEN timestamp END) AS oldest_pending \
              FROM audio_chunks \
              WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?1) \
-               AND file_path NOT LIKE 'cloud://%'",
-        )
+        ")
         .bind(format!("-{} seconds", within_secs))
         .fetch_one(&self.pool)
         .await?;
@@ -1827,7 +1586,6 @@ impl DatabaseManager {
                FROM audio_chunks ac
                LEFT JOIN audio_transcriptions at ON ac.id = at.audio_chunk_id
                WHERE ac.timestamp >= ?1 AND ac.timestamp <= ?2
-                 AND ac.file_path NOT LIKE 'cloud://%'
                ORDER BY ac.timestamp ASC"#,
         )
         .bind(start)
@@ -1850,7 +1608,6 @@ impl DatabaseManager {
             r#"SELECT ac.id, ac.file_path, ac.timestamp
                FROM audio_chunks ac
                WHERE ac.timestamp >= ?1 AND ac.timestamp <= ?2
-                 AND ac.file_path NOT LIKE 'cloud://%'
                ORDER BY ac.timestamp ASC"#,
         )
         .bind(start)
@@ -1877,7 +1634,6 @@ impl DatabaseManager {
                FROM audio_chunks ac
                LEFT JOIN audio_transcriptions at ON ac.id = at.audio_chunk_id
                WHERE ac.id IN ({})
-                 AND ac.file_path NOT LIKE 'cloud://%'
                ORDER BY ac.timestamp ASC"#,
             placeholders.join(", ")
         );
@@ -4014,7 +3770,6 @@ impl DatabaseManager {
             conditions.push("COALESCE(audio_transcriptions.text_length, LENGTH(audio_transcriptions.transcription)) <= ?");
         }
         conditions.push("(speakers.id IS NULL OR speakers.hallucination = 0)");
-        conditions.push("audio_chunks.file_path NOT LIKE 'cloud://%'");
         if speaker_ids.is_some() {
             conditions.push("(json_array_length(?) = 0 OR audio_transcriptions.speaker_id IN (SELECT value FROM json_each(?)))");
         }
@@ -5304,7 +5059,6 @@ impl DatabaseManager {
         FROM frames f
         LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
         WHERE f.timestamp >= ?1 AND f.timestamp <= ?2
-          AND COALESCE(vc.file_path, f.snapshot_path, '') NOT LIKE 'cloud://%'
         ORDER BY f.timestamp DESC, f.offset_index DESC
         LIMIT 10000
     "#;
@@ -5329,7 +5083,6 @@ impl DatabaseManager {
         JOIN audio_chunks ac ON at.audio_chunk_id = ac.id
         LEFT JOIN speakers s ON at.speaker_id = s.id
         WHERE at.timestamp >= ?1 AND at.timestamp <= ?2
-          AND ac.file_path NOT LIKE 'cloud://%'
         ORDER BY at.timestamp DESC
         LIMIT 10000
         "#;
@@ -5888,7 +5641,6 @@ impl DatabaseManager {
             FROM audio_chunks ac
             JOIN audio_transcriptions at ON ac.id = at.audio_chunk_id
             WHERE at.speaker_id = ?
-              AND ac.file_path NOT LIKE 'cloud://%'
             ORDER BY at.start_time
             "#,
         )
@@ -5918,7 +5670,6 @@ impl DatabaseManager {
                 JOIN audio_chunks ac ON at.audio_chunk_id = ac.id
                 WHERE (s.name = '' OR s.name IS NULL)
                 AND s.hallucination = 0
-                AND ac.file_path NOT LIKE 'cloud://%'
                 "#;
 
         let speaker_filter = match &speaker_ids {
@@ -6052,7 +5803,6 @@ impl DatabaseManager {
                     SELECT s2.id FROM speakers s2 WHERE s2.name = ns.name AND s2.hallucination = 0
                 )
                 JOIN audio_chunks ac ON at2.audio_chunk_id = ac.id
-                WHERE ac.file_path NOT LIKE 'cloud://%'
                 AND at2.timestamp IN (
                     SELECT at3.timestamp
                     FROM audio_transcriptions at3
@@ -6159,9 +5909,7 @@ impl DatabaseManager {
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
-        // 1. Collect video file paths for chunks that become fully orphaned.
-        // Only include files that have been uploaded to cloud (cloud_blob_id IS NOT NULL)
-        // or files not managed by archive (no cloud tracking needed for non-archive deletes).
+        // 1. Collect local video file paths for chunks that become fully orphaned.
         // NOTE: filter out NULL video_chunk_id in the NOT IN subquery — SQL `x NOT IN
         // (NULL, ...)` evaluates to UNKNOWN for every row, silently zeroing out the
         // result set. frames.video_chunk_id is nullable (snapshot-only frames have no
@@ -6171,20 +5919,18 @@ impl DatabaseManager {
                WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
                             WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
                AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND (cloud_blob_id IS NOT NULL OR file_path LIKE 'cloud://%')"#,
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
 
-        // Also collect snapshot files that have been uploaded
+        // Also collect local snapshot files.
         let snapshot_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT snapshot_path FROM frames
                WHERE timestamp BETWEEN ?1 AND ?2
-               AND snapshot_path IS NOT NULL
-               AND cloud_blob_id IS NOT NULL"#,
+               AND snapshot_path IS NOT NULL"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6198,8 +5944,7 @@ impl DatabaseManager {
                WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                             WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
-               AND file_path NOT LIKE 'cloud://%'"#,
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6376,8 +6121,7 @@ impl DatabaseManager {
                WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
                             WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
                AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND file_path NOT LIKE 'cloud://%'"#,
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6403,8 +6147,7 @@ impl DatabaseManager {
                WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                             WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
-               AND file_path NOT LIKE 'cloud://%'"#,
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6581,7 +6324,6 @@ impl DatabaseManager {
             r#"SELECT file_path FROM video_chunks
                WHERE evicted_at IS NULL
                AND file_path != ''
-               AND file_path NOT LIKE 'cloud://%'
                AND id IN (SELECT DISTINCT video_chunk_id FROM frames
                           WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
                AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
@@ -6596,7 +6338,6 @@ impl DatabaseManager {
             r#"SELECT file_path FROM audio_chunks
                WHERE evicted_at IS NULL
                AND file_path != ''
-               AND file_path NOT LIKE 'cloud://%'
                AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                           WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
@@ -6625,7 +6366,6 @@ impl DatabaseManager {
                SET file_path = '', evicted_at = CURRENT_TIMESTAMP
                WHERE evicted_at IS NULL
                AND file_path != ''
-               AND file_path NOT LIKE 'cloud://%'
                AND id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
                AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
@@ -6639,7 +6379,6 @@ impl DatabaseManager {
                SET file_path = '', evicted_at = CURRENT_TIMESTAMP
                WHERE evicted_at IS NULL
                AND file_path != ''
-               AND file_path NOT LIKE 'cloud://%'
                AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
@@ -6697,7 +6436,6 @@ impl DatabaseManager {
             r#"SELECT file_path FROM video_chunks
                WHERE evicted_at IS NULL
                AND file_path != ''
-               AND file_path NOT LIKE 'cloud://%'
                AND id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
                AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
@@ -6710,7 +6448,6 @@ impl DatabaseManager {
             r#"SELECT file_path FROM audio_chunks
                WHERE evicted_at IS NULL
                AND file_path != ''
-               AND file_path NOT LIKE 'cloud://%'
                AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
@@ -6753,7 +6490,6 @@ impl DatabaseManager {
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
-        collect_all_files: bool,
     ) -> Result<DeleteTimeRangeResult, sqlx::Error> {
         let mut tx = self.begin_immediate_with_retry().await?;
 
@@ -6772,19 +6508,9 @@ impl DatabaseManager {
         .await?;
 
         // Collect video files that are fully within this batch (all frames in chunk are in range)
-        let video_query = if collect_all_files {
-            // Local retention: collect all files regardless of cloud status
-            r#"SELECT file_path FROM video_chunks
+        let video_query = r#"SELECT file_path FROM video_chunks
                WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)
-               AND file_path NOT LIKE 'cloud://%'"#
-        } else {
-            // Archive: only collect cloud-uploaded files
-            r#"SELECT file_path FROM video_chunks
-               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)
-               AND (cloud_blob_id IS NOT NULL OR file_path LIKE 'cloud://%')"#
-        };
+               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#;
         let video_files: Vec<String> = sqlx::query_scalar(video_query)
             .bind(&start_str)
             .bind(&end_str)
@@ -6795,8 +6521,7 @@ impl DatabaseManager {
         let audio_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM audio_chunks
                WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)
-               AND file_path NOT LIKE 'cloud://%'"#,
+               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6987,204 +6712,6 @@ impl DatabaseManager {
         }))
     }
 
-    /// Delete all locally-stored data that was synced from a specific remote device.
-    /// Uses JOINs to find related OCR/transcription records since those tables
-    /// lack a direct machine_id column.
-    pub async fn delete_by_machine_id(
-        &self,
-        machine_id: &str,
-    ) -> Result<DeleteTimeRangeResult, sqlx::Error> {
-        let mut tx = self.begin_immediate_with_retry().await?;
-
-        // 1. Delete ocr_text for frames from this machine
-        let ocr_result = sqlx::query(
-            "DELETE FROM ocr_text WHERE frame_id IN (SELECT id FROM frames WHERE machine_id = ?1)",
-        )
-        .bind(machine_id)
-        .execute(&mut **tx.conn())
-        .await?;
-        let ocr_deleted = ocr_result.rows_affected();
-
-        // 2. Delete elements for frames from this machine (no CASCADE on FK)
-        sqlx::query(
-            "DELETE FROM elements WHERE frame_id IN (SELECT id FROM frames WHERE machine_id = ?1)",
-        )
-        .bind(machine_id)
-        .execute(&mut **tx.conn())
-        .await?;
-
-        // 3. Delete frames from this machine (vision_tags CASCADE automatically)
-        let frames_result = sqlx::query("DELETE FROM frames WHERE machine_id = ?1")
-            .bind(machine_id)
-            .execute(&mut **tx.conn())
-            .await?;
-        let frames_deleted = frames_result.rows_affected();
-
-        // 3. Delete orphaned video_chunks (cloud:// placeholders from sync)
-        let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE machine_id = ?1 AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
-        )
-        .bind(machine_id)
-        .execute(&mut **tx.conn())
-        .await?;
-        let video_chunks_deleted = video_chunks_result.rows_affected();
-
-        // 4. Delete audio_transcriptions for audio_chunks from this machine
-        let audio_transcriptions_result = sqlx::query(
-            "DELETE FROM audio_transcriptions WHERE audio_chunk_id IN (SELECT id FROM audio_chunks WHERE machine_id = ?1)",
-        )
-        .bind(machine_id)
-        .execute(&mut **tx.conn())
-        .await?;
-        let audio_transcriptions_deleted = audio_transcriptions_result.rows_affected();
-
-        // 5. Delete orphaned audio_chunks from this machine (audio_tags CASCADE automatically)
-        let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE machine_id = ?1 AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
-        )
-        .bind(machine_id)
-        .execute(&mut **tx.conn())
-        .await?;
-        let audio_chunks_deleted = audio_chunks_result.rows_affected();
-
-        // 6. Delete ui_events from this machine
-        let ui_events_result = sqlx::query("DELETE FROM ui_events WHERE machine_id = ?1")
-            .bind(machine_id)
-            .execute(&mut **tx.conn())
-            .await?;
-        let ui_events_deleted = ui_events_result.rows_affected();
-
-        tx.commit().await.map_err(|e| {
-            error!("failed to commit delete_by_machine_id transaction: {}", e);
-            e
-        })?;
-
-        debug!(
-            "delete_by_machine_id({}) committed: frames={}, ocr={}, audio_transcriptions={}, audio_chunks={}, video_chunks={}, ui_events={}",
-            machine_id, frames_deleted, ocr_deleted, audio_transcriptions_deleted, audio_chunks_deleted, video_chunks_deleted, ui_events_deleted
-        );
-
-        Ok(DeleteTimeRangeResult {
-            frames_deleted,
-            ocr_deleted,
-            audio_transcriptions_deleted,
-            audio_chunks_deleted,
-            video_chunks_deleted,
-            accessibility_deleted: 0,
-            ui_events_deleted,
-            video_files: vec![],
-            audio_files: vec![],
-            snapshot_files: vec![],
-        })
-    }
-
-    /// Count synced records per machine_id. Returns (machine_id, frames, audio_transcriptions).
-    pub async fn count_by_machine_id(&self) -> Result<Vec<(String, i64, i64)>, sqlx::Error> {
-        let rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT machine_id, COUNT(*) FROM frames WHERE machine_id IS NOT NULL GROUP BY machine_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let audio_rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT machine_id, COUNT(*) FROM audio_chunks WHERE machine_id IS NOT NULL GROUP BY machine_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut map: std::collections::HashMap<String, (i64, i64)> =
-            std::collections::HashMap::new();
-        for (mid, count) in rows {
-            map.entry(mid).or_default().0 = count;
-        }
-        for (mid, count) in audio_rows {
-            map.entry(mid).or_default().1 = count;
-        }
-
-        Ok(map.into_iter().map(|(mid, (f, a))| (mid, f, a)).collect())
-    }
-
-    // =========================================================================
-    // Cloud archive media upload tracking
-    // =========================================================================
-
-    /// Get video chunks that haven't been uploaded to cloud yet, before cutoff.
-    /// Returns (chunk_id, file_path, min_frame_timestamp).
-    pub async fn get_unuploaded_video_chunks(
-        &self,
-        cutoff: DateTime<Utc>,
-        limit: i64,
-    ) -> Result<Vec<(i64, String, String)>, sqlx::Error> {
-        let cutoff_str = cutoff.to_rfc3339();
-        sqlx::query_as(
-            r#"SELECT vc.id, vc.file_path, MIN(f.timestamp) as min_ts
-               FROM video_chunks vc
-               JOIN frames f ON f.video_chunk_id = vc.id
-               WHERE vc.cloud_blob_id IS NULL
-                 AND f.timestamp < ?1
-               GROUP BY vc.id
-               HAVING MAX(f.timestamp) < ?1
-               ORDER BY min_ts ASC
-               LIMIT ?2"#,
-        )
-        .bind(&cutoff_str)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-    }
-
-    /// Get snapshot frames (not yet compacted into video chunks) that haven't
-    /// been uploaded to cloud yet, before cutoff.
-    /// Returns (frame_id, snapshot_path, timestamp).
-    pub async fn get_unuploaded_snapshots(
-        &self,
-        cutoff: DateTime<Utc>,
-        limit: i64,
-    ) -> Result<Vec<(i64, String, String)>, sqlx::Error> {
-        let cutoff_str = cutoff.to_rfc3339();
-        sqlx::query_as(
-            r#"SELECT id, snapshot_path, timestamp
-               FROM frames
-               WHERE snapshot_path IS NOT NULL
-                 AND cloud_blob_id IS NULL
-                 AND timestamp < ?1
-               ORDER BY timestamp ASC
-               LIMIT ?2"#,
-        )
-        .bind(&cutoff_str)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-    }
-
-    /// Mark a video chunk as uploaded to cloud.
-    pub async fn mark_video_chunk_uploaded(
-        &self,
-        chunk_id: i64,
-        blob_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE video_chunks SET cloud_blob_id = ?1 WHERE id = ?2")
-            .bind(blob_id)
-            .bind(chunk_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Mark a snapshot frame as uploaded to cloud.
-    pub async fn mark_snapshot_uploaded(
-        &self,
-        frame_id: i64,
-        blob_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE frames SET cloud_blob_id = ?1 WHERE id = ?2")
-            .bind(blob_id)
-            .bind(frame_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn get_similar_speakers(
         &self,
         speaker_id: i64,
@@ -7206,7 +6733,6 @@ impl DatabaseManager {
                 JOIN audio_transcriptions at ON s.id = at.speaker_id
                 JOIN audio_chunks ac ON at.audio_chunk_id = ac.id
                 AND s.hallucination = 0
-                AND ac.file_path NOT LIKE 'cloud://%'
                 AND at.timestamp IN (
                     SELECT timestamp
                     FROM audio_transcriptions at2
@@ -9534,7 +9060,7 @@ LIMIT ? OFFSET ?
     /// Give live meeting-transcript segments the SAME global `speaker_id` that the
     /// engine-agnostic backfill (`backfill_missing_speakers`) resolved on
     /// `audio_transcriptions` — so the Meeting view shows the cross-meeting, nameable
-    /// identity instead of Deepgram's per-stream "speaker N" label.
+    /// identity instead of a live stream's session-local "speaker N" label.
     ///
     /// For each segment still missing a speaker (and `captured_at >= since`), take the
     /// `speaker_id` of the nearest already-identified `audio_transcriptions` row within
@@ -9638,7 +9164,7 @@ LIMIT ? OFFSET ?
                     NULL AS audio_file_path,
                     mts.speaker_id AS speaker_id,
                     -- Prefer the resolved global speaker's name; fall back to the
-                    -- free-text Deepgram label until backfilled / if the speaker is
+                    -- free-text live-stream label until backfilled / if the speaker is
                     -- unnamed (NULLIF treats '' as "no name yet").
                     COALESCE(NULLIF(s.name, ''), mts.speaker_name) AS speaker_name,
                     mts.transcript,
@@ -9676,7 +9202,6 @@ LIMIT ? OFFSET ?
                 WHERE julianday(at.timestamp) >= julianday(mw.meeting_start)
                   AND julianday(at.timestamp) <= julianday(mw.meeting_end)
                   AND TRIM(at.transcription) != ''
-                  AND ac.file_path NOT LIKE 'cloud://%'
                   AND (s.id IS NULL OR s.hallucination = 0)
                   -- Drop background rows already covered by a live segment in the
                   -- same meeting (within ±15s). Live + background both writing the
@@ -10144,142 +9669,6 @@ LIMIT ? OFFSET ?
             .await?;
         tx.commit().await?;
         Ok(())
-    }
-
-    // -- memories cross-device sync helpers --
-    //
-    // The HTTP layer + background loop in screenpipe-engine/src/memories_sync.rs
-    // calls these to read all rows for the manifest, mint sync_uuids on first
-    // publish, and apply remote rows back into the local table. Conflict
-    // resolution (LWW) lives in screenpipe-core::memories::sync and is pure;
-    // these are the I/O endpoints.
-
-    /// Read every memory + its sync metadata for manifest building.
-    /// Returns the full row including sync_uuid (may be NULL for rows
-    /// born locally that haven't synced yet) and sync_modified_by.
-    pub async fn list_memories_for_sync(&self) -> Result<Vec<MemorySyncRow>, SqlxError> {
-        sqlx::query_as::<_, MemorySyncRow>(
-            "SELECT id, sync_uuid, content, source, source_context, tags, importance, \
-                    created_at, updated_at, sync_modified_by \
-             FROM memories",
-        )
-        .fetch_all(&self.pool)
-        .await
-    }
-
-    /// Stamp a freshly-minted sync_uuid + machine id on a row that's
-    /// being published for the first time. No-op if the row was deleted
-    /// while the sync was in flight (id no longer exists).
-    pub async fn set_memory_sync_identity(
-        &self,
-        id: i64,
-        sync_uuid: &str,
-        machine_id: &str,
-    ) -> Result<(), SqlxError> {
-        let mut tx = self.begin_immediate_with_retry().await?;
-        sqlx::query(
-            "UPDATE memories SET sync_uuid = ?1, sync_modified_by = ?2 \
-             WHERE id = ?3 AND sync_uuid IS NULL",
-        )
-        .bind(sync_uuid)
-        .bind(machine_id)
-        .bind(id)
-        .execute(&mut **tx.conn())
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Apply a memory pulled from a remote machine. INSERTs if the
-    /// sync_uuid is unknown locally, UPDATEs the existing row if not.
-    /// Caller is responsible for LWW: this just writes what it's given.
-    /// `frame_id` is intentionally not synced (it's a local FK), so
-    /// imported rows always have NULL frame_id.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_synced_memory(
-        &self,
-        sync_uuid: &str,
-        content: &str,
-        source: &str,
-        source_context: Option<&str>,
-        tags: &str,
-        importance: f64,
-        created_at: &str,
-        updated_at: &str,
-        sync_modified_by: &str,
-    ) -> Result<(), SqlxError> {
-        let mut tx = self.begin_immediate_with_retry().await?;
-        // SQLite's INSERT … ON CONFLICT (sync_uuid) is the cleanest path,
-        // but the unique index is partial (WHERE sync_uuid IS NOT NULL),
-        // and partial indexes can't drive ON CONFLICT in SQLite < 3.40
-        // we don't gate on. Two-step is safer and the table is small.
-        let existing: Option<(i64,)> =
-            sqlx::query_as("SELECT id FROM memories WHERE sync_uuid = ?1 LIMIT 1")
-                .bind(sync_uuid)
-                .fetch_optional(&mut **tx.conn())
-                .await?;
-        if let Some((id,)) = existing {
-            sqlx::query(
-                "UPDATE memories SET content = ?1, source = ?2, source_context = ?3, \
-                                     tags = ?4, importance = ?5, created_at = ?6, \
-                                     updated_at = ?7, sync_modified_by = ?8 \
-                 WHERE id = ?9",
-            )
-            .bind(content)
-            .bind(source)
-            .bind(source_context)
-            .bind(tags)
-            .bind(importance)
-            .bind(created_at)
-            .bind(updated_at)
-            .bind(sync_modified_by)
-            .bind(id)
-            .execute(&mut **tx.conn())
-            .await?;
-        } else {
-            sqlx::query(
-                "INSERT INTO memories (sync_uuid, content, source, source_context, tags, \
-                                       importance, created_at, updated_at, sync_modified_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .bind(sync_uuid)
-            .bind(content)
-            .bind(source)
-            .bind(source_context)
-            .bind(tags)
-            .bind(importance)
-            .bind(created_at)
-            .bind(updated_at)
-            .bind(sync_modified_by)
-            .execute(&mut **tx.conn())
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Apply a remote tombstone — delete the local row matching the
-    /// uuid. No-op if not found (already deleted, or never synced).
-    pub async fn delete_memory_by_sync_uuid(&self, sync_uuid: &str) -> Result<(), SqlxError> {
-        let mut tx = self.begin_immediate_with_retry().await?;
-        sqlx::query("DELETE FROM memories WHERE sync_uuid = ?1")
-            .bind(sync_uuid)
-            .execute(&mut **tx.conn())
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Look up a memory's sync_uuid by local id. Used by the DELETE
-    /// route to know whether to record a tombstone (skip if NULL —
-    /// the row was never published, so no other device has it).
-    pub async fn get_memory_sync_uuid(&self, id: i64) -> Result<Option<String>, SqlxError> {
-        let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT sync_uuid FROM memories WHERE id = ?1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.and_then(|(u,)| u))
     }
 
     #[allow(clippy::too_many_arguments)]

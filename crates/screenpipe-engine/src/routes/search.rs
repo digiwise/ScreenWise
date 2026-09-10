@@ -82,10 +82,6 @@ pub(crate) struct SearchQuery {
     /// Filter audio transcriptions by speaker name (case-insensitive partial match)
     #[serde(default)]
     speaker_name: Option<String>,
-    /// Reserved for the retired cloud-sync search backend. A request that
-    /// enables it is rejected before any recorded content is returned.
-    #[serde(default, deserialize_with = "deserialize_flexible_bool")]
-    include_cloud: bool,
     /// Truncate each result's text/transcription to this many characters using middle-truncation.
     /// When set, long content is replaced with first half + "...(truncated N chars)..." + last half.
     #[serde(default)]
@@ -96,10 +92,6 @@ pub(crate) struct SearchQuery {
     /// Filter results by machine identifier (UUID)
     #[serde(default)]
     machine_id: Option<String>,
-    /// Reserved for the retired hosted search-time PII filter. A request that
-    /// enables it is rejected before any recorded content is returned.
-    #[serde(default, deserialize_with = "deserialize_flexible_bool")]
-    filter_pii: bool,
     /// Restrict results to items carrying ALL of these tags. Comma-separated,
     /// e.g. `tags=person:ada,project:atlas`. Tags span one string namespace
     /// across three stores: screen + audio (junction tags written via
@@ -322,11 +314,9 @@ pub(crate) fn compute_search_cache_key(query: &SearchQuery) -> u64 {
     query.on_screen.hash(&mut hasher);
     query.browser_url.hash(&mut hasher);
     query.speaker_name.hash(&mut hasher);
-    query.include_cloud.hash(&mut hasher);
     query.max_content_length.hash(&mut hasher);
     query.device_name.hash(&mut hasher);
     query.machine_id.hash(&mut hasher);
-    query.filter_pii.hash(&mut hasher);
     // Tags change the result set materially — must be in the cache key so a
     // cached untagged response can't be served for a tag-filtered query.
     query.tags.hash(&mut hasher);
@@ -339,26 +329,6 @@ pub(crate) async fn search(
     Query(query): Query<SearchQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<JsonResponse<SearchResponse>, (StatusCode, JsonResponse<serde_json::Value>)> {
-    if query.include_cloud {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            JsonResponse(json!({
-                "error": "cloud_search_unavailable",
-                "message": "cloud-synced search is unavailable in local-only ScreenWise",
-            })),
-        ));
-    }
-
-    if query.filter_pii {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            JsonResponse(json!({
-                "error": "privacy_filter_unavailable",
-                "message": "remote search-time PII filtering is unavailable in local-only ScreenWise; enable local pre-persistence redaction instead",
-            })),
-        ));
-    }
-
     debug!(
         "received search request: query='{}', content_type={:?}, limit={}, offset={}, start_time={:?}, end_time={:?}, app_name={:?}, window_name={:?}, min_length={:?}, max_length={:?}, speaker_ids={:?}, frame_name={:?}, browser_url={:?}, focused={:?}",
         query.q.as_deref().unwrap_or(""),
@@ -772,11 +742,9 @@ mod tests {
             on_screen: None,
             browser_url: None,
             speaker_name: None,
-            include_cloud: false,
             max_content_length: None,
             device_name: None,
             machine_id: None,
-            filter_pii: false,
             tags: None,
         };
 
@@ -800,11 +768,9 @@ mod tests {
             on_screen: None,
             browser_url: None,
             speaker_name: None,
-            include_cloud: false,
             max_content_length: None,
             device_name: None,
             machine_id: None,
-            filter_pii: false,
             tags: None,
         };
 
@@ -836,11 +802,9 @@ mod tests {
             on_screen: None,
             browser_url: None,
             speaker_name: None,
-            include_cloud: false,
             max_content_length: None,
             device_name: None,
             machine_id: None,
-            filter_pii: false,
             tags: None,
         };
 
@@ -864,11 +828,9 @@ mod tests {
             on_screen: None,
             browser_url: None,
             speaker_name: None,
-            include_cloud: false,
             max_content_length: None,
             device_name: None,
             machine_id: None,
-            filter_pii: false,
             tags: None,
         };
 
@@ -907,11 +869,9 @@ mod tests {
             on_screen,
             browser_url: None,
             speaker_name: None,
-            include_cloud: false,
             max_content_length: None,
             device_name: None,
             machine_id: None,
-            filter_pii: false,
             tags: None,
         };
         let none = compute_search_cache_key(&mk(None));

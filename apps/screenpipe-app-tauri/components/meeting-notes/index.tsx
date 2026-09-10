@@ -514,14 +514,6 @@ export function MeetingNotesSection({
     void fetchPage(0, false, appliedQuery);
   }, [fetchPage, appliedQuery]);
 
-  const openCalendarConnections = useCallback(() => {
-    window.dispatchEvent(
-      new CustomEvent("open-settings", {
-        detail: { section: "connections", category: "Calendar" },
-      }),
-    );
-  }, []);
-
   const selected = useMemo(
     () => meetings.find((m) => m.id === selectedId) ?? null,
     [meetings, selectedId],
@@ -622,7 +614,6 @@ export function MeetingNotesSection({
       comingUp={comingUp}
       comingUpStatus={comingUpStatus}
       connectedCalendarSources={connectedCalendarSources}
-      onOpenCalendarConnections={openCalendarConnections}
       onCalendarConnectionChange={refreshUpcoming}
       meetingActive={meetingState.active === true}
       searchInput={searchInput}

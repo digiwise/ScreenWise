@@ -27,25 +27,20 @@
           },
           {
             "group": "connect",
-            "pages": ["mcp-server", "mcp-apps", "connections", "connection-reference", "cloud-archive", "privacy-data-flow", "privacy-filter", "teams"]
+            "pages": ["mcp-server", "privacy-data-flow", "privacy-filter"]
           },
           {
             "group": "use cases",
             "pages": ["search-screen-history", "meeting-intelligence", "meeting-transcription", "ai-memory", "for-developers"]
           },
           {
-            "group": "integrations",
-            "pages": ["chatgpt", "apple-intelligence", "ollama", "claude-code", "opencode", "openclaw", "cline", "continue", "gemini-cli", "copilot-cli", "obsidian", "msty"]
+            "group": "local tools",
+            "pages": ["apple-intelligence", "ollama"]
           },
           {
             "group": "reference",
             "pages": ["api-recipes", "cli-reference"]
           },
-          {
-            "group": "deployment",
-            "pages": ["intune-deployment"]
-          },
-
           {
             "group": "compare",
             "pages": ["vs-pieces", "vs-littlebird", "vs-omi", "vs-granola", "vs-rewind", "vs-recall", "vs-limitless", "vs-otter", "vs-fathom", "vs-fireflies"]
@@ -72,10 +67,6 @@
   },
   "navbar": {
     "links": [
-      {
-        "label": "pricing",
-        "href": "https://screenpi.pe/onboarding"
-      },
       {
         "label": "discord",
         "href": "https://discord.gg/screenpipe"
@@ -105,11 +96,5 @@
     "og:site_name": "screenpipe docs",
     "og:image": "https://screenpi.pe/og-image.png",
     "twitter:site": "@screenpipe"
-  },
-  "integrations": {
-    "posthog": {
-      "apiKey": "phc_Bt8GoTBPgkCpDrbaIZzJIEYt0CrJjhBiuLaBck1clce",
-      "apiHost": "https://eu.i.posthog.com"
-    }
   }
 }

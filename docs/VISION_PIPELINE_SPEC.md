@@ -348,19 +348,20 @@ After implementation, measure on real user setups:
 ## 7. Historical Multi-Machine & Cloud Sync Considerations (retired)
 
 > This section records constraints from the superseded upstream design. The
-> ScreenWise cloud-sync runtime has been removed. Existing sync-related columns
-> remain readable for database compatibility, but no new cloud-sync behavior
-> should be built from the scenarios below.
+> ScreenWise cloud-sync runtime and schema have been removed. The scenarios
+> below are historical design context only and do not describe the current
+> database or a compatibility contract.
 
-### 7.1 Current State
+### 7.1 Retired Upstream State
 
-The DB already has cloud sync columns (migration `20250131000000`):
+The superseded upstream database had cloud sync columns in migration
+`20250131000000`:
 - `frames`: `sync_id TEXT`, `machine_id TEXT`, `synced_at DATETIME`
 - `video_chunks`: `sync_id TEXT`, `machine_id TEXT`, `synced_at DATETIME`
 - `ocr_text`: `sync_id TEXT`, `synced_at DATETIME`
 - `audio_chunks` / `audio_transcriptions`: same columns
 
-These exist but are currently NULL for all local records. The groundwork is laid — the pipeline changes must not break it.
+ScreenWise does not create these columns in a fresh database.
 
 ### 7.2 Synchronization Points
 
@@ -451,5 +452,5 @@ To not paint ourselves into a corner for cloud sync:
 - Changing the video encoding format (FFmpeg H.265 is correct)
 - Real-time streaming OCR (not needed — 0.5-1fps is sufficient for search)
 - Cross-platform changes (this spec is macOS-focused; Windows pipeline may differ)
-- Implementing cloud sync itself (this spec ensures the pipeline doesn't block it)
-- Changing the DB schema beyond what's needed for pipeline correctness (sync columns already exist)
+- Implementing remote or multi-machine synchronization
+- Changing the DB schema beyond what's needed for local pipeline correctness

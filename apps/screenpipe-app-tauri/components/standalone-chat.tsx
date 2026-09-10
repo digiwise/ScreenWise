@@ -34,7 +34,7 @@ import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { AIPreset, PiQueuedPrompt } from "@/lib/utils/tauri";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
-// OpenAI SDK no longer used directly — all providers route through Pi agent
+// The local Ollama runtime is accessed through the Pi agent.
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { save as saveDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readFile, mkdir } from "@tauri-apps/plugin-fs";
@@ -558,7 +558,7 @@ function GridDissolveLoader({
 }
 
 // Pulls /search query params out of a curl-style bash command so the chat row
-// can show "Searched ChatGPT 'foo'" instead of the raw curl URL. Pi's pipes
+// can show a friendly target-app label instead of the raw curl URL. Pi's pipes
 // emit these as plain bash tool calls (no MCP), with the app name encoded as
 // app_name=X in the query string.
 function extractAppFromToolCall(toolCall: ToolCall): string | undefined {
@@ -982,11 +982,6 @@ function formatMinutes(minutes: number): string {
 // are normalized (trim + lowercase, .app/.exe stripped). Paths point at the
 // existing assets in apps/screenpipe-app-tauri/public/images/.
 const STATIC_APP_ICONS: Record<string, string> = {
-  chatgpt: "/images/openai.png",
-  openai: "/images/openai.png",
-  claude: "/images/claude-ai.svg",
-  "claude.ai": "/images/claude-ai.svg",
-  anthropic: "/images/anthropic.png",
   perplexity: "/images/perplexity.svg",
   ollama: "/images/ollama.png",
   "lm studio": "/images/lmstudio.png",
@@ -3024,7 +3019,7 @@ export function StandaloneChat({
     };
   }, []);
 
-  // Listen for chat-prefill events from search modal and pipe creation
+  // Listen for chat-prefill events from the search modal
   useEffect(() => {
     const unlisten = listen<{ context: string; prompt?: string; displayLabel?: string; frameId?: number; images?: string[]; autoSend?: boolean; source?: string; targetWindow?: string }>("chat-prefill", (event) => {
       const { context, prompt, displayLabel, frameId, images, autoSend, source, targetWindow } = event.payload;
@@ -3454,23 +3449,6 @@ export function StandaloneChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Pick up pending conversation from pipe execution history (set via localStorage
-  // because the emit event is lost during page navigation/remount)
-  useEffect(() => {
-    const pendingId = localStorage.getItem("pending-chat-conversation");
-    if (pendingId) {
-      localStorage.removeItem("pending-chat-conversation");
-      (async () => {
-        const { loadConversationFile } = await import("@/lib/chat-storage");
-        const conv = await loadConversationFile(pendingId);
-        if (conv) {
-          loadConversationRef.current(conv);
-        }
-      })();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const appMentionSuggestions = React.useMemo(
     () => buildAppMentionSuggestions(appItems, APP_SUGGESTION_LIMIT),
     [appItems]
@@ -3755,14 +3733,12 @@ export function StandaloneChat({
       if (!prev) return fallback;
       // User's selection still exists. Re-bind to the latest object so edits
       // in the Settings tab flow through, but keep the same id (don't snap
-      // back to the default just because settings got rewritten by an
-      // unrelated update — team sync, device discovery, etc).
+       // back to the default just because settings got rewritten by an
+       // unrelated local update.
       const stillThere = presets.find((p) => p.id === prev.id);
       if (stillThere) {
         return stillThere.provider === prev.provider &&
           stillThere.model === prev.model &&
-          stillThere.url === prev.url &&
-          (stillThere as any).apiKey === (prev as any).apiKey &&
           (stillThere as any).maxTokens === (prev as any).maxTokens &&
           stillThere.prompt === prev.prompt
           ? prev
@@ -3933,8 +3909,7 @@ export function StandaloneChat({
     const p = preset || activePreset;
     if (!p) return null;
     // Combine the screenpipe search instructions with the user's preset prompt.
-    // This is passed via --append-system-prompt to Pi, enabling Anthropic prompt
-    // caching (90% input cost reduction on subsequent messages).
+    // This is passed via --append-system-prompt to the local Pi session.
     const presetPrompt = p.prompt || "";
     const systemPrompt = `${buildSystemPrompt()}\n\n${presetPrompt}`.trim() || null;
     return {
@@ -4780,7 +4755,7 @@ export function StandaloneChat({
           // re-send the same prompt. The cloud LLM gateway caps free/logged-in
           // tiers at a few dozen requests/minute; a single agentic run can trip
           // it, after which a short wait clears the budget. Without this the turn
-          // dies silently (e.g. pipe creation stalls mid-skill).
+          // dies silently during a transient provider rate limit.
           if (
             classifyQuotaError(errorStr) === "rate" &&
             piRateLimitRetries.current < PI_MAX_RATE_LIMIT_RETRIES &&
@@ -5018,7 +4993,7 @@ export function StandaloneChat({
           const msgId = piMessageIdRef.current;
           if (msgId) {
             setMessages((prev) =>
-              prev.map((m) => m.id === msgId ? { ...m, content: "This model doesn't support images — try a vision-capable model (e.g. llama-4-scout on Groq, gpt-4o on OpenAI)." } : m)
+              prev.map((m) => m.id === msgId ? { ...m, content: "This model doesn't support images — select a vision-capable local Ollama model." } : m)
             );
           }
         } else if (line.includes("not found") || line.includes("ECONNREFUSED") || line.includes("connection refused")) {

@@ -66,7 +66,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO meeting_transcript_segments \
              (meeting_id, provider, item_id, device_name, device_type, transcript, captured_at) \
-             VALUES (?1, 'deepgram', ?2, ?3, ?4, 'hello', ?5)",
+             VALUES (?1, 'local', ?2, ?3, ?4, 'hello', ?5)",
         )
         .bind(meeting_id)
         .bind(format!(

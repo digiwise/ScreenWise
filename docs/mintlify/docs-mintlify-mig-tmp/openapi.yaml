@@ -115,11 +115,6 @@ paths:
           type: string
         in: query
         style: form
-      - name: include_cloud
-        schema:
-          type: boolean
-        in: query
-        style: form
       - name: max_content_length
         schema:
           nullable: true
@@ -1519,42 +1514,6 @@ paths:
       - Data Management
       summary: Delete data in time range
       description: Permanently delete all captured data (frames, accessibility text, OCR fallback text, audio, etc.) within a time range.
-  /data/delete-device:
-    post:
-      description: Delete all locally-stored data that was synced from a specific remote device.
-      operationId: routes_data_delete_device_data_handler
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/DeleteDeviceDataRequest'
-        required: true
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DeleteTimeRangeResponse'
-      tags:
-      - Data Management
-      summary: Delete device data
-  /data/device-storage:
-    get:
-      description: Get record counts per synced device.
-      operationId: routes_data_device_storage_handler
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/DeviceStorageEntry'
-      tags:
-      - Data Management
-      summary: Get device storage usage
 components:
   schemas:
     AccessibilityNode:
@@ -2014,31 +1973,6 @@ components:
             type: integer
       required:
       - ids
-    CloudSearchMetadata:
-      description: Metadata about cloud search to include in responses.
-      type: object
-      properties:
-        cloudSearchAvailable:
-          type: boolean
-        cloudHasRelevantData:
-          type: boolean
-        cloudQueryHint:
-          nullable: true
-          type: string
-        status:
-          $ref: '#/components/schemas/CloudStatus'
-      required:
-      - cloudSearchAvailable
-      - cloudHasRelevantData
-      - cloudQueryHint
-      - status
-    CloudStatus:
-      type: string
-      enum:
-      - available
-      - disabled
-      - not_initialized
-      - error
     ContentData:
       oneOf:
       - type: array
@@ -2387,26 +2321,6 @@ components:
       - tags
       - importance
       - frame_id
-    CustomOcrConfig:
-      type: object
-      properties:
-        api_url:
-          type: string
-        api_key:
-          type: string
-        timeout_ms:
-          type: integer
-      required:
-      - api_url
-      - api_key
-      - timeout_ms
-    DeleteDeviceDataRequest:
-      type: object
-      properties:
-        machine_id:
-          type: string
-      required:
-      - machine_id
     DeleteSpeakerRequest:
       type: object
       properties:
@@ -2467,19 +2381,6 @@ components:
       required:
       - is_running
       - is_paused
-    DeviceStorageEntry:
-      type: object
-      properties:
-        machine_id:
-          type: string
-        frames:
-          type: integer
-        audio_chunks:
-          type: integer
-      required:
-      - machine_id
-      - frames
-      - audio_chunks
     DeviceType:
       type: string
       enum:
@@ -3421,30 +3322,11 @@ components:
       - ocr_engine
       - focused
     OcrEngine:
-      oneOf:
-      - type: object
-        properties:
-          Custom:
-            type: object
-            properties:
-              api_url:
-                type: string
-              api_key:
-                type: string
-              timeout_ms:
-                type: integer
-            required:
-            - api_url
-            - api_key
-            - timeout_ms
-        required:
-        - Custom
-      - type: string
-        enum:
-        - Unstructured
-        - Tesseract
-        - WindowsNative
-        - AppleNative
+      type: string
+      enum:
+      - Tesseract
+      - WindowsNative
+      - AppleNative
     Order:
       type: string
       enum:
@@ -3752,8 +3634,6 @@ components:
         speaker_name:
           nullable: true
           type: string
-        include_cloud:
-          type: boolean
         max_content_length:
           nullable: true
           type: integer
@@ -3780,7 +3660,6 @@ components:
       - focused
       - browser_url
       - speaker_name
-      - include_cloud
       - max_content_length
       - device_name
       - machine_id
@@ -3793,8 +3672,6 @@ components:
             $ref: '#/components/schemas/ContentItem'
         pagination:
           $ref: '#/components/schemas/PaginationInfo'
-        cloud:
-          $ref: '#/components/schemas/CloudSearchMetadata'
       required:
       - data
       - pagination

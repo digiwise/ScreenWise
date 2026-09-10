@@ -12,19 +12,13 @@ CREATE TABLE IF NOT EXISTS accessibility (
     window_name TEXT NOT NULL,
     text_content TEXT NOT NULL,
     browser_url TEXT,
-    -- Sync columns
-    sync_id TEXT,
-    machine_id TEXT,
-    synced_at DATETIME
+    machine_id TEXT
 );
 
 -- Indexes for accessibility
 CREATE INDEX IF NOT EXISTS idx_accessibility_timestamp ON accessibility(timestamp);
 CREATE INDEX IF NOT EXISTS idx_accessibility_app_name ON accessibility(app_name);
 CREATE INDEX IF NOT EXISTS idx_accessibility_window_name ON accessibility(window_name);
-CREATE INDEX IF NOT EXISTS idx_accessibility_sync_id ON accessibility(sync_id);
-CREATE INDEX IF NOT EXISTS idx_accessibility_synced_at ON accessibility(synced_at);
-CREATE INDEX IF NOT EXISTS idx_accessibility_unsynced ON accessibility(synced_at) WHERE synced_at IS NULL;
 
 -- FTS for accessibility
 CREATE VIRTUAL TABLE IF NOT EXISTS accessibility_fts USING fts5(
@@ -103,10 +97,7 @@ CREATE TABLE IF NOT EXISTS ui_events (
     element_bounds TEXT,  -- JSON: {"x":0,"y":0,"width":100,"height":50}
     -- Frame correlation
     frame_id INTEGER,
-    -- Sync columns
-    sync_id TEXT,
-    machine_id TEXT,
-    synced_at DATETIME
+    machine_id TEXT
 );
 
 -- Indexes for ui_events
@@ -115,9 +106,6 @@ CREATE INDEX IF NOT EXISTS idx_ui_events_event_type ON ui_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_ui_events_app_name ON ui_events(app_name);
 CREATE INDEX IF NOT EXISTS idx_ui_events_session_id ON ui_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_ui_events_frame_id ON ui_events(frame_id);
-CREATE INDEX IF NOT EXISTS idx_ui_events_sync_id ON ui_events(sync_id);
-CREATE INDEX IF NOT EXISTS idx_ui_events_synced_at ON ui_events(synced_at);
-CREATE INDEX IF NOT EXISTS idx_ui_events_unsynced ON ui_events(synced_at) WHERE synced_at IS NULL;
 
 -- FTS for ui_events (searchable text content)
 CREATE VIRTUAL TABLE IF NOT EXISTS ui_events_fts USING fts5(

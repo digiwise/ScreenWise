@@ -33,11 +33,9 @@ export const aiPresetSchema = z.object({
 export const settingsStoreSchema = z.object({
   // AI Settings
   aiPresets: z.array(aiPresetSchema),
-  openaiApiKey: z.string(),
   aiModel: z.string().min(1, "AI model is required"),
   customPrompt: z.string().min(10, "Custom prompt must be at least 10 characters"),
   aiProviderType: aiProviderTypeSchema,
-  aiUrl: z.string().url("Invalid AI URL format"),
   aiMaxContextChars: z.number().int().min(1000).max(2000000),
   
   // Audio Settings
@@ -73,13 +71,10 @@ export const settingsStoreSchema = z.object({
   stopRecordingShortcut: z.string(),
   startAudioShortcut: z.string(),
   stopAudioShortcut: z.string(),
-  pipeShortcuts: z.record(z.string()),
   showShortcutOverlay: z.boolean().optional(),
   
   // Other
   isLoading: z.boolean(),
-  installedPipes: z.array(z.any()), // Define proper pipe schema if needed
-  userId: z.string(),
   embeddedLLM: embeddedLLMSchema,
 });
 
@@ -236,20 +231,6 @@ export const validatePresetName = (name: string, visiblePresets: AIPreset[], cur
   }
 
   return { isValid: true };
-};
-
-// URL validation
-export const validateUrl = (url: string): FieldValidationResult => {
-  if (!url.trim()) {
-    return { isValid: false, error: "URL is required" };
-  }
-  
-  try {
-    new URL(url);
-    return { isValid: true };
-  } catch {
-    return { isValid: false, error: "Please enter a valid URL" };
-  }
 };
 
 // Context length validation

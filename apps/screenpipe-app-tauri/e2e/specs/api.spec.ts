@@ -14,9 +14,7 @@
  *     bit that should still report a sane shape with audio disabled.
  *   - get_local_api_config IPC — resolves the in-memory bearer key the
  *     server core holds; needed for any authed call.
- *   - GET /connections        — authed; list of available integrations.
- *     Returns a JSON array regardless of which connections the user has
- *     configured (≥0 entries).
+ *   - GET /search             — authed; minimal local search request.
  *
  * If the server early-returned at the permission gate, /health would
  * never respond and this spec would fail at the first request — which is
@@ -142,33 +140,29 @@ describe("Local HTTP API", function () {
     expect(res.status).toBeLessThan(500);
   });
 
-  it("GET /connections — authed, returns 2xx with an array body", async function () {
+  it("GET /search — authed, returns 2xx", async function () {
     if (!key) {
       // api_auth defaults TRUE — if this is null the server didn't seed a
       // key, which is itself a bug worth surfacing. Skip cleanly so the
       // failure attributes correctly to a separate spec.
       this.skip();
     }
-    const res = await fetchJson(`http://127.0.0.1:${port}/connections`, {
+    const res = await fetchJson(`http://127.0.0.1:${port}/search?limit=1`, {
       Authorization: `Bearer ${key}`,
     });
     if (!res.ok) {
       // Surface server response in the failure message so CI logs don't
       // require a separate `app` log dump to attribute the regression.
       throw new Error(
-        `/connections authed failed status=${res.status} body=${JSON.stringify(res.body).slice(0, 200)} err=${res.error ?? ""}`,
+        `/search authed failed status=${res.status} body=${JSON.stringify(res.body).slice(0, 200)} err=${res.error ?? ""}`,
       );
     }
-    // Server wraps the array under `data` — connections_api.rs:
-    // `Json(json!({ "data": data }))`.
-    const body = res.body as { data?: unknown };
-    expect(body).toHaveProperty("data");
-    expect(Array.isArray(body.data)).toBe(true);
+    expect(typeof res.body).toBe("object");
   });
 
-  it("rejects unauthed /connections with a 4xx when api_auth is on", async function () {
+  it("rejects unauthed /search with a 4xx when api_auth is on", async function () {
     if (!key) this.skip();
-    const res = await fetchJson(`http://127.0.0.1:${port}/connections`);
+    const res = await fetchJson(`http://127.0.0.1:${port}/search?limit=1`);
     // Auth middleware can return 401 (missing token) or 403 (bad token);
     // both are correct rejections. Anything outside the 4xx range is the
     // real regression we'd want to flag.

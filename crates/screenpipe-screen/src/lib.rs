@@ -5,7 +5,6 @@
 #[cfg(target_os = "macos")]
 pub mod apple;
 pub mod core;
-pub mod custom_ocr;
 pub mod frame_comparison;
 #[cfg(any(target_os = "windows", test))]
 pub mod microsoft;
@@ -25,7 +24,6 @@ pub use core::RealtimeVisionEvent;
 pub use metrics::{MetricsSnapshot, PipelineMetrics};
 pub use utils::OcrEngine;
 pub mod capture_screenshot_by_window;
-pub use custom_ocr::perform_ocr_custom;
 #[cfg(target_os = "windows")]
 pub use microsoft::perform_ocr_windows;
 pub use tesseract::perform_ocr_tesseract;

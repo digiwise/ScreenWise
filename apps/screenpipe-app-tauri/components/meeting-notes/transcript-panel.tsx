@@ -224,26 +224,10 @@ function formatClock(ms: number): string {
 
 function liveErrorSummary(message: string | null): string {
   const lower = (message ?? "").toLowerCase();
-  if (
-    lower.includes("lookup address") ||
-    lower.includes("nodename") ||
-    lower.includes("dns")
-  ) {
-    return "cloud connection failed";
+  if (lower.includes("model") || lower.includes("provision")) {
+    return "local transcription model unavailable";
   }
-  if (lower.includes("screenpipe cloud login")) {
-    return "cloud login required";
-  }
-  if (lower.includes("daily") && lower.includes("limit")) {
-    return "daily limit reached";
-  }
-  if (lower.includes("tls")) {
-    return "secure connection failed";
-  }
-  if (lower.includes("websocket")) {
-    return "live stream unavailable";
-  }
-  return "live transcription failed";
+  return "local live transcription failed";
 }
 
 export function TranscriptPanel({

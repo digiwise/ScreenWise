@@ -39,9 +39,8 @@ pub struct ScheduleRule {
 /// - **CLI**: built from command-line args or loaded from `~/.screenpipe/config.toml`
 /// - **Engine**: consumed directly for audio, vision, and UI recording
 ///
-/// All field names use `camelCase` serde rename to match the existing frontend
-/// JSON schema (store.bin). This ensures backwards compatibility — existing
-/// `store.bin` files deserialize without migration.
+/// All field names use `camelCase` serde rename to match the desktop settings
+/// schema (store.bin).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(default)]
@@ -53,10 +52,8 @@ pub struct RecordingSettings {
 
     /// Audio transcription engine identifier.
     ///
-    /// The persisted value is intentionally a string for compatibility with
-    /// existing `store.bin` files. Unsupported or retired values are resolved
-    /// to a local engine by [`Self::local_audio_transcription_engine`] before
-    /// capture starts.
+    /// Unsupported values are resolved to a local engine by
+    /// [`Self::local_audio_transcription_engine`] before capture starts.
     #[serde(rename = "audioTranscriptionEngine")]
     pub audio_transcription_engine: String,
 
@@ -118,13 +115,6 @@ pub struct RecordingSettings {
     /// Stored as i32 to match existing store.bin schema (cast to u64 by engine).
     #[serde(rename = "audioChunkDuration")]
     pub audio_chunk_duration: i32,
-
-    /// Retired external-transcription credential retained only so existing
-    /// settings files remain readable. It is never used by the recorder.
-    /// Kept as String (not Option) to match the existing `store.bin` schema.
-    #[serde(rename = "deepgramApiKey", skip_serializing)]
-    #[cfg_attr(feature = "specta", specta(skip))]
-    pub deepgram_api_key: String,
 
     /// Filter music-dominant audio before transcription using spectral analysis.
     #[serde(rename = "filterMusic")]
@@ -383,44 +373,10 @@ pub struct RecordingSettings {
     )]
     pub pii_redaction_labels: Vec<String>,
 
-    // ── Cloud / Auth ───────────────────────────────────────────────────
-    /// Screenpipe cloud user ID. Empty string means not logged in.
-    /// Kept as String (not Option) to match existing store.bin schema.
-    #[serde(rename = "userId")]
-    pub user_id: String,
-
     /// Display name for speaker identification.
-    /// Fallback chain: this field → cloud auth name → cloud auth email.
-    /// Previously stored in SettingsStore.extra["userName"].
+    /// Used only for local speaker identification.
     #[serde(rename = "userName", default)]
     pub user_name: Option<String>,
-
-    /// Retired remote transcription endpoint retained for deserialization only.
-    /// It is never used for a network request.
-    #[serde(rename = "openaiCompatibleEndpoint", default, skip_serializing)]
-    #[cfg_attr(feature = "specta", specta(skip))]
-    pub openai_compatible_endpoint: Option<String>,
-
-    /// Retired remote transcription credential retained for deserialization only.
-    /// It is never used for a network request.
-    #[serde(rename = "openaiCompatibleApiKey", default, skip_serializing)]
-    #[cfg_attr(feature = "specta", specta(skip))]
-    pub openai_compatible_api_key: Option<String>,
-
-    /// Retired remote transcription model retained for deserialization only.
-    #[serde(rename = "openaiCompatibleModel", default, skip_serializing)]
-    #[cfg_attr(feature = "specta", specta(skip))]
-    pub openai_compatible_model: Option<String>,
-
-    /// Retired remote transcription headers retained for deserialization only.
-    #[serde(rename = "openaiCompatibleHeaders", default, skip_serializing)]
-    #[cfg_attr(feature = "specta", specta(skip))]
-    pub openai_compatible_headers: Option<std::collections::HashMap<String, String>>,
-
-    /// Retired remote transcription option retained for deserialization only.
-    #[serde(rename = "openaiCompatibleRawAudio", default, skip_serializing)]
-    #[cfg_attr(feature = "specta", specta(skip))]
-    pub openai_compatible_raw_audio: bool,
 
     // ── System ─────────────────────────────────────────────────────────
     /// HTTP server port for the screenpipe API.
@@ -452,7 +408,7 @@ pub struct RecordingSettings {
     #[serde(rename = "apiAuth", default = "default_true")]
     pub api_auth: bool,
 
-    /// Custom API key for remote authentication. If empty, a key is auto-generated.
+    /// Custom bearer token for protected local API access. If empty, one is generated.
     #[serde(rename = "apiKey", default)]
     pub api_key: String,
 
@@ -506,16 +462,6 @@ impl RecordingSettings {
         }
     }
 
-    /// Returns the user ID if actually set (non-empty).
-    pub fn effective_user_id(&self) -> Option<&str> {
-        let id = self.user_id.as_str();
-        if id.is_empty() {
-            None
-        } else {
-            Some(id)
-        }
-    }
-
     /// Returns the display name/email used to label the local microphone speaker.
     pub fn effective_user_name(&self) -> Option<&str> {
         self.user_name
@@ -539,7 +485,6 @@ impl Default for RecordingSettings {
             windows_input_aec_enabled: false,
             macos_input_vpio_enabled: false,
             audio_chunk_duration: 30,
-            deepgram_api_key: String::new(),
             filter_music: false,
             batch_max_duration_secs: None,
             vocabulary: vec![],
@@ -577,13 +522,7 @@ impl Default for RecordingSettings {
             async_pii_redaction: false,
             async_image_pii_redaction: false,
             pii_redaction_labels: default_pii_redaction_labels(),
-            user_id: String::new(),
             user_name: None,
-            openai_compatible_endpoint: None,
-            openai_compatible_api_key: None,
-            openai_compatible_model: None,
-            openai_compatible_headers: None,
-            openai_compatible_raw_audio: false,
             port: 3030,
             power_mode: None,
             device_tier: None,
@@ -667,8 +606,7 @@ mod tests {
             "powerMode": "battery_saver",
             "userName": "Alice",
             "vocabularyWords": [{"word": "screenpipe"}],
-            "batchMaxDurationSecs": 600,
-            "openaiCompatibleEndpoint": "https://api.example.com/v1"
+            "batchMaxDurationSecs": 600
         }"#;
         let settings: RecordingSettings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.transcription_mode, "batch");
@@ -677,10 +615,6 @@ mod tests {
         assert_eq!(settings.vocabulary.len(), 1);
         assert_eq!(settings.vocabulary[0].word, "screenpipe");
         assert_eq!(settings.batch_max_duration_secs, Some(600));
-        assert_eq!(
-            settings.openai_compatible_endpoint.as_deref(),
-            Some("https://api.example.com/v1")
-        );
     }
 
     #[test]
@@ -703,7 +637,6 @@ mod tests {
             "audioDevices": ["MacBook Pro Microphone"],
             "useSystemDefaultAudio": true,
             "audioChunkDuration": 30,
-            "deepgramApiKey": "",
             "vadSensitivity": "high",
             "filterMusic": false,
             "disableVision": false,
@@ -718,7 +651,6 @@ mod tests {
             "ignoreIncognitoWindows": true,
             "languages": ["en"],
             "usePiiRemoval": false,
-            "userId": "abc-123",
             "port": 3030,
             "analyticsEnabled": true,
             "analyticsId": "posthog-uuid",
@@ -740,8 +672,6 @@ mod tests {
             "whisper-large-v3-turbo"
         );
         assert_eq!(settings.audio_devices, vec!["MacBook Pro Microphone"]);
-        assert_eq!(settings.deepgram_api_key, "");
-        assert_eq!(settings.user_id, "abc-123");
         assert_eq!(
             settings.ignored_windows,
             vec!["Control Center", "Notification Center"]
@@ -800,40 +730,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_external_transcription_fields_remain_readable() {
-        // Old stores may still contain an external credential. It remains
-        // deserializable but is not interpreted as runtime configuration.
-        let json = r#"{"deepgramApiKey": ""}"#;
-        let s: RecordingSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.deepgram_api_key, "");
-
-        let json = r#"{"deepgramApiKey": "default"}"#;
-        let s: RecordingSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.deepgram_api_key, "default");
-
-        let json = r#"{"deepgramApiKey": "real-api-key-123"}"#;
-        let s: RecordingSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.deepgram_api_key, "real-api-key-123");
-
-        let serialized = serde_json::to_value(&s).unwrap();
-        assert!(serialized.get("deepgramApiKey").is_none());
-        assert!(serialized.get("openaiCompatibleEndpoint").is_none());
-        assert!(serialized.get("openaiCompatibleApiKey").is_none());
-        assert!(serialized.get("openaiCompatibleModel").is_none());
-        assert!(serialized.get("openaiCompatibleHeaders").is_none());
-        assert!(serialized.get("openaiCompatibleRawAudio").is_none());
-    }
-
-    #[test]
-    fn retired_remote_engines_fail_closed() {
-        for engine in [
-            "screenpipe-cloud",
-            "deepgram",
-            "deepgram-live",
-            "openai-compatible",
-            "openai",
-            "some-future-remote-engine",
-        ] {
+    fn unsupported_transcription_engines_fail_closed() {
+        for engine in ["unsupported-engine", "some-future-engine"] {
             let settings: RecordingSettings =
                 serde_json::from_str(&format!(r#"{{"audioTranscriptionEngine":"{engine}"}}"#))
                     .unwrap();
@@ -860,9 +758,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_meeting_provider_normalizes_to_selected_local_engine() {
+    fn meeting_provider_normalizes_to_selected_local_engine() {
         assert_eq!(
-            RecordingSettings::normalize_meeting_live_transcription_provider("deepgram-live"),
+            RecordingSettings::normalize_meeting_live_transcription_provider("selected-engine"),
             "selected-engine"
         );
         assert_eq!(

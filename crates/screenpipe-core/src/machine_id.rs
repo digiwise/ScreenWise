@@ -5,8 +5,8 @@
 /// Get or create the stable identifier attached to local records.
 ///
 /// Reads from `~/.screenpipe/machine_id` if it exists. Otherwise generates a
-/// UUID v4, writes it to that file, and returns it. Keeping the existing path
-/// preserves identifiers created by earlier cloud-sync-capable builds.
+/// UUID v4, writes it to that file, and returns it. The stable value associates
+/// records created by the current local recorder with one machine.
 pub fn get_or_create_machine_id() -> String {
     let machine_id_path = crate::paths::default_screenpipe_data_dir().join("machine_id");
 

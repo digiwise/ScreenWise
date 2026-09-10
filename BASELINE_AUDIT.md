@@ -82,6 +82,11 @@ assertion because regeneration would remove three unrelated cloud/account
 bindings (`getCloudToken`, `openLoginWindow`, and `setCloudToken`). That
 pre-existing drift was not accepted into the telemetry cleanup.
 
+The later product-account cleanup removed those obsolete generated bindings.
+On 2026-09-10 the checked-in bindings were regenerated from the current native
+command registry and the isolated `tauri_bindings_are_current` test passed with
+the documented locked/offline native test matrix.
+
 The reproducible Windows test setup differs from the normal release build:
 native-linking test targets use Visual Studio Developer PowerShell plus
 `CMAKE_GENERATOR=Ninja Multi-Config` so `libsamplerate-sys` produces the

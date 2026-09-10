@@ -81,8 +81,7 @@ async function saveCache(cache: UsageCache): Promise<void> {
 }
 
 function normalizeProvider(p: string): string {
-  if (!p || p === "unknown") return "screenpipe";
-  return p;
+  return p === "native-ollama" || p === "ollama" ? "ollama" : "local";
 }
 
 function aggregateEntries(entries: UsageEntry[], since?: number): ModelUsage[] {
@@ -257,22 +256,7 @@ export function UsageSection() {
   };
 
   const providerLabel = (p: string) => {
-    switch (p) {
-      case "screenpipe-cloud":
-      case "screenpipe":
-      case "pi":
-        return "Screenpipe Cloud";
-      case "native-ollama":
-      case "ollama":
-        return "Ollama";
-      case "openai-chatgpt":
-      case "openai":
-      case "anthropic":
-      case "custom":
-        return "Ollama (migrated)";
-      default:
-        return p;
-    }
+    return p === "ollama" ? "Ollama" : "Local model";
   };
 
   const sourceIcon = (_source: UsageEntry["source"]) => "Chat";

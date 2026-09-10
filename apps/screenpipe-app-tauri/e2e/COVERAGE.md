@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 42
-- Declared test blocks: 143
-- Weighted coverage points: 111.1
+- Mapped specs: 41
+- Declared test blocks: 142
+- Weighted coverage points: 110.8
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 35 | 133 | 108.0 | 13 | 40 | 97% |
-| macos | 39 | 109 | 83.7 | 13 | 41 | 93% |
-| linux | 29 | 98 | 80.4 | 11 | 37 | 90% |
+| windows | 35 | 133 | 108.0 | 13 | 39 | 97% |
+| macos | 38 | 108 | 83.4 | 12 | 40 | 90% |
+| linux | 29 | 98 | 80.4 | 11 | 36 | 90% |
 
 ## Runtime Results
 
@@ -33,16 +33,16 @@ pass/fail/skip counts.
 
 | Layer | windows | macos | linux |
 | --- | --- | --- | --- |
-| audio-device | 2 specs / 26 tests / 19.4 pts | 1 specs / 1 tests / 0.3 pts | - |
+| audio-device | 2 specs / 26 tests / 19.4 pts | - | - |
 | capture-ocr | 2 specs / 13 tests / 5.2 pts | 2 specs / 3 tests / 1.2 pts | 1 specs / 2 tests / 0.8 pts |
 | chat-ai | 7 specs / 7 tests / 3.9 pts | 9 specs / 9 tests / 4.5 pts | 7 specs / 7 tests / 3.9 pts |
 | local-api | 9 specs / 70 tests / 58.1 pts | 8 specs / 45 tests / 39.1 pts | 7 specs / 44 tests / 38.7 pts |
-| notifications | 2 specs / 11 tests / 10.1 pts | 2 specs / 4 tests / 2.4 pts | 1 specs / 3 tests / 2.1 pts |
+| notifications | 2 specs / 11 tests / 10.1 pts | 1 specs / 3 tests / 2.1 pts | 1 specs / 3 tests / 2.1 pts |
 | onboarding | 1 specs / 3 tests / 1.2 pts | 1 specs / 3 tests / 1.2 pts | 1 specs / 3 tests / 1.2 pts |
 | os-integration | 3 specs / 16 tests / 15.1 pts | 3 specs / 3 tests / 0.9 pts | - |
 | performance | 2 specs / 43 tests / 43.0 pts | 4 specs / 32 tests / 29.2 pts | 1 specs / 28 tests / 28.0 pts |
 | real-ui-e2e | 17 specs / 64 tests / 51.2 pts | 18 specs / 51 tests / 40.7 pts | 14 specs / 45 tests / 38.8 pts |
-| settings | 6 specs / 23 tests / 21.2 pts | 6 specs / 16 tests / 13.5 pts | 5 specs / 15 tests / 13.2 pts |
+| settings | 6 specs / 23 tests / 21.2 pts | 5 specs / 15 tests / 13.2 pts | 5 specs / 15 tests / 13.2 pts |
 | storage-privacy | 6 specs / 20 tests / 19.1 pts | 5 specs / 12 tests / 11.1 pts | 4 specs / 12 tests / 11.1 pts |
 | tauri-command | 8 specs / 17 tests / 10.3 pts | 9 specs / 19 tests / 10.8 pts | 8 specs / 17 tests / 10.3 pts |
 | window-lifecycle | 16 specs / 60 tests / 51.2 pts | 16 specs / 41 tests / 29.6 pts | 12 specs / 36 tests / 28.1 pts |
@@ -56,11 +56,11 @@ pass/fail/skip counts.
 | Timeline navigation and frames | real-ui-e2e | covered (strong; windows-user-journey, windows-core-recording) | covered (strong; home-window, timeline) | covered (strong; home-window, timeline) |
 | Real capture, OCR, and indexing | capture-ocr | weak (conditional; windows-core-recording, timeline) | weak (conditional; timeline, hd-recording-pipeline) | weak (conditional; timeline) |
 | Local API auth enforcement | local-api | covered (strong; api-search-stress, windows-system-integration) | covered (strong; api-search-stress, api) | covered (strong; api-search-stress, api) |
-| Local API search stability | local-api | covered (strong; api-search-stress, windows-core-recording) | covered (strong; api-search-stress) | covered (strong; api-search-stress) |
+| Local API search stability | local-api | covered (strong; api-search-stress, windows-core-recording) | covered (strong; api-search-stress, api) | covered (strong; api-search-stress, api) |
 | Recording settings UX | settings | covered (strong; settings-sections, windows-user-journey) | covered (strong; settings-sections, meeting-apps-picker) | covered (strong; settings-sections, meeting-apps-picker) |
 | Privacy API auth settings UX | settings | covered (strong; settings-sections, windows-user-journey) | covered (strong; settings-sections, privacy-api-auth) | covered (strong; settings-sections, privacy-api-auth) |
-| Notification history and viewer paths | notifications | covered (strong; windows-user-journey, notification-viewer-link) | covered (partial; notification-viewer-link, audio-fallback) | covered (partial; notification-viewer-link) |
-| Audio device health | audio-device | covered (strong; windows-system-integration, windows-core-recording) | weak (conditional; audio-fallback) | gap |
+| Notification history and viewer paths | notifications | covered (strong; windows-user-journey, notification-viewer-link) | covered (partial; notification-viewer-link) | covered (partial; notification-viewer-link) |
+| Audio device health | audio-device | covered (strong; windows-system-integration, windows-core-recording) | gap | gap |
 | Window lifecycle, focus, and dedupe | window-lifecycle | covered (strong; windows-system-integration, window-lifecycle) | covered (strong; window-lifecycle, viewer-deeplink) | covered (strong; window-lifecycle, viewer-deeplink) |
 | Meeting note creation and editing | real-ui-e2e | covered (strong; windows-user-journey, meeting-note-bottom-click) | covered (strong; meeting-note-bottom-click) | covered (strong; meeting-note-bottom-click) |
 | Chat window, composer, and streaming state | chat-ai | covered (strong; chat-window, chat-composer-isolation) | covered (strong; chat-window, chat-composer-isolation) | covered (strong; chat-window, chat-composer-isolation) |
@@ -70,7 +70,7 @@ pass/fail/skip counts.
 ## Critical Gaps
 
 - windows: Real capture, OCR, and indexing (weak).
-- macos: Real capture, OCR, and indexing (weak); Audio device health (weak).
+- macos: Real capture, OCR, and indexing (weak); Audio device health (gap).
 - linux: Real capture, OCR, and indexing (weak); Audio device health (gap).
 
 ## Execution Integrity
@@ -87,9 +87,8 @@ pass/fail/skip counts.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | api-key-cold-spawn.spec.ts | windows, macos, linux | local-api, tauri-command | local-api-auth, app-launch | medium | partial | command | 3 | Cold-spawn local API config regression coverage. |
 | api-search-stress.spec.ts | windows, macos, linux | local-api, performance | local-api-auth, local-api-search, health, audio-device-health, local-api-load | high | strong | api | 28 | Broad readonly API, auth, search, and load coverage. |
-| api.spec.ts | windows, macos, linux | local-api | health, audio-device-health, connections, local-api-auth | high | partial | api | 4 | Smoke coverage for local HTTP API shape and auth behavior. |
+| api.spec.ts | windows, macos, linux | local-api | health, audio-device-health, local-api-search, local-api-auth | high | partial | api | 4 | Smoke coverage for local HTTP API shape and auth behavior. |
 | app-lifecycle.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, webview-stability, route-churn, browser-storage | high | strong | mixed | 14 | Home webview, routing, reload, focus, resize, and storage stability. |
-| audio-fallback.spec.ts | macos | audio-device, settings, notifications | audio-device-health, settings-recording, notifications | medium | conditional | real-user-flow | 1 | Opt-in macOS cloud audio fallback seed. |
 | chat-composer-isolation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-drafts | medium | partial | mixed | 1 | Composer draft isolation across conversations. |
 | chat-newchat-duplicate.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Synthetic chat event regression for duplicate sidebar rows. |
 | chat-parallel-jobs-duplicate.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Parallel auto-send prefill dedupe regression. |

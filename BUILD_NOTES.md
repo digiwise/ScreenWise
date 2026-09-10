@@ -136,7 +136,9 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
   cloud/account commands (`getCloudToken`, `openLoginWindow`, and
   `setCloudToken`) that the current Rust registry does not export. Regeneration
   was inspected and reverted because accepting those removals would cross this
-  telemetry-only change's scope.
+  telemetry-only change's scope. The subsequent product-account cleanup removed
+  those generated bindings; regeneration and the isolated freshness test both
+  passed under the documented native matrix on 2026-09-10.
 - `Cargo.lock` and the desktop Rust lockfile are unchanged. The Bun lock delta
   removes only the three direct telemetry packages and their unreachable graph;
   Bun relocates already-present `react-is` 16.13.1/17.0.2 resolutions without
@@ -220,9 +222,10 @@ cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' test `
   --locked --offline tauri_bindings_are_current -- --nocapture
 ```
 
-This command built and linked successfully on 2026-09-07 and then reported the
-separate checked-in binding drift described above. The cached test graph now
-includes locked `assert-json-diff 2.0.2`; neither Rust lockfile changed.
+This command built and linked successfully on 2026-09-10 and the checked-in
+bindings passed the freshness assertion after the product-account commands
+were removed and the bindings regenerated. The cached test graph includes
+locked `assert-json-diff 2.0.2`.
 
 ## Functional baseline fixes and verification (2026-09-01)
 

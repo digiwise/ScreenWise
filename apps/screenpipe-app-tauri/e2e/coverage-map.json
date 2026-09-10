@@ -98,7 +98,7 @@
       "spec": "api.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["local-api"],
-      "features": ["health", "audio-device-health", "connections", "local-api-auth"],
+      "features": ["health", "audio-device-health", "local-api-search", "local-api-auth"],
       "criticality": "high",
       "confidence": "partial",
       "ux": "api",
@@ -133,16 +133,6 @@
       "confidence": "strong",
       "ux": "mixed",
       "notes": "Home webview, routing, reload, focus, resize, and storage stability."
-    },
-    {
-      "spec": "audio-fallback.spec.ts",
-      "platforms": ["macos"],
-      "layers": ["audio-device", "settings", "notifications"],
-      "features": ["audio-device-health", "settings-recording", "notifications"],
-      "criticality": "medium",
-      "confidence": "conditional",
-      "ux": "real-user-flow",
-      "notes": "Opt-in macOS cloud audio fallback seed."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",

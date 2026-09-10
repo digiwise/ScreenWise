@@ -832,17 +832,6 @@ async piInfo(sessionId: string | null) : Promise<Result<PiInfo, string>> {
 }
 },
 /**
- * Install pi via bun
- */
-async piInstall() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pi_install") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Start a new Pi session (clears conversation history).
  * Serialized through the queue — waits for any in-flight work to complete,
  * then sends new_session and waits for the SDK's done event before returning.
@@ -1525,7 +1514,7 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 
 /** user-defined types **/
 
-export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
+export type AIPreset = { id: string; prompt: string; provider: AIProviderType; model?: string; defaultPreset: boolean; maxContextChars: number; maxTokens?: number }
 export type AIProviderType = "native-ollama"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
 export type AudioModelFileStatus = { filename: string; path: string; sourceUrl: string; expectedSha256: string; ready: boolean; error: string | null }
@@ -1708,10 +1697,8 @@ disableAudio: boolean;
 /**
  * Audio transcription engine identifier.
  *
- * The persisted value is intentionally a string for compatibility with
- * existing `store.bin` files. Unsupported or retired values are resolved
- * to a local engine by [`Self::local_audio_transcription_engine`] before
- * capture starts.
+ * Unsupported values are resolved to a local engine by
+ * [`Self::local_audio_transcription_engine`] before capture starts.
  */
 audioTranscriptionEngine: string;
 /**
@@ -2007,14 +1994,8 @@ asyncImagePiiRedaction?: boolean;
  */
 piiRedactionLabels?: string[];
 /**
- * Screenpipe cloud user ID. Empty string means not logged in.
- * Kept as String (not Option) to match existing store.bin schema.
- */
-userId: string;
-/**
  * Display name for speaker identification.
- * Fallback chain: this field → cloud auth name → cloud auth email.
- * Previously stored in SettingsStore.extra["userName"].
+ * Used only for local speaker identification.
  */
 userName?: string | null;
 /**
@@ -2044,7 +2025,7 @@ scheduleRules?: ScheduleRule[];
  */
 apiAuth?: boolean;
 /**
- * Custom API key for remote authentication. If empty, a key is auto-generated.
+ * Custom bearer token for protected local API access. If empty, one is generated.
  */
 apiKey?: string;
 /**

@@ -117,7 +117,7 @@ Returns a rich overview with:
 
 This is usually enough to answer "what was I doing?" without further searches. Only drill into `/search` if you need verbatim quotes or specific content.
 
-> **Building a pipe/automation?** Same rule: call this endpoint for time math. The numbers are computed server-side from frame timestamps — never recompute durations from raw frames, and never ask an LLM to sum minutes (it will drift). Let the model label activities; let this endpoint own the durations.
+> Use this endpoint for time math. The numbers are computed server-side from frame timestamps — never recompute durations from raw frames, and never ask an LLM to sum minutes (it will drift).
 
 ---
 
@@ -463,7 +463,7 @@ curl -X POST http://localhost:11435/notify \
 |-------|------|----------|-------------|
 | `title` | string | **Yes** | Notification title |
 | `body` | string | **Yes** | Markdown body (`**bold**`, `` `code` ``, `[text](url)`) |
-| `type` | string | No | Category (default "pipe") |
+| `type` | string | No | Notification category |
 | `timeout` | integer | No | Auto-dismiss in ms (default 20000) |
 | `autoDismissMs` | integer | No | Alias for timeout |
 | `actions` | array | No | Action buttons |

@@ -13,8 +13,7 @@ import { type FontSize, applyFontSize } from "@/lib/utils/font-size";
 export type VadSensitivity = "low" | "medium" | "high";
 
 export type AIProviderType =
-	| "native-ollama"
-	| "embedded";
+	"native-ollama";
 
 export type EmbeddedLLMConfig = {
 	enabled: boolean;
@@ -32,7 +31,6 @@ export type AIPreset = {
 	id: string;
 	maxContextChars: number;
 	maxTokens?: number;
-	url: string;
 	model: string;
 	defaultPreset: boolean;
 	prompt: string;
@@ -302,7 +300,6 @@ export function makeDefaultPresets(): AIPreset[] {
 		{
 			id: LOCAL_OLLAMA_PRESET_ID,
 			provider: "native-ollama",
-			url: "http://localhost:11434/v1",
 			model: "ministral-3:latest",
 			maxContextChars: 200000,
 			defaultPreset: true,
@@ -315,7 +312,6 @@ let DEFAULT_SETTINGS: Settings = {
 			aiPresets: makeDefaultPresets() as any,
 			deviceId: crypto.randomUUID(),
 			isLoading: false,
-			userId: "",
 			devMode: false,
 			audioTranscriptionEngine: "disabled",
 			meetingLiveTranscriptionEnabled: false,
@@ -442,100 +438,9 @@ function createSettingsStore() {
 			return createDefaultSettingsObject();
 		}
 
-		// Migration: Ensure existing users have deviceId for free tier tracking
 		let needsUpdate = false;
-		if (!settings.deviceId) {
-			settings.deviceId = crypto.randomUUID();
-			needsUpdate = true;
-		}
 
-		// Temporary one-time migration: force restart notifications off for all
-		// existing users until the stall detector is more reliable. Users can
-		// still manually opt back in afterward; the marker prevents re-overriding.
-		if (!(settings as any).restartNotificationsDefaultedOff) {
-			settings.showRestartNotifications = false;
-			(settings as any).restartNotificationsDefaultedOff = true;
-			needsUpdate = true;
-		}
-
-		// One-time migration (V2 — supersedes V1): flip the CoreAudio Process
-		// Tap toggle OFF for every existing install, keeping SCK as the System
-		// Audio backend. V1 (run a few days earlier) had flipped it ON by
-		// default, but the Process Tap can't capture audio rendered through a
-		// VoiceProcessing AudioUnit — Zoom/Meet/Teams all use one for echo
-		// cancellation — so the tap silently captured zeroed buffers on every
-		// meeting. Users who explicitly want the tap (e.g. to dodge SCK's
-		// sleep/wake display-enumeration bug) can re-enable it in Settings.
-		// Reported on 2026-04-24 after v2.4.46 calls kept dropping
-		// other participants.
-		if (!(settings as any).coreaudioTapMigrationV2) {
-			settings.experimentalCoreaudioSystemAudio = false;
-			(settings as any).coreaudioTapMigrationV2 = true;
-			needsUpdate = true;
-		}
-
-		if (settings.appendTypedTextToMeetingNote === undefined) {
-			settings.appendTypedTextToMeetingNote = true;
-			needsUpdate = true;
-		}
-
-		// Migration: Add default presets if user has none
-		if (!settings.aiPresets || settings.aiPresets.length === 0) {
-			settings.aiPresets = makeDefaultPresets() as any;
-			needsUpdate = true;
-		}
-
-		// Retired hosted and direct remote-provider presets remain readable but
-		// execute locally. Keep the preset identity, prompt, and ordering while
-		// removing the remote endpoint/key from the active configuration.
-		if (settings.aiPresets?.some((p: any) =>
-			["screenpipe-cloud", "pi", "claude-code", "opencode", "openai", "openai-chatgpt", "anthropic", "custom"].includes(p.provider)
-		)) {
-			settings.aiPresets = settings.aiPresets.map((p: any) =>
-				["screenpipe-cloud", "pi", "claude-code", "opencode", "openai", "openai-chatgpt", "anthropic", "custom"].includes(p.provider)
-					? {
-						...p,
-						provider: "native-ollama",
-						url: "http://localhost:11434/v1",
-						model: "ministral-3:latest",
-						apiKey: undefined,
-					  }
-					: p
-			);
-			needsUpdate = true;
-		}
-
-		// Migration: Add chat history for existing users
-		if (!settings.chatHistory) {
-			settings.chatHistory = {
-				conversations: [],
-				activeConversationId: null,
-				historyEnabled: true,
-			};
-			needsUpdate = true;
-		}
-
-		// Migration: Fill empty showChatShortcut with platform default
-		if (!settings.showChatShortcut || settings.showChatShortcut.trim() === "") {
-			const p = platform();
-			settings.showChatShortcut = p === "windows" ? "Alt+L" : "Control+Super+L";
-			needsUpdate = true;
-		}
-
-		// Migration: Fill empty audio shortcuts with platform defaults
-		if (!settings.startAudioShortcut || settings.startAudioShortcut.trim() === "") {
-			const p = platform();
-			settings.startAudioShortcut = p === "windows" ? "Alt+Shift+A" : "Control+Super+A";
-			needsUpdate = true;
-		}
-		if (!settings.stopAudioShortcut || settings.stopAudioShortcut.trim() === "") {
-			const p = platform();
-			settings.stopAudioShortcut = p === "windows" ? "Alt+Shift+Z" : "Control+Super+Z";
-			needsUpdate = true;
-		}
-
-		// Always override platform with runtime detection — never trust persisted value.
-		// Platform can be "unknown" if it was saved during SSR or before Tauri was ready.
+		// Platform is runtime state rather than a persisted user preference.
 		try {
 			const detectedPlatform = platform();
 			if (settings.platform !== detectedPlatform) {
@@ -546,7 +451,6 @@ function createSettingsStore() {
 			// platform() unavailable (SSR/tests) — keep existing value
 		}
 
-		// Save migrations if needed
 		if (needsUpdate) {
 			await store.set("settings", settings);
 			await saveAndEncrypt(store);

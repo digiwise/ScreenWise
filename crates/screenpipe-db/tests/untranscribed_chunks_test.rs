@@ -219,8 +219,8 @@ mod tests {
         let segment_id = db
             .insert_meeting_transcript_segment(
                 meeting_id,
-                "screenpipe-cloud",
-                Some("nova-3"),
+                "local",
+                Some("parakeet"),
                 "item-1",
                 "test-mic",
                 "input",
@@ -275,8 +275,8 @@ mod tests {
 
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
+            "local",
+            Some("parakeet"),
             "active-item-1",
             "test-mic",
             "input",
@@ -326,8 +326,8 @@ mod tests {
 
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
+            "local",
+            Some("parakeet"),
             "stale-item-1",
             "test-mic",
             "input",
@@ -430,8 +430,8 @@ mod tests {
 
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
+            "local",
+            Some("parakeet"),
             "live-item-1",
             "test-mic",
             "input",
@@ -505,8 +505,8 @@ mod tests {
 
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "deepgram-live",
-            Some("nova-3"),
+            "local-live",
+            Some("parakeet"),
             "live-search-item-1",
             "test-mic",
             "input",
@@ -596,7 +596,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO meeting_transcript_segments \
              (meeting_id, provider, model, item_id, device_name, device_type, speaker_name, transcript, captured_at) \
-             VALUES (?1, 'deepgram-live', 'nova-3', 'later-local-offset', 'test-mic', 'input', 'me', 'local offset later', ?2)",
+             VALUES (?1, 'local-live', 'nova-3', 'later-local-offset', 'test-mic', 'input', 'me', 'local offset later', ?2)",
         )
         .bind(meeting_id)
         .bind("2026-05-14T11:01:00-07:00")
@@ -607,7 +607,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO meeting_transcript_segments \
              (meeting_id, provider, model, item_id, device_name, device_type, speaker_name, transcript, captured_at) \
-             VALUES (?1, 'deepgram-live', 'nova-3', 'earlier-utc', 'test-mic', 'input', 'me', 'utc earlier', ?2)",
+             VALUES (?1, 'local-live', 'nova-3', 'earlier-utc', 'test-mic', 'input', 'me', 'utc earlier', ?2)",
         )
         .bind(meeting_id)
         .bind("2026-05-14T18:00:30Z")

@@ -4,12 +4,7 @@
 "use client";
 
 import React, { useState } from "react";
-import {
-  ArrowRight,
-  CalendarDays,
-  Loader2,
-  Settings2,
-} from "lucide-react";
+import { ArrowRight, CalendarDays, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -38,7 +33,6 @@ interface ComingUpProps {
   events: CalendarEvent[];
   status: ComingUpStatus;
   connectedSources: CalendarSource[];
-  onOpenCalendarConnections: () => void;
   onCalendarConnectionChange: () => void | Promise<void>;
   /** Caller starts a manual meeting seeded with the event's title + attendees. */
   onStart: (event: CalendarEvent) => void | Promise<void>;
@@ -85,7 +79,6 @@ export function ComingUp({
   events,
   status,
   connectedSources,
-  onOpenCalendarConnections,
   onCalendarConnectionChange,
   onStart,
   meetingActive,
@@ -108,7 +101,6 @@ export function ComingUp({
           <ComingUpEmptyState
             status={status}
             connectedSources={connectedSources}
-            onOpenCalendarConnections={onOpenCalendarConnections}
             onOpenProvider={setConnectProvider}
             platform={platformFlags}
           />
@@ -187,13 +179,11 @@ function formatSources(
 function ComingUpEmptyState({
   status,
   connectedSources,
-  onOpenCalendarConnections,
   onOpenProvider,
   platform,
 }: {
   status: ComingUpStatus;
   connectedSources: CalendarSource[];
-  onOpenCalendarConnections: () => void;
   onOpenProvider: (provider: CalendarProviderId) => void;
   platform: { isMac: boolean; isWindows: boolean };
 }) {
@@ -257,7 +247,7 @@ function ComingUpEmptyState({
       <Button
         variant="outline"
         size="sm"
-        onClick={onOpenCalendarConnections}
+        onClick={() => onOpenProvider("native")}
         disabled={loading}
         className="gap-2 normal-case tracking-normal border-border bg-background text-foreground hover:bg-muted hover:text-foreground active:bg-muted disabled:opacity-100 disabled:bg-muted/40 disabled:text-muted-foreground disabled:border-border shrink-0"
       >

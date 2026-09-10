@@ -211,21 +211,10 @@ export default function RootLayout({
     const originalConsole = { ...console };
     const debouncedWrite = createDebouncer(1000);
 
-    // Belt-and-suspenders: scrub well-known secret-bearing keys before they
-    // hit localStorage. Legacy settings objects can still contain retired
-    // provider credentials, so keep scrubbing their historical key names.
-    // Scrubbing here means future debug logs can't reintroduce the leak even
-    // if someone forgets and dumps an object containing these keys.
+    // Belt-and-suspenders: scrub secret-bearing keys before they hit
+    // localStorage. `apiKey` includes the recorder's local bearer key.
     const SECRET_KEYS = new Set([
       "apiKey",
-      "deepgramApiKey",
-      "openaiCompatibleApiKey",
-      "openrouterApiKey",
-      "anthropicApiKey",
-      "openaiApiKey",
-      "geminiApiKey",
-      "groqApiKey",
-      "elevenLabsApiKey",
       "token",
       "accessToken",
       "refreshToken",

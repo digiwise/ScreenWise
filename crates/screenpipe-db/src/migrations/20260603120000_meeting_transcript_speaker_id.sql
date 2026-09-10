@@ -4,7 +4,7 @@
 -- post-hoc by DatabaseManager::backfill_meeting_segment_speakers (no FK, matching
 -- audio_transcriptions.speaker_id which is also unconstrained; orphans are cleaned
 -- up the same way). NULL until resolved → callers fall back to the free-text
--- speaker_name from Deepgram diarization.
+-- speaker_name from live diarization.
 ALTER TABLE meeting_transcript_segments ADD COLUMN speaker_id INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_meeting_transcript_segments_speaker

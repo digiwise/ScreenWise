@@ -7,12 +7,10 @@
 //! Manages the local pi CLI (`@earendil-works/pi-coding-agent`) used by chat.
 
 use anyhow::{anyhow, Result};
-use serde_json::json;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.75.4";
-const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.75.4";
 const PI_NAMESPACE_DIR: &str = "@earendil-works";
 /// Pi bootstrap and shared skill management.
 pub struct PiExecutor;
@@ -182,50 +180,15 @@ impl PiExecutor {
     /// Install the context-pruning extension that truncates large tool results
     /// to prevent unbounded context growth in --continue sessions.
     pub async fn ensure_installed(&self) -> Result<()> {
-        if find_pi_executable().is_some() {
-            // Check if local install matches expected version; upgrade if stale
-            if !is_local_pi_version_current() {
-                info!("pi version mismatch — upgrading to {}", PI_PACKAGE);
-                // Fall through to install
-            } else {
-                debug!("pi already installed");
-                return Ok(());
-            }
+        if find_pi_executable().is_some() && is_local_pi_version_current() {
+            debug!("using explicitly provisioned Pi runtime");
+            return Ok(());
         }
 
-        let bun = find_bun_executable()
-            .ok_or_else(|| anyhow!("bun not found — install from https://bun.sh"))?;
-
-        let install_dir = pi_local_install_dir()
-            .ok_or_else(|| anyhow!("cannot determine home directory for Pi install"))?;
-
-        std::fs::create_dir_all(&install_dir)?;
-
-        info!("installing pi into {} via bun …", install_dir.display());
-
-        // Seed package.json with overrides to fix lru-cache resolution on Windows
-        seed_pi_package_json(&install_dir);
-
-        let mut cmd = std::process::Command::new(&bun);
-        cmd.current_dir(&install_dir)
-            .args(["add", PI_PACKAGE, PI_AI_PACKAGE, "@anthropic-ai/sdk"]);
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let output = cmd.output()?;
-        if output.status.success() {
-            info!("pi installed successfully into {}", install_dir.display());
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("pi installation failed: {}", stderr);
-            Err(anyhow!("pi installation failed: {}", stderr))
-        }
+        Err(anyhow!(
+            "Pi is not provisioned. Install the pinned {} runtime and dependencies under <data-dir>/pi-agent; ScreenWise does not download packages.",
+            PI_PACKAGE
+        ))
     }
 }
 // ---------------------------------------------------------------------------
@@ -301,90 +264,6 @@ fn is_local_pi_version_current() -> bool {
         return false;
     }
     true
-}
-
-/// Seed the pi-agent package.json with overrides + strip legacy deps.
-/// `hosted-git-info` requires `lru-cache@^10`, but bun on Windows can hoist
-/// an ESM-only lru-cache@7.x that breaks CJS `require()`. Also drops any
-/// stale `@mariozechner/*` keys carried over from before the upstream
-/// namespace rename (issue #3527).
-fn seed_pi_package_json(install_dir: &Path) {
-    let pkg_path = install_dir.join("package.json");
-    let expected_overrides = json!({
-        "hosted-git-info": {
-            "lru-cache": "^10.0.0"
-        }
-    });
-    if pkg_path.exists() {
-        let read_result = std::fs::read_to_string(&pkg_path);
-        let parse_result = read_result
-            .as_ref()
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
-        // Detect corruption: a partial bun-install write can leave NUL bytes
-        // in package.json (SCREENPIPE-APP-AR — bun then errors at SyntaxError).
-        // Read failures and parse failures land here too. Wipe and re-seed
-        // rather than silently exiting and letting the next `bun install`
-        // re-fail on the same garbled file.
-        let corrupted = parse_result.is_none()
-            || read_result
-                .as_ref()
-                .map(|c| c.contains('\0'))
-                .unwrap_or(true);
-        if corrupted {
-            warn!(
-                "pi-agent package.json at {} is unreadable or corrupted — re-seeding",
-                pkg_path.display()
-            );
-            let _ = std::fs::remove_file(&pkg_path);
-            let _ = std::fs::remove_file(install_dir.join("bun.lock"));
-            let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
-            // Fall through to the fresh-seed path below.
-        } else if let Some(mut pkg) = parse_result {
-            let mut changed = false;
-            if let Some(obj) = pkg.as_object_mut() {
-                if obj.get("overrides") != Some(&expected_overrides) {
-                    obj.insert("overrides".to_string(), expected_overrides.clone());
-                    changed = true;
-                }
-                if let Some(deps_obj) = obj.get_mut("dependencies").and_then(|d| d.as_object_mut())
-                {
-                    let legacy: Vec<String> = deps_obj
-                        .keys()
-                        .filter(|k| k.starts_with("@mariozechner/"))
-                        .cloned()
-                        .collect();
-                    for k in &legacy {
-                        deps_obj.remove(k);
-                        changed = true;
-                    }
-                }
-            }
-            if changed {
-                if let Ok(new_contents) = serde_json::to_string_pretty(&pkg) {
-                    let _ = std::fs::write(&pkg_path, new_contents);
-                    let _ = std::fs::remove_file(install_dir.join("bun.lock"));
-                    let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
-                    info!("Patched pi-agent package.json (overrides + legacy dep cleanup)");
-                }
-            }
-            return;
-        }
-    }
-    let pkg_json = json!({
-        "overrides": {
-            "hosted-git-info": {
-                "lru-cache": "^10.0.0"
-            }
-        }
-    });
-    match std::fs::write(
-        &pkg_path,
-        serde_json::to_string_pretty(&pkg_json).unwrap_or_default(),
-    ) {
-        Ok(_) => info!("Seeded pi-agent package.json with lru-cache overrides"),
-        Err(e) => warn!("Failed to seed pi-agent package.json: {}", e),
-    }
 }
 
 /// Find the JS entrypoint for the locally-installed pi package.
@@ -636,43 +515,5 @@ mod tests {
             "invalid bytes should become replacement chars"
         );
         assert_eq!(lines[1], "OK");
-    }
-
-    /// Regression guard for SCREENPIPE-APP-AR: a corrupted package.json
-    /// (NUL bytes from a partial bun-install write) used to silently exit
-    /// `seed_pi_package_json` and leave bun looping on the same broken file.
-    #[test]
-    fn seed_pi_package_json_recovers_from_nul_byte_corruption() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pkg_path = dir.path().join("package.json");
-        let lock_path = dir.path().join("bun.lock");
-
-        // Simulate the observed corruption: garbled package name + NUL padding
-        // (matches the actual bytes from `Pi background install failed`).
-        std::fs::write(
-            &pkg_path,
-            b"{\n  \"dependencies\": {\n    \"@mariozech\0\0\0\0\0\0\0\0\0\0\0\0",
-        )
-        .expect("write corrupt pkg");
-        std::fs::write(&lock_path, b"stale-lock").expect("write stale lock");
-
-        seed_pi_package_json(dir.path());
-
-        let contents = std::fs::read_to_string(&pkg_path).expect("re-seeded pkg readable");
-        assert!(
-            !contents.contains('\0'),
-            "re-seeded package.json must not contain NUL bytes; got: {:?}",
-            contents
-        );
-        let parsed: serde_json::Value =
-            serde_json::from_str(&contents).expect("re-seeded pkg must parse");
-        assert!(
-            parsed.get("overrides").is_some(),
-            "re-seeded pkg must include the lru-cache overrides"
-        );
-        assert!(
-            !lock_path.exists(),
-            "stale bun.lock must be cleared so bun re-resolves from the fresh manifest"
-        );
     }
 }

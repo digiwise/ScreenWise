@@ -291,17 +291,17 @@ describe("AI title generation integration logic", () => {
   });
 
   it("should require provider and model for AI generation", () => {
-    const validPreset = { provider: "openai", model: "gpt-4" };
+    const validPreset = { provider: "native-ollama", model: "qwen3.5:9b" };
     expect(
       Boolean(validPreset && validPreset.provider && validPreset.model?.trim())
     ).toBe(true);
 
-    const noModel = { provider: "openai", model: "" };
+    const noModel = { provider: "native-ollama", model: "" };
     expect(
       Boolean(noModel && noModel.provider && noModel.model?.trim())
     ).toBe(false);
 
-    const noProvider = { provider: "", model: "gpt-4" };
+    const noProvider = { provider: "", model: "qwen3.5:9b" };
     expect(
       Boolean(noProvider && noProvider.provider && noProvider.model?.trim())
     ).toBe(false);

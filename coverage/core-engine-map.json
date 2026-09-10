@@ -104,6 +104,7 @@
       "label": "Engine config, health, sleep, and power lifecycle",
       "crate": "screenpipe-engine",
       "files": [
+        "src/crash_log.rs",
         "src/recording_config.rs",
         "src/schedule_monitor.rs",
         "src/sleep_monitor.rs",
@@ -159,6 +160,7 @@
       "label": "Engine API route logic and stream contracts",
       "crate": "screenpipe-engine",
       "files": [
+        "src/server.rs",
         "src/routes/activity_summary.rs",
         "src/routes/health.rs",
         "src/routes/meetings.rs",
@@ -212,45 +214,33 @@
       "notes": "Platform focus-tracker parsing/helpers. These files are cfg-gated and only execute on their target OS."
     },
     {
-      "id": "engine-meeting-privacy-sync",
-      "label": "Engine meetings, privacy, pipes, and sync units",
+      "id": "engine-meeting-privacy-local",
+      "label": "Engine meetings, privacy, and UI units",
       "crate": "screenpipe-engine",
       "files": [
         "src/calendar_speaker_id.rs",
-        "src/cli/install.rs",
         "src/cli/mod.rs",
-        "src/cli/presets.rs",
         "src/cli/search.rs",
         "src/cli/store_file.rs",
-        "src/cli/team.rs",
-        "src/cloud_search.rs",
-        "src/connections_api.rs",
         "src/drm_detector.rs",
-        "src/external_memory_sync.rs",
-        "src/mcp_servers_api.rs",
         "src/meeting_detector.rs",
         "src/meeting_export.rs",
-        "src/meeting_telemetry.rs",
-        "src/pipe_store.rs",
-        "src/privacy_filter.rs",
-        "src/sync_api.rs",
-        "src/sync_provider.rs",
-        "src/ui_recorder.rs",
-        "src/workflow_classifier.rs"
+        "src/ui_recorder.rs"
       ],
       "platforms": ["windows", "macos", "linux"],
-      "layers": ["meeting", "privacy", "ui-events", "pipes", "sync"],
+      "layers": ["meeting", "privacy", "ui-events"],
       "flows": ["meeting-live-notes", "privacy-and-redaction", "accessibility-ui-events", "performance-liveness"],
       "criticality": "medium",
       "confidence": "strong",
       "kind": "unit",
-      "notes": "Unit-heavy coverage for meeting heuristics, privacy filter policy, UI recorder safety, pipes, sync helpers, and CLI parsing."
+      "notes": "Unit-heavy coverage for local meeting heuristics, DRM privacy controls, UI recorder safety, and retained CLI parsing."
     },
     {
       "id": "db-search-indexing",
       "label": "Database OCR/accessibility search indexing",
       "crate": "screenpipe-db",
       "files": [
+        "src/sqlite_error.rs",
         "src/text_normalizer.rs",
         "src/text_similarity.rs",
         "tests/fts_contention_test.rs",
@@ -258,7 +248,8 @@
         "tests/keyword_search_accessibility_test.rs",
         "tests/keyword_search_order_test.rs",
         "tests/query_plan_test.rs",
-        "tests/search_ocr_snapshot_test.rs"
+        "tests/search_ocr_snapshot_test.rs",
+        "tests/tag_filter_bench.rs"
       ],
       "platforms": ["windows", "macos", "linux"],
       "layers": ["db-search", "ocr", "accessibility", "performance"],
@@ -341,8 +332,6 @@
       "files": [
         "src/core/engine.rs",
         "src/core/run_record_and_transcribe.rs",
-        "src/transcription/deepgram/batch.rs",
-        "src/transcription/openai_compatible/batch.rs",
         "src/transcription/transcription_result.rs",
         "src/transcription/whisper/detect_language.rs",
         "tests/accuracy_test.rs",
@@ -390,9 +379,7 @@
       "files": [
         "src/audio_manager/reconciliation.rs",
         "src/meeting_detector.rs",
-        "src/meeting_streaming/config.rs",
         "src/meeting_streaming/controller.rs",
-        "src/meeting_streaming/deepgram_live.rs",
         "src/meeting_streaming/selected_engine.rs",
         "src/speaker/embedding_manager.rs",
         "src/speaker/mod.rs",
@@ -438,12 +425,11 @@
     },
     {
       "id": "audio-models-filtering",
-      "label": "Audio model download and music filtering",
+      "label": "Audio model provisioning and music filtering",
       "crate": "screenpipe-audio",
       "files": [
-        "src/models/download.rs",
+        "src/models/provisioning.rs",
         "src/utils/audio/music_detection.rs",
-        "tests/hf_tls_test.rs",
         "tests/music_detection_real.rs",
         "tests/onnx_model_test.rs"
       ],
@@ -453,7 +439,7 @@
       "criticality": "medium",
       "confidence": "partial",
       "kind": "mixed",
-      "notes": "Model-download/TLS guards, ONNX startup smoke, and music-versus-speech filtering."
+      "notes": "Explicit model-provisioning guards, ONNX startup smoke, and music-versus-speech filtering."
     },
     {
       "id": "screen-capture-windowing",
@@ -518,6 +504,7 @@
       "label": "Windows native OCR",
       "crate": "screenpipe-screen",
       "files": [
+        "src/microsoft.rs",
         "tests/windows_vision_test.rs"
       ],
       "platforms": ["windows"],
@@ -527,21 +514,6 @@
       "confidence": "partial",
       "kind": "integration",
       "notes": "Windows OCR fixture coverage plus an ignored continuous-capture probe that requires a live desktop."
-    },
-    {
-      "id": "screen-custom-ocr",
-      "label": "Custom OCR smoke",
-      "crate": "screenpipe-screen",
-      "files": [
-        "tests/custom_ocr_test.rs"
-      ],
-      "platforms": ["windows", "macos", "linux"],
-      "layers": ["ocr"],
-      "flows": ["capture-ocr-pipeline"],
-      "criticality": "medium",
-      "confidence": "conditional",
-      "kind": "manual",
-      "notes": "Custom OCR tests are ignored by default and only contribute when explicitly run."
     },
     {
       "id": "a11y-core-tree-cross-platform",
@@ -558,7 +530,8 @@
         "src/tree/cache.rs",
         "src/tree/electron_docs.rs",
         "src/tree/enhanced_mode_cache.rs",
-        "src/tree/mod.rs"
+        "src/tree/mod.rs",
+        "src/url_filter.rs"
       ],
       "platforms": ["windows", "macos", "linux"],
       "layers": ["accessibility", "ui-events", "privacy", "performance"],

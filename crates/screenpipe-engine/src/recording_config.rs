@@ -89,9 +89,6 @@ pub struct RecordingConfig {
     pub disable_keyboard_capture: bool,
     pub languages: Vec<Language>,
 
-    // Compatibility account metadata; it is not used for audio transcription.
-    pub user_id: Option<String>,
-
     // Speaker identification
     /// User's display name for calendar-assisted speaker ID.
     /// Fallback chain: settings userName → cloud auth name → cloud auth email.
@@ -260,7 +257,6 @@ impl RecordingConfig {
                 .filter(|s| s.as_str() != "default")
                 .filter_map(|s| s.parse().ok())
                 .collect(),
-            user_id: settings.effective_user_id().map(|s| s.to_string()),
             user_name: settings.user_name.clone(),
             video_quality: settings.video_quality.clone(),
             vocabulary: settings
@@ -487,10 +483,10 @@ mod tests {
     }
 
     #[test]
-    fn retired_transcription_engine_cannot_reach_runtime_config() {
+    fn unsupported_transcription_engine_cannot_reach_runtime_config() {
         let settings = screenpipe_config::RecordingSettings {
-            audio_transcription_engine: "openai-compatible".to_string(),
-            meeting_live_transcription_provider: "deepgram-live".to_string(),
+            audio_transcription_engine: "unsupported-engine".to_string(),
+            meeting_live_transcription_provider: "unsupported-provider".to_string(),
             ..Default::default()
         };
 
@@ -507,12 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn retired_transcription_engine_override_cannot_reach_runtime_config() {
+    fn unsupported_transcription_engine_override_cannot_reach_runtime_config() {
         let settings = screenpipe_config::RecordingSettings::default();
         let config = RecordingConfig::from_settings(
             &settings,
             std::path::PathBuf::from("/tmp/sp_test"),
-            Some("deepgram"),
+            Some("unsupported-engine"),
         );
 
         assert_eq!(

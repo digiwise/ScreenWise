@@ -27,9 +27,9 @@ screenpipe records meetings without a bot joining the call. it captures the meet
 ## setup checklist
 
 1. open **settings -> recording** and choose the microphone and system audio sources you want.
-2. connect **Google Calendar** in **settings -> connections** if you want attendee-aware speaker naming.
+2. optionally allow native local calendar access for meeting context; ScreenWise does not fetch Google Calendar over the network.
 3. open the meeting app normally: Zoom, Google Meet, Microsoft Teams, Slack huddles, or another call surface.
-4. let screenpipe record and transcribe in the background.
+4. let ScreenWise record and transcribe in the background.
 5. open the meeting from the timeline or search with `content_type=audio`.
 
 quick verification:
@@ -141,9 +141,9 @@ use the meetings API when an automation needs meeting lists, search, current mee
 
 | tool | best setup | notes |
 | --- | --- | --- |
-| Zoom | mic plus system audio, Zoom connection when you need cloud recording metadata | OAuth can enrich meeting metadata; local capture still works without a bot |
-| Google Meet | mic plus system audio, Google Calendar connection | calendar attendee context helps speaker naming |
-| Microsoft Teams | mic plus system audio, Teams or Microsoft 365 connection for structured context | useful for enterprise rollouts and meeting-linked docs |
+| Zoom | mic plus system audio | local capture works without a bot |
+| Google Meet | mic plus system audio, native calendar context | calendar attendee context helps speaker naming |
+| Microsoft Teams | mic plus system audio, native calendar context | local capture preserves meeting-linked context |
 
 ## troubleshooting
 
@@ -159,5 +159,4 @@ use the meetings API when an automation needs meeting lists, search, current mee
 ## related pages
 
 - [meeting transcription](/meeting-transcription)
-- [connections](/connections)
 - [API recipes](/api-recipes)

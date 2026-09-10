@@ -17,9 +17,7 @@ CREATE TABLE IF NOT EXISTS frames_new (
     focused BOOLEAN DEFAULT NULL,
     browser_url TEXT DEFAULT NULL,
     device_name TEXT NOT NULL DEFAULT '',
-    sync_id TEXT,
     machine_id TEXT,
-    synced_at DATETIME,
     -- New event-driven capture columns
     snapshot_path TEXT DEFAULT NULL,
     accessibility_text TEXT DEFAULT NULL,
@@ -34,12 +32,12 @@ CREATE TABLE IF NOT EXISTS frames_new (
 INSERT INTO frames_new (
     id, video_chunk_id, offset_index, timestamp, name,
     app_name, window_name, focused, browser_url, device_name,
-    sync_id, machine_id, synced_at
+    machine_id
 )
 SELECT
     id, video_chunk_id, offset_index, timestamp, name,
     app_name, window_name, focused, browser_url, device_name,
-    sync_id, machine_id, synced_at
+    machine_id
 FROM frames;
 
 DROP TABLE frames;

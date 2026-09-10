@@ -45,7 +45,7 @@
 //! ## What we don't cover
 //!
 //! - **localStorage / IndexedDB** — some auth flows (notably some OAuth
-//!   PKCE setups, ChatGPT) keep the live token outside cookies. Those
+//!   PKCE setups) keep the live token outside cookies. Those
 //!   sites still need a manual login in owned-browser the first time.
 //!   WKWebView persists localStorage in its own data store across runs,
 //!   so manual login survives app restart.

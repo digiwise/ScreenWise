@@ -262,7 +262,6 @@ jobs:
             --engines parakeet-local,whisper-local \
             --modes background,live \
             --devices input,output \
-            --deepgram off \
             --out /tmp/eval-results/pipeline-replay.json \
             2> /tmp/eval-results/pipeline-replay.stderr || {
               echo "::error::pipeline replay failed"
@@ -365,8 +364,8 @@ jobs:
               echo
               echo "Source: generated \`screenpipe_*\` fixtures materialized into temp screenpipe SQLite DBs, then read back through \`search_audio\`. This catches storage/search regressions that pure DER scoring misses."
               echo
-              echo "| scenarios | passed | failed | skipped | avg background DER | avg background speaker err | Deepgram |"
-              echo "|---:|---:|---:|---:|---:|---:|---|"
+              echo "| scenarios | passed | failed | skipped | avg background DER | avg background speaker err |"
+              echo "|---:|---:|---:|---:|---:|---:|"
               jq -r '
                 def fmt:
                   if . == null then "n/a"
@@ -378,7 +377,6 @@ jobs:
                 " | " + (.skipped | tostring) +
                 " | " + (.avg_background_der | fmt) +
                 " | " + (.avg_background_speaker_error | fmt) +
-                " | " + (.deepgram_status // "not_requested") +
                 " |"
               ' /tmp/eval-results/pipeline-replay.json
               echo
@@ -391,7 +389,7 @@ jobs:
                   /tmp/eval-results/pipeline-replay.json
                 echo
               fi
-              echo "<sub>The no-secret CI matrix runs local diarization under Parakeet/Whisper engine labels across live/background and mic/system device profiles. Real Deepgram/screenpipe-cloud smoke can be run locally with \`--deepgram required\` when credentials are present.</sub>"
+              echo "<sub>The CI matrix runs local diarization under Parakeet/Whisper engine labels across live/background and mic/system device profiles.</sub>"
               echo
             fi
             if [ -f /tmp/eval-results/transcription.json ]; then

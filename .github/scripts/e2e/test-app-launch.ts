@@ -116,18 +116,17 @@ await test("health API doesn't expose internal errors (S5.8)", async () => {
 // ── S9.4: Event listener race condition proxy ───────────────────────────
 
 await test("concurrent API calls don't race (S9.4)", async () => {
-  // Fire search + health + pipes simultaneously — tests internal event handling
+  // Fire search + health simultaneously — tests internal event handling
   const start = Date.now();
-  const [search, health, pipes] = await Promise.all([
+  const [search, health] = await Promise.all([
     fetch("http://localhost:3030/search?limit=1").then(r => ({ ok: r.ok })).catch(() => ({ ok: false })),
     fetch(HEALTH_URL).then(r => ({ ok: r.ok })).catch(() => ({ ok: false })),
-    fetch("http://localhost:3030/pipes/list").then(r => ({ ok: r.ok || r.status === 404 })).catch(() => ({ ok: false })),
   ]);
   const elapsed = Date.now() - start;
 
   if (!search.ok) throw new Error("search failed in concurrent call");
   if (!health.ok) throw new Error("health failed in concurrent call");
-  console.log(`  3 concurrent API calls: ${elapsed}ms`);
+  console.log(`  2 concurrent API calls: ${elapsed}ms`);
 });
 
 await screenshot("01-app-launch");

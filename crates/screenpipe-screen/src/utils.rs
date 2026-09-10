@@ -1,35 +1,27 @@
 use crate::capture_screenshot_by_window::{
     capture_all_visible_windows, CapturedWindow, WindowFilters,
 };
-use crate::custom_ocr::CustomOcrConfig;
 use crate::monitor::SafeMonitor;
 use image::DynamicImage;
 use image_compare::{Algorithm, Metric, Similarity};
-use screenpipe_db::CustomOcrConfig as DBCustomOcrConfig;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 #[derive(Clone, Debug, Default)]
 pub enum OcrEngine {
-    Unstructured,
     #[default]
     Tesseract,
     WindowsNative,
     AppleNative,
-    Custom(CustomOcrConfig),
 }
 
 impl From<OcrEngine> for screenpipe_db::OcrEngine {
     fn from(val: OcrEngine) -> Self {
         match val {
-            OcrEngine::Unstructured => screenpipe_db::OcrEngine::Unstructured,
             OcrEngine::Tesseract => screenpipe_db::OcrEngine::Tesseract,
             OcrEngine::WindowsNative => screenpipe_db::OcrEngine::WindowsNative,
             OcrEngine::AppleNative => screenpipe_db::OcrEngine::AppleNative,
-            OcrEngine::Custom(config) => {
-                screenpipe_db::OcrEngine::Custom(DBCustomOcrConfig::from(config))
-            }
         }
     }
 }
@@ -37,11 +29,9 @@ impl From<OcrEngine> for screenpipe_db::OcrEngine {
 impl From<screenpipe_db::OcrEngine> for OcrEngine {
     fn from(engine: screenpipe_db::OcrEngine) -> Self {
         match engine {
-            screenpipe_db::OcrEngine::Unstructured => OcrEngine::Unstructured,
             screenpipe_db::OcrEngine::Tesseract => OcrEngine::Tesseract,
             screenpipe_db::OcrEngine::WindowsNative => OcrEngine::WindowsNative,
             screenpipe_db::OcrEngine::AppleNative => OcrEngine::AppleNative,
-            screenpipe_db::OcrEngine::Custom(config) => OcrEngine::Custom(config.into()),
         }
     }
 }
@@ -69,7 +59,6 @@ impl std::str::FromStr for OcrEngine {
         match s {
             "tesseract" => Ok(Self::Tesseract),
             "windows-native" => Ok(Self::WindowsNative),
-            "unstructured" => Ok(Self::Unstructured),
             "apple-native" => Ok(Self::AppleNative),
             _ => Ok(Self::platform_default()),
         }
@@ -80,6 +69,32 @@ impl std::str::FromStr for OcrEngine {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_ocr_engines_roundtrip_through_the_database_type() {
+        for (engine, expected) in [
+            (OcrEngine::Tesseract, "Tesseract"),
+            (OcrEngine::WindowsNative, "WindowsNative"),
+            (OcrEngine::AppleNative, "AppleNative"),
+        ] {
+            let database_engine: screenpipe_db::OcrEngine = engine.into();
+            let encoded = serde_json::to_value(&database_engine).unwrap();
+            assert_eq!(encoded, expected);
+            let decoded: screenpipe_db::OcrEngine = serde_json::from_value(encoded).unwrap();
+            let roundtrip: OcrEngine = decoded.into();
+            let roundtrip: screenpipe_db::OcrEngine = roundtrip.into();
+            assert_eq!(serde_json::to_value(roundtrip).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn removed_remote_ocr_configuration_is_not_deserializable() {
+        assert!(serde_json::from_str::<screenpipe_db::OcrEngine>(
+            r#"{"Custom":{"api_url":"https://example.invalid/ocr","api_key":"test","timeout_ms":5000}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<screenpipe_db::OcrEngine>(r#""Unstructured""#).is_err());
+    }
 
     #[test]
     fn ocr_engine_from_str_tesseract() {
@@ -94,14 +109,6 @@ mod tests {
         assert!(matches!(
             "windows-native".parse::<OcrEngine>().unwrap(),
             OcrEngine::WindowsNative
-        ));
-    }
-
-    #[test]
-    fn ocr_engine_from_str_unstructured() {
-        assert!(matches!(
-            "unstructured".parse::<OcrEngine>().unwrap(),
-            OcrEngine::Unstructured
         ));
     }
 

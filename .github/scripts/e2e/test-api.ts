@@ -46,13 +46,6 @@ await test("health response structure", async () => {
   }
 });
 
-await test("GET /pipes/list", async () => {
-  const status = await httpStatus(`${BASE}/pipes/list`);
-  // 200, 403 (auth), or 404 are fine — not 500
-  if (status === 500) throw new Error("server error 500");
-  if (status === 0) throw new Error("connection refused");
-});
-
 await test("search with date range", async () => {
   const today = new Date().toISOString().split("T")[0] + "T00:00:00Z";
   const res = await fetch(`${BASE}/search?limit=1&start_time=${today}`);

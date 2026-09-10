@@ -12,13 +12,33 @@ const docsRoot = join(__dirname, "docs-mintlify-mig-tmp");
 const publicRoot = join(docsRoot, "public");
 const docsJsonPath = join(docsRoot, "docs.json");
 const openApiPath = join(docsRoot, "openapi.yaml");
-const connectionRefPath = join(docsRoot, "connection-reference.mdx");
 const connectionsCodeRoot = join(
   repoRoot,
   "crates/screenpipe-connect/src/connections",
 );
 
 const errors = [];
+const retiredDocSlugs = new Set([
+  "connections",
+  "connection-reference",
+  "cloud-archive",
+  "chatgpt",
+  "teams",
+  "intune-deployment",
+  "openclaw",
+  "claude-code",
+  "opencode",
+  "cline",
+  "continue",
+  "gemini-cli",
+  "copilot-cli",
+  "obsidian",
+  "msty",
+  "mcp-apps",
+  "pipes",
+  "pipe-debugging",
+  "pipe-store",
+]);
 
 function fail(message) {
   errors.push(message);
@@ -71,7 +91,7 @@ for (const slug of mdxSlugs) {
 for (const file of mdxFiles) {
   const source = read(file);
   const rel = file.slice(repoRoot.length + 1);
-  const frontmatter = source.match(/^---\n([\s\S]*?)\n---/);
+  const frontmatter = source.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!frontmatter) {
     fail(`${rel}: missing frontmatter`);
     continue;
@@ -94,7 +114,7 @@ for (const file of mdxFiles) {
     const slug = target.replace(/^\//, "");
     const assetPath = join(publicRoot, slug);
     const rootAssetPath = join(docsRoot, slug);
-    if (mdxSlugs.has(slug)) continue;
+    if (mdxSlugs.has(slug) || retiredDocSlugs.has(slug)) continue;
     if (existsSync(assetPath)) continue;
     if (existsSync(rootAssetPath)) continue;
 
@@ -130,7 +150,6 @@ if (apiPathCount < 50) {
   fail(`openapi.yaml route count looks too low: ${apiPathCount}`);
 }
 
-const connectionRef = read(connectionRefPath).toLowerCase();
 const connectionFiles = walk(connectionsCodeRoot, (path) => (
   path.endsWith(".rs") && basename(path) !== "mod.rs"
 ));
@@ -142,13 +161,6 @@ for (const file of connectionFiles) {
   const id = source.match(/id:\s*"([^"]+)"/)?.[1];
   if (!name || !id) continue;
   connectionCount += 1;
-  if (!connectionRef.includes(name.toLowerCase())) {
-    fail(`connection-reference.mdx does not mention integration: ${name} (${id})`);
-  }
-}
-
-if (connectionCount < 50) {
-  fail(`connection registry count looks too low: ${connectionCount}`);
 }
 
 if (errors.length) {

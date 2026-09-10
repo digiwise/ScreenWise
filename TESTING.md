@@ -78,12 +78,11 @@ commits that broke this area: `0752ea59`, `7562ec62`, `2a2bd9b5`, `f2f7f770`, `5
 - [ ] **dock right-click menu works** — right-click dock icon. "Show screenpipe", "Settings", "Check for updates" all work (`d794176a`).
 - [ ] **tray menu items don't fire twice** — click any tray menu item. action happens once, not twice (`9e151265`).
 - [ ] **tray health indicator** — tray icon shows green (healthy) or yellow/red (issues) based on recording status.
-- [ ] **tray doesn't show false "Error" on transient issues** — Under load (running many pipes, high CPU), tray icon should not flip to "Error" if recording is actually working. Only sustained errors (>2min) show red. Tests under transient DB/OCR/audio pressure. (`abc234aae`)
+- [ ] **tray doesn't show false "Error" on transient issues** — Under load (high CPU), tray icon should not flip to "Error" if recording is actually working. Only sustained errors (>2min) show red. Tests under transient DB/OCR/audio pressure. (`abc234aae`)
 - [ ] **tray on notched MacBook** — on 14"/16" MacBook Pro, tray icon is visible (not hidden behind notch). if hidden, user can Cmd+drag to reposition.
 - [ ] **activation policy never changes** — after ANY user interaction, dock icon should remain visible. no Accessory mode switches. verify with: `ps aux | grep screenpipe`.
 - [ ] **no autosave_name crash** — removed in `2a2bd9b5`. objc2→objc pointer cast was causing `panic_cannot_unwind`.
 - [ ] **no recreate_tray** — recreating tray pushes icon LEFT (behind notch). must only create once (`f2f7f770`).
-- [ ] **tray upgrade button opens in-app checkout** — Verify that clicking the tray's upgrade button correctly opens the in-app checkout experience. (`078fcfb2`)
 - [ ] **modernized tray menu** — Verify the tray menu's updated layout and functionality match the modernized design. (`b6c363e5`)
 - [ ] **Recording toggle in tray** — Verify that the tray menu has a single toggle to start/stop recording (replacing separate items). (`cdc1d0fd9`)
 
@@ -195,7 +194,7 @@ commits: `6dd5d98e`, `831ad258`
 - [ ] **Meeting app OCR force** — Open a meeting app (Zoom, Teams, Meet). Verify OCR is forced for these apps even if accessibility is available. (`b18ae2253`)
 - [ ] **Accessibility automation properties** — Verify automation properties (labels, roles, automation IDs) are correctly captured in the accessibility tree across Windows, macOS, and Linux. (`1b7d0db5b`)
 - [ ] **Apple Vision per-word OCR fast path** — Browse an app with lots of text (e.g., Wikipedia article with 500+ words). Verify OCR database inserts are fast (bulk VALUES insert, not 500 individual RETURNING queries). Check logs for no "Slow DB batch insert" warnings. Regression: `6f3f80dd3` (Apple per-word records now use level="0" for bulk-insert fast path, not level="5" which hit expensive per-row insert).
-- [ ] **DB write coalesce queue** — Under heavy load (e.g. many pipes + high FPS), verify no "database is locked" errors and no vision stalls due to write contention. (`39c016cb3`, `d119d060d`, `231521192`)
+- [ ] **DB write coalesce queue** — Under heavy load and high FPS, verify no "database is locked" errors and no vision stalls due to write contention. (`39c016cb3`, `d119d060d`, `231521192`)
 - [ ] **static-screen does not trigger vision-stall WARN** — Sit on a Zoom call / slide deck / IDE waiting screen for >2 minutes (no UI activity). Verify the engine does NOT log `health_check: no unique vision frame in Ns` warnings, and the Tauri app's `consecutive_vision_stall` counter stays at 0 (no `vision capture recovered after N stale checks` info line). Dedup-skipped captures must tick `last_db_write_ts` so the health check distinguishes "static screen, dedup working" from "pipeline stuck". Pre-fix: 8–14 false alarms/day with single stretches up to 28 minutes. (`a08ec9140`, +follow-up commit)
 - [ ] **Windows idle CPU reduction** — Verify low CPU usage on Windows when screen is idle, using event-driven hooks and caching. (`d2c9d1fb8`)
 - [ ] **reduced CPU spikes in vision/capture pipeline** — Actively browse and use applications, verifying that CPU spikes in the vision/capture pipeline are significantly reduced. (`8f7294e6`)
@@ -291,12 +290,10 @@ commits: `eea0c865`, `cc09de61`, `e61501da`, `d25191d7`, `60096fb9`
 - [ ] **Snapshot compaction integrity** — Verify compaction doesn't result in NULL offset_index or pool exhaustion. (`09245af5f`)
 - [ ] **Audio chunk timestamps** — `start_time` and `end_time` are correctly set for reconciled and retranscribed audio chunks in the database.
 - [ ] **SCREENPIPE_DATA_DIR usage** — Set the `SCREENPIPE_DATA_DIR` environment variable. Verify the app uses this directory for all its data storage. (`d5f30db71`)
-- [ ] **DB pool starvation prevention** — Simulate high database load (e.g., rapid screen activity, many pipes running) and monitor logs. Verify no "database is locked" errors or signs of DB pool starvation.
+- [ ] **DB pool starvation prevention** — Simulate high database load during rapid screen activity and monitor logs. Verify no "database is locked" errors or signs of DB pool starvation.
 - [ ] **DB write coalescing queue** — verify high-frequency captures (e.g. 10 FPS) don't lock the UI or cause write errors. (`c23768f41`)
 - [ ] **Multi-byte window titles in suggestions** — Interact with suggestions for windows that have multi-byte (e.g., Unicode, emoji) characters in their titles. Verify no char boundary panics.
 - [ ] **no concurrent reconciliation issues** — Verify that concurrent reconciliation processes do not cause issues during heavy load or sync operations. (`1d436bc3`)
-- [ ] **pipe_config blobs skipped in sync** — Verify that `pipe_config` blobs are correctly skipped during synchronization, preventing unnecessary data transfer and potential issues. (`08d5c53a`)
-- [ ] **Pi's native auto-compaction for pipe session history** — Verify that Pi's native auto-compaction feature for pipe session history works as expected, preventing indefinite growth of history and maintaining performance. (`8f49e2cf`)
 - [ ] **UTF-8 panic with long multi-byte strings** — Introduce long strings with multi-byte UTF-8 characters (e.g., in window titles, chat input, search queries). Verify no panics occur when these strings are truncated, stored, or processed.
 - [ ] **fsync snapshots before DB commit** — verify data integrity by force-quitting during heavy capture; snapshots should match DB entries. (`2e63282b8`)
 - [ ] **Data directory setting location** — Verify that the data directory setting is now located in the "Storage" tab of the settings menu. (`0d3ffe30a`)
@@ -323,13 +320,12 @@ commits: `8a5f51dd`, `0b0d8090`, `7e58564e`, `2522a7e2`, `f3e55dbc`, `79f2913f`
 - [ ] **FPS setting** — change capture FPS. recording interval changes accordingly.
 - [ ] **language/OCR engine setting** — change OCR language. new language used on next capture cycle.
 - [ ] **video quality setting** — low/balanced/high/max. affects FFmpeg encoding params (`21bddd0f`).
-- [ ] **Settings UI sentence case** — All settings UI elements (billing, pipes, team) should use consistent sentence case.
+- [ ] **Settings UI sentence case** — All settings UI elements should use consistent sentence case.
 - [ ] **Sidebar text visibility in Auto theme** — On macOS, switch between Light, Dark, and Auto system theme modes. Verify that sidebar text remains visible and legible in all modes. (`16d38570d`)
 - [ ] **Billing page links to website** — Verify that the in-app billing page correctly links to the *new* website billing page.
 - [ ] **Non-pro subscriber Whisper fallback** — As a non-pro subscriber, verify that audio transcription defaults to `whisper-large-v3-turbo-quantized` and functions correctly.
 - [ ] **Pi restart on preset switch** — Switch between different AI presets. Verify that the Pi agent restarts if required by the new preset.
 - [ ] **No hosted web search** — Verify local Pi chat does not install or invoke the removed hosted web-search extension.
-- [ ] **Unknown AI provider type sanitization** — Configure a malformed or retired provider type by manual config edit. Verify it migrates non-destructively to fixed-loopback Ollama without retaining its credential.
 - [ ] **standalone settings page** — Verify that clicking settings in the tray menu opens a standalone `/settings` page instead of a modal overlay. (`ec2a5789e`)
 - [ ] **optional API auth** — Enable API auth in settings (or via `--api-auth`). Verify that remote access to the API requires the configured token. (`09f18141a`, `cfc1a74e1`)
 - [ ] **privacy settings reordering** — Verify that the Security section appears first in the Privacy settings tab. (`4718785b6`)
@@ -345,7 +341,7 @@ commits: `8a5f51dd`, `0b0d8090`
 - [ ] **FPS setting** — change capture FPS. recording interval changes accordingly.
 - [ ] **language/OCR engine setting** — change OCR language. new language used on next capture cycle.
 - [ ] **video quality setting** — low/balanced/high/max. affects FFmpeg encoding params (`21bddd0f`).
-- [ ] **Settings UI sentence case** — All settings UI elements (billing, pipes, team) should use consistent sentence case.
+- [ ] **Settings UI sentence case** — All settings UI elements should use consistent sentence case.
 
 ### 11. onboarding
 
@@ -413,7 +409,7 @@ commits: `f1255eac`, `25cbdc6b`, `2529367d`, `d9821624`, `e61501da`, `039d5fea`,
 - [ ] **Activity summary time measurement and relative parsing** — Verify activity summaries display accurate time measurements and relative time parsing (e.g., "5 minutes ago", "yesterday") works correctly in the UI.
 - [ ] **Hybrid OCR for canvas apps** — Verify that text from Google Docs and Figma (canvas-rendered) is captured using hybrid OCR. (`4d2b05990`, `f09f1e9aa`)
 - [ ] **Search modal scroll** — Verify that the search modal is scrollable on Windows/Linux embedded timeline and trackpad/wheel scrolling works. (`f108f1f0d`, `2a2bd9b5`, `5762c60bf`)
-- [ ] **Modal scrolling (general)** — Verify that all modals (e.g., settings, pipes, search) are scrollable and handle overflow correctly, especially on Windows and Linux. (`19789657d`)
+- [ ] **Modal scrolling (general)** — Verify that all modals (e.g., settings and search) are scrollable and handle overflow correctly, especially on Windows and Linux. (`19789657d`)
 - [ ] **Search modal UX** — Verify that click interference from Live Text and wheel handlers is resolved, and app/date filter timezone bugs are fixed. (`0c883819e`, `b7123231`, `f09f1e9aa`)
 - [ ] **Timeline filter viewport scoping** — verify timeline filters apply to current viewport, not a fixed 800-frame window. (`9277431e4`)
 - [ ] **Chat UI code blocks** — verify light text on dark bg in chat code blocks. (`c029f7779`)
@@ -435,32 +431,12 @@ commits: `f1255eac`, `25cbdc6b`, `2529367d`, `d9821624`
 - [ ] **Keyword search logic** — Verify that keyword search SQL correctly uses `OR` instead of `UNION` within `IN()`.
 - [ ] **Search prompt accuracy** — Verify that search prompts are improved to prevent false negatives from over-filtering.
 
-### 13. sync & cloud
-
-- [ ] **CLI remote sync** — Run `screenpipe sync remote`. Verify it correctly syncs data to a remote SSH/SFTP server. (`f46e85cb1`)
-
-
-commits: `2f6b2af5`, `ea7f1f61`, `5cb100ea`
-
-- [ ] **auto-remember sync password** — user doesn't have to re-enter password each time (`5cb100ea`).
-- [ ] **auto-download from other devices** — after upload cycle, download new data from paired devices (`2f6b2af5`).
-- [ ] **auto-init doesn't loop** — sync initialization happens once, doesn't repeat endlessly (`ea7f1f61`).
-- [ ] **Cloud archive docs** — Verify that the cloud archive documentation page exists and is accessible via a link from settings.
-- [ ] **simplified Arc URL extraction** — Verify that simplified Arc URL extraction works correctly, capturing URLs from Arc browser content. (`08d5c53a`)
-- [ ] **Randomly generated cloud sync password** — On new sync setup, verify that a randomly generated cloud sync password is used.
-- [ ] **Trialing subscriptions for pipe sync** — With a trialing subscription, verify that pipe sync functions as if the subscription is active, and pipes sync correctly.
-- [ ] **Encrypted pipe sync (Pro) and locked toggle (non-Pro)** — As a Pro user, enable encrypted pipe sync and verify pipes sync encrypted. As a non-Pro user, verify the encrypted pipe sync toggle is locked and inaccessible.
-- [ ] **Arc URL extraction and pipe_config blobs** — If Arc Browser is supported, verify accurate URL extraction. Verify that `pipe_config` blobs are correctly skipped during sync (requires inspection of sync data or logs).
-- [ ] **Per-device record counts in sync** — In sync settings, verify that record counts are displayed for each synchronized device and that sync configuration persists across restarts. (`0e7baaedb`)
-- [ ] **transcription daily cost cap** — Verify that the daily cost cap for transcription is correctly enforced and prevents further transcription once reached. (`2f67a1041`)
-- [ ] **local Google Calendar OAuth** — Connect Google Calendar. Verify it uses the local OAuth flow instead of a cloud-based one. (`0177fdf2b`)
-
-### 14. Region OCR (Shift+Drag)
+### 13. Region OCR (Shift+Drag)
 
 commits: `b3628788`, `738178da`
 
 - [ ] **Shift+Drag region OCR functionality** — Perform a `Shift+Drag` region OCR selection on the screen. Verify that the RegionOcrOverlay appears correctly and local OCR processes the selected region.
-- [ ] **Local OCR without login for Shift+Drag** — Verify that the `Shift+Drag` region OCR uses local OCR and functions correctly without requiring the user to be logged in or have a cloud subscription.
+- [ ] **Local OCR without login for Shift+Drag** — Verify that the `Shift+Drag` region OCR uses local OCR without an account.
 
 ### 15. Windows-specific
 
@@ -473,7 +449,6 @@ commits: `eea0c865`, `fe9060db`, `c99c3967`, `aeaa446b`, `5a219688`, `caae1ebc`,
 - [ ] **Windows default mode** — On Windows, the app should default to window mode on first launch.
 - [ ] **Windows taskbar icon** — The app should display a taskbar icon on Windows.
 - [ ] **Windows audio transcription accuracy** — On Windows, verify improved audio transcription accuracy due to native Silero VAD frame size and lower speech threshold.
-- [ ] **Windows multi-line pipe prompts** — Multi-line pipe prompts should be preserved on Windows.
 - [ ] **Windows ARM64 support** — On a Windows ARM64 device, verify the app installs and runs correctly. (`d62360bc4`)
 - [ ] **Windows app matching for meetings** — On Windows, verify that meeting detection correctly matches active applications. (`ef39e728d`)
 - [ ] **Alt+S shortcut activates overlay with keyboard focus** — On Windows, press `Alt+S`. Verify that the overlay window appears and immediately receives keyboard focus, allowing immediate typing.
@@ -494,7 +469,6 @@ commits: `eea0c865`, `fe9060db`, `c99c3967`, `aeaa446b`, `5a219688`, `caae1ebc`,
 - [ ] **Windows default mode** — On Windows, the app should default to window mode on first launch.
 - [ ] **Windows taskbar icon** — The app should display a taskbar icon on Windows.
 - [ ] **Windows audio transcription accuracy** — On Windows, verify improved audio transcription accuracy due to native Silero VAD frame size and lower speech threshold.
-- [ ] **Windows multi-line pipe prompts** — Multi-line pipe prompts should be preserved on Windows.
 
 #### Windows text extraction matrix (accessibility vs OCR)
 
@@ -590,7 +564,7 @@ These apps are common on Windows but have **never been tested** with the event-d
 3. Windows Terminal / cmd.exe / powershell.exe — verify terminal detection
 4. Edge / Firefox — browser is primary use
 5. Notion / Obsidian — knowledge workers
-6. Office apps — enterprise users
+6. Office apps — general users
 
 **How to verify an app:**
 ```bash
@@ -607,43 +581,22 @@ curl "http://localhost:3030/search?app_name=<exe_name>&limit=3&content_type=all"
 - If mintty (Git Bash) returns chrome-only, add `"mintty"`
 - Any app where the accessibility tree consistently returns only window chrome but screenshots contain readable text
 
-### 15. Help and Support
-
-commits: `deac5ea9`
-
-- [ ] **Intercom integration in help section** — Navigate to the desktop app's help section. Verify that Crisp is replaced by Intercom and that the Intercom chat widget and knowledge base search function as expected.
-
 ### 16. CI / release
 
 commits: `8f334c0a`, `fda40d2c`
 
 - [ ] **macOS 26 runner** — release builds on self-hosted macOS 26 runner with Apple Intelligence (`fda40d2c`).
-- [ ] **updater artifacts** — release includes `.tar.gz` + `.sig` for macOS, `.nsis.zip` + `.sig` for Windows.
 - [ ] **prod config used** — CI copies `tauri.prod.conf.json` to `tauri.conf.json` before building. identifier is `screenpi.pe` not `screenpi.pe.dev`.
 - [ ] **draft then publish** — `workflow_dispatch` creates draft. manual publish or `release-app-publish` commit publishes.
 - [ ] **macOS E2E workflow** — Verify the macOS E2E workflow in CI ensures stability across releases. (`18ca34d55`)
 
-### 16. MCP / Claude integration
-
-commits: `8c8c445c`
-
-- [ ] **Claude connect button works** — Settings → Connections → "Connect Claude" downloads `.mcpb` file and opens it in Claude Desktop. was broken because GitHub releases API pagination didn't reach `mcp-v*` releases buried behind 30+ app releases (`8c8c445c`).
-- [ ] **MCP release discovery with many app releases** — `getLatestMcpRelease()` paginates up to 5 pages (250 releases) to find `mcp-v*` tagged releases. verify it works even when >30 app releases exist since last MCP release.
-- [ ] **Claude Desktop not installed** — clicking connect shows a useful error, not a silent failure.
-- [ ] **MCP version display** — Settings shows the available MCP version and whether it's already installed.
-- [ ] **macOS Claude install flow** — downloads `.mcpb`, opens Claude Desktop, waits 1.5s, then opens the `.mcpb` file to trigger Claude's install modal.
-- [ ] **Windows Claude install flow** — same flow using `cmd /c start` instead of `open -a`.
-- [ ] **download error logging** — if download fails, console shows actual error message (not `{}`).
-
-### 17. AI Agents / Pipes
+### 17. Local Pi / Ollama
 
 commits: `fa887407`, `815f52e6`, `60840155`, `e66c3ff8`, `c905ffbf`, `01147096`, `5908d7f4`, `46422869`, `4f43da70`, `71a1a537`, `6abaaa36`, `f3e55dbc`, `8e426dec`, `1289f51e`, `4bc9ff1a`, `c336f73d`, `2f7416ae`
 
 - [ ] **Pi process stability** — After app launch, `ps aux | grep pi` should show a single, stable `pi` process that doesn't restart or get killed.
 - [ ] **Pi readiness handshake** — First chat interaction with Pi should be fast (<2s for readiness).
 - [ ] **Pi auto-recovery** — If the `pi` process is manually killed, it should restart automatically within a few seconds and be ready for chat.
-- [ ] **Pipe output accuracy** — When executing a pipe, the user's prompt should be accurately reflected in the output.
-- [ ] **Silent LLM errors** — LLM errors during pipe execution should be displayed to the user, not silently suppressed.
 - [ ] **Fast first chat with Pi** — The first interaction with Pi after app launch should be responsive, with no noticeable delay (aim for <2s).
 - [ ] **Activity Summary tool** — MCP can access activity summaries via the `activity-summary` tool, and the `activity-summary` endpoint works correctly.
 - [ ] **Search Elements tool** — MCP can search elements using the `search-elements` tool.
@@ -651,80 +604,20 @@ commits: `fa887407`, `815f52e6`, `60840155`, `e66c3ff8`, `c905ffbf`, `01147096`,
 - [ ] **Progressive disclosure for AI data** — AI data querying should progressively disclose information.
 - [ ] **Screenpipe Analytics skill** — The `screenpipe-analytics` skill can be used by the Pi agent to perform raw SQL usage analytics.
 - [ ] **Screenpipe Retranscribe skill** — The `screenpipe-retranscribe` skill can be used by the Pi agent for retranscription.
-- [ ] **AI preset save stability** — Saving AI presets should not cause crashes, especially when dealing with pipe session conflicts.
-- [ ] **Pipe local-provider defaults** — Verify that a pipe without an explicit preset uses local Ollama and never inserts a hosted Screenpipe provider or credential into Pi configuration.
-- [ ] **Legacy hosted preset compatibility** — Verify that stored `screenpipe-cloud`, `pi`, and `pi-agent` presets remain readable and execute through local Ollama without deleting the stored preset.
-- [ ] **Pipe preset override** — Install a pipe from the store. Verify its preset can be overridden by user's default. (`bee49f1e7`)
-- [ ] **Pipe configurable timeout** — Add `timeout` to pipe.md frontmatter. Verify pipe respects this timeout. (`cc0ecef53`)
-- [ ] **Pipe store caching** — Navigate pipe store and connections pages. Verify fast loading due to client-side caching. (`f501c19fb`)
-- [ ] **Primary + fallback AI preset UI** — Verify the UI for primary and fallback AI presets for pipes works as expected. (`da206471a`)
 - [ ] **Default AI model ID** — Verify that the default AI model ID does not contain outdated date suffixes.
 - [ ] **Move provider/model flags** — `--provider` and `--model` flags should be correctly moved before `-p prompt` in `pi spawn` commands.
 - [ ] **Pi restart on preset switch** — Switch between different AI presets. Verify that the Pi agent restarts if required by the new preset.
-- [ ] **Faster Pipes page loading** — Verify that the "Pipes" page loads significantly faster, especially when there are a large number of pipes configured.
-- [ ] **Instant pipe enable toggle UI update** — Toggle a pipe's enable status. Verify that the UI updates instantly due to optimistic updates, even if the backend operation takes a moment.
-- [ ] **Pipe execution shows parsed text** — Execute a pipe that outputs JSON. Verify that the output displayed to the user is correctly parsed text, not raw JSON.
 - [ ] **Surface local model errors in chat UI** — Stop Ollama or select an unavailable local model. Verify the error is clearly surfaced to the user.
-- [ ] **Pipe preset local-only migration** — Verify retired provider presets are mapped to fixed-loopback Ollama without retaining provider credentials.
-- [ ] **pipe UI improvements** — Verify the overall improvements to the Pipes UI, ensuring a better user experience. (`2e68400c`)
-- [ ] **proper spinner icon for pipe refresh button** — Verify that the pipe refresh button displays the correct spinner icon during loading states. (`b709af2f`)
-- [ ] **Retired pipe provider compatibility** — A pipe referencing a retired ChatGPT/provider preset remains readable and executes through local Ollama.
 - [ ] **Reduced excessive Pi restarts** — When changing AI preset values or other settings, verify that excessive Pi restarts are reduced. Monitor logs for unnecessary restart messages.
-- [ ] **Invalid UTF-8 in Pi streaming** — Execute a pipe that outputs invalid UTF-8 characters to stdout/stderr. Verify that Pi streaming correctly handles these without crashing or displaying garbled output.
 - [ ] **Auto-abort stuck Pi agent** — Verify that the Pi agent is auto-aborted if stuck before sending a new message. (`602419151`)
 - [ ] **Pi crash loop fix (Windows)** — Verify that the Pi agent doesn't enter a crash loop on Windows due to lru-cache interop issues. (`de56176e5`)
 - [ ] **Token counter** — Verify that the chat UI displays a token counter. (`2f75e90bf`)
-- [ ] **Optimize button** — Verify that the "optimize" button appears in the pipe dropdown menu. (`5dff9d21a`)
-- [ ] **Pipes as App Store** — Verify the redesigned Pipes tab, which provides a unified app store experience. (`89d2e0129`)
-- [ ] **Tool call UI with progress rail** — Execute a pipe that uses tool calls. Verify the redesigned UI featuring a progress rail timeline and auto-collapse for friendly interaction. (`6c23e1399`, `d81ea65c1`)
-- [ ] **In-app Notification Panel** — Use the `/notify` API (e.g., via a pipe). Verify an in-app notification panel appears instead of a system notification. (`34937b2dc`)
-- [ ] **Pipe Suggestions Scheduler** — Verify that pipe suggestions are displayed according to the scheduled intervals. (`41c8b8085`)
-- [ ] **Pipe store stability** — verify null guards, sharp corners, unpublish functionality, and data unwrap fixes. (`603c84f7b`)
 - [ ] **Pi agent & search timeouts** — Run a long-running search or Pi agent task. Verify it doesn't timeout prematurely at 60s (should allow up to 120s for search). (`f01213cf5`)
-- [ ] **allow schedule + triggers together in pipe config UI** — Verify that both schedule and triggers can be configured together in the pipe config UI without conflicts. (`f32bf9230`)
-- [ ] **local event triggers for pipes** — Verify that pipes can be triggered by local events such as meeting start/end and pipe chaining. (`508b68ff7`, `776587aa7`)
-- [ ] **tool call indicators in pipe run output** — Verify that tool call indicators are displayed in the pipe run output. (`dda33a6a7`)
-- [ ] **align copy and chat icons in pipe run history** — Verify that copy and chat icons are properly aligned in the pipe run history. (`f8fe5cff4`)
-- [ ] **Live pipe output streaming** — Open the "Runs" tab for a running pipe. Verify that the output streams live as the pipe executes. (`4c1fab276`)
 - [ ] **Rich activity-summary** — Verify that activity summaries include details about windows, URLs, and audio transcriptions. (`f2d8ba1dad3`)
 - [ ] **OpenAI-compatible transcription endpoint** — Verify that the `/v1/audio/transcriptions` endpoint works correctly with standard OpenAI clients. (`59deeba19`)
 - [ ] **Mermaid diagram XSS sanitization** — Verify that mermaid diagrams in the UI are correctly sanitized to prevent XSS attacks. (`3405e9793`)
-- [ ] **Per-machine pipe favorites (stars)** — Toggle the star icon for a pipe. Verify that favorites are persisted per-machine and that the filter chip correctly shows starred pipes first. (`e1a18adb9`, `0a2c1abb7`)
-- [ ] **Connected integrations @mentions in chat** — Open the filter popover in chat. Verify that connected integrations (like Notion, Slack, Google Docs) appear as @mentions for easy filtering. (`1c0c95b20`)
 
-commits: `fa887407`, `815f52e6`, `60840155`, `e66c3ff8`, `c905ffbf`, `01147096`, `5908d7f4`, `46422869`, `4f43da70`, `71a1a537`, `6abaaa36`
-
-- [ ] **Pi process stability** — After app launch, `ps aux | grep pi` should show a single, stable `pi` process that doesn't restart or get killed.
-- [ ] **Pi readiness handshake** — First chat interaction with Pi should be fast (<2s for readiness).
-- [ ] **Pi auto-recovery** — If the `pi` process is manually killed, it should restart automatically within a few seconds and be ready for chat.
-- [ ] **Pipe output accuracy** — When executing a pipe, the user's prompt should be accurately reflected in the output.
-- [ ] **Silent LLM errors** — LLM errors during pipe execution should be displayed to the user, not silently suppressed.
-- [ ] **Fast first chat with Pi** — The first interaction with Pi after app launch should be responsive, with no noticeable delay (aim for <2s).
-- [ ] **Activity Summary tool** — MCP can access activity summaries via the `activity-summary` tool, and the `activity-summary` endpoint works correctly.
-- [ ] **Search Elements tool** — MCP can search elements using the `search-elements` tool.
-- [ ] **Frame Context tool** — MCP can access frame context via the `frame-context` tool.
-- [ ] **Progressive disclosure for AI data** — AI data querying should progressively disclose information.
-- [ ] **Screenpipe Analytics skill** — The `screenpipe-analytics` skill can be used by the Pi agent to perform raw SQL usage analytics.
-- [ ] **Screenpipe Retranscribe skill** — The `screenpipe-retranscribe` skill can be used by the Pi agent for retranscription.
-- [ ] **AI preset save stability** — Saving AI presets should not cause crashes, especially when dealing with pipe session conflicts.
-- [ ] **Pipe local-provider defaults** — Verify that a pipe without an explicit preset uses local Ollama and never inserts a hosted Screenpipe provider or credential into Pi configuration.
-- [ ] **Legacy hosted preset compatibility** — Verify that stored `screenpipe-cloud`, `pi`, and `pi-agent` presets remain readable and execute through local Ollama without deleting the stored preset.
-- [ ] **Default AI model ID** — Verify that the default AI model ID does not contain outdated date suffixes.
-- [ ] **Move provider/model flags** — `--provider` and `--model` flags should be correctly moved before `-p prompt` in `pi spawn` commands.
-
-### 18. Admin / Team features
-
-commits: `58460e02`, `853e0975`
-
-- [ ] **Admin team-shared filters** — Admins should be able to remove individual team-shared filters.
-- [ ] **Simplified team invite** — Verify the simplified team invite flow using a single web URL without requiring a passphrase. (`44a19b73f`, `b53b08b6e`)
-- [ ] **Per-request AI cost tracking and admin spend endpoint** — Verify that per-request AI costs are tracked correctly and that the admin spend endpoint provides accurate usage data.
-
-commits: `58460e02`
-
-- [ ] **Admin team-shared filters** — Admins should be able to remove individual team-shared filters.
-
-### 19. Logging
+### 18. Logging
 
 commits: `fc830b43`, `f54d3e0d`
 
@@ -860,51 +753,19 @@ commits: `cf2dcd5f8`, `ad1d00d8f`, `6f623b30a`, `aaf031169`
 - [ ] **Notification text selection** — Verify that text can be selected in notification inbox messages. (`3449197c3`)
 - [ ] **macOS notification "Open" click** — Click "Open" on a macOS system notification. Verify it correctly brings the Screenpipe window to the front. (`3e86cebb0`)
 
-### 26. Onboarding & Fleet UX
+### 26. Browser Extension
 
-commits: `f6c21a022`, `31e67ae1c`, `8d0a5348d`, `b1c30e99b`
-
-- [ ] **Redesigned Onboarding** — Complete the redesigned onboarding. Verify live feed appears and opinionated pipe setup works. (`f6c21a022`)
-- [ ] **Pipes & Fleet merged UI** — Open Pipes tab. Verify fleet devices appear in the dropdown. Verify local machine is filtered/distinct. (`31e67ae1c`, `8d0a5348d`)
-- [ ] **Scheduled vs Manual pipes** — In My Pipes, verify sub-tabs for scheduled and manual pipes. (`b1c30e99b`)
-
-### 27. Connections (Multi-instance & New Services)
-
-- [ ] **Microsoft 365 / Teams** — Verify that Microsoft Graph OAuth works for Microsoft 365 and Teams (excluding personal accounts). (`635c32347`, `f35e999b0`)
-- [ ] **New Integrations** — Verify Loops, Resend, and Supabase integrations. (`ea454f324`)
-- [ ] **Google Docs Read/Write** — Verify Google Docs integration supports both read and write scopes. (`8f3ca5283`)
 
 
 commits: `c8769545b`, `4f522325b`, `54000c295`
 
-- [ ] **Multi-instance connections** — Add two different accounts for the same service (e.g., two Slack workspaces). Verify both work independently. (`c8769545b`)
-- [ ] **Post-install connection modal** — After installing a pipe, verify the connection modal appears if the pipe requires a service connection. (`c8769545b`)
-- [ ] **New service connections** — Verify Brex, Stripe, Sentry, Vercel, Pipedrive, Intercom, and Limitless connections can be authorized and sync data. (`4f522325b`, `54000c295`)
-- [ ] **Multi-instance OAuth for GitHub and Notion** — Verify that multi-instance OAuth works for GitHub and Notion, including fetching identity after token exchange. (`5d6ee5da3`)
-- [ ] **Glean icon in connections grid** — Verify that the Glean icon is displayed in the connections grid. (`ec6374e1d`)
-- [ ] **Google Docs connection & Pro gate** — Verify that Google Docs connection works and that the "Pro required" gate correctly appears for non-pro users on the connect button. (`9835b09d8`, `dbf451f34`, `dda16447c`, `e3a2be5cb`)
-- [ ] **Bitrix24 CRM integration** — Verify that Bitrix24 CRM connection can be authorized and syncs data correctly. (`55026df56`)
-- [ ] **OAuth auto-refresh** — Verify that expired OAuth tokens for generic proxy connections (like Google, Bitrix24) are automatically refreshed. (`d7835eabb`)
-
-### 28. Deployment & Remote Management
-
-commits: `c6a73b17e`, `945b687ec`
-
-- [ ] **Deploy to offline devices** — Use chat prompt to deploy screenpipe to an offline device. Verify it handles the "Screen Sharing" permission dialog by opening it on the target machine. (`c6a73b17e`, `945b687ec`)
-
-### 29. Browser Extension
 
 - [ ] **Extension popup** — Open the browser extension popup. Verify connection status is displayed correctly. (`be7c9e8b5`)
 
 
 - [ ] **Browser extension token auth** — Open the browser extension options page. Verify that token-based authentication works and that it can successfully connect to the Screenpipe API. (`be14de544`)
 
-### 30. CLI
-
-- [ ] **CLI logout** — Run `screenpipe logout`. Verify it clears local auth tokens. (`793c3d6e9`)
-- [ ] **CLI sync remote** — Verify `screenpipe sync remote` command and its configuration. (`f46e85cb1`)
-
-### 31. Chat (Pi)
+### 27. Chat (Pi)
 
 - [ ] **Parallel chats** — Verify that multiple chat sessions can run in parallel and their background streams remain visible when switching. (`c9d64ce23`)
 - [ ] **Chat sidebar navigation** — Verify that the chat sidebar (pinned, recents, live status) works correctly and replaces the Home view for "New chat". (`ec5e80992`, `28c4b1ac5`)

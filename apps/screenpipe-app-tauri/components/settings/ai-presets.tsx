@@ -17,7 +17,6 @@ import {
   DEFAULT_PROMPT,
   useSettings,
 } from "@/lib/hooks/use-settings";
-import { buildChatTestBody } from "@/lib/utils/chat-test-body";
 import { Label } from "../ui/label";
 import { Input } from "../ui/input";
 import { ValidatedInput } from "../ui/validated-input";
@@ -78,7 +77,6 @@ import {
 import { Badge } from "../ui/badge";
 import { toast } from "../ui/use-toast";
 import { Card, CardContent } from "../ui/card";
-import { AIProviderType } from "@/lib/hooks/use-settings";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -93,12 +91,7 @@ import {
 import { cn } from "@/lib/utils";
 import { AIPreset, commands } from "@/lib/utils/tauri";
 import { SkillsCard } from "./skills-card";
-import {
-  validatePresetName,
-  validateUrl,
-  debounce,
-  FieldValidationResult
-} from "@/lib/utils/validation";
+import { validatePresetName, debounce } from "@/lib/utils/validation";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -120,14 +113,12 @@ interface DiagnosticStepResult {
 
 interface DiagnosticResults {
   endpoint: DiagnosticStepResult;
-  auth: DiagnosticStepResult;
   models: DiagnosticStepResult;
   chat: DiagnosticStepResult;
 }
 
 const INITIAL_DIAGNOSTICS: DiagnosticResults = {
   endpoint: { status: "pending", message: "" },
-  auth: { status: "pending", message: "" },
   models: { status: "pending", message: "" },
   chat: { status: "pending", message: "" },
 };
@@ -248,14 +239,6 @@ const AISection = ({
         );
         if (!nameValidation.isValid && nameValidation.error) {
           errors.id = nameValidation.error;
-        }
-      }
-      
-      // Validate URL
-      if (presetData.url) {
-        const urlValidation = validateUrl(presetData.url);
-        if (!urlValidation.isValid && urlValidation.error) {
-          errors.url = urlValidation.error;
         }
       }
       
@@ -388,47 +371,6 @@ const AISection = ({
     setSettingsPreset(prev => ({ ...prev, ...presetsObject }));
   }, []);
 
-  // Auto-set max output tokens based on model name
-  const getDefaultMaxTokens = useCallback((model: string): number | null => {
-    const m = model.toLowerCase();
-    // Claude models
-    if (m.includes("opus")) return 64000;
-    if (m.includes("sonnet-4") || m.includes("sonnet-3.7")) return 64000;
-    if (m.includes("haiku")) return 8192;
-    // OpenAI models
-    if (m.includes("gpt-5")) return 128000;
-    if (m.includes("o3") || m.includes("o4") || m.includes("o1")) return 100000;
-    if (m.includes("gpt-4.1")) return 32768;
-    if (m.includes("gpt-oss")) return 8192;
-    // Google models
-    if (m.includes("gemini-3") || m.includes("gemini-2.5-pro")) return 65536;
-    if (m.includes("gemini")) return 8192;
-    // DeepSeek
-    if (m.includes("deepseek")) return 8192;
-    // Qwen
-    if (m.includes("qwen")) return 8192;
-    // Mistral
-    if (m.includes("mistral")) return 4096;
-    // Local/OSS models
-    if (m.includes("llama")) return 4096;
-    if (m.includes("phi")) return 16384;
-    return null; // unknown model, don't change
-  }, []);
-
-  // Only auto-set max tokens when the user actually changes the model name,
-  // not on mount — otherwise the saved maxTokens value gets overwritten.
-  const prevModelRef = useRef(settingsPreset?.model);
-  useEffect(() => {
-    const model = settingsPreset?.model;
-    if (!model) return;
-    if (model === prevModelRef.current) return; // no change — preserve saved value
-    prevModelRef.current = model;
-    const tokens = getDefaultMaxTokens(model);
-    if (tokens) {
-      updateSettingsPreset({ maxTokens: tokens } as any);
-    }
-  }, [settingsPreset?.model, settingsPreset?.provider, getDefaultMaxTokens, updateSettingsPreset]);
-
   const handleCustomPromptChange = useCallback((value: string, isValid: boolean) => {
     updateSettingsPreset({ prompt: value });
   }, [updateSettingsPreset]);
@@ -436,36 +378,6 @@ const AISection = ({
   const handleResetCustomPrompt = useCallback(() => {
     updateSettingsPreset({ prompt: DEFAULT_PROMPT });
   }, [updateSettingsPreset]);
-
-  const handleAiProviderChange = useCallback((newValue: AIPreset["provider"]) => {
-    // No-op if same provider.
-    if (newValue === settingsPreset?.provider) return;
-
-    // Clear stale diagnostic results so previous provider's errors don't bleed through
-    setTestStatus("idle");
-    setTestResults(INITIAL_DIAGNOSTICS);
-    setDiagnosticsOpen(false);
-    const defaultNames: Record<string, string> = {
-      "native-ollama": "ollama",
-    };
-
-    let newUrl = "";
-    let newModel = settingsPreset?.model;
-
-    switch (newValue) {
-      case "native-ollama":
-        newUrl = "http://localhost:11434/v1";
-        break;
-    }
-
-    const updates: Partial<AIPreset> = { provider: newValue, url: newUrl, model: newModel };
-    // Auto-fill name only when creating a new preset (no existing id)
-    if (!settingsPreset?.id && defaultNames[newValue]) {
-      updates.id = defaultNames[newValue];
-    }
-
-    updateSettingsPreset(updates);
-  }, [settingsPreset?.id, settingsPreset?.url, settingsPreset?.model, updateSettingsPreset]);
 
   const [models, setModels] = useState<AIModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
@@ -488,9 +400,9 @@ const AISection = ({
         ...prev,
         [failStep]: { status: "fail", message },
         ...Object.fromEntries(
-          (["endpoint", "auth", "models", "chat"] as const)
+          (["endpoint", "models", "chat"] as const)
             .filter((k) => {
-              const order = ["endpoint", "auth", "models", "chat"];
+              const order = ["endpoint", "models", "chat"];
               return order.indexOf(k) > order.indexOf(failStep);
             })
             .map((k) => [k, { status: "skip", message: "Skipped" }])
@@ -502,9 +414,7 @@ const AISection = ({
     // Only the local Ollama provider is active here.
     const modelsUrl = "http://localhost:11434/api/tags";
 
-    const headers: Record<string, string> = {};
-
-    // Step 1+2+3: Fetch models endpoint (tests endpoint, auth, and models in one call)
+    // Fetch the loopback model list before testing chat completion.
     setTestResults((prev) => ({
       ...prev,
       endpoint: { status: "running", message: "Connecting..." },
@@ -514,16 +424,11 @@ const AISection = ({
     {
       try {
         modelsResponse = await fetch(modelsUrl, {
-          headers,
           signal: abort.signal,
         });
       } catch (err: any) {
         if (abort.signal.aborted) return;
-        const hint =
-          settingsPreset?.provider === "native-ollama"
-            ? "Is Ollama running? Try: `ollama serve`"
-            : "Check your network connection";
-        skipRemaining("endpoint", `Connection failed: ${hint}`);
+        skipRemaining("endpoint", "Connection failed: is Ollama running? Try: `ollama serve`");
         return;
       }
 
@@ -533,48 +438,30 @@ const AISection = ({
       setTestResults((prev) => ({
         ...prev,
         endpoint: { status: "pass", message: `GET ${modelsResponse!.status}` },
-        auth: { status: "running", message: "Checking..." },
       }));
 
-      // Step 2: Auth check
-      if (modelsResponse!.status === 401 || modelsResponse!.status === 403) {
-        skipRemaining("auth", `${modelsResponse!.status} Unauthorized. Is Ollama running?`);
-        return;
-      } else if (!modelsResponse!.ok) {
-        skipRemaining("auth", `Unexpected status ${modelsResponse!.status}`);
+      if (!modelsResponse!.ok) {
+        skipRemaining("models", `Unexpected status ${modelsResponse!.status}`);
         return;
       } else {
         setTestResults((prev) => ({
           ...prev,
-          auth: { status: "pass", message: "API key accepted" },
           models: { status: "running", message: "Loading..." },
         }));
       }
 
-          // Step 3: Parse the local model list.
+      // Parse the local model list.
       if (modelsResponse!.ok) {
         let modelCount = 0;
         try {
           const data = await modelsResponse!.json();
-          if (settingsPreset?.provider === "native-ollama") {
-            const ollamaModels = (data.models || []).map((m: any) => ({
+          const ollamaModels = (data.models || []).map((m: any) => ({
               id: m.name,
               name: m.name,
               provider: "ollama",
             }));
-            modelCount = ollamaModels.length;
-            setModels(ollamaModels);
-          } else {
-            const apiModels = (data.data || [])
-              .map((m: any) => ({
-              id: m.id,
-              name: m.id,
-              provider: "ollama",
-              }))
-              .filter((m: any, idx: number, arr: any[]) => arr.findIndex((x: any) => x.id === m.id) === idx);
-            modelCount = apiModels.length;
-            setModels(apiModels);
-          }
+          modelCount = ollamaModels.length;
+          setModels(ollamaModels);
         } catch {
           if (abort.signal.aborted) return;
           skipRemaining("models", "Failed to parse models response");
@@ -592,17 +479,15 @@ const AISection = ({
     }
 
     // Step 4: Test the local chat completion.
-    let chatUrl: string;
-    chatUrl = "http://localhost:11434/v1/chat/completions";
-
-    // For OpenAI-compatible endpoints, start with `max_tokens` (broadest
-    // compatibility) but retry with `max_completion_tokens` if the endpoint
-    // rejects it (GPT-5, o-series, Azure Foundry, etc.).
-    const chatBody: any = buildChatTestBody(settingsPreset?.model || "", "say hi", 50, "max_tokens");
+    const chatUrl = "http://localhost:11434/v1/chat/completions";
+    const chatBody = {
+      model: settingsPreset?.model || "",
+      messages: [{ role: "user", content: "say hi" }],
+      max_tokens: 50,
+    };
 
     const chatHeaders: Record<string, string> = {
       "Content-Type": "application/json",
-      ...headers,
     };
 
     const fetchFn = fetch;
@@ -615,9 +500,6 @@ const AISection = ({
         body: JSON.stringify(chatBody),
         signal: abort.signal,
       });
-
-      // Retry with max_completion_tokens for newer OpenAI-compatible endpoints
-      // (GPT-5, o-series, Azure Foundry) that reject max_tokens. Only for the
 
       const latencyMs = Math.round(performance.now() - chatStart);
 
@@ -663,32 +545,19 @@ const AISection = ({
     }
 
     setTestStatus("done");
-  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.model]);
+  }, [settingsPreset?.model]);
 
   const fetchModels = useCallback(async () => {
     setIsLoadingModels(true);
     try {
-      switch (settingsPreset?.provider) {
-
-        case "native-ollama":
-          const ollamaResponse = await fetch("http://localhost:11434/api/tags");
-          if (!ollamaResponse.ok)
-            throw new Error("Failed to fetch Ollama models");
-          const ollamaData = (await ollamaResponse.json()) as {
-            models: OllamaModel[];
-          };
-          setModels(
-            (ollamaData.models || []).map((model) => ({
-              id: model.name,
-              name: model.name,
-              provider: "ollama",
-            }))
-          );
-          break;
-
-        default:
-          setModels([]);
-      }
+      const ollamaResponse = await fetch("http://localhost:11434/api/tags");
+      if (!ollamaResponse.ok) throw new Error("Failed to fetch Ollama models");
+      const ollamaData = (await ollamaResponse.json()) as { models: OllamaModel[] };
+      setModels((ollamaData.models || []).map((model) => ({
+        id: model.name,
+        name: model.name,
+        provider: "ollama",
+      })));
     } catch (error) {
       console.error(
         `Failed to fetch models for ${settingsPreset?.provider}:`,
@@ -699,7 +568,7 @@ const AISection = ({
       setIsLoadingModels(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settingsPreset?.provider, settingsPreset?.url, settingsPreset?.model]);
+  }, [settingsPreset?.model]);
 
   useEffect(() => {
     fetchModels();
@@ -708,15 +577,9 @@ const AISection = ({
 
   // Auto-trigger diagnostics when the local provider is configured.
   useEffect(() => {
-    if (!settingsPreset?.provider) return;
-
-    if (settingsPreset.provider === "native-ollama") {
-      const timer = setTimeout(() => {
-        runDiagnostics();
-      }, 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [settingsPreset?.provider, settingsPreset?.url, runDiagnostics]);
+    const timer = setTimeout(runDiagnostics, 1000);
+    return () => clearTimeout(timer);
+  }, [runDiagnostics]);
 
   // Cleanup abort controller on unmount
   useEffect(() => {
@@ -742,7 +605,7 @@ const AISection = ({
 
       <div className="w-full">
         <div className="flex flex-col gap-2">
-          <Label htmlFor="aiUrl" className="min-w-[80px]">
+          <Label className="min-w-[80px]">
             AI provider
           </Label>
         </div>
@@ -753,7 +616,7 @@ const AISection = ({
             description="Run AI models locally using your existing Ollama installation"
             imageSrc="/images/ollama.png"
             selected={settingsPreset?.provider === "native-ollama"}
-            onClick={() => handleAiProviderChange("native-ollama")}
+            onClick={() => undefined}
           />
 
         </div>
@@ -933,8 +796,7 @@ const AISection = ({
             }
             return null;
           })()}
-          {settingsPreset?.provider === "native-ollama" && (
-            <div className="text-xs text-muted-foreground space-y-1">
+          <div className="text-xs text-muted-foreground space-y-1">
               <p>
                 <span className="font-medium">recommended:</span>{" "}
                 <code className="bg-secondary/50 px-1 rounded">qwen3.5:9b</code>{" "}
@@ -947,8 +809,7 @@ const AISection = ({
                 for best results, use a local Ollama model.
               </p>
             </div>
-          )}
-        </div>
+          </div>
       </div>
 
       <ValidatedTextarea
@@ -989,12 +850,10 @@ const AISection = ({
           />
           <div className="flex flex-wrap gap-1.5 mt-2">
             {[
-              { label: "8k", value: 8192, hint: "haiku / qwen / deepseek" },
-              { label: "32k", value: 32768, hint: "gpt-4.1" },
-              { label: "64k", value: 64000, hint: "opus / sonnet" },
-              { label: "65k", value: 65536, hint: "gemini 3 pro" },
-              { label: "100k", value: 100000, hint: "o3 / o4" },
-              { label: "128k", value: 128000, hint: "gpt-5" },
+              { label: "4k", value: 4096, hint: "small local models" },
+              { label: "8k", value: 8192, hint: "medium local models" },
+              { label: "16k", value: 16384, hint: "larger local models" },
+              { label: "32k", value: 32768, hint: "long local responses" },
             ].map((preset) => (
               <button
                 key={preset.value}
@@ -1028,8 +887,6 @@ const AISection = ({
                     ? "All checks passed"
                     : testResults.endpoint.status === "fail"
                     ? "Connection failed"
-                    : testResults.auth.status === "fail"
-                    ? "Auth failed"
                     : testResults.models.status === "fail"
                     ? "Models failed"
                     : testResults.chat.status === "fail"
@@ -1071,9 +928,8 @@ const AISection = ({
                 {(
                   [
                     ["endpoint", "1", "Endpoint reachable"],
-                    ["auth", "2", "Auth valid"],
-                    ["models", "3", "Models loaded"],
-                    ["chat", "4", "Test message"],
+                    ["models", "2", "Models loaded"],
+                    ["chat", "3", "Test message"],
                   ] as const
                 ).map(([key, num, label]) => {
                   const result = testResults[key];
@@ -1404,7 +1260,6 @@ useEffect(() => {
         aiModel: selectedPreset.model,
         aiProviderType: selectedPreset.provider,
         customPrompt: selectedPreset.prompt,
-        aiUrl: selectedPreset.url,
       };
 
 
@@ -1514,7 +1369,7 @@ useEffect(() => {
                   key={preset.id}
                   preset={preset}
                   isDefault={preset.defaultPreset}
-                  hasValidation={!!(preset.provider && preset.model && preset.url)}
+                  hasValidation={!!(preset.provider && preset.model)}
                   onEdit={() => {
                     setSelectedPreset(preset);
                     setIsDuplicating(false);

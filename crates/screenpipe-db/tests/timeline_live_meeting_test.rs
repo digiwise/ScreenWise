@@ -58,9 +58,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
-            "deepgram:0:0",
+            "local",
+            Some("parakeet"),
+            "local:0:0",
             "System Audio",
             "output",
             Some("Speaker 1"),
@@ -132,9 +132,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
+            "local",
             None,
-            "deepgram:0:0",
+            "local:0:0",
             "System Audio",
             "output",
             None,
@@ -185,9 +185,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
-            "deepgram:0:0",
+            "local",
+            Some("parakeet"),
+            "local:0:0",
             "System Audio",
             "output",
             Some("Speaker 1"),
@@ -254,9 +254,9 @@ mod timeline_live_meeting_tests {
         // fetch is bounded by min/max segment time ±window) and matches normally.
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
+            "local",
             None,
-            "deepgram:0:0",
+            "local:0:0",
             "System Audio",
             "output",
             None,
@@ -272,9 +272,9 @@ mod timeline_live_meeting_tests {
         // survives (with its own timestamp).
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
+            "local",
             None,
-            "deepgram:0:1",
+            "local:0:1",
             "System Audio",
             "output",
             None,
@@ -322,9 +322,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
-            "deepgram:0:0",
+            "local",
+            Some("parakeet"),
+            "local:0:0",
             "System Audio",
             "output",
             Some("Speaker 1"),
@@ -386,9 +386,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
-            "deepgram:0:0",
+            "local",
+            Some("parakeet"),
+            "local:0:0",
             "System Audio",
             "output",
             Some("Speaker 1"),
@@ -423,7 +423,7 @@ mod timeline_live_meeting_tests {
     /// Once the engine-agnostic backfill has resolved a global `speaker_id` on the
     /// covering audio (here pre-seeded), `backfill_meeting_segment_speakers` maps the
     /// live segment onto it, and the Meeting view shows the global speaker's NAME
-    /// instead of Deepgram's free-text "speaker N".
+    /// instead of local diarization's free-text "speaker N".
     #[tokio::test]
     async fn test_meeting_segment_speaker_backfill_resolves_global_id() {
         let db = setup_test_db().await;
@@ -454,16 +454,16 @@ mod timeline_live_meeting_tests {
         .await
         .unwrap();
 
-        // A live segment at the same time, still on Deepgram's free-text label.
+        // A live segment at the same time, still on local diarization's free-text label.
         let meeting_id = db
             .insert_meeting("zoom.us", "ui_scan", None, None)
             .await
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
-            Some("nova-3"),
-            "deepgram:0:0",
+            "local",
+            Some("parakeet"),
+            "local:0:0",
             "System Audio",
             "output",
             Some("speaker 1"),
@@ -494,11 +494,11 @@ mod timeline_live_meeting_tests {
         assert_eq!(
             live.speaker_name.as_deref(),
             Some("Chris Ng"),
-            "Meeting view shows the resolved global name, not the Deepgram label"
+            "Meeting view shows the resolved global name, not the local diarization label"
         );
     }
 
-    /// Until a segment is resolved, the Meeting view falls back to Deepgram's
+    /// Until a segment is resolved, the Meeting view falls back to local diarization's
     /// free-text `speaker_name`, and the backfill maps nothing.
     #[tokio::test]
     async fn test_meeting_segment_falls_back_to_freetext_speaker() {
@@ -511,9 +511,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
+            "local",
             None,
-            "deepgram:0:0",
+            "local:0:0",
             "System Audio",
             "output",
             Some("speaker 2"),
@@ -542,7 +542,7 @@ mod timeline_live_meeting_tests {
         assert_eq!(
             live.speaker_name.as_deref(),
             Some("speaker 2"),
-            "falls back to the free-text Deepgram label when unresolved"
+            "falls back to the free-text local diarization label when unresolved"
         );
     }
 
@@ -575,9 +575,9 @@ mod timeline_live_meeting_tests {
             .unwrap();
         db.insert_meeting_transcript_segment(
             meeting_id,
-            "screenpipe-cloud",
+            "local",
             None,
-            "deepgram:0:0",
+            "local:0:0",
             "Built-in Mic",
             "input",
             Some("speaker 1"),

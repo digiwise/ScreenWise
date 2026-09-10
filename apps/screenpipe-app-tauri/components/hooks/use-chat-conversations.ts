@@ -1014,8 +1014,8 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     // thread (or silently inject a PDF/image they thought belonged to the
     // previous chat). Mirrors startNewConversation, which already clears
     // the full composer on "+ new chat". The block below then restores
-    // the INCOMING chat's saved draft after switching — ChatGPT/Claude
-    // parity. The clear is intentional even with restore: if the
+    // the incoming chat's saved draft after switching. The clear is
+    // intentional even with restore: if the
     // incoming chat has no draft, we want a clean composer, not the
     // outgoing chat's contents lingering for a frame.
     setInput("");

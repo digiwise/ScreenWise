@@ -1,7 +1,7 @@
 ---
 title: "docs maintenance guide for screenpipe contributors"
 sidebarTitle: "docs maintenance"
-description: "How screenpipe maintainers keep docs synced with product changes, OpenAPI routes, app connections, UI screenshots, and changelog release notes."
+description: "How screenpipe maintainers keep docs synced with product changes, OpenAPI routes, UI screenshots, and changelog release notes."
 icon: "check-circle"
 ---
 
@@ -19,11 +19,10 @@ for every release PR or feature PR, check:
 | --- | --- |
 | new setting or UI flow | relevant guide plus screenshot if it changes the user path |
 | new API route or parameter | OpenAPI plus [API recipes](/api-recipes) if user-facing |
-| new connection | [connections](/connections) and [connection reference](/connection-reference) |
+| local tool integration | relevant local setup guide and explicit provisioning boundary |
 | meeting feature | [meeting intelligence](/meeting-intelligence) |
 | privacy/security behavior | [privacy data flow](/privacy-data-flow) and [privacy filter](/privacy-filter) |
 | platform reliability fix | [troubleshooting](/troubleshooting) |
-| enterprise control | [teams](/teams) or deployment docs |
 
 ## validation
 
@@ -73,16 +72,14 @@ then reference them as:
 | get started | first value, permissions, desktop vs CLI |
 | MCP | client setup, auth, restart requirements, troubleshooting |
 | API | generated OpenAPI, tested recipes, auth examples |
-| pipes | lifecycle, permissions, logs, store, publishing |
-| connections | registry drift, OAuth, proxy paths, multi-account |
+| local automation | explicit operator setup, permissions, and logs |
 | meetings | transcript, speakers, summaries, calendar context |
-| privacy | local/cloud data flow, PII, deletion, LAN access |
-| enterprise | teams, managed presets, deployment, encryption |
+| privacy | local data flow, PII, deletion, and LAN access |
 | troubleshooting | symptom-first fixes by platform |
 
 ## drift rules
 
 - if a route is added to code, OpenAPI and docs should mention it or intentionally keep it reference-only.
-- if a connection is added to `screenpipe-connect`, docs must include it in the reference.
+- if a retained local integration changes, document its reachability and provisioning boundary.
 - if release notes mention a feature, the durable guide should also explain how to use it.
 - if a screenshot changes materially, update the image in the same PR.

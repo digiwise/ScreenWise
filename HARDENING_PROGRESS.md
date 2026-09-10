@@ -1773,9 +1773,6 @@ closed.
   The Bun lock removes only the two matching plugins and their private API
   entries; its SHA-256 is
   `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
-  No retained version, source, or checksum changed. Litepipe was not consulted.
-
-Verification on Windows on 2026-09-10:
 
 - Root and desktop `cargo fmt --all -- --check`, `cargo check -p
   screenpipe-core --locked --offline`, and `git diff --check`: passed. The
@@ -1804,6 +1801,44 @@ Verification on Windows on 2026-09-10:
 Audio model acquisition, build-script tool/runtime acquisition, and Pi package
 bootstrap are explicitly not claimed complete here and remain the next audited
 boundaries.
+
+## Cloud archive and remote-device persistence boundary (2026-09-10)
+
+Pre-change reachability: cloud archive persistence remained in `screenpipe-db`
+through `cloud_blob_id`, archive-only orphan queries, and archive branches in
+deletion cleanup. The engine also exposed `/data/device-storage` and
+`/data/delete-device`, which only counted or deleted records by machine ID and
+had no desktop callers. The write queue and database manager still exposed
+cloud-sync insertion/marking operations, and fresh migrations created
+`sync_id`/`synced_at` columns and indexes. These surfaces are not part of the
+local recorder. `machine_id` is retained for local record provenance and
+search/filtering, including memory device metadata. Baseline database
+compatibility is not required.
+
+Post-change evidence: cloud archive migration, cloud blob references, archive
+DB helpers, remote-device routes, database-manager sync methods, write-queue
+sync operations, and remote-frame response handling were removed. Fresh
+migrations now create only the retained `machine_id` columns; obsolete sync
+indexes/migrations and all `sync_id`/`synced_at` SQL plumbing are gone. Local
+machine identity, memory device metadata, retention, and ordinary local
+memories CRUD/search remain unchanged. No baseline database migration
+compatibility is retained by owner decision. No retained version, source, or
+checksum changed. Litepipe was not consulted.
+
+Verification on Windows on 2026-09-10:
+
+- Scoped DB/engine source residue searches found no cloud placeholder, sync
+  column, sync queue operation, remote-device route, or sync-memory helper.
+  `machine_id` query/filter and memory-device paths remain.
+- `cargo check -p screenpipe-db --locked --offline` and
+  `cargo check -p screenpipe-engine --locked --offline` passed.
+- `cargo test -p screenpipe-db --test db_config_test --locked --offline`
+  passed all 5 migration/configuration tests. The full locked/offline DB suite
+  passed after replacing a test-only hard-coded `/tmp` path with a unique path
+  below `std::env::temp_dir()`; the affected performance suite passed 11 tests,
+  failed 0, and ignored 1.
+- Whole-workspace root and desktop formatting plus `git diff --check` passed
+  after integrating the concurrent subsystem edits.
 
 ### Audio model acquisition boundary — 2026-09-10
 
@@ -1905,6 +1940,67 @@ Verification on Windows on 2026-09-10:
   and unchanged Bun
   `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
 
+### Custom remote OCR boundary — 2026-09-10
+
+Pre-change reachability: the screen capture crate exports `CustomOcrConfig`
+and `OcrEngine::Custom`, converts the equivalent serializable DB variant, and
+dispatches it from the common OCR path. The provider JPEG-encodes captured
+images and sends them with language metadata and a bearer API key to an
+arbitrary configured HTTP(S) URL. Current CLI parsing and desktop settings do
+not expose this selection, but public Rust capture callers can still activate
+it. This is the screen crate's sole `reqwest` caller; base64 remains required
+for local realtime vision serialization. Two ignored integration tests,
+coverage metadata, and a checked-in OpenAPI schema retain the obsolete API.
+
+This boundary removes the remote provider/configuration/dispatch, generated
+schema and dead tests, and the direct network dependency. Native Windows OCR,
+local Tesseract and target-gated Apple OCR remain. The owner explicitly waived
+baseline DB/settings compatibility, so no serialized Custom variant or
+migration shim will be retained. No database content or smoke evidence is read
+or deleted, and no post-MIT upstream or Litepipe source is consulted.
+
+The `Unstructured` enum/parser value is also a dead compatibility alias from
+the earlier hosted OCR removal: its only remaining behavior selected the
+existing native OCR implementation. It has no distinct local capability and
+is removed in this boundary together with the dead serialized variant.
+
+Post-change evidence: `CustomOcrConfig`, the custom provider/module/export,
+its HTTP client and OCR dispatch, both DB/screen enum variants, obsolete
+ignored tests, and Custom OpenAPI/coverage entries are removed. Tracked-source
+searches find no Custom OCR symbol or `reqwest` use in the screen crate;
+`Unstructured` remains only in the regression test proving old remote-provider
+configuration is rejected. Browser URL observation/normalization and ordinary
+URL privacy filters remain local operations. Local OCR enum conversion and
+serialization round trips are covered for all three retained engines.
+
+Scoped verification on Windows in Visual Studio Developer PowerShell:
+
+- `cargo fmt -p screenpipe-screen -p screenpipe-db -- --check` and scoped
+  `git diff --check` passed. A root formatting check observed concurrent
+  formatting work in `screenpipe-engine/src/retention.rs`; final whole-change
+  formatting is left to the integrating agent.
+- `cargo check -p screenpipe-screen --offline` passed in 38s while refreshing
+  the intended lock removal. The desktop offline check passed in 2m11s with
+  Ninja Multi-Config and the documented transient CRT/OpenBLAS/ORT matrix.
+- `cargo test -p screenpipe-screen --lib --locked --offline utils::tests --
+  --nocapture` passed 19 tests (including the two new OCR contract tests and
+  existing browser-title utility tests).
+- `cargo test -p screenpipe-screen --test windows_vision_test --locked
+  --offline test_process_ocr_task_windows -- --nocapture` passed its native
+  Windows OCR fixture test. No live desktop capture was started.
+- The initial locked test correctly refused the stale lock before the
+  intentional refresh. Complete lock inspection finds exactly one removed
+  dependency line, `screenpipe-screen -> reqwest 0.13.3`, in each Cargo lock;
+  no package version, source, or checksum changed. Root SHA-256 is
+  `FA69784870CFC06AE3CF018E0DFA3E34B85CABDB31D413F1FCF8A508A989AD18`,
+  desktop is
+  `134BA7DAAE25A408C57D5BD27873F92958D16931F54F657AE1972EDDBB24BEAF`,
+  and the unchanged Bun lock is
+  `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
+- Full scoped source/schema/lock diffs were inspected. No Tauri command or
+  generated desktop binding changed in this boundary. Final release and
+  integration validation is pending the integrating agent's combined commit.
+
 ### Windows build artifact acquisition boundary — 2026-09-10
 
 Pre-change reachability finds that every build of `screenpipe-audio` executes
@@ -1962,4 +2058,204 @@ Verification on Windows on 2026-09-10:
   desktop Cargo
   `5F3263CA1412F9C592702B54AB2DAD49AE23366BA432FC536CE6ADD8295026B3`,
   and unchanged Bun
+  `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
+
+### External transcription settings residue boundary — 2026-09-10
+
+Reachability audit confirmed that Deepgram and generic OpenAI-compatible
+transcription clients are absent, but their retired credentials, endpoints,
+model and header settings remained in `RecordingSettings`, desktop settings
+tests, and frontend debug-log scrubbing. No retained local transcription
+engine, local API bearer credential, or local Ollama setting reads those
+fields. Because ScreenWise does not preserve baseline settings compatibility,
+the dead serialized settings surface can be removed instead of retained as
+deserialize-only compatibility fields.
+
+The cleanup removes the fields, defaults, compatibility fixtures, named remote
+engine tests, and desktop secret-key residue. Unsupported engine identifiers
+still fail closed to disabled local transcription through the generic local
+engine normalization; the selected-local-engine meeting provider normalization,
+local model selections, localhost Ollama, and authenticated localhost
+`/v1/audio/transcriptions` API remain unchanged.
+
+Evidence: scoped searches after the removal find no Deepgram/OpenAI-compatible
+transcription setting, generated binding, or frontend caller; remaining
+OpenAI-compatible names describe the local inbound API or platform-gated Apple
+Intelligence and are outside this boundary. Scoped rustfmt completed for the
+modified Rust files and `git diff --check` passed. The requested locked offline
+Cargo test/check could not start before lock refresh because concurrent reviewed
+dependency-removal work had made `Cargo.lock` intentionally stale; Cargo
+reported the `--locked` refusal and no lockfile was changed here.
+
+### Pi runtime acquisition boundary — 2026-09-10
+
+The retained Pi chat executor previously repaired, upgraded, and installed its
+JavaScript package tree in the background with Bun and an npm fallback. Those
+startup paths could resolve the Pi and Anthropic SDK packages from the Internet
+and rewrote the local package-lock state. Pi itself can remain local: its RPC
+process is configured only for loopback Ollama and can execute a fully
+provisioned package directory.
+
+ScreenWise now validates the pinned Pi runtime and direct dependency tree under
+`<data-dir>/pi-agent` rather than acquiring or repairing it. Missing, corrupt,
+or version-mismatched packages produce explicit provisioning instructions; they
+do not block the recorder or remove local Pi/Ollama capability. This boundary
+does not authorize arbitrary Pi shell/browser tool actions; those remain the
+separate user-directed-agent policy decision.
+
+### Desktop pipe/workflow residue boundary — 2026-09-10
+
+Pre-change evidence: tracked E2E probes still called the removed `/pipes/list`
+route; MCP notifications required `pipe_name` and advertised pipe execution;
+desktop validation, onboarding, settings restart tracking, standalone-chat
+localStorage/comments, skills, coverage, TESTING, and README still described
+retired pipe/workflow or enterprise/shared-pipe behavior.
+
+Post-change evidence: those probes, MCP pipe/context/open-in-chat fields,
+dead persisted validation fields, `starting_pipes`, workflow-events UI residue,
+pipe-execution localStorage, the orphaned scheduler example, stale test/coverage
+entries, and obsolete
+enterprise/shared-pipe marketing claims are removed. Local notifications,
+links/deeplinks, local Pi/Ollama chat, owned-browser behavior, and media-pipe
+terminology remain. Canonical `.claude` skills were regenerated into the
+checked-in desktop skill module. No Pi or database Rust files were touched.
+
+### Product/docs residue boundary — 2026-09-10
+
+Pre-change evidence: README and migration docs still advertised encrypted
+cloud sync/archive, paid subscriptions and checkout, cloud-model choices,
+third-party OAuth/app integrations, Teams/enterprise/fleet deployment, and
+shared-pipe workflows. TESTING retained cloud-sync, subscription, OAuth,
+connection, remote-management, and integration checks.
+
+Post-change evidence: stale README pricing/account/sync/team claims and the
+corresponding TESTING sections were removed. Retired docs pages for cloud
+archive, ChatGPT subscription, third-party connections, Teams, Intune, and
+remote sync were removed from the migration docs set and navigation. The docs
+validator now treats historical links to retired slugs as intentional and no
+longer requires a deleted connection-reference registry. Local MCP/API,
+owned-browser, native meeting/calendar, Apple Intelligence, and Ollama/Pi
+documentation remain. No CONTRIBUTING content or captured evidence was read or
+changed.
+
+### Local-only AI provider boundary — 2026-09-10
+
+Pre-change reachability: desktop AI presets retained arbitrary provider URLs
+and provider credential fields, remote-provider migration branches, and UI,
+diagnostic, title-test, usage-label, icon, and validation residue. Pi selected
+loopback Ollama at execution time, but it still read and merged the user's
+global Pi provider/auth configuration and could fall back to an unverified
+global Pi executable. The settings schema also retained the obsolete
+Screenpipe-cloud account user ID. These settings are independent of the local
+recorder API bearer key.
+
+Post-change evidence: presets have one provider (`native-ollama`) and contain
+only local model, prompt, and token controls; no arbitrary endpoint or AI
+provider credential is serialized, displayed, normalized, or tested. Pi
+  requires an explicitly provisioned `<data-dir>/pi-agent` runtime whose pinned
+  version and required dependency tree pass local validation,
+writes an Ollama-only `models.json` below `<data-dir>/pi-agent-config`, sets
+`PI_CODING_AGENT_DIR` for the child, and removes inherited external-provider
+credential variables before launch. Its sole endpoint remains the fixed
+`LOCAL_OLLAMA_URL` loopback address. The Pi config protocol's
+`openai-completions` value is retained only because Pi uses that name for
+Ollama's local wire format; it does not select a hosted provider. The local
+recorder `apiKey`, `SCREENPIPE_LOCAL_API_KEY`, and authenticated loopback API
+paths remain intact. Cloud account `userId` and compatibility migration code
+are removed, as the owner waived legacy settings compatibility. Ordinary
+user-directed browser URLs are unchanged.
+
+Initial verification: direct TypeScript checking passed and the focused
+chat-title Vitest suite passed 41/41. Scoped Rust formatting/checks and final
+source/lock inspection are pending concurrent database cleanup completion.
+
+### MCP token-discovery acquisition boundary — 2026-09-10
+
+Pre-change reachability: MCP startup attempted to discover the local recorder
+bearer token by invoking `bun x screenpipe@latest` from several guessed desktop
+locations and then `npx screenpipe@latest` through both Node-adjacent and
+`PATH` fallbacks. Those package-manager commands could contact the npm registry
+and install code during ordinary MCP startup. They were not required for MCP's
+authenticated loopback API client.
+
+Post-change evidence: MCP token discovery now accepts the explicit
+`SCREENPIPE_LOCAL_API_KEY` (plus the existing deprecated local alias) and may
+read a plaintext token from the local SQLite secret store through an installed
+local `sqlite3` executable. It no longer invokes Bun, npm, npx, or a package
+specifier. Authentication remains required and missing credentials still fail
+loudly rather than weakening the local API. Scoped searches and `git diff
+--check` passed. Package-local typecheck/tests were unavailable because that
+package's development dependencies are not installed; the consolidated
+frontend validation below covers the checked-in desktop application instead.
+
+### Clean ScreenWise persistence baseline boundary — 2026-09-10
+
+Owner decision: historical Screenpipe databases and settings have no retained
+value, and ScreenWise will not support migration from the baseline product.
+The pre-change audit found cloud archive/sync columns and write helpers still
+present solely for old data, plus desktop settings migrations for renamed
+fields, restart-notification defaults, CoreAudio defaults, missing presets,
+chat history, and old shortcut values.
+
+Post-change evidence: fresh database migrations now create only the current
+local schema; cloud blob/sync identifiers, timestamps, indexes, manager methods,
+write-queue operations, route parameters, and compatibility migrations are
+removed. `machine_id` remains because current local frames, UI events, inputs,
+and memories use it. Desktop settings are deserialized as the current
+ScreenWise schema without baseline alias or one-time migration rewrites; new
+stores still receive complete defaults, and runtime platform detection remains
+an active invariant. The unreachable OCR-to-frames `migration_worker` API was
+also removed; current fresh-database migrations already define the retained
+schema and no workspace caller used that worker. No private smoke data was
+inspected or modified.
+
+### Consolidated local-only product boundary — 2026-09-10
+
+The final reachability audit found no application-initiated public Internet
+request in the Windows recorder or retained Pi/Ollama path. Production HTTP
+calls are limited to the authenticated ScreenWise loopback API, the desktop
+loopback notification service, and Ollama on loopback. Owned-browser navigation
+and ordinary help links remain explicit user actions. Build/CI acquisition is
+outside the runtime boundary and remains separately auditable.
+
+Active docs and regression surfaces were aligned with that architecture:
+hosted provider endpoints and credentials, one-click third-party connection
+installers, pipe-store automation, cloud archive/sync, and product account
+claims are gone. The docs now require explicit provisioning for local tools,
+models, Pi, Ollama, and MCP. Native calendar setup opens the local calendar
+dialog instead of navigating to the removed Connections settings page. Final
+cleanup also removed the unreachable Claude/Codex memory-export renderer; it
+had no network code or runtime caller, and existing external files are not
+modified.
+
+Consolidated verification on Windows on 2026-09-10:
+
+- Root and desktop `cargo fmt --all -- --check`, direct TypeScript checking,
+  docs validation, and `git diff --check` passed. The docs validator reports 33
+  active pages, 50 API paths, and no connection registry entries.
+- The full frontend Vitest suite passed: 32 files and 362 tests. The production
+  Next build completed successfully. E2E, core-engine, and unified generated
+  coverage reports all pass their freshness checks; the unified report was
+  regenerated after the reviewed source-map removals.
+- Root locked/offline core tests passed 128/128 plus the doc test, and focused
+  engine search tests passed 7/7. Locked/offline DB/core/engine checks passed
+  after removal of the obsolete migration worker. Earlier in this boundary the
+  full database suite and focused Windows capture/OCR suites also passed.
+- `tauri_bindings_are_current` passed in isolation using Ninja Multi-Config,
+  the transient `knf-rs-sys` dev CRT override, and OpenBLAS on runtime `PATH`.
+  The settings-store suite passed 10/10 under the same native matrix. The first
+  binding exporter invocation omitted `UPDATE_TAURI_BINDINGS=1`, so it wrote
+  only a temporary export and the following freshness assertion failed on the
+  stale account bindings. Regeneration with the explicit flag then succeeded,
+  followed by the passing isolated freshness run.
+- `cargo build --release --locked --offline` passed in Visual Studio Developer
+  PowerShell with normal Ninja in 6m05s. Only the established audio
+  `unused_mut` and engine `CommandExt` warnings remained.
+- Root and desktop Cargo lock diffs each remove only the direct
+  `screenpipe-screen -> reqwest 0.13.3` edge; no package version, source, or
+  checksum changed. Final lock SHA-256 values are root Cargo
+  `FA69784870CFC06AE3CF018E0DFA3E34B85CABDB31D413F1FCF8A508A989AD18`,
+  desktop Cargo
+  `134BA7DAAE25A408C57D5BD27873F92958D16931F54F657AE1972EDDBB24BEAF`,
+  and unchanged desktop Bun
   `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.

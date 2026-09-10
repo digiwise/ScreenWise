@@ -25,7 +25,6 @@ Automate releasing all components of the screenpipe monorepo.
 - `screenpipe-server/`
 - `screenpipe-db/`
 - `screenpipe-events/`
-- `screenpipe-integrations/`
 
 **App-only release** is fine when changes are only in:
 - `apps/screenpipe-app-tauri/` (UI/frontend changes)
@@ -37,7 +36,7 @@ To check what changed since last CLI release:
 git log --oneline --all | grep -E "CLI to v" | head -1
 
 # Check if core code changed since then
-git diff <COMMIT>..HEAD --stat -- screenpipe-core screenpipe-vision screenpipe-audio screenpipe-server screenpipe-db screenpipe-events screenpipe-integrations
+git diff <COMMIT>..HEAD --stat -- crates/screenpipe-core crates/screenpipe-vision crates/screenpipe-audio crates/screenpipe-server crates/screenpipe-db crates/screenpipe-events
 ```
 
 ## Release Workflow

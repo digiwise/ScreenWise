@@ -77,7 +77,6 @@ type BootPhaseSnapshot = {
     | "starting"
     | "migrating_database"
     | "building_audio"
-    | "starting_pipes"
     | "ready"
     | "error";
   message: string | null;
@@ -280,16 +279,15 @@ export default function EngineStartup({
         const contentType = useFallback ? "all" : "accessibility";
 
         // We pull OCR with include_frames=true purely for the visual proof
-        // tiles below the prose. filter_pii=true is on every search — these
-        // results are about to be summarized by an LLM, and we don't want the
-        // user's password manager text or 2FA codes round-tripping through it.
+        // tiles below the prose. Recorder-level regex/ONNX privacy filtering
+        // happens before persistence rather than through a hosted search filter.
         const [mainRes, audioRes, ocrFramesRes] = await Promise.all([
           localFetch(
-            `/search?content_type=${contentType}&start_time=${encodeURIComponent("3m ago")}&limit=8&max_content_length=120&filter_pii=true`,
+            `/search?content_type=${contentType}&start_time=${encodeURIComponent("3m ago")}&limit=8&max_content_length=120`,
             { signal: AbortSignal.timeout(3000) }
           ).catch(() => null),
           localFetch(
-            `/search?content_type=audio&start_time=${encodeURIComponent("3m ago")}&limit=4&max_content_length=120&filter_pii=true`,
+            `/search?content_type=audio&start_time=${encodeURIComponent("3m ago")}&limit=4&max_content_length=120`,
             { signal: AbortSignal.timeout(3000) }
           ).catch(() => null),
           thumbnails.length < MAX_THUMBNAILS
@@ -636,7 +634,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
         const activePhases: BootPhaseSnapshot["phase"][] = [
           "migrating_database",
           "building_audio",
-          "starting_pipes",
         ];
         if (bootPhase && activePhases.includes(bootPhase.phase)) {
           // Progress is happening — don't flip to stuck. Timer will re-arm

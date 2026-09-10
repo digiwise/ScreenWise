@@ -11,5 +11,5 @@ Run the installed `screenpipe` executable. The recorder is local-first: use
 `screenpipe export` for recorder operations. Use `screenpipe auth token` to
 retrieve the local API bearer token for the same recorder data directory.
 
-Do not create or run scheduled automation files. Screenpipe does not execute
-pipe workflows.
+Do not create or run scheduled automation files. Screenpipe is a local recorder
+and search tool.

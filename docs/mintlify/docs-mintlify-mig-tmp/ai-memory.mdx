@@ -1,76 +1,36 @@
 ---
-title: "give AI memory of your screen"
-sidebarTitle: "ai memory"
-description: "Give Claude, Cursor, Ollama, and other LLMs persistent memory of everything on your screen so they can answer questions with full context."
+title: "Local AI over ScreenWise history"
+sidebarTitle: "local AI"
+description: "Use explicitly provisioned local tools to analyze ScreenWise screen and audio history."
 icon: "brain"
 ---
 
-screenpipe acts as a memory layer for AI — it gives LLMs context about what you've been doing on your computer.
+ScreenWise stores searchable screen and audio records locally and exposes them
+through an authenticated loopback API. Optional AI analysis stays local through
+the native Ollama preset.
 
-## why AI needs memory
+## local Ollama chat
 
-LLMs are stateless — they don't know what you were working on 5 minutes ago. screenpipe bridges this by:
+Provision Pi and Ollama before enabling chat. ScreenWise uses only
+`http://127.0.0.1:11434` and does not accept a hosted or arbitrary model
+endpoint. See [Ollama](/ollama).
 
-- capturing everything on your screen 24/7
-- extracting app text primarily via accessibility APIs, with OCR fallback for visual-only surfaces
-- making it searchable via REST API on `localhost:3030`
+## local API and MCP
 
-## connect to AI
+Local programs can query recent activity directly:
 
-### MCP (recommended)
-
-screenpipe has a built-in MCP server that works with Claude Desktop, Cursor, and other MCP-compatible tools:
-
-```json
-{
-  "mcpServers": {
-    "screenpipe": {
-      "command": "npx",
-      "args": ["-y", "screenpipe-mcp"]
-    }
-  }
-}
+```powershell
+curl.exe "http://127.0.0.1:3030/search?limit=20" `
+  -H "Authorization: Bearer <local-token>"
 ```
 
-see [MCP server setup](/mcp-server) for details.
+An explicitly provisioned MCP package can expose the same authenticated API to
+a trusted local MCP host. ScreenWise does not install, configure, or update that
+package. See [MCP server setup](/mcp-server).
 
-### direct API
+## privacy controls
 
-any tool that can make HTTP requests can query screenpipe:
-
-```bash
-# get recent screen activity
-curl "http://localhost:3030/search?content_type=all&limit=20"
-
-# search for specific content
-curl "http://localhost:3030/search?q=meeting+notes&app_name=Slack&limit=10"
-```
-
-## use cases
-
-| use case | how |
-|----------|-----|
-| "what was I working on?" | search by time range |
-| "summarize today's meetings" | query audio transcriptions |
-| "find that code snippet" | search screen text |
-| "auto-track my time" | toggl-sync pipe |
-| "sync activity to notes" | obsidian-sync pipe |
-
-## privacy-first
-
-- all data stays on your device
-- use local LLMs (Ollama, LMStudio) for complete privacy
-- filter what gets captured with `--ignored-windows` and `--included-windows`
-- no data sent to cloud unless you explicitly choose cloud providers
-
-## next steps
-
-- [set up MCP server](/mcp-server) — connect to Claude, Cursor
-- [API reference](/cli-reference) — search parameters and API endpoints
-- [join our discord](https://discord.gg/screenpipe) — get help from the community
-
-## get screenpipe
-
-screenpipe gives your AI assistants memory of everything on your screen.
-
-[download screenpipe →](https://screenpi.pe/onboarding)
+- capture exclusions apply before local persistence
+- deterministic regex redaction is always available
+- semantic ONNX redaction activates only after verified models are provisioned
+- no hosted AI, cloud transcription, archive/sync, or service connector is used

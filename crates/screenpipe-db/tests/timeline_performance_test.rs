@@ -7,7 +7,7 @@ mod timeline_performance_tests {
     use chrono::{Duration, Utc};
     use screenpipe_db::{AudioDevice, DatabaseManager, DeviceType, OcrEngine};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     async fn setup_test_db() -> DatabaseManager {
         let _ = tracing_subscriber::fmt()
@@ -403,9 +403,7 @@ mod timeline_performance_tests {
         // Remove if exists
         let _ = std::fs::remove_file(path);
 
-        let db_url = format!("sqlite:{}", path);
-
-        let db = DatabaseManager::new(&db_url, Default::default())
+        let db = DatabaseManager::new(path, Default::default())
             .await
             .unwrap();
 
@@ -420,8 +418,16 @@ mod timeline_performance_tests {
     /// Test with file-based SQLite - closer to real customer experience
     #[tokio::test]
     async fn test_file_based_db_performance() {
-        let db_path = "/tmp/screenpipe_test_perf.db";
-        let db = setup_file_db(db_path).await;
+        let db_path = std::env::temp_dir().join(format!(
+            "screenpipe_test_perf_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after Unix epoch")
+                .as_nanos()
+        ));
+        let db_path_str = db_path.to_string_lossy();
+        let db = setup_file_db(&db_path_str).await;
         let frame_count = 3000; // ~1 hour at 0.5 FPS
 
         let start_time = Utc::now() - Duration::hours(2);
@@ -461,6 +467,7 @@ mod timeline_performance_tests {
         }
 
         // Cleanup
+        db.pool.close().await;
         let _ = std::fs::remove_file(db_path);
     }
 

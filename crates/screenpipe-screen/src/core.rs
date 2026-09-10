@@ -7,7 +7,6 @@ use crate::apple::perform_ocr_apple;
 use crate::capture_screenshot_by_window::{
     get_excluded_sck_window_ids, CapturedWindow, WindowFilters,
 };
-use crate::custom_ocr::perform_ocr_custom;
 use crate::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use crate::metrics::PipelineMetrics;
 #[cfg(target_os = "windows")]
@@ -549,19 +548,6 @@ async fn perform_ocr_with_engine(
     languages: Vec<Language>,
 ) -> Result<(String, String, Option<f64>), ContinuousCaptureError> {
     match ocr_engine {
-        // Keep accepting the historical `unstructured` setting so existing
-        // local configs do not fail to deserialize, but never send captured
-        // frames to its hosted OCR service.
-        #[cfg(target_os = "windows")]
-        OcrEngine::Unstructured => perform_ocr_windows(image, &languages)
-            .await
-            .map_err(|e| ContinuousCaptureError::ErrorProcessingOcr(e.to_string())),
-        #[cfg(target_os = "macos")]
-        OcrEngine::Unstructured => perform_ocr_apple(image, &languages)
-            .await
-            .map_err(|e| ContinuousCaptureError::ErrorProcessingOcr(e.to_string())),
-        #[cfg(target_os = "linux")]
-        OcrEngine::Unstructured => Ok(perform_ocr_tesseract(image, languages)),
         OcrEngine::Tesseract => Ok(perform_ocr_tesseract(image, languages)),
         #[cfg(target_os = "windows")]
         OcrEngine::WindowsNative => perform_ocr_windows(image, &languages)
@@ -569,9 +555,6 @@ async fn perform_ocr_with_engine(
             .map_err(|e| ContinuousCaptureError::ErrorProcessingOcr(e.to_string())),
         #[cfg(target_os = "macos")]
         OcrEngine::AppleNative => Ok(perform_ocr_apple(image, &languages)),
-        OcrEngine::Custom(config) => perform_ocr_custom(image, languages, config)
-            .await
-            .map_err(|e| ContinuousCaptureError::ErrorProcessingOcr(e.to_string())),
         _ => Err(ContinuousCaptureError::ErrorProcessingOcr(
             "Unsupported OCR engine".to_string(),
         )),

@@ -733,13 +733,9 @@ pub struct AIPreset {
     pub prompt: String,
     pub provider: AIProviderType,
     #[serde(default)]
-    pub url: String,
-    #[serde(default)]
     pub model: String,
     #[serde(rename = "defaultPreset")]
     pub default_preset: bool,
-    #[serde(rename = "apiKey")]
-    pub api_key: Option<String>,
     #[serde(rename = "maxContextChars")]
     pub max_context_chars: i32,
     #[serde(rename = "maxTokens", default = "default_max_tokens")]
@@ -756,10 +752,8 @@ impl Default for AIPreset {
             id: String::new(),
             prompt: String::new(),
             provider: AIProviderType::NativeOllama,
-            url: "http://localhost:11434/v1".to_string(),
             model: "ministral-3:latest".to_string(),
             default_preset: false,
-            api_key: None,
             max_context_chars: 512000,
             max_tokens: 4096,
         }
@@ -877,10 +871,8 @@ Rules:
 - Always answer my question/intent, do not make up things
 "#.to_string(),
             provider: AIProviderType::NativeOllama,
-            url: "http://localhost:11434/v1".to_string(),
             model: "ministral-3:latest".to_string(),
             default_preset: true,
-            api_key: None,
             max_context_chars: 128000,
             max_tokens: 4096,
         };
@@ -966,84 +958,6 @@ Rules:
 }
 
 impl SettingsStore {
-    /// Remove legacy field aliases that conflict with their renamed counterparts.
-    /// e.g. `enableUiEvents` was renamed to `enableAccessibility` — if both exist
-    /// in the stored JSON, serde rejects it as a duplicate field.
-    /// Also sanitize unknown AI provider types to prevent deserialization failures
-    /// (e.g. synced settings from a newer version with a provider this version doesn't know).
-    fn sanitize_legacy_fields(mut val: Value) -> Value {
-        if let Some(obj) = val.as_object_mut() {
-            if obj.contains_key("enableAccessibility") {
-                obj.remove("enableUiEvents");
-            } else if let Some(v) = obj.remove("enableUiEvents") {
-                obj.insert("enableAccessibility".to_string(), v);
-            }
-
-            // Temporary one-time migration: disable restart notifications for all
-            // existing users until the stall detector is more reliable. Users can
-            // still opt back in manually from Settings; once they've seen this
-            // version, we stop overriding their choice.
-            if !obj.contains_key("restartNotificationsDefaultedOff") {
-                obj.insert("showRestartNotifications".to_string(), Value::Bool(false));
-                obj.insert(
-                    "restartNotificationsDefaultedOff".to_string(),
-                    Value::Bool(true),
-                );
-            }
-
-            // Sanitize retired or unknown provider types in aiPresets to keep
-            // historical settings readable without retaining remote execution.
-            let known_providers = ["native-ollama"];
-            if let Some(presets) = obj.get_mut("aiPresets") {
-                if let Some(arr) = presets.as_array_mut() {
-                    for preset in arr.iter_mut() {
-                        let retired_provider = preset
-                            .get("provider")
-                            .and_then(|p| p.as_str())
-                            .map(|provider| {
-                                matches!(
-                                    provider,
-                                    "screenpipe-cloud"
-                                        | "pi"
-                                        | "claude-code"
-                                        | "opencode"
-                                        | "openai"
-                                        | "openai-chatgpt"
-                                        | "anthropic"
-                                        | "custom"
-                                )
-                            })
-                            .unwrap_or(false);
-                        let unknown_provider = preset
-                            .get("provider")
-                            .and_then(|p| p.as_str())
-                            .map(|provider| !known_providers.contains(&provider))
-                            .unwrap_or(false);
-                        if retired_provider || unknown_provider {
-                            if let Some(obj) = preset.as_object_mut() {
-                                obj.insert(
-                                    "provider".to_string(),
-                                    Value::String("native-ollama".to_string()),
-                                );
-                                obj.insert(
-                                    "url".to_string(),
-                                    Value::String("http://localhost:11434/v1".to_string()),
-                                );
-                                obj.insert(
-                                    "model".to_string(),
-                                    Value::String("ministral-3:latest".to_string()),
-                                );
-                                obj.insert("apiKey".to_string(), Value::Null);
-                            }
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        val
-    }
-
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
         let store = get_store(app, None).map_err(|e| format!("Failed to get store: {}", e))?;
 
@@ -1051,14 +965,7 @@ impl SettingsStore {
             true => Ok(None),
             false => {
                 let raw = store.get("settings").unwrap_or(Value::Null);
-                let sanitized = Self::sanitize_legacy_fields(raw.clone());
-                // Persist sanitized fields back to store so the migration only warns once
-                if sanitized != raw {
-                    store.set("settings", sanitized.clone());
-                    let _ = store.save();
-                    reencrypt_store_file(app);
-                }
-                let settings = serde_json::from_value(sanitized);
+                let settings = serde_json::from_value(raw);
                 match settings {
                     Ok(settings) => Ok(settings),
                     Err(e) => {
@@ -1160,21 +1067,11 @@ impl SettingsStore {
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
-    let raw_obj = get_store(app, None)
-        .ok()
-        .and_then(|store| store.get("settings"))
-        .and_then(|raw| raw.as_object().cloned());
-
-    let should_persist_restart_notification_migration = raw_obj
-        .as_ref()
-        .map(|obj| !obj.contains_key("restartNotificationsDefaultedOff"))
-        .unwrap_or(false);
-
     let is_new_store;
     let (mut store, mut should_save) = match SettingsStore::get(app) {
         Ok(Some(store)) => {
             is_new_store = false;
-            (store, should_persist_restart_notification_migration)
+            (store, false)
         }
         Ok(None) => {
             is_new_store = true;
@@ -1310,17 +1207,10 @@ mod tests {
     const FALLBACK_ENGINE: &str = "disabled";
 
     #[test]
-    fn retired_remote_engines_fall_back_even_with_legacy_credentials() {
-        for engine in [
-            "screenpipe-cloud",
-            "deepgram",
-            "deepgram-live",
-            "openai-compatible",
-        ] {
+    fn unsupported_engines_fall_back() {
+        for engine in ["unsupported-engine", "some-future-engine"] {
             let mut store = SettingsStore::default();
             store.recording.audio_transcription_engine = engine.to_string();
-            store.recording.deepgram_api_key = "legacy-credential".to_string();
-            store.recording.openai_compatible_api_key = Some("legacy-credential".to_string());
 
             let resolution = store.audio_engine_resolution();
 
@@ -1497,111 +1387,5 @@ mod tests {
         );
         // And the file must be unchanged
         assert_eq!(std::fs::read(&store_path).unwrap(), blob);
-    }
-
-    // ---- Existing tests ----
-
-    #[test]
-    fn test_sanitize_legacy_fields_does_not_panic() {
-        let corrupted = json!({
-            "aiPresets": ["corrupted_string_not_an_object"]
-        });
-
-        let _sanitized = SettingsStore::sanitize_legacy_fields(corrupted);
-
-        // And let's test a valid object with missing/unknown provider to prove it works
-        let valid = json!({
-            "aiPresets": [{"provider": "unknown_provider"}]
-        });
-        let sanitized2 = SettingsStore::sanitize_legacy_fields(valid);
-
-        let presets = sanitized2.get("aiPresets").unwrap().as_array().unwrap();
-        assert_eq!(
-            presets[0].get("provider").unwrap().as_str().unwrap(),
-            "native-ollama"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_legacy_cloud_preset_to_local_ollama() {
-        let stored = json!({
-            "aiPresets": [{
-                "provider": "screenpipe-cloud",
-                "url": "https://api.screenpi.pe/v1",
-                "model": "auto",
-                "apiKey": "legacy-token"
-            }]
-        });
-
-        let sanitized = SettingsStore::sanitize_legacy_fields(stored);
-        let preset = &sanitized["aiPresets"][0];
-        assert_eq!(preset["provider"], "native-ollama");
-        assert_eq!(preset["url"], "http://localhost:11434/v1");
-        assert_eq!(preset["model"], "ministral-3:latest");
-        assert!(preset["apiKey"].is_null());
-    }
-
-    #[test]
-    fn test_sanitize_direct_remote_presets_to_local_ollama() {
-        let stored = json!({
-            "aiPresets": [
-                {"provider": "openai", "url": "https://api.openai.com/v1", "model": "gpt-4o", "apiKey": "sk-old"},
-                {"provider": "openai-chatgpt", "url": "https://chatgpt.com/backend-api", "model": "gpt-5", "apiKey": "oauth-old"},
-                {"provider": "anthropic", "url": "https://api.anthropic.com", "model": "claude", "apiKey": "sk-ant-old"},
-                {"provider": "custom", "url": "https://models.example/v1", "model": "remote", "apiKey": "old"}
-            ]
-        });
-
-        let sanitized = SettingsStore::sanitize_legacy_fields(stored);
-        for preset in sanitized["aiPresets"].as_array().unwrap() {
-            assert_eq!(preset["provider"], "native-ollama");
-            assert_eq!(preset["url"], "http://localhost:11434/v1");
-            assert_eq!(preset["model"], "ministral-3:latest");
-            assert!(preset["apiKey"].is_null());
-        }
-    }
-
-    #[test]
-    fn test_deserialize_settings_with_null_fields() {
-        let json_data = json!({
-            "recording": {
-                "audio": true,
-                "video": true
-            },
-            "user": null,
-            "embeddedLLM": null,
-            "aiPresets": null
-        });
-
-        let settings: Result<SettingsStore, _> = serde_json::from_value(json_data);
-        if let Err(e) = &settings {
-            println!("Deser error: {:?}", e);
-        }
-        assert!(
-            settings.is_ok(),
-            "Failed to deserialize settings with null fields"
-        );
-        let settings = settings.unwrap();
-
-        assert_eq!(settings.extra.get("user"), Some(&Value::Null));
-        assert_eq!(settings.embedded_llm.enabled, false);
-        assert_eq!(settings.ai_presets.len(), 0);
-    }
-
-    #[test]
-    fn legacy_product_user_is_preserved_as_extra_json() {
-        let legacy_user = json!({
-            "id": "historical-user-id",
-            "token": "historical-product-token",
-            "cloud_subscribed": true
-        });
-        let settings: SettingsStore = serde_json::from_value(json!({
-            "user": legacy_user.clone()
-        }))
-        .unwrap();
-
-        assert_eq!(settings.extra.get("user"), Some(&legacy_user));
-        let serialized = serde_json::to_value(settings).unwrap();
-        assert_eq!(serialized.get("user"), Some(&legacy_user));
     }
 }

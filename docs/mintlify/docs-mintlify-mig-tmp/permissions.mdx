@@ -30,7 +30,6 @@ screenpipe ships under four bundle ids:
 | `screenpi.pe` | production (stable release) |
 | `screenpi.pe.beta` | beta channel |
 | `screenpi.pe.dev` | local dev build (`cargo` / `bun tauri dev`) |
-| `screenpi.pe.enterprise` | enterprise distribution |
 
 the stuck screen shows which one you're running as. if it doesn't match the entry you've toggled in System Settings, you need to grant permission for the new bundle id.
 
@@ -58,8 +57,6 @@ tccutil reset ScreenCapture screenpi.pe.beta
 # local dev build
 tccutil reset ScreenCapture screenpi.pe.dev
 
-# enterprise distribution
-tccutil reset ScreenCapture screenpi.pe.enterprise
 ```
 
 no sudo required — TCC's per-app records live in your user scope.

@@ -26,7 +26,7 @@
  *              stream still runs alongside the 10fps HD stream — #3699).
  *
  * Requires a host with Screen Recording granted and a real display, so it is an
- * OPT-IN macOS spec (same shape as audio-fallback.spec.ts). It self-skips under
+ * OPT-IN macOS spec. It self-skips under
  * the default `no-recording` seed or whenever the HD controller is unavailable
  * (vision off / headless), so it never fails the default CI lane.
  *

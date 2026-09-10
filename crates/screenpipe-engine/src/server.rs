@@ -24,8 +24,7 @@ use crate::{
             remove_tags, validate_media_handler,
         },
         data::{
-            backup_handler, checkpoint_handler, delete_device_data_handler,
-            delete_time_range_handler, device_storage_handler, evict_media_handler,
+            backup_handler, checkpoint_handler, delete_time_range_handler, evict_media_handler,
             storage_preview_handler,
         },
         elements::{get_frame_elements, search_elements},
@@ -163,7 +162,7 @@ pub struct AppState {
     pub api_auth: bool,
     /// The API key to validate against (from SCREENPIPE_API_KEY or auth.json)
     pub api_auth_key: Option<String>,
-    /// Unified credential store for OAuth tokens, API keys, etc.
+    /// Local secret store used for the recorder bearer token.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
     /// Runtime control for the high-FPS screen-capture override. Shared
     /// with each per-monitor capture loop so HTTP toggles propagate
@@ -195,9 +194,9 @@ pub struct SCServer {
     /// the engine creates a default unattached instance and owned-browser
     /// requests return 503 until a handle is wired up.
     pub owned_browser: Option<Arc<screenpipe_connect::connections::browser::OwnedBrowser>>,
-    /// Require auth for remote API access
+    /// Require bearer authentication for protected API access.
     pub api_auth: bool,
-    /// API key for remote auth validation
+    /// Local bearer token used for API authentication.
     pub api_auth_key: Option<String>,
     /// Local secret store, including the local API bearer token.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
@@ -499,8 +498,6 @@ impl SCServer {
             .post("/data/delete-range", delete_time_range_handler)
             .post("/data/evict-media", evict_media_handler)
             .get("/data/storage-preview", storage_preview_handler)
-            .post("/data/delete-device", delete_device_data_handler)
-            .get("/data/device-storage", device_storage_handler)
             // Database backup & checkpoint
             .post("/data/checkpoint", checkpoint_handler)
             .get("/data/backup", backup_handler)
