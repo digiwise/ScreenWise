@@ -33,7 +33,6 @@ edition = "2021"
 
 [workspace.dependencies]
 # AI
-tokenizers = "0.21.0"
 hf-hub = { version = "0.3.2", git = "https://github.com/neo773/hf-hub", rev = "437dcf4049233f4a0e0cfc4e1c1dbf5ed2c57760", default-features = false, features = [
     "native-tls",
     "tokio",
@@ -48,18 +47,15 @@ crossbeam = "0.8.4"
 dashmap = "6.1.0"
 image = "0.25"
 criterion = { version = "0.5.1", features = ["async_tokio"] }
-cc = "1.0"
 oasgen = { version = "0.22.0", features = ["axum", "chrono"] }
 once_cell = "1.20.2"
 tracing-oslog = "0.3.0"
 
-http-cache-reqwest = "0.15.0"
 # reqwest 0.13 renamed `rustls-tls` → `rustls` and folded the native-roots
 # variants into `rustls-platform-verifier` (which the `rustls` feature pulls
 # in automatically). The `rustls` feature bundles aws-lc-rs as the provider;
 # Windows MSVC links cleanly because of bswap_shim.c in the tauri app crate.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "multipart", "json", "form", "query", "rustls"] }
-reqwest-middleware = "0.4.1"
 
 
 [patch.crates-io]

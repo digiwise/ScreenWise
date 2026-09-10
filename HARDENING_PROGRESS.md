@@ -2259,3 +2259,18 @@ Consolidated verification on Windows on 2026-09-10:
   `134BA7DAAE25A408C57D5BD27873F92958D16931F54F657AE1972EDDBB24BEAF`,
   and unchanged desktop Bun
   `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
+
+### Final workspace dependency audit — 2026-09-10
+
+Pre-change reachability found four inherited dependency declarations with no
+workspace consumers: `tokenizers`, `cc`, `http-cache-reqwest`, and
+`reqwest-middleware`. The retained PII crate declares its optional tokenizer
+dependency directly, and the desktop build crate declares its own `cc` build
+dependency. Removing these root declarations changes no runtime or feature
+edge. The audio and meeting evaluation crates remain isolated developer
+regression harnesses rather than production dependencies and are retained;
+target-gated Apple and MLX crates are also retained because workspace
+inheritance and supported non-Windows builds are not evidence of dead code.
+`cargo check --workspace --exclude screenpipe-rfdetr-mlx --locked --offline`,
+root formatting, and `git diff --check` passed. No Cargo or Bun lockfile changed;
+the removed declarations had no package edge of their own.
