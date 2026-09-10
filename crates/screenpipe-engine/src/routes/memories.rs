@@ -298,7 +298,7 @@ pub(crate) async fn update_memory_handler(
         .tags
         .map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string()));
     // Re-stamp `_device` on update so a row whose source_context is replaced
-    // by a caller (UI, pipe) doesn't lose its provenance. If the caller
+    // by a caller (for example, the UI) doesn't lose its provenance. If the caller
     // didn't pass source_context at all, leave the existing DB row alone.
     let source_context_json = payload.source_context.map(|v| {
         enrich_source_context_with_device(Some(v))
@@ -368,14 +368,14 @@ pub(crate) async fn list_memory_tags_handler(
 ///     context to merge with).
 ///   * `Value::Object(map)` → original keys preserved, `_device` added.
 ///     If the caller already provided a `_device` key (rare — typically
-///     pipes don't), we overwrite it: trust the local server, not the
+///     other local callers don't), we overwrite it: trust the local server, not the
 ///     client.
 ///   * Anything else (string, number, array, bool) → wrap as
 ///     `{"_value": <original>, "_device":"<machine_id>"}` so downstream
 ///     consumers always see an object and can rely on `.["_device"]`.
 ///
 /// We use the underscore prefix to distinguish system-managed fields
-/// from caller-provided keys; pipes that read source_context can keep
+/// from caller-provided keys; local callers that read source_context can keep
 /// reading their own keys and ignore anything starting with `_`.
 ///
 /// Returns `None` only if `get_or_create_machine_id` fails to produce
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn enrich_wraps_non_object_value() {
-        // Pipes that pass a bare string get wrapped, not silently lost.
+        // Callers that pass a bare string get wrapped, not silently lost.
         let v = enrich_source_context_with_device(Some(json!("raw note text"))).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(

@@ -531,25 +531,6 @@ export function NoteView({
         fresh.id,
       );
 
-      // Use the user-picked summary pipe's body as the directive when one is
-      // set. The chat path knows the meeting id so we prepend that and let
-      // the pipe body skip any "find the meeting that just ended" lookup.
-      // Falls back to the built-in instructions if the pipe can't be loaded.
-      const pipeSlug = settings.meetingSummaryPipeSlug || "meeting-summary";
-      let directiveOverride: string | undefined;
-      try {
-        const res = await localFetch(`/pipes/${pipeSlug}`);
-        if (res.ok) {
-          const json = await res.json();
-          const body: string | undefined = json.data?.body || json.body;
-          if (body && body.trim().length > 0) {
-            directiveOverride = body;
-          }
-        }
-      } catch (err) {
-        console.warn("failed to fetch summary pipe body, falling back", err);
-      }
-
       await showChatWithPrefill({
         context: "",
         prompt: buildEnrichedSummarizePrompt({
@@ -557,7 +538,6 @@ export function NoteView({
           context: ctx,
           transcript,
           noteImages,
-          directiveOverride,
         }),
         displayLabel: buildMeetingSummarizeDisplayLabel(fresh),
         images: noteImages,

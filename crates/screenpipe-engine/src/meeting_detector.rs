@@ -3138,7 +3138,7 @@ pub async fn run_meeting_detection_loop(
                         {
                             Ok(()) => {
                                 info!("meeting v2: meeting ended (id={})", meeting_id);
-                                // Emit event so triggered pipes can react
+                                // Notify local meeting audio and capture controllers.
                                 if let Err(e) = screenpipe_events::send_event(
                                     "meeting_ended",
                                     serde_json::json!({ "meeting_id": meeting_id }),
@@ -3419,7 +3419,7 @@ async fn insert_new_meeting(
                 "meeting v2: meeting started (id={}, app={}, title={:?})",
                 id, app, title
             );
-            // Emit event so triggered pipes can react
+            // Notify local meeting audio and capture controllers.
             if let Err(e) = screenpipe_events::send_event(
                 "meeting_started",
                 serde_json::json!({

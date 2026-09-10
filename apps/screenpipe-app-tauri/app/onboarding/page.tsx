@@ -9,18 +9,16 @@ import { useToast } from "@/components/ui/use-toast";
 import PermissionsStep from "@/components/onboarding/permissions-step";
 import EngineStartup from "@/components/onboarding/engine-startup";
 import ConnectApps from "@/components/onboarding/connect-apps";
-import PickPipe from "@/components/onboarding/pick-pipe";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { commands } from "@/lib/utils/tauri";
 
-type SlideKey = "permissions" | "engine" | "connect-apps" | "pipe";
+type SlideKey = "permissions" | "engine" | "connect-apps";
 
 const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
   {
     permissions: { width: 500, height: 560 },
     engine: { width: 500, height: 620 },
     "connect-apps": { width: 500, height: 680 },
-    pipe: { width: 500, height: 500 },
   };
 
 const setWindowSizeForSlide = async (slide: SlideKey) => {
@@ -37,7 +35,7 @@ export default function OnboardingPage() {
   const [currentSlide, setCurrentSlide] = useState<SlideKey>("permissions");
   const [isVisible, setIsVisible] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
-  const { onboardingData, isLoading } = useOnboarding();
+  const { onboardingData, isLoading, completeOnboarding } = useOnboarding();
 
   // Restore saved step on mount
   useEffect(() => {
@@ -56,11 +54,11 @@ export default function OnboardingPage() {
           "connect-apps": "connect-apps",
           integrations: "connect-apps",
           connections: "connect-apps",
-          pipe: "pipe",
           // backwards compat with old onboarding
+          pipe: "connect-apps",
+          read: "connect-apps",
+          shortcut: "connect-apps",
           encrypt: "engine",
-          read: "pipe",
-          shortcut: "pipe",
           welcome: "permissions",
           intro: "permissions",
           usecases: "permissions",
@@ -104,11 +102,24 @@ export default function OnboardingPage() {
       "permissions",
       "engine",
       "connect-apps",
-      "pipe",
     ];
     const currentIdx = stepOrder.indexOf(currentSlide);
 
-    const nextSlide = stepOrder[currentIdx + 1] || "pipe";
+    if (currentIdx === stepOrder.length - 1) {
+      try {
+        await completeOnboarding();
+      } catch {
+        setIsTransitioning(false);
+        toast({
+          title: "couldn't finish setup",
+          description: "try again in a moment.",
+          variant: "destructive",
+        });
+      }
+      return;
+    }
+
+    const nextSlide = stepOrder[currentIdx + 1];
     try {
       await commands.setOnboardingStep(nextSlide);
     } catch {
@@ -152,7 +163,6 @@ export default function OnboardingPage() {
           {currentSlide === "connect-apps" && (
             <ConnectApps handleNextSlide={handleNextSlide} />
           )}
-          {currentSlide === "pipe" && <PickPipe />}
         </div>
       </div>
     </div>

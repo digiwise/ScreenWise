@@ -30,7 +30,6 @@ use window::ShowRewindWindow;
 
 #[allow(deprecated)]
 mod icons;
-mod agent_event_emitter;
 mod audio_exclusions;
 mod calendar;
 mod capture_session;
@@ -62,7 +61,6 @@ mod owned_browser_cookies;
 mod permissions;
 mod pi;
 mod pi_command_queue;
-mod pipe_suggestions_scheduler;
 mod recording;
 mod remote_sync_commands;
 mod retention;
@@ -405,8 +403,7 @@ async fn main() {
     // NODE_EXTRA_CA_CERTS before any bun/node subprocess can spawn. Fixes
     // "unable to verify the first certificate" on corporate networks where
     // antivirus (ESET, Zscaler, etc.) injects a private root CA. No-op on
-    // macOS/Linux. Must run before Pi, PortableGit download, and pipe
-    // subprocesses are touched.
+    // macOS/Linux. Must run before Pi and PortableGit download.
     windows_ca_bundle::install();
 
     // Handle --check-arc-automation / --trigger-arc-automation flags early,
@@ -607,7 +604,6 @@ async fn main() {
     };
     let pi_state = pi::PiState(Arc::new(tokio::sync::Mutex::new(pi::PiPool::new())));
     let suggestions_state = suggestions::SuggestionsState::new();
-    let pipe_suggestions_state = pipe_suggestions_scheduler::PipeSuggestionsState::new();
     #[allow(clippy::single_match)]
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -751,7 +747,6 @@ async fn main() {
     let app = app.manage(recording_state)
         .manage(pi_state)
         .manage(suggestions_state)
-        .manage(pipe_suggestions_state)
         .manage(sync_scheduler)
         .invoke_handler(tauri_helper::tauri_collect_commands!())
         .setup(move |app| {
@@ -1198,8 +1193,8 @@ async fn main() {
 
             // Start server core + capture on a dedicated thread with its own tokio runtime
             // to avoid competing with Tauri's UI runtime.
-            // Two-phase startup: ServerCore (DB + HTTP + pipes) then CaptureSession (vision + audio).
-            'start_server: {
+            // Two-phase startup: ServerCore (DB + HTTP) then CaptureSession (vision + audio).
+            {
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
                 let recording_state = app_handle.state::<RecordingState>();
@@ -1208,22 +1203,7 @@ async fn main() {
                 let capture_arc = recording_state.capture.clone();
                 let is_starting_clone = recording_state.is_starting.clone();
 
-                // Pipe output callback. Stage 5: legacy `pipe_event`
-                // topic dropped — every pipe stdout line goes out on
-                // `agent_event` with sessionId `pipe:<name>:<execId>`.
-                let app_for_pipe = app_handle.clone();
-                // Separate clone for the owned-browser install path — the
-                // on_pipe_output closure below captures app_for_pipe by
-                // move, so we need a distinct handle that survives into
-                // the server thread.
                 let app_for_owned = app_handle.clone();
-                let pipe_agent_events =
-                    crate::agent_event_emitter::PipeAgentEventEmitter::new(app_for_pipe);
-                let on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine> = Some(
-                    std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, line: &str| {
-                        pipe_agent_events.emit_line(pipe_name, exec_id, line);
-                    }),
-                );
 
                 std::thread::Builder::new()
                     .name("screenpipe-server".to_string())
@@ -1339,7 +1319,6 @@ async fn main() {
                             // Phase 1: Start server core
                             let server = match server_core::ServerCore::start(
                                 &config,
-                                on_pipe_output,
                                 Some(owned_browser),
                             )
                             .await
@@ -1357,7 +1336,7 @@ async fn main() {
                                 Ok(c) => c,
                                 Err(e) => {
                                     error!("Failed to start capture: {}", e);
-                                    // Store server anyway so pipes/search work
+                                    // Store server anyway so search remains available
                                     let mut guard = server_arc.lock().await;
                                     *guard = Some(server);
                                     drop(guard);
@@ -1498,17 +1477,6 @@ async fn main() {
                     &suggestions_state_clone,
                 )
                 .await;
-            });
-
-            // Auto-start pipe suggestions scheduler if enabled
-            let app_handle_clone = app_handle.clone();
-            let pipe_suggestions_state = app_handle.state::<pipe_suggestions_scheduler::PipeSuggestionsState>();
-            let pipe_suggestions_state_clone = pipe_suggestions_scheduler::PipeSuggestionsState {
-                scheduler_handle: pipe_suggestions_state.scheduler_handle.clone(),
-            };
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                pipe_suggestions_scheduler::auto_start_scheduler(app_handle_clone, &pipe_suggestions_state_clone).await;
             });
 
             // Start calendar events publisher (publishes to event bus for meeting detection)

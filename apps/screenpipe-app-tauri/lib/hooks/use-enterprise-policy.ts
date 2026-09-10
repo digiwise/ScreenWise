@@ -11,7 +11,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import { localFetch } from "@/lib/api";
 import { platform as getPlatform } from "@tauri-apps/plugin-os";
 
-import { syncManagedPipes, gatherPipeStatuses, type ManagedPipe } from "./use-enterprise-pipes";
 import {
   DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
   EnterpriseAiPresetPolicy,
@@ -33,7 +32,6 @@ interface EnterprisePolicy {
   managedAiPreset: EnterpriseManagedAiPreset | null;
   aiPresetPolicy: EnterpriseAiPresetPolicy;
   appUpdatePolicy: EnterpriseAppUpdatePolicy;
-  managedPipes: ManagedPipe[];
   orgName: string;
 }
 
@@ -43,7 +41,6 @@ const EMPTY_POLICY: EnterprisePolicy = {
   managedAiPreset: null,
   aiPresetPolicy: DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
   appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
-  managedPipes: [],
   orgName: "",
 };
 
@@ -225,12 +222,6 @@ async function sendHeartbeat(licenseKey: string): Promise<void> {
       }
     } catch {}
 
-    // Gather enterprise pipe statuses for heartbeat
-    let pipeStatuses: unknown[] = [];
-    try {
-      pipeStatuses = await gatherPipeStatuses();
-    } catch {}
-
     await tauriFetch("https://screenpi.pe/api/enterprise/heartbeat", {
       method: "POST",
       headers: {
@@ -253,7 +244,6 @@ async function sendHeartbeat(licenseKey: string): Promise<void> {
           allow_employee_override: appUpdatePolicy.allow_employee_override,
           channel: appUpdatePolicy.channel,
         },
-        pipe_statuses: pipeStatuses,
       }),
     });
   } catch {}
@@ -352,7 +342,6 @@ export function useEnterprisePolicy() {
         managedAiPreset: data.managedAiPreset || null,
         aiPresetPolicy,
         appUpdatePolicy,
-        managedPipes: data.managedPipes || [],
         orgName: data.orgName || "",
       };
       console.log(
@@ -394,13 +383,6 @@ export function useEnterprisePolicy() {
 
       // Fire-and-forget heartbeat
       sendHeartbeat(licenseKey);
-
-      // Sync managed pipes to local filesystem
-      if (result.managedPipes.length > 0) {
-        syncManagedPipes(result.managedPipes).catch((e) =>
-          console.warn("[enterprise] failed to sync managed pipes:", e)
-        );
-      }
 
       // Push hidden sections to Rust so tray menu can use them
       try {

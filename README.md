@@ -207,26 +207,6 @@ Natural language search across accessibility-first screen text, OCR fallback tex
 ### Timeline view
 Visual timeline of your entire screen history. Scroll through your day like a DVR. Click any moment to see the full screenshot and extracted text. Play back audio from any time period.
 
-### Plugin system (Pipes)
-Pipes are scheduled AI agents defined as markdown files. Each pipe is a `pipe.md` with a prompt and schedule — screenpipe runs an AI coding agent (like pi or claude-code) that queries your screen data, calls APIs, writes files, and takes actions. Built-in pipes include:
-- **meeting-summary**: Summarizes the meeting that just ended and patches the note back onto the meeting record
-- **day-recap**: Today's accomplishments, key moments, and unfinished work
-- **standup-update**: What you did, what's next, and any blockers
-- **time-breakdown**: Where your time went, by app, project, and category
-- **ai-prompt-journal**: Captures every prompt you send to AI tools, saved to Obsidian or local markdown
-- **video-export**: Create a video of your recent screen activity
-
-Developers can create pipes by writing a markdown file in `~/.screenpipe/pipes/`.
-
-#### Pipe data permissions
-Each pipe supports YAML frontmatter fields that give admins deterministic, OS-level control over what data AI agents can access:
-- **App & window filtering**: `allow-apps`, `deny-apps`, `deny-windows` (glob patterns)
-- **Content type control**: restrict to `ocr`, `audio`, `input`, or `accessibility`
-- **Time & day restrictions**: e.g. `time-range: 09:00-18:00`, `days: Mon,Tue,Wed,Thu,Fri`
-- **Endpoint gating**: `allow-raw-sql: false`, `allow-frames: false`
-
-Enforced at three layers — skill gating (AI never learns denied endpoints), agent interception (blocked before execution), and server middleware (per-pipe cryptographic tokens). Not prompt-based. Deterministic.
-
 ### MCP server (Model Context Protocol)
 screenpipe runs as an MCP server, allowing AI assistants to query your screen history:
 - Works with Claude Desktop, Cursor, VS Code (Cline, Continue), and any MCP-compatible client

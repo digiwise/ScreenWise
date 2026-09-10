@@ -368,21 +368,6 @@ export function classifyCurl(cmd: string): CurlPresentation | null {
     return { label: `${name} connection`, connectionIconName: icon };
   }
 
-  if (path === "/pipes") {
-    if (method === "POST") return { label: "Installed pipe" };
-    return { label: "Listed pipes" };
-  }
-  const pipeMatch = path.match(/^\/pipes\/([^/]+)(?:\/(.+))?$/);
-  if (pipeMatch) {
-    const name = pipeMatch[1];
-    const sub = pipeMatch[2];
-    if (sub === "executions") return { label: `${name}: recent runs` };
-    if (sub === "run" || method === "POST") return { label: `Ran pipe ${name}` };
-    if (method === "PATCH" || method === "PUT") return { label: `Configured pipe ${name}` };
-    if (method === "DELETE") return { label: `Removed pipe ${name}` };
-    return { label: `Pipe ${name}` };
-  }
-
   if (path === "/export") return { label: "Exported video" };
   if (path === "/health") return { label: "Health check" };
   if (path === "/list-monitors") return { label: "Listed monitors" };
@@ -416,7 +401,6 @@ export function endpointFamily(path: string): string {
   }
   if (path.startsWith("/meetings")) return "Meetings";
   if (path.startsWith("/speakers")) return "Speakers";
-  if (path.startsWith("/pipes")) return "Pipes";
   return "Screenpipe";
 }
 

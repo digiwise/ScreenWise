@@ -98,16 +98,6 @@ describe('Search & API', () => {
         expect(result.status).not.toBe(500);
     });
 
-    it('should have pipes endpoint accessible', async () => {
-        const result = await browser.execute(async (base) => {
-            const res = await fetch(`${base}/pipes/list`);
-            return { status: res.status };
-        }, API_BASE);
-
-        // 200, 403, or 404 are fine — not 500
-        expect(result.status).not.toBe(500);
-    });
-
     it('should return OCR results with app context (S5.9/S12.5)', async () => {
         const data = await browser.execute(async (base) => {
             const res = await fetch(`${base}/search?limit=10&content_type=ocr`);

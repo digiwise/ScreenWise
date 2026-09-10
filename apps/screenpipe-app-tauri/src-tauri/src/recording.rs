@@ -5,7 +5,7 @@
 //! Tauri commands for managing the screenpipe server and capture session.
 //!
 //! Two independent lifecycles:
-//! - **Server** (DB + HTTP + pipes): started once, lives until app quits.
+//! - **Server** (DB + HTTP): started once, lives until app quits.
 //! - **Capture** (vision + audio + UI): can be toggled without restarting the server.
 
 use crate::capture_session::CaptureSession;
@@ -129,7 +129,7 @@ pub(crate) struct InterruptedMeeting {
 /// When both locks are needed (e.g. `start_capture`), always lock `capture` first,
 /// then `server`. Never hold `server` while waiting on `capture`.
 pub struct RecordingState {
-    /// Long-lived server core (DB, HTTP, pipes). None until first start.
+    /// Long-lived server core (DB, HTTP). None until first start.
     pub server: Arc<Mutex<Option<ServerCore>>>,
     /// Current capture session. None when recording is stopped/paused.
     /// Self-contained — `CaptureSession::stop()` needs no external references.
@@ -208,7 +208,7 @@ pub async fn get_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
 }
 
 /// Read the current boot phase of the server. Used by the onboarding UI to
-/// show progress ("updating database", "loading pipes", ...) while the HTTP
+/// show progress ("updating database", ...) while the HTTP
 /// server is not yet listening — in particular during long DB migrations
 /// where /health is unreachable.
 #[tauri::command]
@@ -257,7 +257,7 @@ pub async fn get_monitors() -> Result<Vec<MonitorDevice>, String> {
 // ---------------------------------------------------------------------------
 
 /// Stop recording without killing the server.
-/// Pipes, memories, search, and the HTTP API remain accessible.
+/// Memories, search, and the HTTP API remain accessible.
 #[tauri::command]
 #[specta::specta]
 pub async fn stop_capture(
@@ -577,7 +577,7 @@ pub async fn spawn_screenpipe(
     // Now we use boot-phase state as the source of truth:
     //   - "ready" → server is up, we're done
     //   - "error" → initial start failed, safe to take over and retry
-    //   - "migrating_database" / "building_audio" / "starting_pipes" / "starting"
+    //   - "migrating_database" / "building_audio" / "starting"
     //     → another thread is making progress, keep waiting no matter how long
     //
     // A 30-minute safety ceiling prevents a wedged start from hanging the app
@@ -637,7 +637,7 @@ pub async fn spawn_screenpipe(
                     }
                 }
                 _ => {
-                    // starting | migrating_database | building_audio | starting_pipes
+                    // starting | migrating_database | building_audio
                     // — keep waiting, progress is being made.
                 }
             }
@@ -795,11 +795,6 @@ pub async fn spawn_screenpipe(
     let server_arc = state.server.clone();
     let capture_arc = state.capture.clone();
 
-    // Pipe output callback. Stage 5: legacy `pipe_event` topic dropped.
-    // Every pipe stdout line is emitted on the unified `agent_event`
-    // topic with sessionId `pipe:<name>:<execId>` (see the matching
-    // helper in `apps/screenpipe-app-tauri/lib/events/types.ts`).
-    let app_for_pipe = app.clone();
     let app_for_owned = app.clone();
 
     // Owned-browser: create the connect-side instance and kick off the
@@ -814,13 +809,6 @@ pub async fn spawn_screenpipe(
         recording_config.data_dir.clone(),
         owned_browser.clone(),
     );
-    let pipe_agent_events = crate::agent_event_emitter::PipeAgentEventEmitter::new(app_for_pipe);
-    let on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine> = Some(
-        std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, line: &str| {
-            pipe_agent_events.emit_line(pipe_name, exec_id, line);
-        }),
-    );
-
     // Oneshot for result
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
@@ -846,7 +834,7 @@ pub async fn spawn_screenpipe(
             server_runtime.block_on(async move {
                 // Phase 1: Start server
                 let server =
-                    match ServerCore::start(&recording_config, on_pipe_output, Some(owned_browser))
+                    match ServerCore::start(&recording_config, Some(owned_browser))
                         .await
                     {
                         Ok(s) => s,
@@ -863,7 +851,7 @@ pub async fn spawn_screenpipe(
                     Err(e) => {
                         error!("Failed to start capture session: {}", e);
                         // Server started but capture failed — store server anyway
-                        // so pipes/search still work
+                        // so search still works
                         {
                             let mut guard = server_arc.lock().await;
                             *guard = Some(server);

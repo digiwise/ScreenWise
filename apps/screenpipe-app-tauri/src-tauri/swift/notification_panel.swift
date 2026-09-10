@@ -20,7 +20,6 @@ struct NotificationAction: Codable {
     var primary: Bool?
     var id: String?
     var type: String?
-    var pipe: String?
     var context: [String: AnyCodable]?
     var url: String?
     var method: String?
@@ -36,7 +35,6 @@ struct NotificationPayload: Codable {
     let body: String
     let actions: [NotificationAction]
     var autoDismissMs: Int?
-    var pipe_name: String?
 }
 
 // Minimal AnyCodable for JSON round-trip
@@ -255,25 +253,13 @@ struct NotificationContentView: View {
                 .padding(.bottom, 6)
             }
 
-            // Footer: manage + mute
+            // Footer: manage
             HStack(spacing: 6) {
                 BrandTextButton(label: "⚙ manage", fontSize: 9) {
                     onDismiss()
                     // Small delay so the panel hides before the window appears
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         sendActionJson("{\"type\":\"manage\"}")
-                    }
-                }
-
-                if let pipeName = payload.pipe_name {
-                    Text("·")
-                        .font(Brand.swiftUIMonoFont(size: 9))
-                        .foregroundColor(.primary.opacity(0.15))
-                    BrandTextButton(label: "mute \(pipeName)", fontSize: 9) {
-                        onDismiss()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            sendActionJson("{\"type\":\"mute\",\"pipe_name\":\"\(pipeName)\"}")
-                        }
                     }
                 }
 

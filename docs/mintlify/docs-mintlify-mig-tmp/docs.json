@@ -26,10 +26,6 @@
             "pages": ["home", "quickstart", "getting-started", "use-cases", "architecture"]
           },
           {
-            "group": "pipes",
-            "pages": ["pipe-store", "pipes", "pipe-debugging", "pipe-permissions"]
-          },
-          {
             "group": "connect",
             "pages": ["mcp-server", "mcp-apps", "connections", "connection-reference", "cloud-archive", "privacy-data-flow", "privacy-filter", "teams"]
           },

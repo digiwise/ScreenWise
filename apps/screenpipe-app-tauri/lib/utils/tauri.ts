@@ -280,19 +280,6 @@ async e2eEmitAgentStream(sessionId: string, deltaCount: number) : Promise<Result
 }
 },
 /**
- * E2E helper for the scheduled-pipe path: feed synthetic pipe stdout
- * through the same Rust-side callback adapter production uses, then let the
- * frontend's default pipe handlers record it as a completed pipe run.
- */
-async e2eEmitPipeStream(pipeName: string, executionId: number, deltaCount: number) : Promise<Result<E2eAgentStreamResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_pipe_stream", { pipeName, executionId, deltaCount }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * E2E helper: report whether the main overlay is logically visible.
  *
  * The main window uses platform-specific "hide" semantics (macOS NSPanel with
@@ -408,7 +395,7 @@ async getAudioDevices() : Promise<Result<AudioDeviceInfo[], string>> {
 },
 /**
  * Read the current boot phase of the server. Used by the onboarding UI to
- * show progress ("updating database", "loading pipes", ...) while the HTTP
+ * show progress ("updating database", ...) while the HTTP
  * server is not yet listening — in particular during long DB migrations
  * where /health is unreachable.
  */
@@ -837,14 +824,6 @@ async openNotePath(path: string) : Promise<Result<null, string>> {
 async openPermissionSettings(permission: OSPermission) : Promise<void> {
     await TAURI_INVOKE("open_permission_settings", { permission });
 },
-async openPipeWindow(port: number, title: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_pipe_window", { port, title }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async openSearchWindow(query: string | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_search_window", { query }) };
@@ -1143,28 +1122,6 @@ async piStop(sessionId: string | null) : Promise<Result<PiInfo, string>> {
 async piUpdateConfig(providerConfig: PiProviderConfig | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pi_update_config", { providerConfig }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get current pipe suggestions settings.
- */
-async pipeSuggestionsGetSettings() : Promise<Result<PipeSuggestionsSettings, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pipe_suggestions_get_settings") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Update pipe suggestions settings and restart the scheduler.
- */
-async pipeSuggestionsUpdateSettings(enabled: boolean, frequencyHours: number) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pipe_suggestions_update_settings", { enabled, frequencyHours }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1697,7 +1654,7 @@ async startCapture() : Promise<Result<null, string>> {
 },
 /**
  * Stop recording without killing the server.
- * Pipes, memories, search, and the HTTP API remain accessible.
+ * Memories, search, and the HTTP API remain accessible.
  */
 async stopCapture() : Promise<Result<null, string>> {
     try {
@@ -1863,8 +1820,7 @@ export type AIProviderType = "native-ollama"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
 export type BootPhaseSnapshot = {
 /**
- * One of: idle | starting | migrating_database | building_audio |
- * starting_pipes | ready | error
+ * One of: idle | starting | migrating_database | building_audio | ready | error
  */
 phase: string;
 /**
@@ -2035,7 +1991,6 @@ preview: string;
  * label in the UI ("queued 4s ago").
  */
 queuedAtMs: number }
-export type PipeSuggestionsSettings = { enabled: boolean; frequencyHours: number }
 /**
  * Configuration for remote sync.
  */
@@ -2443,11 +2398,6 @@ powerMode?: string | null;
  */
 useChineseMirror: boolean;
 /**
- * Enable AI workflow event detection (cloud feature, requires subscription).
- * When enabled, classifies desktop activity and triggers event-based pipes.
- */
-enableWorkflowEvents?: boolean;
-/**
  * Detected hardware tier ("high", "mid", "low").
  * Set once on first launch; `None` for existing installs (treated as High).
  */
@@ -2496,10 +2446,6 @@ deviceId?: string;
  * When disabled, users must click "update now" in the tray menu.
  */
 autoUpdate?: boolean;
-/**
- * Auto-update store-installed pipes that haven't been locally modified.
- */
-autoUpdatePipes?: boolean;
 /**
  * Timeline overlay mode: "fullscreen" (floating panel above everything) or
  * "window" (normal resizable window with title bar).

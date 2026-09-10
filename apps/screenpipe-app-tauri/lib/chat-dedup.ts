@@ -41,6 +41,7 @@ interface DedupMessageLike {
 
 interface DedupConvLike {
   kind?: string | null;
+  deduplicationExempt?: boolean;
   messages?: unknown;
 }
 
@@ -49,6 +50,7 @@ interface DedupConvLike {
  *  templated first message and must never be collapsed — and for chats with
  *  no user message. */
 export function conversationDedupKey(conv: DedupConvLike | null | undefined): string | null {
+  if (conv?.deduplicationExempt === true) return null;
   const kind = conv?.kind ?? "chat";
   if (kind !== "chat") return null;
   const messages = Array.isArray(conv?.messages) ? (conv!.messages as DedupMessageLike[]) : [];

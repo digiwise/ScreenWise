@@ -12,15 +12,12 @@ import {
   onTerminated as onAgentTerminated,
   onEvicted as onAgentEvicted,
 } from "@/lib/events/bus";
-import { pipeSessionId } from "@/lib/events/types";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { useSettings, ChatMessage, ChatConversation } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
 import { Loader2, Send, Square, Settings, ExternalLink, X, ImageIcon, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Calendar, Paperclip, Filter, RefreshCw, GitBranch, MoreHorizontal, Pencil, Pin, Sparkles, Plug, CornerDownRight } from "lucide-react";
-import { SchedulePromptDialog } from "@/components/chat/schedule-prompt-dialog";
-import { PipeContextBanner } from "@/components/chat/pipe-context-banner";
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
@@ -117,7 +114,6 @@ import {
   firstExternalWebTarget,
   type WebTargetPresentation,
 } from "@/lib/chat/tool-presentation";
-import { usePipes } from "@/lib/hooks/use-pipes";
 import { localFetch, getApiBaseUrl } from "@/lib/api";
 import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connections-events";
 import {
@@ -639,7 +635,7 @@ interface Message {
   retryPrompt?: string; // when set, renders a retry CTA on error messages
   interruptedBySteer?: boolean;
   steeredResponse?: boolean;
-  workDurationMs?: number; // wall-clock work duration for coalesced pipe-run assistants
+  workDurationMs?: number; // wall-clock duration for coalesced assistant work
 }
 
 type QueuedDisplayPayload = {
@@ -949,7 +945,7 @@ function GridDissolveLoader({
 // Pulls /search query params out of a curl-style bash command so the chat row
 // can show "Searched ChatGPT 'foo'" instead of the raw curl URL. Pi's pipes
 // emit these as plain bash tool calls (no MCP), with the app name encoded as
-// app_name=X in the query string — see crates/screenpipe-core/assets/pipes/.
+// app_name=X in the query string.
 function extractAppFromToolCall(toolCall: ToolCall): string | undefined {
   if (toolCall.toolName === "bash") {
     return classifyCurl(String(toolCall.args?.command ?? ""))?.appName;
@@ -1879,7 +1875,7 @@ function ToolCallGroup({
 
   // Auto-expand while running, auto-collapse when done (user can override).
   // `defaultExpanded` keeps the group open even when done — used for
-  // messages whose entire output is tool calls (typical pipe-runs)
+  // messages whose entire output is tool calls
   // where the tool result is the whole story.
   const isExpanded = manualExpand !== null ? manualExpand : (hasRunning || defaultExpanded);
 
@@ -2020,7 +2016,7 @@ function MessageContent({
     const grouped = groupContentBlocks(message.contentBlocks);
     const displayGroups = collapseHiddenWorkGroups(grouped, hideThinkingBlocks);
     // When the message has no rendered prose (no text block — common for
-    // pipe-run executions whose entire output is thinking + tool calls),
+    // agent turns whose entire output is thinking + tool calls),
     // expand thinking blocks by default. Otherwise the collapsed
     // "thought for 0s" pill is the only visible thing on the message
     // and the chat panel reads as empty even though there's real
@@ -2619,7 +2615,6 @@ export function StandaloneChat({
   const isFullscreen = useIsFullscreen();
   const { items: appItems } = useSqlAutocomplete("app");
   const { suggestions: autoSuggestions, refreshing: suggestionsRefreshing, forceRefresh: refreshSuggestions } = useAutoSuggestions();
-  const { templatePipes, loading: pipesLoading } = usePipes();
   // Connected integrations (gmail, google-sheets, slack, etc.) surfaced in the
   // filter popover so users can mention them directly with @id — helps the
   // agent pick the right connection for a query instead of having to guess.
@@ -2921,7 +2916,6 @@ export function StandaloneChat({
   // (e.g. a meeting note) that would otherwise also stage into the composer.
   const dropRootRef = useRef<HTMLDivElement>(null);
 
-  const [scheduleDialogMessage, setScheduleDialogMessage] = useState<{ prompt: string; response: string } | null>(null);
   const [prefillContext, setPrefillContext] = useState<string | null>(null);
   const [prefillSource, setPrefillSource] = useState<string>("search");
   const [prefillFrameId, setPrefillFrameId] = useState<number | null>(null);
@@ -3083,11 +3077,6 @@ export function StandaloneChat({
     systemPrompt: string | null;
   } | null>(null);
 
-  // Active pipe execution (when watching a running pipe)
-  const [activePipeExecution, setActivePipeExecution] = useState<{
-    name: string;
-    executionId: number;
-  } | null>(null);
 
   // Follow-up suggestions state (TikTok-style)
   const [followUpSuggestions, setFollowUpSuggestions] = useState<string[]>([]);
@@ -3942,22 +3931,11 @@ export function StandaloneChat({
   // delivers only events whose envelope sessionId matches the
   // registration key.
   //
-  // This is also where pipe-watch sessions register: initWatch swaps
-  // conversationId to a `pipe:<name>:<execId>` id, so this effect
-  // re-runs and registers the panel as the foreground owner of pipe
-  // stdout. Switching to a chat unregisters the pipe foreground (via
-  // the cleanup) and registers the chat — pipe events naturally stop
-  // reaching the panel and start hitting the pipe-run-recorder
-  // instead, which is what we want.
-  // Pipe-watch sessions don't register foreground — pipe-watch-writer
-  // is the sole writer for them, panel mirrors store messages below.
   // We grab `kind` synchronously here (not via the Zustand selector) so
   // the effect re-runs on conversationId change without an extra render
   // cycle that could miss the foreground registration window for chats.
   useEffect(() => {
     if (!conversationId) return;
-    const kind = useChatStore.getState().sessions[conversationId]?.kind;
-    if (kind === "pipe-watch") return;
     let cancelled = false;
     let off: (() => void) | null = null;
     (async () => {
@@ -3989,46 +3967,6 @@ export function StandaloneChat({
     };
   }, [conversationId]);
 
-  // Mirror chat-store messages into local React state when the panel is
-  // showing a pipe-watch session. The writer is the source of truth;
-  // this hook makes the existing render path (which reads `messages`)
-  // pick up writer updates without forking the rendering code.
-  const pipeWatchMessages = useChatStore((s) =>
-    conversationId && s.sessions[conversationId]?.kind === "pipe-watch"
-      ? s.sessions[conversationId]?.messages
-      : undefined,
-  );
-  useEffect(() => {
-    if (!pipeWatchMessages) return;
-    setMessages(pipeWatchMessages as any);
-  }, [pipeWatchMessages, setMessages]);
-
-  // Mirror isLoading / isStreaming from the store for pipe-watch
-  // sessions. Without this the panel's "writing…" indicator strands
-  // forever once the pipe finishes — the writer flips the flags in the
-  // store on agent_end, but the panel's local React state was set to
-  // true at initWatch and never gets cleared (no foreground bus
-  // registration → no panel-side terminal handler runs).
-  // Two scalar selectors instead of one returning {isLoading,isStreaming}
-  // — Zustand's shallow-equal would re-render every store mutation if
-  // the selector built a fresh object each call.
-  const pipeWatchIsLoading = useChatStore((s) => {
-    if (!conversationId) return undefined;
-    const sess = s.sessions[conversationId];
-    if (sess?.kind !== "pipe-watch") return undefined;
-    return !!sess.isLoading;
-  });
-  const pipeWatchIsStreaming = useChatStore((s) => {
-    if (!conversationId) return undefined;
-    const sess = s.sessions[conversationId];
-    if (sess?.kind !== "pipe-watch") return undefined;
-    return !!sess.isStreaming;
-  });
-  useEffect(() => {
-    if (pipeWatchIsLoading !== undefined) setIsLoading(pipeWatchIsLoading);
-    if (pipeWatchIsStreaming !== undefined) setIsStreaming(pipeWatchIsStreaming);
-  }, [pipeWatchIsLoading, pipeWatchIsStreaming]);
-
   // Self-heal a stuck "writing…" indicator on regular chat sessions.
   // The router (background) and the panel's foreground listener both set
   // store.isStreaming/isLoading to false on agent_end. Local React
@@ -4044,13 +3982,13 @@ export function StandaloneChat({
   const storeChatIsStreaming = useChatStore((s) => {
     if (!conversationId) return undefined;
     const sess = s.sessions[conversationId];
-    if (!sess || sess.kind === "pipe-watch") return undefined;
+    if (!sess) return undefined;
     return !!sess.isStreaming;
   });
   const storeChatIsLoading = useChatStore((s) => {
     if (!conversationId) return undefined;
     const sess = s.sessions[conversationId];
-    if (!sess || sess.kind === "pipe-watch") return undefined;
+    if (!sess) return undefined;
     return !!sess.isLoading;
   });
   const currentStreamingMessageId = useChatStore((s) => {
@@ -4065,29 +4003,6 @@ export function StandaloneChat({
   useEffect(() => {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
-
-  // Keep the pipe-context banner in sync with the current session.
-  // When the panel switches AWAY from a pipe-watch session (user
-  // clicks a chat), `activePipeExecution` would otherwise stay set
-  // and the banner would render on top of the chat. Reading the
-  // current session record's kind / pipeContext gives us a single
-  // source of truth tied to conversationId.
-  const currentSessionKind = useChatStore((s) =>
-    s.currentId ? s.sessions[s.currentId]?.kind : undefined,
-  );
-  const currentSessionPipeContext = useChatStore((s) =>
-    s.currentId ? s.sessions[s.currentId]?.pipeContext : undefined,
-  );
-  useEffect(() => {
-    if (currentSessionKind === "pipe-watch" && currentSessionPipeContext) {
-      setActivePipeExecution({
-        name: currentSessionPipeContext.pipeName,
-        executionId: currentSessionPipeContext.executionId,
-      });
-    } else {
-      setActivePipeExecution(null);
-    }
-  }, [currentSessionKind, currentSessionPipeContext?.pipeName, currentSessionPipeContext?.executionId]);
 
   // If the Pi pool evicted the session we're currently viewing, swap the
   // panel to a fresh one. The pool only evicts idle sessions (see
@@ -4429,8 +4344,6 @@ export function StandaloneChat({
     // before that, settings.aiPresets contains only the hardcoded default,
     // which would cause Pi to start with the wrong model then immediately restart.
     if (!isSettingsLoaded) return;
-    // Don't overwrite pipe-specific preset when watching a pipe execution
-    if (activePipeExecution) return;
     const presets = settings.aiPresets ?? [];
     const fallback = presets.find((p) => p.defaultPreset) ?? presets[0];
     setActivePreset((prev) => {
@@ -4803,7 +4716,7 @@ export function StandaloneChat({
     }
   }, [isStreaming, handlePiRestart]);
 
-  // Listen for Pi / pipe events.
+  // Listen for local Pi events.
   //
   // Stage 3 of the events refactor: the panel registers with the
   // agent-event bus instead of subscribing to legacy Tauri topics
@@ -4811,16 +4724,8 @@ export function StandaloneChat({
   // events for the registered sessionId to this handler and skips the
   // background router. See `lib/events/bus.ts`.
   //
-  // The panel may hold up to two foreground registrations at once:
-  //   - one for the chat session (`conversationId`), bound below in a
-  //     dedicated useEffect that re-registers on every session switch
-  //   - one for a synthetic pipe id (`pipe:<name>:<execId>`) when the
-  //     user is actively watching a pipe — bound inside `initWatch`
-  //     and released on watch end
-  //
-  // The shared `handleAgentEventDataRef` lets both registrations
-  // dispatch through the same event-handling switch without forcing a
-  // costly re-extraction every time the closure changes.
+  // The panel registers the current chat session and dispatches through
+  // `handleAgentEventDataRef` without re-extracting the handler closure.
   useEffect(() => {
     let unlistenLog: UnlistenFn | null = null;
     let mounted = true;
@@ -4829,7 +4734,7 @@ export function StandaloneChat({
     // uniformly.
     const busUnregistrations: Array<() => void> = [];
 
-    // Shared handler for Pi event data — used by both pi_event and pipe_event.
+    // Shared handler for Pi event data.
     //
     // When the rust queue drains a queued prompt, Pi emits text_delta /
     // thinking_start / tool_execution_start for a NEW turn — but the previous
@@ -4968,7 +4873,6 @@ export function StandaloneChat({
 
         if (
           data.type === "agent_end" ||
-          data.type === "pipe_done" ||
           (data.type === "response" && data.success === false) ||
           (data.type === "auto_retry_end" && data.success === false) ||
           (data.type === "message_update" && data.assistantMessageEvent?.type === "error") ||
@@ -5331,10 +5235,7 @@ export function StandaloneChat({
             setIsStreaming(false);
           }
         } else if (data.type === "agent_end") {
-          // When watching a pipe, agent_end fires before pipe_done — don't
-          // clear pipe refs here, let pipe_done handle cleanup instead.
-          const isPipeWatch = piMessageIdRef.current?.startsWith("pipe-");
-          if (piMessageIdRef.current && !isPipeWatch) {
+          if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
             // Use streamed text if available, otherwise extract from agent_end messages
             let content = piStreamingTextRef.current;
@@ -5441,7 +5342,7 @@ export function StandaloneChat({
                 ? { ...m, content, contentBlocks, ...(emptyResponseRetryPrompt ? { retryPrompt: emptyResponseRetryPrompt } : {}) }
                 : m);
             });
-            if (!isPipeWatch) {
+            {
               const followUpText = streamedText || content || "";
               if (followUpText.length > 500 && !followUpFiredRef.current) {
                 const followUpTurnId = msgId;
@@ -5457,7 +5358,7 @@ export function StandaloneChat({
               }
             }
           }
-          if (!isPipeWatch) {
+          {
             piStreamingTextRef.current = "";
             piMessageIdRef.current = null;
             piContentBlocksRef.current = [];
@@ -5576,36 +5477,15 @@ export function StandaloneChat({
           }
           piStreamingTextRef.current = "";
           optimisticSteerRef.current = null;
-          if (piMessageIdRef.current?.startsWith("pipe-")) {
-            setActivePipeExecution(null);
-          }
           piMessageIdRef.current = null;
           piContentBlocksRef.current = [];
           setIsLoading(false);
           setIsStreaming(false);
-        } else if (data.type === "pipe_done") {
-          // Pipe execution finished — clean up streaming state
-          if (piMessageIdRef.current?.startsWith("pipe-")) {
-            const msgId = piMessageIdRef.current;
-            const content = piStreamingTextRef.current || "Pipe completed with no output.";
-            const blocksSnapshot = [...piContentBlocksRef.current];
-            setMessages((prev) =>
-              prev.map((m) => m.id === msgId ? { ...m, content, contentBlocks: blocksSnapshot } : m)
-            );
-            piStreamingTextRef.current = "";
-            piMessageIdRef.current = null;
-            piContentBlocksRef.current = [];
-            piLastErrorRef.current = null;
-            piThinkingStartRef.current = null;
-            setActivePipeExecution(null);
-            setIsLoading(false);
-            setIsStreaming(false);
-          }
         }
       };
 
     // Publish the current handler to the forwarding ref so foreground
-    // registrations (chat + pipe-watch) dispatch through the same
+    // registrations dispatch through the same
     // closure without re-binding.
     handleAgentEventDataRef.current = handlePiEventData;
 
@@ -5823,186 +5703,6 @@ export function StandaloneChat({
       commands.piAbort(piSessionIdRef.current).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Watch pipe: set up tracking from either Tauri event or sessionStorage (for cross-page navigation)
-  useEffect(() => {
-    let watchPollTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // Poll execution API to check if pipe already finished (race condition fix)
-    const pollExecutionStatus = async (pipeName: string, executionId: number, pipeSid: string) => {
-      try {
-        const res = await localFetch(`/pipes/${pipeName}/executions?limit=20`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const exec = (data.data || []).find((e: any) => e.id === executionId);
-        if (!exec) return;
-
-        // Pipe already finished before live events could reach the writer
-        // (race between pipe completion and bus mount). Reconstruct the
-        // conversation from stdout and write it directly to chat-store —
-        // the panel mirrors store messages for pipe-watch sessions, so
-        // this surfaces the result without a separate render path.
-        if (exec.status !== "running") {
-          const { parsePipeNdjsonToMessages } = await import(
-            "@/lib/pipe-ndjson-to-chat"
-          );
-          let messagesFromStdout = exec.stdout
-            ? parsePipeNdjsonToMessages(exec.stdout)
-            : [];
-          if (messagesFromStdout.length === 0) {
-            const fallback =
-              exec.status === "failed"
-                ? `Pipe failed: ${exec.error_message || exec.stderr || "unknown error"}`
-                : "Pipe completed with no output.";
-            messagesFromStdout = [
-              {
-                id: `pipe-poll-${executionId}`,
-                role: "assistant",
-                content: fallback,
-                timestamp: Date.now(),
-              } as any,
-            ];
-          }
-          const store = useChatStore.getState();
-          if (store.sessions[pipeSid]) {
-            store.actions.setMessages(pipeSid, messagesFromStdout as any);
-            store.actions.endTurn(pipeSid);
-          }
-          return true;
-        }
-        return false; // still running
-      } catch {
-        return false;
-      }
-    };
-
-    const initWatch = async (pipeName: string, executionId: number, presetId?: string | null) => {
-      setActivePipeExecution({ name: pipeName, executionId });
-
-      // Apply the pipe's AI preset so the chat header reflects it
-      if (presetId && settings.aiPresets) {
-        const match = settings.aiPresets.find((p) => p.id === presetId);
-        if (match) setActivePreset(match);
-      }
-
-      const pipeSid = pipeSessionId(pipeName, executionId);
-
-      // Pipe-watch is a real session (kind: "pipe-watch"). The writer
-      // (`pipe-watch-writer`) is the sole authority for its message
-      // content — it implicit-creates messages on first content event
-      // and prefers `agent_end`'s authoritative messages array on
-      // terminal events. We upsert the session record synchronously
-      // here so the writer can identify the sid as kind=pipe-watch
-      // for any events that arrive between this call and
-      // loadConversation finishing its async setup.
-      const startedAt = new Date().toISOString();
-      const storeNow = useChatStore.getState();
-      if (!storeNow.sessions[pipeSid]) {
-        storeNow.actions.upsert({
-          id: pipeSid,
-          title: pipeName,
-          preview: "",
-          status: "streaming",
-          messageCount: 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          pinned: false,
-          unread: false,
-          kind: "pipe-watch",
-          pipeContext: { pipeName, executionId, startedAt },
-          isLoading: true,
-          isStreaming: true,
-        });
-      }
-
-      const pipeConv: ChatConversation = {
-        id: pipeSid,
-        title: pipeName,
-        // No placeholder — the writer creates the first message on the
-        // first real content event. Until then the panel shows a
-        // loading indicator (isLoading=true) which matches the visual
-        // we want during pipe startup.
-        messages: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        kind: "pipe-watch",
-        pipeContext: { pipeName, executionId, startedAt },
-      };
-      await loadConversationRef.current(pipeConv);
-
-      // No piMessageIdRef setup — the writer owns message lifecycle
-      // for pipe-watch. The local refs stay null/empty so the chat
-      // panel's chat-shaped event handlers (which only fire if
-      // foreground is registered, which it isn't for pipe-watch)
-      // can't accidentally write to a stale placeholder id.
-      setIsStreaming(true);
-      setIsLoading(true);
-
-      // Poll the executions API as a safety net — catches the case
-      // where the pipe finished BEFORE we mounted the foreground bus
-      // registration (the events fired and went to the recorder, not
-      // here). Once the live agent_event stream has had a chance to
-      // arrive, this poll has done its job; the live stream is the
-      // authoritative source for in-progress runs.
-      //
-      // Bug fix (2026-04-26): the previous version tore down the watch
-      // after 30s "timeout" — clearing activePipeExecution, unregistering
-      // the foreground, and nulling piMessageIdRef. For pipes that take
-      // longer than 30s this would silently (a) hide the banner, (b)
-      // strand the thinking indicator at isThinking:true, and (c) drop
-      // every subsequent live event on the floor because piMessageIdRef
-      // was null. Now we just stop polling — the watch stays alive and
-      // is driven by live events to completion.
-      let pollCount = 0;
-      const maxPolls = 10; // 30s of safety-net polling
-      const doPoll = async () => {
-        // Stop polling if the user navigated to a different chat. The
-        // writer still accumulates events for this sid in the
-        // background — we just don't need the poll fallback once we're
-        // not actively viewing.
-        if (piSessionIdRef.current !== pipeSid) return;
-        const done = await pollExecutionStatus(pipeName, executionId, pipeSid);
-        if (done) {
-          watchPollTimer = null;
-          return;
-        }
-        pollCount++;
-        if (pollCount >= maxPolls) {
-          // Safety-net budget exhausted. The pipe is running and live
-          // events are doing their job — no teardown here. The watch
-          // ends when agent_end / pipe_done arrives via the bus.
-          watchPollTimer = null;
-          return;
-        }
-        watchPollTimer = setTimeout(doPoll, 3000);
-      };
-      // Small delay before first poll to let streaming events arrive first
-      watchPollTimer = setTimeout(doPoll, 1500);
-    };
-
-    // Check sessionStorage first (set by pipes-section before navigation)
-    const stored = sessionStorage.getItem("watchPipe");
-    if (stored) {
-      sessionStorage.removeItem("watchPipe");
-      try {
-        const { pipeName, executionId, presetId } = JSON.parse(stored);
-        if (pipeName && executionId != null) {
-          initWatch(pipeName, executionId, presetId);
-        }
-      } catch {}
-    }
-
-    // Also listen for live events (in case chat is already mounted)
-    let unlisten: (() => void) | null = null;
-    listen<{ pipeName: string; executionId: number; presetId?: string | null }>("watch_pipe", (event) => {
-      const { pipeName, executionId, presetId } = event.payload;
-      initWatch(pipeName, executionId, presetId);
-    }).then((fn) => { unlisten = fn; });
-    return () => {
-      unlisten?.();
-      if (watchPollTimer) clearTimeout(watchPollTimer);
-    };
   }, []);
 
   // Generate follow-up suggestions using Apple Intelligence
@@ -7919,19 +7619,16 @@ export function StandaloneChat({
       ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
       : null;
 
-  // Per-turn aggregation plan. Pipe sessions (pipe-run, pipe-watch) and any
-  // chat with an agentic loop (≥2 assistant messages with citations between
+  // Per-turn aggregation plan. Agentic loops (≥2 assistant messages with citations between
   // user turns) fold their per-message footers into one aggregated footer
   // rendered after the last assistant of the turn. Single-step turns keep
   // their per-message footer untouched.
-  const isPipeSessionChat =
-    currentSessionKind === "pipe-run" || currentSessionKind === "pipe-watch";
   const citationPlan = React.useMemo(
     () =>
       computeChatCitationPlan(messages, {
-        forceAggregate: isPipeSessionChat,
+        forceAggregate: false,
       }),
-    [isPipeSessionChat, messages],
+    [messages],
   );
 
   return (
@@ -8206,16 +7903,7 @@ export function StandaloneChat({
           }}
         >
         <div className={cn(CHAT_RAIL_CLASS, "px-5 sm:px-6 py-4 space-y-4")}>
-        {/* Pipe-watch banner — shown when the user clicked through from
-            a running pipe execution. Replaces the prior synthetic
-            "Watching pipe: X" user-bubble sentinel. */}
-        {activePipeExecution && (
-          <PipeContextBanner
-            pipeName={activePipeExecution.name}
-            executionId={activePipeExecution.executionId}
-          />
-        )}
-        {messages.length === 0 && !isPreparingPrefill && !activePipeExecution && !isLoading && !isStreaming && disabledReason && (!hasPresets || !hasValidModel) && (
+        {messages.length === 0 && !isPreparingPrefill && !isLoading && !isStreaming && disabledReason && (!hasPresets || !hasValidModel) && (
           <div className="relative flex flex-col items-center justify-center py-12 space-y-4">
             <div className="relative p-6 rounded-2xl border bg-muted/50 border-border/50">
               <Settings className="h-12 w-12 text-muted-foreground" />
@@ -8242,7 +7930,7 @@ export function StandaloneChat({
             )}
           </div>
         )}
-        {messages.length === 0 && !isPreparingPrefill && !activePipeExecution && !isLoading && !isStreaming && hasPresets && hasValidModel && (
+        {messages.length === 0 && !isPreparingPrefill && !isLoading && !isStreaming && hasPresets && hasValidModel && (
           <SummaryCards
             onSendMessage={sendMessage}
             onOpenConnection={openConnectionSetup}
@@ -8254,8 +7942,6 @@ export function StandaloneChat({
             onSaveCustomTemplate={saveCustomTemplate}
             onDeleteCustomTemplate={deleteCustomTemplate}
             userName={settings.userName}
-            templatePipes={templatePipes}
-            pipesLoading={pipesLoading}
           />
         )}
         <AnimatePresence mode="popLayout">
@@ -8543,30 +8229,6 @@ export function StandaloneChat({
                         <div className="text-xs text-muted-foreground px-2 py-1 mb-1">
                           {new Date(message.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                         </div>
-                        {!message.content.includes("used all your free queries") &&
-                          !message.content.startsWith("Error") &&
-                          message.content !== "Processing..." && (
-                          <button
-                            onClick={() => {
-                              setOpenMessageMenuId(null);
-                              const msgIndex = messages.findIndex((m) => m.id === message.id);
-                              const userMsg = messages
-                                .slice(0, msgIndex)
-                                .reverse()
-                                .find((m) => m.role === "user");
-                              if (userMsg) {
-                                setScheduleDialogMessage({
-                                  prompt: userMsg.content,
-                                  response: message.content,
-                                });
-                              }
-                            }}
-                            className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
-                          >
-                            <Clock className="h-3.5 w-3.5 shrink-0" />
-                            Run on schedule
-                          </button>
-                        )}
                         <button
                           onClick={() => {
                             setOpenMessageMenuId(null);
@@ -9249,7 +8911,7 @@ export function StandaloneChat({
                   const match = settings.aiPresets?.find((p) => p.id === id);
                   if (!match) return;
                   setActivePreset(match);
-                  if (!activePipeExecution) handlePiRestart(match);
+                  handlePiRestart(match);
                 }}
               />
               {(() => {
@@ -9356,20 +9018,6 @@ export function StandaloneChat({
       </div> {/* End of horizontal chat+browser split */}
 
 
-      {scheduleDialogMessage && (
-        <SchedulePromptDialog
-          open={!!scheduleDialogMessage}
-          onClose={() => setScheduleDialogMessage(null)}
-          onSchedule={(message, displayLabel) => {
-            setScheduleDialogMessage(null);
-            // Clear any stale Pi message ref so sendMessage doesn't reject
-            piMessageIdRef.current = null;
-            sendMessage(message, displayLabel);
-          }}
-          originalPrompt={scheduleDialogMessage.prompt}
-          responsePreview={scheduleDialogMessage.response}
-        />
-      )}
 
       {/* Full-screen image viewer (like reference): click any attached photo to open */}
       <Dialog open={!!imageViewer} onOpenChange={(open) => !open && setImageViewer(null)}>

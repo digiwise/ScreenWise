@@ -461,15 +461,8 @@ export function MemoriesSection() {
         <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
           <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
           <span>
-            memories haven&apos;t updated in {staleDays} day{staleDays !== 1 ? "s" : ""}.
-            check that a memory-writing pipe is installed and enabled —{" "}
-            <a
-              href="?section=pipes&tab=discover&q=memory"
-              className="underline hover:opacity-80 transition-opacity"
-            >
-              browse memory pipes
-            </a>
-            .
+            no new memories have been saved in {staleDays} day{staleDays !== 1 ? "s" : ""}.
+            Existing memories remain available below.
           </span>
         </div>
       )}
@@ -687,18 +680,8 @@ export function MemoriesSection() {
           {!debouncedQuery && !activeTag && (
             <>
               <p className="text-xs">
-                memories are automatically created by pipes that learn from your
-                screen & audio activity.
-              </p>
-              <p className="text-xs mt-3">
-                install pipes from the{" "}
-                <a
-                  href="?section=pipes&tab=discover"
-                  className="underline text-foreground hover:text-foreground/80 transition-colors"
-                >
-                  pipe store
-                </a>{" "}
-                to start building memories.
+                add one manually, or ask local chat to remember a useful
+                preference, decision, or project detail.
               </p>
             </>
           )}

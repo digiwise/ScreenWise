@@ -22,7 +22,6 @@ import { SpeakerAssignPopover } from "@/components/speaker-assign-popover";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Meeting, deduplicateAudioItems } from "@/lib/hooks/use-meetings";
-import { usePipes } from "@/lib/hooks/use-pipes";
 import { localFetch } from "@/lib/api";
 
 // Extended audio item with timestamp for conversation view
@@ -84,7 +83,6 @@ export function AudioTranscript({
 	isPlaying = false,
 }: AudioTranscriptProps) {
 	const [playing, setPlaying] = useState<string | null>(null);
-	const { templatePipes } = usePipes();
 	const meetingScrollRef = useRef<HTMLDivElement | null>(null);
 
 	// Pagination for full meeting view
@@ -559,14 +557,11 @@ export function AudioTranscript({
 			`use screenpipe search API with content_type=audio, start_time=${startUtc}, end_time=${endUtc} to fetch the transcript`,
 		].filter(Boolean).join("\n");
 
-		const meetingPipe = templatePipes.find((p) => p.name === "meeting-summary");
 		const fallbackPrompt = isOngoing
 			? `query the audio transcriptions from ${startLocal} to ${endLocal} and summarize this meeting so far with key takeaways and action items`
 			: `query the audio transcriptions from ${startLocal} to ${endLocal} and summarize this meeting with key takeaways and action items`;
-		const prompt = meetingPipe?.prompt || fallbackPrompt;
-
-		await showChatWithPrefill({ context, prompt, autoSend: true });
-	}, [summarizeInfo, templatePipes]);
+		await showChatWithPrefill({ context, prompt: fallbackPrompt, autoSend: true });
+	}, [summarizeInfo]);
 
 	const isVisible = useMemo(() => {
 		return conversationData.items.length > 0 || activeMeeting != null;

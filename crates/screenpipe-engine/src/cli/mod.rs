@@ -7,7 +7,6 @@ pub mod auth;
 pub mod backup;
 pub mod db;
 pub mod export;
-pub mod presets;
 pub mod search;
 pub mod status;
 mod store_file;
@@ -1206,88 +1205,6 @@ fn persist_recording_settings_to_store(
     })
 }
 
-#[derive(Subcommand)]
-pub enum ModelCommand {
-    /// List available AI presets from settings
-    List {
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Show one preset's full configuration (api key is masked in human view; raw in --json)
-    Show {
-        /// Preset id
-        id: String,
-        /// Output as JSON (returns raw api key — for scripting / backup)
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Create a new preset
-    Create {
-        /// Preset id (letters, digits, '-', '_'; max 64 chars)
-        id: String,
-        /// Provider: native-ollama
-        #[arg(long)]
-        provider: String,
-        /// Local Ollama model name (e.g. ministral-3:latest, llama3.2)
-        #[arg(long)]
-        model: String,
-        /// Ollama base URL (only http://localhost:11434/v1 is supported)
-        #[arg(long)]
-        url: Option<String>,
-        /// Optional system prompt prepended to pipe bodies
-        #[arg(long)]
-        prompt: Option<String>,
-        /// Max input context characters (1000–2_000_000)
-        #[arg(long)]
-        max_context_chars: Option<i64>,
-        /// Max output tokens (1–200000)
-        #[arg(long)]
-        max_tokens: Option<i64>,
-        /// Make this the default preset for new pipes
-        #[arg(long, default_value_t = false)]
-        set_default: bool,
-    },
-    /// Update fields on an existing preset (only provided flags change)
-    Update {
-        /// Preset id to modify
-        id: String,
-        #[arg(long)]
-        provider: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
-        /// Ollama base URL (only http://localhost:11434/v1 is supported)
-        #[arg(long)]
-        url: Option<String>,
-        /// Empty string clears prompt
-        #[arg(long)]
-        prompt: Option<String>,
-        #[arg(long)]
-        max_context_chars: Option<i64>,
-        #[arg(long)]
-        max_tokens: Option<i64>,
-        /// Promote this preset to default (unsets others atomically)
-        #[arg(long, default_value_t = false)]
-        set_default: bool,
-        /// Clear default flag on this preset
-        #[arg(long, default_value_t = false)]
-        unset_default: bool,
-    },
-    /// Mark a preset as the default (atomically unsets others)
-    SetDefault {
-        /// Preset id
-        id: String,
-    },
-    /// Delete a preset; refuses if any pipe references it (use --force to override)
-    Delete {
-        /// Preset id
-        id: String,
-        /// Delete even if pipes reference it (those pipes will fall back to default)
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
-}
-
 // =============================================================================
 // Vault subcommands
 // =============================================================================
@@ -1331,7 +1248,7 @@ pub enum DbCommand {
     /// List stale recovery/backup artifacts (db.sqlite.corrupt-*, db_corrupted.sqlite,
     /// db.sqlite.backup, db-recovery-* dirs, db-hotfix-* dirs, db.sqlite.pre-recover-*).
     /// Defaults to dry-run; pass `--apply` to actually delete. Never touches live
-    /// db.sqlite, recordings under data/, pipes/, or settings.
+    /// db.sqlite, recordings under data/, or settings.
     Cleanup {
         /// Actually delete (default is dry-run for safety).
         #[arg(long)]
@@ -1377,7 +1294,7 @@ pub enum AuthCommand {
 // =============================================================================
 
 /// Mirrors the HTTP `/search` query string so terminal use, jq filters, and
-/// pipe scripts share the same vocabulary. Output is the same `ContentItem`
+/// local scripts share the same vocabulary. Output is the same `ContentItem`
 /// shape the API returns — `screenpipe search` and `curl /search` are
 /// interchangeable for downstream consumers.
 #[derive(Parser, Clone, Debug)]

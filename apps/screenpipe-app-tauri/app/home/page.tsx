@@ -6,7 +6,6 @@
 import React, { useEffect, useState, useRef, Suspense, useCallback } from "react";
 import {
   Settings as SettingsIcon,
-  Workflow,
   Plus,
   Clock,
   HelpCircle,
@@ -41,7 +40,6 @@ import { UpdateBanner } from "@/components/update-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { FeedbackSection } from "@/components/settings/feedback-section";
-import { PipeStoreView } from "@/components/pipe-store";
 import { MemoriesSection } from "@/components/settings/memories-section";
 import { ConnectionsSection } from "@/components/settings/connections-section";
 import { MeetingNotesSection } from "@/components/meeting-notes";
@@ -52,14 +50,11 @@ import {
 } from "@/components/chat-sidebar";
 import { ChatHistoryView } from "@/components/chat/chat-history-view";
 import { mountPiEventRouter } from "@/lib/stores/pi-event-router";
-import { mountPipeRunRecorder } from "@/lib/events/pipe-run-recorder";
-import { mountPipeWatchWriter } from "@/lib/events/pipe-watch-writer";
 import { NotificationBell } from "@/components/notification-bell";
 import Timeline from "@/components/rewind/timeline";
 import { useQueryState } from "nuqs";
 import { listen } from "@tauri-apps/api/event";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { useRunningPipes } from "@/lib/hooks/use-running-pipes";
 import { commands } from "@/lib/utils/tauri";
 import { shouldAcceptTitleSource } from "@/lib/utils/chat-title";
 import {
@@ -70,7 +65,6 @@ import {
 import { useTeam } from "@/lib/hooks/use-team";
 import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
 import { EnterpriseLicensePrompt } from "@/components/enterprise-license-prompt";
-import { PipeActivityIndicator } from "@/components/pipe-activity-indicator";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { computeMeetingActive, type MeetingStatusResponse } from "@/lib/utils/meeting-state";
 import type { MeetingRecord } from "@/lib/utils/meeting-format";
@@ -83,7 +77,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-type MainSection = "home" | "timeline" | "memories" | "pipes" | "connections" | "meetings" | "help";
+type MainSection = "home" | "timeline" | "memories" | "connections" | "meetings" | "help";
 type ConnectionFocusRequest = {
   id: string | null;
   category: string | null;
@@ -92,7 +86,7 @@ type ConnectionFocusRequest = {
 
 // All valid URL sections for the home page
 const ALL_SECTIONS = [
-  "home", "timeline", "pipes", "help", "memories", "connections", "meetings", "history",
+  "home", "timeline", "help", "memories", "connections", "meetings", "history",
   "feedback", // backwards compat → maps to "help"
 ];
 
@@ -126,8 +120,6 @@ function HomeContent() {
   const { isTranslucent } = useSidebarContext();
   const teamState = useTeam();
   const { isSectionHidden, isSettingLocked, needsLicenseKey, submitLicenseKey } = useEnterprisePolicy();
-  const runningPipes = useRunningPipes();
-  const runningPipeCount = runningPipes.length;
   const selectChatConversation = useCallback((id: string) => {
     setActiveSection("home");
     useChatStore.getState().actions.setCurrent(id);
@@ -169,7 +161,7 @@ function HomeContent() {
   // If current section is hidden by enterprise policy, redirect to first visible one
   useEffect(() => {
     if (!isSectionHidden(activeSection)) return;
-    const fallback = ["home", "timeline", "pipes"].find((s) => !isSectionHidden(s));
+    const fallback = ["home", "timeline"].find((s) => !isSectionHidden(s));
     setActiveSection(fallback ?? "home");
   }, [activeSection, isSectionHidden, setActiveSection]);
 
@@ -189,16 +181,6 @@ function HomeContent() {
   // freeze the moment the chat unmounts. Idempotent.
   useEffect(() => {
     void mountPiEventRouter();
-    // Pipe-run recorder — buffers pipe-source events on the agent-event
-    // bus and saves each completed run as a `kind: "pipe-run"` chat
-    // file. Pairs with the chat router; both run for the lifetime of
-    // the app process. Idempotent.
-    void mountPipeRunRecorder();
-    // Pipe-watch writer — sole authority on chat-store messages for
-    // sessions with kind="pipe-watch". The chat panel mirrors the
-    // store; this writer is what makes "switch away and back" preserve
-    // the full live transcript. Idempotent.
-    void mountPipeWatchWriter();
   }, []);
 
   // Overlay-side foreground sessions don't pass through this window's
@@ -745,15 +727,6 @@ function HomeContent() {
     return () => { unlisten?.(); };
   }, []);
 
-  // Watch pipe: navigate to chat when user clicks "watch" on a running pipe
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    listen<{ pipeName: string; executionId: number }>("watch_pipe", () => {
-      setActiveSection("home");
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
-  }, [setActiveSection]);
-
   const openSettings = useCallback((section: string = "general") => {
     router.push(`/settings?section=${section}`);
   }, [router]);
@@ -813,8 +786,6 @@ function HomeContent() {
         return <Timeline embedded />;
       case "memories":
         return <MemoriesSection />;
-      case "pipes":
-        return <PipeStoreView />;
       case "connections":
         return (
           <ConnectionsSection
@@ -861,7 +832,6 @@ function HomeContent() {
     // conversation". Each click allocates a new session id (empty
     // rows are not reused — that felt like opening an old recent).
     { id: "home", label: "New chat", icon: <Plus className="h-3.5 w-3.5" /> },
-    { id: "pipes", label: "Pipes", icon: <Workflow className="h-3.5 w-3.5" /> },
     { id: "timeline", label: "Timeline", icon: <Clock className="h-3.5 w-3.5" /> },
     { id: "meetings", label: "Meeting notes", icon: <NotebookPen className="h-3.5 w-3.5" /> },
     { id: "memories", label: "Memories", icon: <Sparkles className="h-3.5 w-3.5" /> },
@@ -1217,16 +1187,7 @@ function HomeContent() {
                       )}>
                         {section.icon}
                       </div>
-                      {!sidebarCollapsed && <span className={cn("text-xs truncate", section.id === "pipes" && runningPipeCount > 0 && "flex-1", isActive && isTranslucent ? "font-semibold vibrant-sidebar-fg" : "font-medium")}>{section.label}</span>}
-                      {section.id === "pipes" && runningPipeCount > 0 && !sidebarCollapsed && (
-                        <PipeActivityIndicator
-                          kind="running"
-                          label={runningPipeCount}
-                          className="ml-auto shrink-0"
-                          labelClassName="text-muted-foreground/60"
-                          ariaLabel={`${runningPipeCount} running pipe${runningPipeCount === 1 ? "" : "s"}`}
-                        />
-                      )}
+                      {!sidebarCollapsed && <span className={cn("text-xs truncate", isActive && isTranslucent ? "font-semibold vibrant-sidebar-fg" : "font-medium")}>{section.label}</span>}
                     </button>
                   );
                   if (sidebarCollapsed) {

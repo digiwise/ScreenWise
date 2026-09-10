@@ -220,8 +220,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       pinned: conversation.pinned === true,
       hidden: conversation.hidden === true,
       lastUserMessageAt,
-      kind: conversation.kind ?? "chat",
-      pipeContext: conversation.pipeContext,
       titleSource: conversation.titleSource,
       dedupKey: conversationDedupKey(conversation) ?? undefined,
     };
@@ -706,11 +704,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       }),
       createdAt: existing?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
-      // Preserve pipe-run identity across follow-up saves. Without this, the
-      // first user-typed follow-up to a pipe-run silently demoted it to a
-      // plain chat (kind/pipeContext dropped on disk).
-      ...(existing?.kind ? { kind: existing.kind } : {}),
-      ...(existing?.pipeContext ? { pipeContext: existing.pipeContext } : {}),
       ...(browserState ? { browserState } : {}),
       ...(existing?.pinned ? { pinned: existing.pinned } : {}),
       ...(existing?.hidden ? { hidden: existing.hidden } : {}),
@@ -816,27 +809,19 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   };
 
   // ---- Auto-save conversation when a response completes (isLoading transitions from true to false) ----
-  // Skip saving live pipe watch conversations (transient, streaming from pipe_event).
-  // But DO save pipe execution conversations that the user has loaded and is chatting in
-  // (they have a conversationId and user-typed messages without pipe- IDs).
   const prevIsLoadingRef = useRef(false);
   useEffect(() => {
     if (prevIsLoadingRef.current && !isLoading && messages.length > 0) {
-      // Only skip if ALL messages are pipe-generated (live watch).
-      // If the user has typed follow-up messages, some won't have pipe- IDs → save.
-      const allPipe = messages.every((m) => m.id?.startsWith("pipe-"));
-      if (!allPipe) {
-        saveConversation(messages);
-        // Reveal this session in the sidebar — the assistant has replied,
-        // so it's no longer an empty draft.
-        void (async () => {
-          const { useChatStore } = await import("@/lib/stores/chat-store");
-          const sid = piSessionIdRef.current;
-          if (sid && useChatStore.getState().sessions[sid]?.draft) {
-            useChatStore.getState().actions.patch(sid, { draft: false });
-          }
-        })();
-      }
+      saveConversation(messages);
+      // Reveal this session in the sidebar — the assistant has replied,
+      // so it's no longer an empty draft.
+      void (async () => {
+        const { useChatStore } = await import("@/lib/stores/chat-store");
+        const sid = piSessionIdRef.current;
+        if (sid && useChatStore.getState().sessions[sid]?.draft) {
+          useChatStore.getState().actions.patch(sid, { draft: false });
+        }
+      })();
     }
     prevIsLoadingRef.current = isLoading;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -848,8 +833,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   // the partial assistant reply (the user still saw their question on
   // reload, but the model's response was gone). Save every ~1.5 s while
   // a response is streaming so a crash/quit drops at most a second of
-  // tokens. Pipe-watch conversations are still skipped — same rule as
-  // the edge save: only persist if at least one message is user-typed.
+  // tokens. Only persist if at least one message is user-typed.
   const streamingSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Snapshot of last-saved content length per message id so we don't
   // rewrite the file when only React re-rendered (e.g. cursor blink).
@@ -994,22 +978,15 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     //     race against this update can't land between the messages
     //     write and the streaming-refs write (which would point the
     //     router at a streamingMessageId not yet present in messages).
-    //     Pipe-watch sessions are owned by `pipe-watch-writer`, which
-    //     keeps the chat-store as the source of truth — snapshotting
-    //     the panel's mirrored copy back over the writer's accumulator
-    //     would be a regression (lossy round-trip via React state).
     if (outgoingSid && store.sessions[outgoingSid]) {
-      const outgoingKind = store.sessions[outgoingSid].kind;
-      if (outgoingKind !== "pipe-watch") {
-        store.actions.snapshotSession(outgoingSid, {
-          messages: messages as any,
-          streamingText: piStreamingTextRef.current,
-          streamingMessageId: piMessageIdRef.current,
-          contentBlocks: [...piContentBlocksRef.current],
-          isStreaming,
-          isLoading,
-        });
-      }
+      store.actions.snapshotSession(outgoingSid, {
+        messages: messages as any,
+        streamingText: piStreamingTextRef.current,
+        streamingMessageId: piMessageIdRef.current,
+        contentBlocks: [...piContentBlocksRef.current],
+        isStreaming,
+        isLoading,
+      });
       // (1b) Snapshot OUTGOING composer draft — what the user had
       // typed + staged but not yet sent. Restored when they come back
       // to this chat. Mirrors how messages/streamingText are stored.
@@ -1093,8 +1070,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
             pinned: persisted.pinned === true,
             unread: false,
             ...(persisted.hidden === true ? { hidden: true } : {}),
-            ...(persisted.kind ? { kind: persisted.kind } : {}),
-            ...(persisted.pipeContext ? { pipeContext: persisted.pipeContext } : {}),
           });
         } else {
           store.actions.patch(conv.id, {
@@ -1103,8 +1078,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
             pinned: persisted.pinned === true,
             hidden: persisted.hidden === true,
             updatedAt: Math.max(existing?.updatedAt ?? 0, persisted.updatedAt ?? 0),
-            ...(persisted.kind ? { kind: persisted.kind } : {}),
-            ...(persisted.pipeContext ? { pipeContext: persisted.pipeContext } : {}),
           });
         }
       }
@@ -1181,22 +1154,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           updatedAt: full.updatedAt ?? Date.now(),
           pinned: full.pinned === true,
           unread: false,
-          // Propagate kind / pipeContext from the synthetic conv when
-          // initWatch creates a pipe-watch session — the banner reads
-          // this off the session record so it persists across
-          // foreground/background swaps.
-          ...(conv.kind ? { kind: conv.kind } : full.kind ? { kind: full.kind } : {}),
-          ...(conv.pipeContext ? { pipeContext: conv.pipeContext } : full.pipeContext ? { pipeContext: full.pipeContext } : {}),
-        });
-      } else if (conv.kind || conv.pipeContext) {
-        store.actions.patch(conv.id, {
-          title: full.title || store.sessions[conv.id]?.title || "untitled",
-          ...(full.titleSource ? { titleSource: full.titleSource } : {}),
-          pinned: full.pinned === true,
-          hidden: full.hidden === true,
-          updatedAt: Math.max(store.sessions[conv.id]?.updatedAt ?? 0, full.updatedAt ?? 0),
-          ...(conv.kind ? { kind: conv.kind } : {}),
-          ...(conv.pipeContext ? { pipeContext: conv.pipeContext } : {}),
         });
       }
       store.actions.setMessages(conv.id, messagesForPanel as any);
@@ -1265,17 +1222,14 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     const store = useChatStore.getState();
     const outgoingSid = piSessionIdRef.current;
     if (outgoingSid && store.sessions[outgoingSid]) {
-      const outgoingKind = store.sessions[outgoingSid].kind;
-      if (outgoingKind !== "pipe-watch") {
-        store.actions.snapshotSession(outgoingSid, {
-          messages: messages as any,
-          streamingText: piStreamingTextRef.current,
-          streamingMessageId: piMessageIdRef.current,
-          contentBlocks: [...piContentBlocksRef.current],
-          isStreaming,
-          isLoading,
-        });
-      }
+      store.actions.snapshotSession(outgoingSid, {
+        messages: messages as any,
+        streamingText: piStreamingTextRef.current,
+        streamingMessageId: piMessageIdRef.current,
+        contentBlocks: [...piContentBlocksRef.current],
+        isStreaming,
+        isLoading,
+      });
     }
 
     const newId = crypto.randomUUID();

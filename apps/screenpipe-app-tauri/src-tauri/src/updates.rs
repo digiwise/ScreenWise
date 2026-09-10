@@ -365,10 +365,6 @@ impl UpdatesManager {
             return Result::Ok(false);
         }
 
-        if let Err(err) = self.app.emit("update-all-pipes", ()) {
-            error!("Failed to update all pipes: {}", err);
-        }
-
         let current_version = self.app.package_info().version.to_string();
         let product_name = self.app.package_info().name.clone();
         info!(
@@ -890,11 +886,7 @@ fn check_whats_new(app: &tauri::AppHandle) {
         match client
             .post("http://127.0.0.1:11435/notify")
             .json(&serde_json::json!({
-                // Explicit type so this isn't bucketed as a "pipe" notification
-                // (the /notify default) and silently suppressed when a user
-                // turns off Pipe notifications. App updates are a separate class
-                // with their own toggle. See the pipe gate in
-                // notifications/routes.rs (#3880).
+                // Keep app updates in their own notification class.
                 "type": "app-update",
                 "title": format!("🎉 screenpipe v{} — what's new", current_version),
                 "body": body,

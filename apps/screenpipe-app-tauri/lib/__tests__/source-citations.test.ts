@@ -202,7 +202,7 @@ describe("source citations", () => {
 
     expect(citations).toHaveLength(1);
     expect(citations[0]).toMatchObject({
-      kind: "pipe",
+      kind: "file",
       title: "Read: pipe.ts",
     });
   });
@@ -516,9 +516,9 @@ describe("source citations", () => {
     expect(titles).not.toContain("Local file: undefined");
   });
 
-  it("aggregates citations across pipe-run messages and dedupes repeats", () => {
-    // Real pipe-run pattern from chat-memory-sync_2341.json: the agent reads
-    // the same state file across multiple debug steps. Per-message footers
+  it("aggregates citations across local chat messages and dedupes repeats", () => {
+    // A local agent may read the same state file across multiple debug steps.
+    // Per-message footers
     // would render N "Read: state.json" rows; the aggregator emits one.
     const readState = {
       contentBlocks: [
@@ -526,7 +526,7 @@ describe("source citations", () => {
           type: "tool",
           toolCall: {
             toolName: "read",
-            args: { path: "/Users/me/.screenpipe/pipes/sync/state.json" },
+            args: { path: "/tmp/sync-state.json" },
             result: "{}",
             isRunning: false,
           },
@@ -554,7 +554,7 @@ describe("source citations", () => {
     ]);
 
     expect(aggregated.map((c) => c.title)).toEqual([
-      "Read: state.json",
+      "Read: sync-state.json",
       "Wrote: sync.ts",
     ]);
   });

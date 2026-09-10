@@ -31,7 +31,6 @@ import { usePlatform } from "@/lib/hooks/use-platform";
 import { useAudioPlayback } from "@/lib/hooks/use-audio-playback";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { usePipes, type TemplatePipe } from "@/lib/hooks/use-pipes";
 
 import { toast } from "@/components/ui/use-toast";
 import { DailySummaryCard } from "@/components/rewind/daily-summary";
@@ -153,7 +152,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 
 	// Get timeline selection for chat context
 	const { selectionRange, loadTagsForFrames, tags } = useTimelineSelection();
-	const { promptPipes } = usePipes();
 
 	// Load tags when a selection is made (lazy-load)
 	useEffect(() => {
@@ -586,7 +584,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 	}, [frames.length, currentFrame, setCurrentFrame, seekingTimestamp]);
 
 	// Send timeline selection context to chat (optionally with a specific pipe)
-	const sendSelectionToChat = useCallback(async (pipe?: TemplatePipe) => {
+	const sendSelectionToChat = useCallback(async () => {
 		if (!selectionRange) return;
 
 		const startTime = selectionRange.start.toLocaleString();
@@ -652,16 +650,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 		const context = contextParts.join("\n\n");
 
 		// Open chat window and deliver prefill reliably (handles fresh webview creation)
-		if (pipe) {
-			await showChatWithPrefill({ context, prompt: pipe.prompt, autoSend: true });
-		} else {
-			await showChatWithPrefill({ context, prompt: `Based on my activity from ${startTime} to ${endTime}, `, source: "timeline" });
-		}
-
-
-		if (pipe) {
-			toast({ title: `${pipe.icon} ${pipe.title}`, description: "running pipe with selection context" });
-		}
+		await showChatWithPrefill({ context, prompt: `Based on my activity from ${startTime} to ${endTime}, `, source: "timeline" });
 	}, [selectionRange, frames]);
 
 	// Wrapper that opens search in separate window (fullscreen) or inline modal (embedded)
@@ -1374,8 +1363,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 							targetZoom={targetZoom}
 							setTargetZoom={setTargetZoom}
 							onAskAI={() => sendSelectionToChat()}
-							onRunPipe={(pipe) => sendSelectionToChat(pipe)}
-							templatePipes={promptPipes}
 							isPlaying={isPlaying}
 							onTogglePlayPause={togglePlayPause}
 							selectedDeviceId={selectedDeviceId}

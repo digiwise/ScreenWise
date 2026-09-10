@@ -289,7 +289,6 @@ describe("Local API search and stability", function () {
     ["/speakers/search?name=Louis", "named speaker search"],
     ["/retention/status?force=true", "retention force status"],
     ["/power?detail=true", "power detail status"],
-    ["/pipes/list", "pipes list"],
     ["/connections", "connections list"],
     ["/settings", "settings API path"],
     ["/tags", "tags API path"],

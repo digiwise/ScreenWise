@@ -795,7 +795,6 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
     listConversations({
       limit: CHAT_HISTORY_INITIAL_LIMIT,
       includeHidden: false,
-      kind: "chat",
     })
       .then((all) => {
         if (recentChatRequestRef.current !== requestId) return;

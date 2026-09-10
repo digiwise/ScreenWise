@@ -16,41 +16,6 @@ interface DiscoveredHost {
   alias?: string;
 }
 
-export interface PipeExecution {
-  id: number;
-  pipe_name: string;
-  started_at?: string;
-  finished_at?: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
-  exit_code?: number;
-  duration_ms?: number;
-  trigger_type?: string;
-  error_type?: string;
-  error_message?: string;
-  model?: string;
-  stdout?: string;
-  stderr?: string;
-}
-
-export interface RemotePipeStatus {
-  config: {
-    name: string;
-    schedule: string;
-    enabled: boolean;
-    source_slug?: string;
-    trigger?: {
-      events?: string[];
-      custom?: string[];
-    };
-  };
-  is_running: boolean;
-  last_run?: string;
-  last_success?: boolean;
-  last_error?: string;
-  consecutive_failures?: number;
-  recent_executions?: PipeExecution[];
-}
-
 interface HealthResponse {
   status: string;
   frame_status: string;
@@ -69,7 +34,6 @@ export interface DeviceMonitorData {
   status: "online" | "offline" | "loading";
   lastSeen: string | null;
   health?: HealthResponse;
-  pipes?: RemotePipeStatus[];
   error?: string;
 }
 
@@ -90,21 +54,6 @@ async function fetchWithTimeout(
   }
 }
 
-async function remotePost(address: string, path: string, body?: object, authToken?: string) {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
-  const res = await fetchWithTimeout(`http://${address}${path}`, FETCH_TIMEOUT_MS, {
-    method: "POST",
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status}: ${text.slice(0, 200)}`);
-  }
-  return res.json().catch(() => ({}));
-}
-
 function authHeaders(token?: string): Record<string, string> {
   return token ? { "Authorization": `Bearer ${token}` } : {};
 }
@@ -114,7 +63,7 @@ export function useDeviceMonitor() {
   const [devices, setDevices] = useState<DeviceMonitorData[]>([]);
   const failCountRef = useRef<Record<string, number>>({});
   const lastDataRef = useRef<
-    Record<string, { health?: HealthResponse; pipes?: RemotePipeStatus[]; lastSeen: string }>
+    Record<string, { health?: HealthResponse; lastSeen: string }>
   >({});
 
   const registeredDevices = (settings.monitorDevices || []).filter((d) => {
@@ -124,8 +73,6 @@ export function useDeviceMonitor() {
   });
   // Stable key for effect dependency
   const deviceKey = registeredDevices.map((d) => d.address).sort().join(",");
-
-  const apiKey = undefined;
 
   const localHealthFetch = useCallback(
     async (timeoutMs: number): Promise<Response> => {
@@ -143,26 +90,15 @@ export function useDeviceMonitor() {
   const pollDevice = useCallback(
     async (address: string, label?: string): Promise<DeviceMonitorData> => {
       try {
-        const headers = authHeaders(apiKey ?? undefined);
-        const [healthRes, pipesRes] = await Promise.all([
-          fetchWithTimeout(`http://${address}/health`, FETCH_TIMEOUT_MS, { headers }),
-          fetchWithTimeout(
-            `http://${address}/pipes?include_executions=true`,
-            FETCH_TIMEOUT_MS,
-            { headers }
-          ),
-        ]);
+        const headers = authHeaders();
+        const healthRes = await fetchWithTimeout(`http://${address}/health`, FETCH_TIMEOUT_MS, { headers });
 
         if (!healthRes.ok) throw new Error(`health ${healthRes.status}`);
-        if (!pipesRes.ok) throw new Error(`pipes ${pipesRes.status}`);
-
         const health: HealthResponse = await healthRes.json();
-        const pipesJson = await pipesRes.json();
-        const pipes: RemotePipeStatus[] = pipesJson.data || [];
         const now = new Date().toISOString();
 
         failCountRef.current[address] = 0;
-        lastDataRef.current[address] = { health, pipes, lastSeen: now };
+        lastDataRef.current[address] = { health, lastSeen: now };
 
         return {
           address,
@@ -170,7 +106,6 @@ export function useDeviceMonitor() {
           status: "online",
           lastSeen: now,
           health,
-          pipes,
         };
       } catch {
         failCountRef.current[address] = (failCountRef.current[address] || 0) + 1;
@@ -181,7 +116,6 @@ export function useDeviceMonitor() {
           status: "offline",
           lastSeen: cached?.lastSeen || null,
           health: cached?.health,
-          pipes: cached?.pipes,
           error: "device unreachable",
         };
       }
@@ -335,38 +269,6 @@ export function useDeviceMonitor() {
     [settings.monitorDevices, updateSettings]
   );
 
-  // Remote control actions
-  const runPipe = useCallback(async (address: string, pipeName: string) => {
-    await remotePost(address, `/pipes/${encodeURIComponent(pipeName)}/run`, undefined, apiKey ?? undefined);
-  }, [apiKey]);
-
-  const stopPipe = useCallback(async (address: string, pipeName: string) => {
-    await remotePost(address, `/pipes/${encodeURIComponent(pipeName)}/stop`, undefined, apiKey ?? undefined);
-  }, [apiKey]);
-
-  const enablePipe = useCallback(
-    async (address: string, pipeName: string, enabled: boolean) => {
-      await remotePost(address, `/pipes/${encodeURIComponent(pipeName)}/enable`, {
-        enabled,
-      }, apiKey ?? undefined);
-    },
-    [apiKey]
-  );
-
-  // Fetch full execution history for a specific pipe
-  const fetchExecutions = useCallback(
-    async (address: string, pipeName: string, limit = 20): Promise<PipeExecution[]> => {
-      const res = await fetchWithTimeout(
-        `http://${address}/pipes/${encodeURIComponent(pipeName)}/executions?limit=${limit}`,
-        FETCH_TIMEOUT_MS
-      );
-      if (!res.ok) return [];
-      const json = await res.json();
-      return json.data || [];
-    },
-    []
-  );
-
   // Auto-discover screenpipe instances on the network
   const [discovering, setDiscovering] = useState(false);
   const hasDiscoveredRef = useRef(false);
@@ -510,10 +412,6 @@ export function useDeviceMonitor() {
     devices,
     addDevice,
     removeDevice,
-    runPipe,
-    stopPipe,
-    enablePipe,
-    fetchExecutions,
     discoverDevices,
     discovering,
   };

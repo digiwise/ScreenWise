@@ -515,7 +515,7 @@ function markdownImageDataUrlRegex(): RegExp {
  *   - the in-app "summarize with AI" button (chat path) — passes the known
  *     meeting id and asks for the speaker/connector follow-up
  *   - the bundled meeting-summary pipe (background event-triggered path) —
- *     keep the wording in sync with crates/screenpipe-core/assets/pipes/meeting-summary/pipe.md
+ *     keep the wording stable for meeting-note summaries
  *
  * The agent decides whether to PATCH. Empty transcript / nothing worth saving
  * → say so out loud, skip the PATCH. Useful summary → append under "## Summary"

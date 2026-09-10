@@ -4,7 +4,6 @@
 
 import { useCallback } from "react";
 import { StreamTimeSeriesResponse } from "@/components/rewind/timeline";
-import { type TemplatePipe } from "@/lib/hooks/use-pipes";
 import { commands } from "@/lib/utils/tauri";
 import { toast } from "@/components/ui/use-toast";
 import { showChatWithPrefill } from "@/lib/chat-utils";
@@ -14,7 +13,6 @@ export function useFrameActions(opts: {
 	frameContext: any;
 	textPositions: any;
 	currentFrame: StreamTimeSeriesResponse;
-	templatePipes: any[];
 }) {
 	const {
 		debouncedFrame,
@@ -84,14 +82,5 @@ export function useFrameActions(opts: {
 		toast({ title: "ask about this frame", description: "chat opened with frame context" });
 	}, [debouncedFrame, device, frameContext?.text, textPositions, currentFrame]);
 
-	const runPipeWithContext = useCallback(async (pipe: TemplatePipe) => {
-		if (!debouncedFrame?.frameId || !device) return;
-		const rawText = frameContext?.text || textPositions.map((p: any) => p.text).join(" ");
-		const textSnippet = rawText.slice(0, 300);
-		const context = `Context from timeline frame:\n${device.metadata?.app_name || "?"} - ${device.metadata?.window_name || "?"}\nTime: ${currentFrame?.timestamp || "?"}\n\nText:\n${textSnippet}${textSnippet.length >= 300 ? "…" : ""}`;
-		await showChatWithPrefill({ context, prompt: pipe.prompt, autoSend: true });
-		toast({ title: `${pipe.icon} ${pipe.title}`, description: "running pipe with frame context" });
-	}, [debouncedFrame, device, frameContext?.text, textPositions, currentFrame]);
-
-	return { copyImage, copyFrameText, copyDeeplinkAction, askAboutFrame, runPipeWithContext };
+	return { copyImage, copyFrameText, copyDeeplinkAction, askAboutFrame };
 }

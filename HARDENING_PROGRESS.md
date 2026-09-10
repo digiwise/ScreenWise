@@ -1314,3 +1314,69 @@ Verification on Windows on 2026-09-10:
   `unpdf` `import.meta` warning.
 - `cargo build --release --locked --offline`: passed in 10m 19s from the root
   workspace with the documented release environment and only known warnings.
+
+### Desktop pipes and workflow automation boundary — 2026-09-10
+
+The engine pipe HTTP API, scheduler routes, and CLI automation commands are
+already removed, but the desktop still starts `PipeManager`, creates and
+recovers the pipes directory, runs its scheduler, bridges pipe stdout into
+agent events, and starts the suggestion scheduler. Generated capabilities and
+Tauri E2E commands still grant sidecar pipe operations. The frontend continues
+to poll removed `/pipes` endpoints and exposes pipe store/install/share/update,
+configuration, run history, scheduled/upcoming sections, and pipe-specific chat
+conversation state. Core still exports the pipe manager, bundled pipe skills,
+workflow event types, meeting-trigger emissions, preset scans, and pipe disk
+accounting.
+
+These paths are stale and separable from retained local chat. Standalone Pi
+sessions, their local Screenpipe API/search bridge, title generation, and the
+fixed-loopback Ollama provider do not require desktop pipe navigation, hosted
+store behavior, pipe scheduling, or pipe-specific event routing. Ordinary
+recording schedules and meeting privacy/detection also do not require workflow
+trigger emission. Historical pipe files and settings can remain on disk and in
+serialized compatibility fields; this removal will not delete user data.
+
+### Desktop pipes and workflow automation removal complete — 2026-09-10
+
+- Removed desktop `PipeManager` startup/shutdown, scheduler recovery, built-in
+  pipe installation, pipe-output event bridging, suggestion scheduling,
+  pipe-specific Tauri commands/capabilities, disk accounting, workflow event
+  types/emissions, engine preset scans, and the dormant core pipe executor.
+- Removed pipe navigation, store/install/share/update/configuration UI,
+  notification mute actions, favorites, remote monitoring, onboarding,
+  scheduling/run-history views, generated bindings, and E2E helpers that called
+  removed `/pipes` or pipe-stream commands. Current docs and bundled local API
+  skills no longer advertise pipe automation.
+- Retained local Pi chat and its fixed-loopback Ollama configuration, local
+  capture/search/MCP access, owned-browser support, ordinary meeting detection,
+  and local API bearer authentication. Old chat files with `kind` or
+  `pipeContext` remain readable as ordinary chats. A compatibility-only
+  deduplication exemption is carried forward when those files are saved so
+  repeated historical runs with the same templated prompt remain individually
+  accessible; focused storage/store regression tests passed (47 tests). Old
+  notification/settings keys and historical pipe database tables/files are
+  ignored rather than migrated or deleted. No database migration was added.
+- Root and desktop lockfiles only remove `cron` and pipe-only direct dependency
+  edges from `screenpipe-core`, plus the now-unused `chrono` edge from
+  `screenpipe-events`. No package version changed and neither Bun lockfile
+  changed.
+- `cargo check --locked --offline` for the root default members passed in the
+  documented Visual Studio Developer PowerShell environment. A prior ordinary
+  shell `--workspace` attempt failed in native setup/target-gated crates and is
+  not counted as validation. Focused locked offline core/events/database tests
+  passed: 228 tests total.
+- The documented Ninja Multi-Config desktop binding check passed when run alone.
+  A full parallel desktop test run compiled and passed 158 tests, ignored 4,
+  but its freshness test raced the binding-export test and read the generated
+  file while it contained one byte; the required isolated rerun passed. The
+  initial locked run also correctly refused the stale desktop lock until a
+  controlled offline resolution pruned the removed dependencies.
+- Direct TypeScript `tsc --noEmit` passed. The first full Vitest run exposed an
+  orphan test for a deleted component; after cleanup the final direct Node
+  Vitest run passed all 35 files and 403 tests. The installed Next production
+  entrypoint passed with only the existing `unpdf` `import.meta` warning.
+- The Node skill-generation attempt failed because the ESM script references
+  `__dirname`; running the installed Bun entrypoint regenerated the checked-in
+  skill binding successfully. `cargo fmt --all -- --check`, `git diff --check`,
+  and `cargo build --release --locked --offline` passed; the release build took
+  9m 17s with only established unrelated warnings.

@@ -13,11 +13,7 @@ import {
   exists,
   stat,
 } from "@tauri-apps/plugin-fs";
-import type {
-  ChatConversation,
-  ConversationKind,
-  PipeContext,
-} from "@/lib/hooks/use-settings";
+import type { ChatConversation } from "@/lib/hooks/use-settings";
 import { deleteCachedBrowserState } from "@/lib/browser-state-cache";
 import {
   CHAT_PROCESSING_PLACEHOLDER,
@@ -54,8 +50,6 @@ export interface ConversationListOptions {
   /** Only return hidden rows (for the archived tab). Storage-level filter so
    *  pagination offsets line up — post-filtering in JS would skew the page size. */
   hiddenOnly?: boolean;
-  /** Restrict results to one conversation surface. Undefined means all kinds. */
-  kind?: ConversationKind | "all";
 }
 
 async function getChatsDir(): Promise<string> {
@@ -73,9 +67,8 @@ export async function ensureChatsDir(): Promise<string> {
   return dir;
 }
 
-// Pipe-run session ids are `pipe:<name>:<execId>`. The colons are illegal on
-// NTFS (reserved for alternate data streams), so saves silently fail on
-// Windows. Same set as Win32's invalid-filename chars; safe no-op for UUIDs.
+// Windows reserves several characters in file names. Normal UUID session ids
+// never contain them, but sanitize defensively before persistence.
 function conversationFilename(id: string): string {
   return `${id.replace(/[<>:"/\\|?*]/g, "_")}.json`;
 }
@@ -128,7 +121,19 @@ export async function loadConversationFile(
   try {
     if (!(await exists(filePath))) return null;
     const text = await readTextFile(filePath);
-    return JSON.parse(text) as ChatConversation;
+    // Legacy pipe conversations remain readable as ordinary local chats. Do
+    // not delete their files or messages; ignore retired presentation metadata
+    // whenever the conversation is loaded or subsequently saved.
+    const { kind, pipeContext: _pipeContext, ...conversation } = JSON.parse(text);
+    return {
+      ...conversation,
+      // Preserve only the identity behavior needed to keep repeated historical
+      // runs distinct. The retired kind/context never re-enter the runtime.
+      deduplicationExempt:
+        conversation.deduplicationExempt === true ||
+        kind === "pipe-watch" ||
+        kind === "pipe-run",
+    } as ChatConversation;
   } catch {
     return null;
   }
@@ -179,14 +184,10 @@ export interface ConversationMeta {
    *  sidebar sort order. Falls back to derive-from-messages on legacy
    *  files that pre-date the field. */
   lastUserMessageAt?: number;
-  /** Conversation kind — `chat` for chats, `pipe-watch` / `pipe-run` for
-   *  pipe sessions. Sidebar uses this to split rows into separate
-   *  sections. Older files default to `chat`. */
-  kind: ConversationKind;
-  /** Pipe metadata for `pipe-*` kinds. Undefined for plain chats. */
-  pipeContext?: PipeContext;
   /** Title source priority: user > ai > fallback. */
   titleSource?: "user" | "ai" | "fallback";
+  /** Compatibility-only identity exemption for legacy automated-run history. */
+  deduplicationExempt?: boolean;
   /** Normalized first user message — the cross-window duplicate key. Carried
    *  onto the in-memory SessionRecord so the live sidebar/switcher can dedup
    *  metadata-only rows (a cross-window twin synced via
@@ -299,8 +300,10 @@ export function conversationMetaFromJson(conv: any): ConversationMeta | null {
     pinned: conv.pinned === true,
     hidden: conv.hidden === true,
     lastUserMessageAt,
-    kind: conv.kind ?? "chat",
-    pipeContext: conv.pipeContext,
+    deduplicationExempt:
+      conv.deduplicationExempt === true ||
+      conv.kind === "pipe-watch" ||
+      conv.kind === "pipe-run",
     titleSource: conv.titleSource,
     dedupKey: conversationDedupKey(conv) ?? undefined,
   };
@@ -312,9 +315,6 @@ function matchesConversationOptions(
 ): boolean {
   if (options.hiddenOnly === true && !meta.hidden) return false;
   if (options.hiddenOnly !== true && options.includeHidden === false && meta.hidden) {
-    return false;
-  }
-  if (options.kind && options.kind !== "all" && meta.kind !== options.kind) {
     return false;
   }
   return true;

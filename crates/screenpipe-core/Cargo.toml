@@ -8,8 +8,6 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
-screenpipe-events = { path = "../screenpipe-events" }
-futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 which = "6.0.1"
@@ -29,21 +27,14 @@ dirs = "5.0.0"
 clap = { version = "4.5.20", features = ["derive"] }
 
 # random
-rand = "0.8.5"
-
 uuid = { version = "1.0", features = ["v4"] }
 
-reqwest = { workspace = true }
-async-trait = "0.1"
 screenpipe-secrets = { path = "../screenpipe-secrets", optional = true }
 screenpipe-vault = { path = "../screenpipe-vault", optional = true }
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"], optional = true }
 
 once_cell = "1.19.0"
 
-cron = "0.13.0"
-
-serde_yaml = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 

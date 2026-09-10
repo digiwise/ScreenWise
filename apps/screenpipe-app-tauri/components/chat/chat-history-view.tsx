@@ -260,8 +260,6 @@ export function ChatHistoryView({
           hidden: meta.hidden ?? false,
           unread: false,
           draft: false,
-          kind: meta.kind,
-          pipeContext: meta.pipeContext,
           dedupKey: meta.dedupKey,
         });
       }

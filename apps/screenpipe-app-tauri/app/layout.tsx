@@ -9,7 +9,6 @@ import "./globals.css";
 import { Providers } from "./providers";
 import { Toaster } from "@/components/ui/toaster";
 import { Suspense, useEffect } from "react";
-import { PipeInstallDialog } from "@/components/pipe-install-dialog";
 import { BrowserPairingDialog } from "@/components/browser-pairing-dialog";
 import { RecentChatSwitcherController } from "@/components/chat/recent-chat-switcher-controller";
 import { FeedbackDialog } from "@/components/feedback-dialog";
@@ -385,7 +384,6 @@ export default function RootLayout({
             React #419 (hydration recovery) → #185 (infinite loop during
             recovery render) on every first launch after auto-update. */}
         <Providers>
-          {!isOverlay && <PipeInstallDialog />}
           {!isOverlay && <BrowserPairingDialog />}
           <Suspense fallback={null}>
             <RecentChatSwitcherMount />

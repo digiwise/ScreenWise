@@ -1,7 +1,7 @@
 ---
-title: "troubleshoot screenpipe: install, permissions, and pipes"
+title: "troubleshoot screenpipe: install, permissions, and capture"
 sidebarTitle: "troubleshooting"
-description: "Fix common screenpipe issues including installation errors, screen and microphone permissions, missing audio, pipe failures, and MCP connection problems."
+description: "Fix common screenpipe issues including installation errors, screen and microphone permissions, missing audio, and MCP connection problems."
 icon: "wrench"
 ---
 
@@ -18,8 +18,6 @@ icon: "wrench"
 | desktop timeline missing after CLI install | install desktop app, not only CLI | [getting started](/getting-started) |
 | app opens but data is empty | `curl http://localhost:3030/health` and wait 1-2 minutes | [API recipes](/api-recipes) |
 | AI tool cannot see screenpipe | MCP config, Node 18+, app running | [MCP server](/mcp-server) |
-| pipe fails or hangs | pipe logs, provider auth, permissions | [pipe debugging](/pipe-debugging) |
-| Windows command window flashes during pipe run | pipe exits immediately; check logs | [pipe debugging](/pipe-debugging) |
 | meeting transcript is empty | microphone, system audio, transcription engine | [meeting intelligence](/meeting-intelligence) |
 | `/api/search` returns 404 | use `/search` on `localhost:3030` | [API recipes](/api-recipes) |
 | privacy question | local/cloud path and enabled toggles | [privacy data flow](/privacy-data-flow) |
@@ -33,7 +31,7 @@ icon: "wrench"
 
 `npx screenpipe@latest record` starts local recording and the API. it does not give you the desktop timeline UI by itself.
 
-if you want the visual timeline, pipe store, settings, chat, and guided permissions, install the desktop app from [screenpi.pe/onboarding](https://screenpi.pe/onboarding).
+if you want the visual timeline, settings, chat, and guided permissions, install the desktop app from [screenpi.pe/onboarding](https://screenpi.pe/onboarding).
 
 after installing the desktop app:
 

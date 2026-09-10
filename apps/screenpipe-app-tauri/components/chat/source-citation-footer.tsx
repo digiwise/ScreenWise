@@ -6,7 +6,6 @@
 import * as React from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import {
-  Activity,
   ChevronDown,
   ChevronUp,
   Database,
@@ -35,7 +34,6 @@ const KIND_ICON: Record<SourceCitationKind, React.ComponentType<{ className?: st
   web: Globe,
   file: FileText,
   memory: HardDrive,
-  pipe: Activity,
   command: TerminalSquare,
 };
 
@@ -46,7 +44,6 @@ const KIND_LABEL: Record<SourceCitationKind, string> = {
   web: "web",
   file: "file",
   memory: "memory",
-  pipe: "pipe",
   command: "cmd",
 };
 

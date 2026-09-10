@@ -778,7 +778,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the shared high-FPS controller once. Same instance feeds the
     // VisionManager (so each capture loop reacts on the next tick) and the
-    // SCServer (so HTTP toggles, the tray menu, and pipes can all hit it
+    // SCServer (so HTTP toggles and the tray menu can all hit it
     // without an engine restart). Seed from the persisted RecordingSettings
     // so a user who already toggled the auto-mode preference keeps it.
     let high_fps_controller = Arc::new(HighFpsController::new(

@@ -6,15 +6,13 @@ import { useTimelineSelection } from "@/lib/hooks/use-timeline-selection";
 import { getStore, type ChatConversation } from "@/lib/hooks/use-settings";
 import { isAfter, subDays, addDays, startOfDay, format, formatDistanceToNow } from "date-fns";
 import { motion } from "framer-motion";
-import { ZoomIn, ZoomOut, Mic, Monitor, AppWindow, Globe, Hash, RotateCcw, Phone, PanelBottomClose, PanelBottomOpen } from "lucide-react";
+import { ZoomIn, ZoomOut, Mic, Monitor, AppWindow, Globe, Hash, RotateCcw, Phone, PanelBottomClose, PanelBottomOpen, MessageSquare } from "lucide-react";
 import type { Meeting } from "@/lib/hooks/use-meetings";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { commands } from "@/lib/utils/tauri";
 import { emit } from "@tauri-apps/api/event";
-import { PipeAIIcon } from "@/components/pipe-ai-icon";
-import { type TemplatePipe } from "@/lib/hooks/use-pipes";
 import { AppContextPopover } from "./app-context-popover";
 import { TimelineTagToolbar } from "./timeline-tag-toolbar";
 import { extractDomain, FaviconImg } from "./favicon-utils";
@@ -118,8 +116,6 @@ interface TimelineSliderProps {
 	targetZoom: number;
 	setTargetZoom: (fn: (prev: number) => number) => void;
 	onAskAI?: () => void;
-	onRunPipe?: (pipe: TemplatePipe) => void;
-	templatePipes?: TemplatePipe[];
 	isPlaying?: boolean; // Whether audio playback is active
 	onTogglePlayPause?: () => void; // Toggle audio playback (Space key)
 	selectedDeviceId?: string; // "all" or a specific device_id — dims non-matching bars
@@ -276,8 +272,6 @@ export const TimelineSlider = ({
 	targetZoom,
 	setTargetZoom,
 	onAskAI,
-	onRunPipe,
-	templatePipes,
 	isPlaying = false,
 	onTogglePlayPause,
 	selectedDeviceId = "all",
@@ -1645,7 +1639,7 @@ export const TimelineSlider = ({
 										onMouseLeave={() => setHoveredChatConv(null)}
 									>
 										<div className="w-4 h-4 rounded-full bg-background/80 border border-border/50 flex items-center justify-center backdrop-blur-sm shadow-sm hover:scale-125 transition-transform">
-											<PipeAIIcon size={10} animated={false} />
+											<MessageSquare className="w-2.5 h-2.5" />
 										</div>
 									</div>
 								)}
@@ -1869,7 +1863,7 @@ export const TimelineSlider = ({
 
 			{/* Tag toolbar — floating above selection */}
 			{selectedIndices.size > 1 && selectionRange && (
-				<TimelineTagToolbar anchorRect={selectionRect} onAskAI={onAskAI} onRunPipe={onRunPipe} templatePipes={templatePipes} />
+				<TimelineTagToolbar anchorRect={selectionRect} onAskAI={onAskAI} />
 			)}
 
 			{/* App filter dot tooltip */}
@@ -1898,7 +1892,7 @@ export const TimelineSlider = ({
 					}}
 				>
 					<div className="flex items-center gap-1.5">
-						<PipeAIIcon size={12} animated={false} className="shrink-0" />
+						<MessageSquare className="w-3 h-3 shrink-0" />
 						<span className="text-popover-foreground font-medium truncate">
 							{hoveredChatConv.conv.title || "Chat"}
 						</span>

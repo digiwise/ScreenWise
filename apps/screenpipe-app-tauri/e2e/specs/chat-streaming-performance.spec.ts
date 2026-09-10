@@ -20,7 +20,6 @@ import { getAppPid } from "../helpers/app-launcher.js";
 
 const STREAMING_PERF_SESSION = "33333333-3333-3333-3333-333333333333";
 const DELTA_COUNT = 240;
-const PIPE_DELTA_COUNT = 800;
 const CPU_SAMPLE_INTERVAL_MS = 250;
 const CHAT_CPU_AVG_MAX_PERCENT = Number(
   process.env.SCREENPIPE_E2E_CHAT_CPU_AVG_MAX_PERCENT ?? "85",
@@ -40,15 +39,6 @@ interface StreamingPerfResult {
 }
 
 interface UiProbeResult {
-  frames: number;
-  maxFrameGapMs: number;
-  mutationCount: number;
-  error?: string;
-}
-
-interface PipeBurstPerfResult {
-  emittedDeltas: number;
-  emitMs: number;
   frames: number;
   maxFrameGapMs: number;
   mutationCount: number;
@@ -375,104 +365,6 @@ async function runUiProbe(durationMs: number): Promise<UiProbeResult> {
   )) as UiProbeResult;
 }
 
-async function runBackgroundPipeBurst(deltaCount: number): Promise<PipeBurstPerfResult> {
-  return (await browser.executeAsync(
-    (count: number, done: (result: PipeBurstPerfResult) => void) => {
-      const g = globalThis as unknown as {
-        __TAURI__?: {
-          core?: { invoke: (cmd: string, args?: object) => Promise<unknown> };
-        };
-        __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
-      };
-      const invoke = g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
-
-      let running = true;
-      let frames = 0;
-      let maxFrameGapMs = 0;
-      let lastFrameAt = performance.now();
-      let mutationCount = 0;
-      let frameTimer: number | undefined;
-      const observer = new MutationObserver((records) => {
-        mutationCount += records.length;
-      });
-
-      const frameLoop = () => {
-        const now = performance.now();
-        maxFrameGapMs = Math.max(maxFrameGapMs, now - lastFrameAt);
-        lastFrameAt = now;
-        frames += 1;
-        if (running) frameTimer = window.setTimeout(frameLoop, 16);
-      };
-
-      const finish = (result: Partial<PipeBurstPerfResult>) => {
-        running = false;
-        if (frameTimer !== undefined) window.clearTimeout(frameTimer);
-        observer.disconnect();
-        done({
-          emittedDeltas: count,
-          emitMs: 0,
-          frames,
-          maxFrameGapMs,
-          mutationCount,
-          ...result,
-        });
-      };
-
-      const run = async () => {
-        try {
-          observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-          });
-          frameTimer = window.setTimeout(frameLoop, 16);
-          if (!invoke) {
-            throw new Error("Tauri invoke is not available in this context");
-          }
-          const commandResult = (await invoke("e2e_emit_pipe_stream", {
-            pipeName: "e2e-background-pipe",
-            executionId: Math.floor(performance.timeOrigin + performance.now()),
-            deltaCount: count,
-          }).catch(() =>
-            invoke("e2e_emit_pipe_stream", {
-              pipe_name: "e2e-background-pipe",
-              execution_id: Math.floor(performance.timeOrigin + performance.now()),
-              delta_count: count,
-            }),
-          )) as {
-            emitted_deltas?: number;
-            emittedDeltas?: number;
-            emit_ms?: number;
-            emitMs?: number;
-          };
-          await new Promise((resolve) => setTimeout(resolve, 700));
-          finish({
-            emittedDeltas:
-              typeof commandResult.emitted_deltas === "number"
-                ? commandResult.emitted_deltas
-                : typeof commandResult.emittedDeltas === "number"
-                  ? commandResult.emittedDeltas
-                  : count,
-            emitMs:
-              typeof commandResult.emit_ms === "number"
-                ? commandResult.emit_ms
-                : typeof commandResult.emitMs === "number"
-                  ? commandResult.emitMs
-                  : 0,
-          });
-        } catch (error) {
-          finish({
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      };
-
-      void run();
-    },
-    deltaCount,
-  )) as PipeBurstPerfResult;
-}
-
 describe("Chat streaming performance", function () {
   this.timeout(180_000);
 
@@ -548,61 +440,4 @@ describe("Chat streaming performance", function () {
     expect(existsSync(filepath)).toBe(true);
   });
 
-  it("keeps chat responsive while scheduled pipe output streams in the background", async () => {
-    await openHomeWindow();
-    const home = await $('[data-testid="section-home"]');
-    await home.waitForExist({ timeout: t(15_000) });
-
-    await switchToSession(`${STREAMING_PERF_SESSION}-pipe`);
-    await waitForChatSeedHook();
-    await browser.pause(t(2_000));
-
-    const probeCpu = await sampleAppCpuWhile(() => runUiProbe(t(1_200)));
-    const cpu = await sampleAppCpuWhile(() =>
-      runBackgroundPipeBurst(PIPE_DELTA_COUNT),
-    );
-    const result = cpu.result;
-    const avgCpuDeltaPercent = Math.max(
-      0,
-      cpu.avgCpuPercent - probeCpu.avgCpuPercent,
-    );
-    const p95CpuDeltaPercent = Math.max(
-      0,
-      cpu.p95CpuPercent - probeCpu.p95CpuPercent,
-    );
-
-    console.log("chat background pipe perf", {
-      emittedDeltas: result.emittedDeltas,
-      emitMs: Math.round(result.emitMs),
-      frames: result.frames,
-      maxFrameGapMs: Math.round(result.maxFrameGapMs),
-      mutationCount: result.mutationCount,
-      probeFrames: probeCpu.result.frames,
-      probeMaxFrameGapMs: Math.round(probeCpu.result.maxFrameGapMs),
-      probeMutationCount: probeCpu.result.mutationCount,
-      cpuSamples: cpu.sampleCount,
-      probeAvgCpuPercent: Math.round(probeCpu.avgCpuPercent),
-      probeP95CpuPercent: Math.round(probeCpu.p95CpuPercent),
-      avgCpuPercent: Math.round(cpu.avgCpuPercent),
-      p95CpuPercent: Math.round(cpu.p95CpuPercent),
-      maxCpuPercent: Math.round(cpu.maxCpuPercent),
-      avgCpuDeltaPercent: Math.round(avgCpuDeltaPercent),
-      p95CpuDeltaPercent: Math.round(p95CpuDeltaPercent),
-    });
-
-    expect(probeCpu.result.error).toBeUndefined();
-    expect(result.error).toBeUndefined();
-    expect(result.emittedDeltas).toBe(PIPE_DELTA_COUNT);
-    expect(probeCpu.result.frames).toBeGreaterThan(5);
-    expect(result.frames).toBeGreaterThan(5);
-    expect(result.maxFrameGapMs).toBeLessThan(t(1_000));
-    expect(result.mutationCount).toBeLessThan(PIPE_DELTA_COUNT);
-    expect(probeCpu.sampleCount).toBeGreaterThan(1);
-    expect(cpu.sampleCount).toBeGreaterThan(1);
-    expect(avgCpuDeltaPercent).toBeLessThan(CHAT_CPU_AVG_MAX_PERCENT);
-    expect(p95CpuDeltaPercent).toBeLessThan(CHAT_CPU_P95_MAX_PERCENT);
-
-    const filepath = await saveScreenshot("chat-background-pipe-performance");
-    expect(existsSync(filepath)).toBe(true);
-  });
 });

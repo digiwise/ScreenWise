@@ -41,7 +41,6 @@ pub struct DiskUsedByMedia {
 pub struct DiskUsedByOther {
     pub database_size: String,
     pub logs_size: String,
-    pub pipes_size: String,
     pub other_size: String,
 }
 
@@ -322,21 +321,8 @@ pub async fn disk_usage(
     }
     info!("Logs size: {} bytes", logs_size);
 
-    // Calculate pipes size
-    let pipes_size: u64 = {
-        let pipes_dir = screenpipe_dir.join("pipes");
-        if pipes_dir.exists() {
-            directory_size(&pipes_dir)
-                .map_err(|e| e.to_string())?
-                .unwrap_or(0)
-        } else {
-            0
-        }
-    };
-    info!("Pipes size: {} bytes", pipes_size);
-
     // Calculate "other" — everything not accounted for above
-    let accounted = total_media_size_calculated + database_size + logs_size + pipes_size;
+    let accounted = total_media_size_calculated + database_size + logs_size;
     let other_size: u64 = total_data_size_bytes.saturating_sub(accounted);
     info!(
         "Other size: {} bytes (total {} - accounted {})",
@@ -402,7 +388,6 @@ pub async fn disk_usage(
         other: DiskUsedByOther {
             database_size: readable(database_size),
             logs_size: readable(logs_size),
-            pipes_size: readable(pipes_size),
             other_size: readable(other_size),
         },
         total_data_size,

@@ -81,34 +81,16 @@ export interface ChatMessage {
 	workDurationMs?: number;
 }
 
-/** What kind of session a conversation represents.
- *
- *  - `chat`        — a normal Pi chat session. The default; assumed when
- *                    `kind` is missing on disk.
- *  - `pipe-watch`  — a live pipe execution the user is currently
- *                    watching. The chat panel renders pipe events in
- *                    real time; the conversation is volatile (not
- *                    persisted unless the user opts to keep it).
- *  - `pipe-run`    — a completed pipe execution kept around as
- *                    history. Lives under "Pipe runs" in the sidebar
- *                    rather than "Recents". */
-export type ConversationKind = "chat" | "pipe-watch" | "pipe-run";
-
-/** Pipe-specific context attached to `pipe-watch` / `pipe-run`
- *  conversations. Drives the in-panel banner and the sidebar
- *  grouping. */
-export interface PipeContext {
-	pipeName: string;
-	executionId: number;
-	startedAt?: string;
-}
-
 export interface ChatConversation {
 	id: string;
 	title: string;
 	messages: ChatMessage[];
 	createdAt: number;
 	updatedAt: number;
+	/** Compatibility marker for legacy automated-run histories. Those runs often
+	 *  share the same templated opening prompt, so cross-window chat deduplication
+	 *  must keep each record distinct. It carries no runtime automation behavior. */
+	deduplicationExempt?: boolean;
 	/** User pinned this conversation in the chat sidebar — keeps it at the top.
 	 *  Persists across app restarts via the on-disk conversation file. */
 	pinned?: boolean;
@@ -121,12 +103,6 @@ export interface ChatConversation {
 	 *  sidebar sort order. Persisted so that order survives app restart;
 	 *  derived from messages on first hydration if not set on disk yet. */
 	lastUserMessageAt?: number;
-	/** Conversation type — defaults to "chat" when missing (back-compat
-	 *  with older on-disk files). See `ConversationKind`. */
-	kind?: ConversationKind;
-	/** Pipe metadata for `pipe-watch` / `pipe-run` conversations.
-	 *  Undefined for plain chats. */
-	pipeContext?: PipeContext;
 	/** Last URL the agent navigated the embedded browser sidebar to.
 	 *  Drives the right-side `<BrowserSidebar />` panel: when the user
 	 *  re-opens this conversation the panel restores to this URL.
@@ -162,8 +138,6 @@ export type Settings = SettingsStore & {
 	lockVaultShortcut?: string;
 	/** When true, audio devices follow system default and auto-switch on changes */
 	useSystemDefaultAudio?: boolean;
-	/** Enable AI workflow event detection (cloud, triggers event-based pipes) */
-	enableWorkflowEvents?: boolean;
 	/** Audio transcription scheduling: "realtime" (default) or "batch" (longer chunks for quality) */
 	transcriptionMode?: "realtime" | "smart" | "batch";
 	/** Live notes for manually-started meetings. Separate from background 24/7 transcription. */
@@ -182,11 +156,6 @@ export type Settings = SettingsStore & {
 	};
 	/** Custom vocabulary entries for transcription biasing and word replacement */
 	vocabularyWords?: Array<{ word: string; replacement?: string }>;
-	/** Slug of the pipe used to summarize meetings. Drives both the manual
-	 * "Summarize with AI" button (its body becomes the chat prompt) and the
-	 * auto-fire on meeting_ended (the picked pipe owns the trigger). Default:
-	 * "meeting-summary" (the built-in pipe). */
-	meetingSummaryPipeSlug?: string;
 	/** Font size for the entire app UI */
 	fontSize?: FontSize;
 	/** OpenAI-compatible transcription endpoint URL */
@@ -203,10 +172,6 @@ export type Settings = SettingsStore & {
 	filterMusic?: boolean;
 	/** Maximum batch transcription duration in seconds (0 = engine default: Deepgram 5000s, OpenAI 3000s, Whisper 600s) */
 	batchMaxDurationSecs?: number;
-	/** Show periodic notifications suggesting pipe ideas based on user's data (default: true) */
-	pipeSuggestionsEnabled?: boolean;
-	/** Hours between pipe suggestion notifications (default: 24) */
-	pipeSuggestionFrequencyHours?: number;
 	/** User's power mode preference — persisted so it survives app restarts */
 	powerMode?: "auto" | "performance" | "battery_saver";
 	/** Show restart notifications when audio/vision capture stalls (default: false for now) */
@@ -245,8 +210,6 @@ export type Settings = SettingsStore & {
 	notificationPrefs?: {
 		captureStalls: boolean;
 		appUpdates: boolean;
-		pipeSuggestions: boolean;
-		pipeNotifications: boolean;
 		/** Toast when a monitor is plugged, unplugged, or switched (clamshell, dock). Default true. */
 		displayChanges?: boolean;
 		/** Live-note prompt when a meeting is detected. Default true. */
@@ -255,13 +218,12 @@ export type Settings = SettingsStore & {
 		audioCaptureStalled?: boolean;
 		/** In-app /notify when audio is captured but no live transcript arrives within 60s. Default true. */
 		liveTranscriptStalled?: boolean;
-		mutedPipes: string[];
 	};
-	/** Remote devices to monitor pipes on (LAN addresses) */
-		monitorDevices?: Array<{
-			address: string;
-			label?: string;
-		}>;
+	/** Locally configured recorder devices for the retained LAN health monitor. */
+	monitorDevices?: Array<{
+		address: string;
+		label?: string;
+	}>;
 		/** Enterprise app-update policy fetched from the admin dashboard. */
 		enterpriseAppUpdatePolicy?: EnterpriseAppUpdatePolicy;
 		/** Local install/update-manager detection for enterprise fleet reporting. */
@@ -415,7 +377,6 @@ let DEFAULT_SETTINGS: Settings = {
 			},
 		updateChannel: "stable",
 			autoUpdate: false,
-			autoUpdatePipes: true,
 			autoStartEnabled: true,
 			platform: "unknown",
 			disabledShortcuts: [],
@@ -440,7 +401,6 @@ let DEFAULT_SETTINGS: Settings = {
 			disableTimeline: false,
 			videoQuality: "balanced",
 			transcriptionMode: "batch",
-			meetingSummaryPipeSlug: "meeting-summary",
 			filterMusic: false,
 			ignoreIncognitoWindows: true,
 			pauseOnDrmContent: false,

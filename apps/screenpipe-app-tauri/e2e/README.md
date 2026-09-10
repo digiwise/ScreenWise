@@ -107,9 +107,6 @@ $env:SCREENPIPE_E2E_SEED="onboarding,no-audio,event-trigger-capture,keyboard-db-
 # Run only the settings-sections spec
 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/settings-sections.spec.ts
 
-# Run only the pipes spec
-bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/pipes.spec.ts
-
 # Run only home window navigation
 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/home-window.spec.ts
 ```
@@ -238,5 +235,4 @@ Saves to `e2e/videos/`.
 | `window-lifecycle.spec.ts` | Exercises `show_window` / `close_window` routing for Home, Search, and completed onboarding |
 | `permission-recovery.spec.ts` | macOS recovery window smoke for missing TCC permissions, route wiring, dedupe, and clean close |
 | `owned-browser.spec.ts` | Verifies the embedded agent browser queues navigation and hides safely |
-| `pipes.spec.ts` | Opens Pipes section; verifies pipe store mounts without crash; navigates back to Home |
 | `parallel-chat.spec.ts` | Drives chat-load-conversation + fake `pi_event` envelopes from the webview to walk Louis's repro: chat A → chat B → back to A. Asserts A's messages are still in the DOM (catches the "switch wipes A" regression) and that backgrounded streaming does NOT reorder sidebar rows. |

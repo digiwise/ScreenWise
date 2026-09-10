@@ -33,7 +33,6 @@ this takes you straight to where you need to be — no more hunting through docs
 
 **oauth integrations** (Slack, Notion, Gmail, etc.) skip the API key step entirely — just click the big "Connect with [App]" button and approve access in your browser.
 
-<Tip>some pipes require specific connections. when you install a pipe that needs a connection (like Notion or Toggl), screenpipe will prompt you to configure it automatically.</Tip>
 
 ## available integrations
 
@@ -150,7 +149,7 @@ curl "http://localhost:3030/connections/hubspot/proxy/crm/v3/objects/contacts?li
 curl "http://localhost:3030/connections/notion/proxy/v1/users/me"
 ```
 
-see [connection reference](/connection-reference) and [pipe debugging](/pipe-debugging) for safe proxy patterns.
+see [connection reference](/connection-reference) for safe proxy patterns.
 
 ## AI tool connections (MCP)
 
@@ -208,7 +207,6 @@ if a pipe reports that a connection isn't available:
 - confirm the connection is active in **settings → connections** (green dot or "connected" status)
 - for multi-account setups, verify the pipe is using the correct instance name (e.g., `notion:work` vs `notion:personal`)
 - try reconnecting: disconnect and reconnect the app
-- check the [pipe debugging guide](/pipe-debugging) for troubleshooting pipe-specific issues
 
 ## privacy & security
 

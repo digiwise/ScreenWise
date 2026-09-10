@@ -403,8 +403,8 @@ mod macos {
         cmd.spawn().context("spawn hd ffmpeg")
     }
 
-    /// Encode one captured RGBA frame to JPEG bytes for the mjpeg pipe. JPEG has
-    /// no alpha (dropped); the pipe stays small vs raw RGBA. CPU-heavy — always
+    /// Encode one captured RGBA frame to JPEG bytes for the MJPEG stream. JPEG has
+    /// no alpha (dropped); the stream stays small versus raw RGBA. CPU-heavy — always
     /// run on a blocking thread.
     fn encode_jpeg(frame: image::RgbaImage) -> Result<Vec<u8>> {
         let rgb = image::DynamicImage::ImageRgba8(frame).to_rgb8();

@@ -9,7 +9,6 @@ export type SourceCitationKind =
   | "web"
   | "file"
   | "memory"
-  | "pipe"
   | "command";
 
 export interface SourceCitation {
@@ -50,9 +49,8 @@ export function sourceCitationsFromMessage(message: MessageLike): SourceCitation
   return sourceCitationsFromContentBlocks(message.contentBlocks);
 }
 
-// Aggregate citations across a sequence of messages, deduped. Used for
-// pipe-run chats where the whole transcript is one agentic loop and showing
-// per-message footers spams the same file across every step.
+// Aggregate citations across a sequence of messages, deduped. This keeps a
+// multi-step local agent turn from repeating the same file in every footer.
 export function aggregateSourceCitations(messages: readonly MessageLike[]): SourceCitation[] {
   const all: SourceCitation[] = [];
   for (const message of messages) {
@@ -77,8 +75,7 @@ interface PlanMessageLike extends MessageLike {
 
 interface ChatCitationPlanOptions {
   // Always aggregate even if a turn has only one citation-bearing assistant
-  // message. Used for pipe sessions where the visual treatment should be
-  // consistent across every transcript.
+  // message. Useful when a caller wants a single turn-level footer.
   forceAggregate?: boolean;
   // Aggregate when a turn group has ≥ this many assistant messages bearing
   // citations. Defaults to 2 — leaves single-tool-call turns alone.
@@ -90,7 +87,7 @@ interface ChatCitationPlanOptions {
 // message (or end of chat). Within each turn, if multiple assistant messages
 // carry citations, fold them into a single footer rendered after the last
 // assistant of that turn — that's the agentic-loop pattern (Pi looping
-// debug→fix→re-run, pipe-runs, multi-step research).
+  // debug→fix→re-run or multi-step research).
 export function computeChatCitationPlan(
   messages: readonly PlanMessageLike[],
   options: ChatCitationPlanOptions = {},
@@ -419,7 +416,6 @@ function fileKind(path: string): SourceCitationKind {
   if (path.includes("/.codex/memories/") || /(^|\/)MEMORY\.md$/.test(path)) {
     return "memory";
   }
-  if (path.includes("/.screenpipe/pipes/")) return "pipe";
   if (path.includes("/.screenpipe/chats/")) return "screenpipe";
   return "file";
 }
@@ -429,6 +425,8 @@ function normalizeExplicitCitations(value: unknown): SourceCitation[] {
   const citations: SourceCitation[] = [];
   for (const item of value) {
     if (!isObject(item)) continue;
+    // Retired pipe citations from old chat files remain readable as normal
+    // local-file citations; no data is deleted from the stored transcript.
     const kind = typeof item.kind === "string" && isSourceKind(item.kind)
       ? item.kind
       : "file";
@@ -701,7 +699,7 @@ function stableId(parts: Array<string | undefined>): string {
 }
 
 function isSourceKind(kind: string): kind is SourceCitationKind {
-  return ["screenpipe", "database", "connector", "web", "file", "memory", "pipe", "command"].includes(kind);
+  return ["screenpipe", "database", "connector", "web", "file", "memory", "command"].includes(kind);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

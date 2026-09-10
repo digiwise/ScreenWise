@@ -646,9 +646,6 @@ pub struct SettingsStore {
     /// When disabled, users must click "update now" in the tray menu.
     #[serde(rename = "autoUpdate", default = "default_false")]
     pub auto_update: bool,
-    /// Auto-update store-installed pipes that haven't been locally modified.
-    #[serde(rename = "autoUpdatePipes", default = "default_true")]
-    pub auto_update_pipes: bool,
     /// Timeline overlay mode: "fullscreen" (floating panel above everything) or
     /// "window" (normal resizable window with title bar).
     #[serde(rename = "overlayMode", default = "default_overlay_mode")]
@@ -961,7 +958,6 @@ Rules:
             shortcut_overlay_size: "small".to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: false,
-            auto_update_pipes: true,
             #[cfg(target_os = "macos")]
             overlay_mode: "fullscreen".to_string(),
             #[cfg(not(target_os = "macos"))]
@@ -1324,53 +1320,6 @@ impl IcsCalendarSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("ics_calendars", json!(self));
-        store.save().map_err(|e| e.to_string())?;
-        reencrypt_store_file(app);
-        Ok(())
-    }
-}
-
-// ─── Pipe Suggestions Settings ───────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipeSuggestionsSettingsStore {
-    pub enabled: bool,
-    #[serde(default = "default_pipe_suggestion_frequency")]
-    pub frequency_hours: u32,
-    #[serde(default)]
-    pub last_shown_at: Option<String>,
-}
-
-fn default_pipe_suggestion_frequency() -> u32 {
-    24
-}
-
-impl Default for PipeSuggestionsSettingsStore {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            frequency_hours: 24,
-            last_shown_at: None,
-        }
-    }
-}
-
-impl PipeSuggestionsSettingsStore {
-    pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
-        let store = get_store(app, None).map_err(|e| e.to_string())?;
-        if store.is_empty() {
-            return Ok(None);
-        }
-        let settings = serde_json::from_value(store.get("pipe_suggestions").unwrap_or(Value::Null));
-        match settings {
-            Ok(settings) => Ok(settings),
-            Err(_) => Ok(None),
-        }
-    }
-
-    pub fn save(&self, app: &AppHandle) -> Result<(), String> {
-        let store = get_store(app, None).map_err(|e| e.to_string())?;
-        store.set("pipe_suggestions", json!(self));
         store.save().map_err(|e| e.to_string())?;
         reencrypt_store_file(app);
         Ok(())

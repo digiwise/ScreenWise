@@ -123,27 +123,6 @@ describe('MCP & Claude Integration (S16)', () => {
         }
     });
 
-    it('should not crash accessing pipes endpoint (S16)', async () => {
-        const result = await browser.execute(async (base) => {
-            try {
-                const res = await fetch(`${base}/pipes/list`);
-                const data = await res.json();
-                return {
-                    status: res.status,
-                    ok: res.ok,
-                    hasError: !!data.error,
-                    error: data.error || null,
-                };
-            } catch (e) {
-                return { status: 0, ok: false, error: e.message };
-            }
-        }, API_BASE);
-
-        // Pipes may be disabled, but should not crash
-        expect(result.status).not.toBe(500);
-        console.log(`Pipes endpoint: status=${result.status}, error=${result.error || 'none'}`);
-    });
-
     it('should handle error logging without crash (S16.7)', async () => {
         // Verify console doesn't have uncaught MCP-related errors
         const logs = await browser.getLogs('browser');

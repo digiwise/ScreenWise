@@ -627,7 +627,7 @@ pub(crate) async fn start_meeting_handler(
         )
     })?;
 
-    // Emit event so triggered pipes can react
+    // Notify local meeting audio and capture controllers.
     if let Err(e) = screenpipe_events::send_event(
         "meeting_started",
         serde_json::json!({
@@ -705,7 +705,7 @@ pub(crate) async fn stop_meeting_handler(
         emit_meeting_status_changed(&status);
     }
 
-    // Emit event so triggered pipes can react
+    // Notify local meeting audio and capture controllers.
     if let Err(e) =
         screenpipe_events::send_event("meeting_ended", serde_json::json!({ "meeting_id": id }))
     {

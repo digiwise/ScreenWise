@@ -16,7 +16,6 @@ import { Button } from "@/components/ui/button";
 import { loadAllConversations } from "@/lib/chat-storage";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { readTextFile, writeTextFile, exists } from "@tauri-apps/plugin-fs";
-import { localFetch } from "@/lib/api";
 
 type TimeRange = "day" | "week" | "month" | "all";
 
@@ -30,7 +29,7 @@ interface UsageEntry {
 interface UsageCache {
   version: 2;
   lastChatUpdate: number;
-  lastPipeUpdate: number;
+  lastPipeUpdate?: number;
   entries: UsageEntry[];
   totalChats: number;
   totalChatMessages: number;
@@ -42,13 +41,12 @@ interface ModelUsage {
   provider: string;
   count: number;
   lastUsed: number;
-  source: "chat" | "pipe" | "both";
+  source: "chat";
 }
 
 const EMPTY_CACHE: UsageCache = {
   version: 2,
   lastChatUpdate: 0,
-  lastPipeUpdate: 0,
   entries: [],
   totalChats: 0,
   totalChatMessages: 0,
@@ -83,12 +81,15 @@ async function saveCache(cache: UsageCache): Promise<void> {
 }
 
 function normalizeProvider(p: string): string {
-  if (!p || p === "unknown" || p === "pipe") return "screenpipe";
+  if (!p || p === "unknown") return "screenpipe";
   return p;
 }
 
 function aggregateEntries(entries: UsageEntry[], since?: number): ModelUsage[] {
-  const filtered = since ? entries.filter((e) => e.timestamp >= since) : entries;
+  const chatEntries = entries.filter((entry) => entry.source === "chat");
+  const filtered = since
+    ? chatEntries.filter((entry) => entry.timestamp >= since)
+    : chatEntries;
   const map = new Map<string, ModelUsage>();
 
   for (const e of filtered) {
@@ -98,14 +99,13 @@ function aggregateEntries(entries: UsageEntry[], since?: number): ModelUsage[] {
     if (existing) {
       existing.count++;
       if (e.timestamp > existing.lastUsed) existing.lastUsed = e.timestamp;
-      if (existing.source !== e.source) existing.source = "both";
     } else {
       map.set(key, {
         model: e.model,
         provider,
         count: 1,
         lastUsed: e.timestamp,
-        source: e.source,
+        source: "chat",
       });
     }
   }
@@ -204,55 +204,6 @@ export function UsageSection() {
         }
       }
 
-      // Pipe executions - only fetch newer than cache watermark
-      try {
-        const pipesRes = await localFetch("/pipes");
-        if (pipesRes.ok) {
-          const pipesData = await pipesRes.json();
-          const pipes = pipesData.data || [];
-
-          const cachedPipeEntrySet = new Set(
-            cache.entries
-              .filter((e) => e.source === "pipe")
-              .map((e) => `${e.timestamp}::${e.provider}::${e.model}`)
-          );
-
-          for (const pipe of pipes) {
-            const id = pipe.config?.name || pipe.source_slug || pipe.id || pipe.name;
-            if (!id) continue;
-            try {
-              const execRes = await localFetch(
-                `/pipes/${id}/executions?limit=100`
-              );
-              if (!execRes.ok) continue;
-              const execData = await execRes.json();
-              const execs = execData.data || [];
-              for (const exec of execs) {
-                if (exec.model && exec.status === "completed") {
-                  const ts = exec.started_at
-                    ? new Date(exec.started_at).getTime()
-                    : Date.now();
-
-                  const entryKey = `${ts}::${exec.provider || "pipe"}::${exec.model}`;
-                  if (cachedPipeEntrySet.has(entryKey)) continue;
-
-                  newEntries.push({
-                    model: exec.model,
-                    provider: exec.provider || "pipe",
-                    timestamp: ts,
-                    source: "pipe",
-                  });
-                }
-              }
-            } catch {
-              // skip
-            }
-          }
-        }
-      } catch {
-        // screenpipe not running
-      }
-
       // Merge new entries with cached entries and hard-dedupe to prevent inflation.
       const allEntries = dedupeEntries([...(cache.entries || []), ...newEntries]);
 
@@ -260,7 +211,7 @@ export function UsageSection() {
       const updatedCache: UsageCache = {
         version: 2,
         lastChatUpdate: Date.now(),
-        lastPipeUpdate: Date.now(),
+        lastPipeUpdate: cache.lastPipeUpdate,
         entries: allEntries,
         totalChats: totalChatsCount,
         totalChatMessages: chatMsgs,
@@ -290,10 +241,6 @@ export function UsageSection() {
   const since = getTimeSince(timeRange);
   const usage = aggregateEntries(entries, since);
   const totalTracked = usage.reduce((sum, u) => sum + u.count, 0);
-  const totalPipeExecutions = entries.filter((e) => e.source === "pipe").length;
-  const filteredPipeExecs = since
-    ? entries.filter((e) => e.source === "pipe" && e.timestamp >= since).length
-    : totalPipeExecutions;
   const filteredChatMsgs = since
     ? entries.filter((e) => e.source === "chat" && e.timestamp >= since).length
     : entries.filter((e) => e.source === "chat").length;
@@ -328,13 +275,7 @@ export function UsageSection() {
     }
   };
 
-  const sourceIcon = (s: "chat" | "pipe" | "both") => {
-    switch (s) {
-      case "chat": return "Chat";
-      case "pipe": return "Pipe";
-      case "both": return "Chat + Pipe";
-    }
-  };
+  const sourceIcon = (_source: UsageEntry["source"]) => "Chat";
 
   const ranges: { value: TimeRange; label: string }[] = [
     { value: "day", label: "24h" },
@@ -386,7 +327,7 @@ export function UsageSection() {
         <p className="text-xs text-muted-foreground">Updating...</p>
       )}
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-4">
         <Card>
           <CardContent className="pt-6">
             <div className="text-2xl font-bold">{totalChats}</div>
@@ -397,12 +338,6 @@ export function UsageSection() {
           <CardContent className="pt-6">
             <div className="text-2xl font-bold">{filteredChatMsgs}</div>
             <p className="text-xs text-muted-foreground">Chat responses</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{filteredPipeExecs}</div>
-            <p className="text-xs text-muted-foreground">Pipe runs</p>
           </CardContent>
         </Card>
       </div>

@@ -4,7 +4,7 @@
 
 /**
  * Router contract tests. The Rust side emits
- *   `{ source: "pi" | "pipe", sessionId: string, event: { type, ... } }`
+ *   `{ source: "pi", sessionId: string, event: { type, ... } }`
  * on the `agent_event` topic and
  *   `{ source, sessionId: string, pid?: number, exitCode?: number }`
  * on `agent_terminated`. The router was reading `payload.session`
@@ -35,9 +35,7 @@ import {
 import { useChatStore, type SessionRecord } from "../stores/chat-store";
 import type { AgentEventEnvelope, AgentInnerEvent } from "../events/types";
 
-/** Helper — every router test passes a Pi-source envelope; this keeps
- *  the call sites tight and prevents copy-paste drift on the source
- *  field (which would silently route the test through the pipe filter). */
+/** Helper — every router test passes the local Pi-source envelope. */
 function piEvt(sessionId: string, event: AgentInnerEvent): AgentEventEnvelope {
   return { source: "pi", sessionId, event };
 }
@@ -88,18 +86,6 @@ describe("pi-event-router: envelope destructuring (the actual day-1 bug)", () =>
     expect(useChatStore.getState().sessions.A.status).toBe("idle");
   });
 
-  it("ignores pipe-sourced envelopes (handled separately)", async () => {
-    // Pipe sessions ride the same agent_event bus but get a different
-    // surface (Stage 3 — kind: "pipe-watch" / "pipe-run"). The chat
-    // router must NOT lazy-create a chat session for every running
-    // pipe — that would litter the sidebar with synthetic rows.
-    await handlePiEvent({
-      source: "pipe",
-      sessionId: "pipe:my-pipe:42",
-      event: { type: "message_start", message: { role: "assistant" } },
-    });
-    expect(useChatStore.getState().sessions["pipe:my-pipe:42"]).toBeUndefined();
-  });
 });
 
 describe("pi-event-router: status mirroring for backgrounded sessions", () => {

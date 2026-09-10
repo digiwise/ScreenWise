@@ -212,7 +212,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
     let _ = app.emit("native-notification-action", &json);
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn is_meeting_deeplink(url: &str) -> bool {
     url.starts_with("screenpipe://meeting/") || url.starts_with("screenpipe://meeting?")
 }
@@ -1015,95 +1015,6 @@ pub async fn e2e_emit_agent_stream(
     })
 }
 
-/// E2E helper for the scheduled-pipe path: feed synthetic pipe stdout
-/// through the same Rust-side callback adapter production uses, then let the
-/// frontend's default pipe handlers record it as a completed pipe run.
-#[tauri::command]
-#[specta::specta]
-pub async fn e2e_emit_pipe_stream(
-    app_handle: tauri::AppHandle,
-    pipe_name: String,
-    execution_id: i64,
-    delta_count: u32,
-) -> Result<E2eAgentStreamResult, String> {
-    if !cfg!(feature = "e2e") {
-        return Err("e2e_emit_pipe_stream is only available in e2e builds".to_string());
-    }
-
-    let pipe_name = if pipe_name.trim().is_empty() {
-        "e2e-pipe".to_string()
-    } else {
-        pipe_name
-    };
-    let start = std::time::Instant::now();
-    let emitter = crate::agent_event_emitter::PipeAgentEventEmitter::new(app_handle);
-    tokio::spawn(async move {
-        let emit_line = |event: serde_json::Value| -> Result<(), String> {
-            let line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
-            emitter.emit_line(&pipe_name, execution_id, &line);
-            Ok(())
-        };
-
-        if let Err(e) = emit_line(serde_json::json!({
-            "type": "message_start",
-            "message": { "role": "assistant" },
-        })) {
-            warn!("e2e pipe stream failed to emit message_start: {}", e);
-            return;
-        }
-
-        let mut full_text = String::new();
-        for i in 0..delta_count {
-            let token = format!("pipe-token-{} ", i);
-            full_text.push_str(&token);
-            if let Err(e) = emit_line(serde_json::json!({
-                "type": "message_update",
-                "assistantMessageEvent": {
-                    "type": "text_delta",
-                    "delta": token,
-                },
-            })) {
-                warn!("e2e pipe stream failed to emit text_delta: {}", e);
-                return;
-            }
-            if (i + 1) % 40 == 0 && i + 1 < delta_count {
-                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            }
-        }
-
-        if let Err(e) = emit_line(serde_json::json!({
-            "type": "agent_end",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Time range: 2026-01-01T00:00:00Z to 2026-01-01T00:05:00Z\nExecute the pipe now."
-                        }
-                    ]
-                },
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": full_text
-                        }
-                    ]
-                }
-            ]
-        })) {
-            warn!("e2e pipe stream failed to emit agent_end: {}", e);
-        }
-    });
-
-    Ok(E2eAgentStreamResult {
-        emitted_deltas: delta_count,
-        emit_ms: start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-    })
-}
-
 /// Enable click-through mode on the main overlay window (Windows only)
 /// When enabled, mouse events pass through to windows below
 #[tauri::command]
@@ -1248,83 +1159,6 @@ pub fn update_show_screenpipe_shortcut(
 
         return Err("failed to set shortcut, reverted to default".to_string());
     }
-
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn open_pipe_window(
-    app_handle: tauri::AppHandle,
-    port: u16,
-    title: String,
-) -> Result<(), String> {
-    // Close existing window if it exists
-    if let Some(existing_window) = app_handle.get_webview_window(&title) {
-        if let Err(e) = existing_window.destroy() {
-            error!("failed to destroy existing window: {}", e);
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-
-    let url = format!("http://localhost:{}", port);
-    #[allow(unused_mut)]
-    let mut builder = tauri::WebviewWindowBuilder::new(
-        &app_handle,
-        &title,
-        tauri::WebviewUrl::External(url.parse().unwrap()),
-    )
-    .title(title.clone())
-    .inner_size(1200.0, 850.0)
-    .min_inner_size(600.0, 400.0)
-    .focused(true)
-    .fullscreen(false);
-
-    #[cfg(target_os = "macos")]
-    {
-        builder = builder.hidden_title(true);
-    }
-
-    let window = match builder.build().map(crate::window::finalize_webview_window) {
-        Ok(window) => window,
-        Err(e) => {
-            log_webview_build_failure(&title, &url, &e);
-            return Err(format!("failed to create window: {}", e));
-        }
-    };
-
-    // flag to prevent infinite loop
-    let is_closing = std::sync::Arc::new(std::sync::Mutex::new(false));
-    let is_closing_clone = std::sync::Arc::clone(&is_closing);
-
-    // event listener for the window close event
-    let window_clone = window.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            let mut is_closing = is_closing_clone.lock().unwrap_or_else(|e| e.into_inner());
-            if *is_closing {
-                return;
-            }
-            *is_closing = true;
-            if window_clone.is_fullscreen().unwrap_or(false) {
-                let _ = window_clone.destroy();
-            } else {
-                api.prevent_close();
-                let _ = window_clone.close();
-            }
-        }
-    });
-
-    // Only try to manipulate window if creation succeeded
-    if let Err(e) = window.set_focus() {
-        error!("failed to set window focus: {}", e);
-    }
-    if let Err(e) = window.show() {
-        error!("failed to show window: {}", e);
-    }
-
-    #[cfg(target_os = "macos")]
-    crate::window::reset_to_regular_and_refresh_tray(&app_handle);
 
     Ok(())
 }

@@ -11,8 +11,8 @@
  * both. Before the fix each window's prefill listener mints its own session
  * id (crypto.randomUUID) and calls sendMessage, so ONE prefill becomes TWO
  * conversations persisted under two ids — the duplicate rows the user sees.
- * (pipe-store.tsx / pipes-section.tsx store the prefill with no target, and
- * the re-emit in standalone-chat re-broadcast it untargeted.)
+ * (older navigation surfaces stored the prefill with no target, and the
+ * re-emit in standalone-chat re-broadcast it untargeted.)
  *
  * Repro here: open both windows, emit ONE untargeted autoSend prefill with a
  * unique marker, then count chat files on disk whose first user message
@@ -93,8 +93,8 @@ async function emitUntargetedAutoSendPrefill(prompt: string): Promise<void> {
         __TAURI__?: { event?: { emit: (n: string, payload: unknown) => Promise<unknown> } };
         __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
       };
-      // DELIBERATELY no targetWindow — this is exactly what pipe-store /
-      // pipes-section produced and what the re-emit re-broadcast.
+      // DELIBERATELY no targetWindow — this is what the re-emit used to
+      // broadcast.
       const payload = { prompt: p, autoSend: true, context: "" };
       const emit = g.__TAURI__?.event?.emit;
       if (emit) {

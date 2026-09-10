@@ -9,7 +9,7 @@
  *   const data = apiCache.get<MyType>(key);      // null if expired/missing
  *   apiCache.set(key, data, 60_000);              // cache for 60s
  *   apiCache.invalidate(key);                      // force re-fetch next time
- *   apiCache.invalidatePrefix("pipes/store");      // invalidate all matching keys
+ *   apiCache.invalidatePrefix("search/");           // invalidate all matching keys
  */
 
 interface CacheEntry<T> {

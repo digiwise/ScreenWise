@@ -23,7 +23,6 @@ export interface DiskUsedByMedia {
 export interface DiskUsedByOther {
   database_size: string;
   logs_size: string;
-  pipes_size: string;
   other_size: string;
 }
 
@@ -116,4 +115,4 @@ export function useDiskUsage() {
     error,
     refetch: () => fetchDiskUsage(true), // Force refresh when user clicks refresh
   };
-} 
+}

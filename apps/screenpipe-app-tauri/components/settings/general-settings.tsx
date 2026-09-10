@@ -25,7 +25,6 @@ export const searchIndex: SettingsField[] = [
   { label: "Auto-start", keywords: ["autostart", "launch", "startup"] },
   { label: "Auto-update", keywords: ["updates"] },
   { label: "Check for updates", keywords: ["version"] },
-  { label: "Auto-Update Pipes" },
   { label: "Enhanced AI", keywords: ["cloud"] },
   { label: "Auto-generate chat titles" },
   { label: "Reset Onboarding", keywords: ["setup"] },
@@ -266,28 +265,6 @@ export default function GeneralSettings() {
             </CardContent>
           </Card>
         )}
-
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
-                <div>
-                  <h3 className="text-sm font-medium text-foreground">Auto-Update Pipes</h3>
-                  <p className="text-xs text-muted-foreground">Update store pipes you haven&apos;t modified</p>
-                </div>
-              </div>
-              <Switch
-                id="auto-update-pipes-toggle"
-                checked={settings?.autoUpdatePipes ?? true}
-                onCheckedChange={(checked) =>
-                  handleSettingsChange({ autoUpdatePipes: checked })
-                }
-                className="ml-4"
-              />
-            </div>
-          </CardContent>
-        </Card>
 
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">

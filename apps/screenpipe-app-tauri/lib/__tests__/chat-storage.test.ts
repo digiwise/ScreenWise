@@ -158,7 +158,7 @@ describe("chat-storage bounded history", () => {
     expect(fsMock.reads).toHaveLength(60);
   });
 
-  it("skips hidden and non-chat rows while filling a bounded chat page", async () => {
+  it("loads legacy pipe rows as ordinary chats in a bounded page", async () => {
     putConversation("hidden-new", {
       updatedAt: 30,
       hidden: true,
@@ -174,10 +174,29 @@ describe("chat-storage bounded history", () => {
     const rows = await listConversations({
       limit: 1,
       includeHidden: false,
-      kind: "chat",
     });
 
-    expect(rows.map((row) => row.id)).toEqual(["visible-old"]);
+    expect(rows.map((row) => row.id)).toEqual(["pipe-new"]);
+  });
+
+  it("keeps repeated legacy run histories distinct", async () => {
+    putConversation("pipe:recap:1", {
+      updatedAt: 1_000,
+      createdAt: 1_000,
+      content: "summarize the last meeting",
+      kind: "pipe-run",
+    });
+    putConversation("pipe:recap:2", {
+      updatedAt: 1_100,
+      createdAt: 1_100,
+      content: "summarize the last meeting",
+      kind: "pipe-run",
+    });
+
+    const rows = await listConversations();
+
+    expect(rows.map((row) => row.id)).toEqual(["pipe:recap:2", "pipe:recap:1"]);
+    expect(rows.every((row) => row.deduplicationExempt)).toBe(true);
   });
 });
 
@@ -193,7 +212,6 @@ function meta(
     messageCount: 2,
     pinned: false,
     hidden: false,
-    kind: "chat",
     ...over,
   };
 }

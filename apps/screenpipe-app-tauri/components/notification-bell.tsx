@@ -24,7 +24,6 @@ interface NotificationEntry {
   type: string;
   title: string;
   body: string;
-  pipe_name?: string;
   timestamp: string;
   read: boolean;
 }
@@ -330,18 +329,13 @@ export function NotificationBell() {
                           >{entry.body}</ReactMarkdown>
                         </div>
                       )}
-                      {entry.pipe_name && (
-                        <span className="text-[9px] text-muted-foreground/60 block mb-2">
-                          {entry.pipe_name}
-                        </span>
-                      )}
                       <button
                         data-testid={`notification-bell-ask-ai-${entry.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           setOpen(false);
                           showChatWithPrefill({
-                            context: `notification from ${entry.pipe_name || "screenpipe"}:\n\n**${entry.title}**\n${entry.body}`,
+                            context: `notification from screenpipe:\n\n**${entry.title}**\n${entry.body}`,
                             prompt: `tell me more about this: "${entry.title}"`,
                             displayLabel: buildNotificationDisplayLabel(entry.title),
                             autoSend: true,

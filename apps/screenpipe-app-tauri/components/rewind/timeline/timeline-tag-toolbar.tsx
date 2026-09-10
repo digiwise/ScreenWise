@@ -20,10 +20,9 @@ import {
 	AlertDialogHeader,
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { PipeAIIcon } from "@/components/pipe-ai-icon";
+import { MessageSquare } from "lucide-react";
 import { localFetch } from "@/lib/api";
 import { showChatWithPrefill } from "@/lib/chat-utils";
-import { type TemplatePipe } from "@/lib/hooks/use-pipes";
 import { AnimatePresence, motion } from "framer-motion";
 
 const DEFAULT_TAGS = ["deep work", "meeting", "admin", "break"];
@@ -55,13 +54,10 @@ interface TimelineTagToolbarProps {
 	anchorRect: { x: number; y: number; width: number } | null;
 	/** Called when user clicks "ask AI" — parent handles building context and opening chat */
 	onAskAI?: () => void;
-	/** Called when user clicks a pipe in the radial menu */
-	onRunPipe?: (pipe: TemplatePipe) => void;
-	/** Available template pipes for the radial menu */
-	templatePipes?: TemplatePipe[];
 }
 
-export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePipes }: TimelineTagToolbarProps) {
+export function TimelineTagToolbar({ anchorRect, onAskAI }: TimelineTagToolbarProps) {
+	const automationPresets: Array<{ name: string; title: string; icon?: string }> = [];
 	const { selectionRange, tagFrames, removeTagFromFrames, setSelectionRange, tags } = useTimelineSelection();
 	const [customTag, setCustomTag] = useState("");
 	const [radialOpen, setRadialOpen] = useState(false);
@@ -287,7 +283,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 								className="relative"
 								onMouseEnter={() => {
 									if (radialTimeoutRef.current) clearTimeout(radialTimeoutRef.current);
-									if (templatePipes && templatePipes.length > 0) setRadialOpen(true);
+									if (automationPresets.length > 0) setRadialOpen(true);
 								}}
 								onMouseLeave={() => {
 									radialTimeoutRef.current = setTimeout(() => {
@@ -302,15 +298,15 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 									title="ask ai"
 								>
 									<span className="pointer-events-none">
-										<PipeAIIcon size={14} animated={radialOpen} />
+										<MessageSquare className="w-3.5 h-3.5" />
 									</span>
 									ask ai
 								</button>
 								<AnimatePresence>
-									{radialOpen && templatePipes && templatePipes.length > 0 && (() => {
+									{radialOpen && automationPresets.length > 0 && (() => {
 										const maxVisible = 6;
-										const visible = templatePipes.slice(0, maxVisible);
-										const overflow = templatePipes.length - maxVisible;
+										const visible = automationPresets.slice(0, maxVisible);
+										const overflow = automationPresets.length - maxVisible;
 										const count = visible.length + (overflow > 0 ? 1 : 0);
 										const radius = 60;
 										const containerSize = radius * 2 + 40;
@@ -365,7 +361,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 																onClick={(e) => {
 																	e.stopPropagation();
 																	setRadialOpen(false);
-																	onRunPipe?.(pipe);
+											void pipe;
 																}}
 															>
 																{label}

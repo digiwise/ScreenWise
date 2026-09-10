@@ -54,7 +54,6 @@ describe('Database & Stability (S9)', () => {
                 `${base}/health`,
                 `${base}/search?limit=1&content_type=ocr`,
                 `${base}/search?limit=5&q=test`,
-                `${base}/pipes/list`,
                 `${base}/search?limit=1&content_type=audio`,
             ];
             const promises = [];

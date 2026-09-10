@@ -21,7 +21,6 @@
  */
 
 import { create } from "zustand";
-import type { ConversationKind, PipeContext } from "@/lib/hooks/use-settings";
 import type { ConversationMeta } from "@/lib/chat-storage";
 import type { ChatTitleSource } from "@/lib/utils/chat-title";
 import {
@@ -105,6 +104,8 @@ export interface SessionRecord {
   pinned: boolean;
   /** Archived conversation hidden from recents. */
   hidden?: boolean;
+  /** Compatibility-only identity exemption for legacy automated-run history. */
+  deduplicationExempt?: boolean;
   /** ms since epoch of the most recent time this chat was actively viewed
    *  in the current app session. Ephemeral UI signal for recent-switching;
    *  never persisted to disk and does not affect the sidebar order. */
@@ -159,17 +160,6 @@ export interface SessionRecord {
    *  sidebar-hidden sessions. */
   composerDraft?: SessionDraft;
 
-  // ── Conversation kind + pipe metadata ──────────────────────────────
-  // Splits sessions into chat / pipe-watch / pipe-run so the sidebar
-  // can render them in distinct sections and the chat panel knows
-  // whether to show a pipe-context banner instead of the regular
-  // header. Defaults to "chat" when missing — older on-disk files
-  // hydrate as plain chats with no behavioral change.
-
-  /** What kind of session this is. See `ConversationKind`. */
-  kind?: ConversationKind;
-  /** Pipe metadata — only meaningful when `kind !== "chat"`. */
-  pipeContext?: PipeContext;
 }
 
 interface ChatStoreState {
@@ -179,7 +169,7 @@ interface ChatStoreState {
   diskHydrated: boolean;
   /** Currently FOCUSED session — i.e. the chat the user is actively
    *  looking at. Cleared when the user navigates away from the chat
-   *  view (Pipes/Memories/...) so the sidebar row stops being
+   *  view so the sidebar row stops being
    *  highlighted. Distinct from `panelSessionId` which never clears. */
   currentId: string | null;
   /** The chat the panel is rendering right now, regardless of whether
@@ -397,7 +387,7 @@ export const useChatStore = create<ChatStore>((set) => ({
         if (s.currentId === id) return {};
         // Also a no-op when the chat is still loaded in the (display:none)
         // panel — the user already read what's there; trailing deltas that
-        // arrive after they navigate to Settings/Pipes/Memories/Timeline
+        // arrive after they navigate to Settings/Memories/Timeline
         // shouldn't re-light the unread dot. The panel keeps streaming in
         // the background and panelSessionId tracks its current conversation.
         if (s.panelSessionId === id) return {};
@@ -620,11 +610,8 @@ export const useChatStore = create<ChatStore>((set) => ({
  *  selector returns the same reference forever. Safe to use in deps. */
 export const useChatActions = () => useChatStore((s) => s.actions);
 
-/** Build a fresh SessionRecord from on-disk metadata. Used by both the
- *  boot-time hydrate path and the pipe-run recorder so the sidebar sees
- *  identically-shaped rows whether they were loaded at startup or upserted
- *  the moment a pipe finishes. unread is false: persisted-from-disk rows
- *  aren't user-actionable in the inbox sense. */
+/** Build a fresh SessionRecord from on-disk metadata. Persisted rows are not
+ * unread: their contents were already present before this app session. */
 export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
   return {
     id: m.id,
@@ -638,8 +625,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     pinned: m.pinned,
     unread: false,
     lastUserMessageAt: m.lastUserMessageAt,
-    kind: m.kind,
-    pipeContext: m.pipeContext,
+    deduplicationExempt: m.deduplicationExempt,
     dedupKey: m.dedupKey,
   };
 }
@@ -705,11 +691,8 @@ function sortKey(s: SessionRecord): number {
   return s.lastUserMessageAt ?? s.createdAt;
 }
 
-/** Tier: user-touched chats (any lastUserMessageAt set) sit above
- *  auto-generated rows (pipe-watch / pipe-run completions). Without
- *  this, a pipe that finished 30 s ago would outrank a chat the user
- *  typed in 2 min ago — `createdAt` of a fresh pipe session is more
- *  recent than the user's last bump. Lower tier = higher in list. */
+/** Tier: user-touched chats (any lastUserMessageAt set) sit above new,
+ * auto-generated rows. Lower tier = higher in the list. */
 function tier(s: SessionRecord): number {
   return s.lastUserMessageAt ? 0 : 1;
 }
@@ -728,17 +711,18 @@ function compareForSidebar(a: SessionRecord, b: SessionRecord): number {
 // (e.g. via chat-sidebar's `chat-conversation-saved` → syncConversationFromDisk)
 // would otherwise show as a second row for one conversation. Mirror the disk
 // dedup here: same key (normalized first user message), same 30-min window,
-// pipe runs exempt. Shared primitives live in `@/lib/chat-dedup`.
+// rows without a user message are exempt. Shared primitives live in
+// `@/lib/chat-dedup`.
 // ---------------------------------------------------------------------------
 
 /** First-user-message dedup key for a store session. Prefer the key derived
  *  from in-store `messages` (foreground / hydrated rows); fall back to the
  *  `dedupKey` carried from disk meta (metadata-only rows — a boot-hydrated row
- *  or a cross-window twin). Null exempts the row (pipe runs, or a chat with no
- *  user message yet). */
+ *  or a cross-window twin). Null exempts a chat with no user message yet or a
+ *  retained legacy automated-run history. */
 function sessionDedupKey(s: SessionRecord): string | null {
-  if (s.kind === "pipe-watch" || s.kind === "pipe-run") return null;
-  return conversationDedupKey({ kind: s.kind, messages: s.messages }) ?? s.dedupKey ?? null;
+  if (s.deduplicationExempt) return null;
+  return conversationDedupKey({ messages: s.messages }) ?? s.dedupKey ?? null;
 }
 
 /** Which of two same-conversation rows to keep: the copy the user should see.
@@ -807,9 +791,7 @@ export function selectRecentSwitcherSessions(state: ChatSessionsState): SessionR
   const ordered = selectOrderedSessions(state);
   const isEligibleSwitcherSession = (session: SessionRecord) =>
     !session.hidden &&
-    !session.draft &&
-    session.kind !== "pipe-watch" &&
-    session.kind !== "pipe-run";
+    !session.draft;
   return ordered
     .filter((session) => isEligibleSwitcherSession(session) && session.lastViewedAt)
     .sort((a, b) => (b.lastViewedAt ?? 0) - (a.lastViewedAt ?? 0));

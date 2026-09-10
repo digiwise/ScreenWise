@@ -4,7 +4,7 @@
 
 //! Bash startup wrapper for pi-coding-agent subshells.
 //!
-//! Problem: every chat/pipe run, the agent's first `curl localhost:3030/...`
+//! Problem: a fresh chat run's first `curl localhost:3030/...`
 //! typically omits the Authorization header and comes back 403. The agent
 //! then reads the skill file, learns about `$SCREENPIPE_LOCAL_API_KEY`, and
 //! retries — burning a wasted tool call per fresh session.
@@ -21,11 +21,7 @@
 //! model effort, no prompt changes, no new system-prompt lines.
 //!
 //! Reads `$SCREENPIPE_LOCAL_API_KEY` only — every spawn path (Tauri chat,
-//! core pipe-executor) is now contractually required to export it.
-//! `SCREENPIPE_API_AUTH_KEY` was a historical second name from when the two
-//! spawn paths diverged; spawn paths still export it as a deprecated alias
-//! for one release so user-installed pipe.md files that hardcode the old
-//! name keep working, but new shim code reads the canonical name only.
+//! core Pi executor) is contractually required to export it.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -41,7 +37,7 @@ pub const WRAPPER_RELATIVE_PATH: &str = "pi-agent/bash-env.sh";
 /// substrings in command arguments. If none match, `curl` runs unchanged.
 pub const WRAPPER_SCRIPT: &str = r#"# screenpipe — auto-injected by pi-agent bash subshells (do not edit by hand)
 # Transparently adds Authorization: Bearer to curl calls that target the
-# local screenpipe API, tags them with x-screenpipe-session (the chat/pipe
+# local screenpipe API, tags them with x-screenpipe-session (the chat
 # that owns this agent, from SCREENPIPE_SESSION_ID) so the owned-browser
 # sidebar can route navigations to the right chat, and — when
 # SCREENPIPE_FILTER_PII=1 — rewrites any /search URL to include filter_pii=1
@@ -71,9 +67,8 @@ curl() {
   local -a out=() hdrs=()
   key="$(_sp_auth_key)"
   # Chat/session this agent runs under. The owned-browser is a singleton shared
-  # by every chat and background pipe, so we tag local API calls with the owner
-  # (x-screenpipe-session); the navigate handler rides it to the frontend so a
-  # background pipe's page doesn't pop into whatever chat is on screen. Empty
+  # by every chat, so we tag local API calls with the owner
+  # (x-screenpipe-session); the navigate handler rides it to the frontend. Empty
   # for spawn paths that don't set it — then the call is simply untagged.
   sid="${SCREENPIPE_SESSION_ID:-}"
   if [ "${SCREENPIPE_FILTER_PII:-}" = "1" ]; then
@@ -263,7 +258,7 @@ mod tests {
     /// End-to-end: the shim adds `x-screenpipe-session: <id>` to local API
     /// calls when `SCREENPIPE_SESSION_ID` is set, and never leaks it to
     /// third-party hosts. This is the production path that lets a background
-    /// pipe's owned-browser navigation be ignored by an unrelated chat.
+    /// session's owned-browser navigation be routed to its conversation.
     #[test]
     #[cfg(unix)]
     fn shim_tags_session_header_for_local_only() {

@@ -89,13 +89,6 @@ const tests: TestDef[] = [
     },
   },
   {
-    name: "GET /pipes/list (!500)",
-    fn: async (base) => {
-      const r = await fetch(`${base}/pipes/list`);
-      if (r.status === 500) throw new Error("server error 500");
-    },
-  },
-  {
     name: "search with date range",
     fn: async (base) => {
       const today = new Date().toISOString().split("T")[0] + "T00:00:00Z";

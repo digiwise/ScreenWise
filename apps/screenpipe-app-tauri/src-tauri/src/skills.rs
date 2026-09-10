@@ -11,9 +11,9 @@
 //! (`<data_dir>/skills/<name>/`), and list / remove what's been imported.
 //!
 //! The store is the source of truth. `screenpipe-core`'s pi executor mirrors it
-//! into every pipe + chat session's `.pi/skills/` on launch (see
+//! into the chat session's `.pi/skills/` on launch (see
 //! `PiExecutor::sync_user_skills`), so an imported skill becomes available to
-//! the agent everywhere without per-pipe wiring.
+//! the local chat agent.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

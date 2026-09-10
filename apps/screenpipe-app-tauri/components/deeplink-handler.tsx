@@ -123,17 +123,6 @@ export function DeeplinkHandler() {
         }
       }
 
-      // Handle pipe install deep links: screenpipe://install-pipe?url=<encoded-url>
-      if (
-        parsedUrl.host === "install-pipe" ||
-        parsedUrl.pathname === "install-pipe"
-      ) {
-        const pipeUrl = parsedUrl.searchParams.get("url");
-        if (pipeUrl) {
-          await emit("install-pipe", { url: pipeUrl, name: parsedUrl.searchParams.get("name") || undefined });
-        }
-      }
-
       // Handle in-app file viewer: screenpipe://view?path=<encoded-path>
       // Notification bodies with markdown links to local files are rewritten
       // to this scheme by the /notify route in src-tauri/src/notifications/rewrite.rs

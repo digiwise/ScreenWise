@@ -12,8 +12,8 @@ import {
 } from "../bus";
 import type { AgentEventEnvelope } from "../types";
 
-const env = (sessionId: string, type = "text_delta", source: "pi" | "pipe" = "pi"): AgentEventEnvelope => ({
-  source,
+const env = (sessionId: string, type = "text_delta"): AgentEventEnvelope => ({
+  source: "pi",
   sessionId,
   event: { type, delta: "hi" },
 });

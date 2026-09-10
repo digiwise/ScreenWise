@@ -6,9 +6,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, ChevronUp, Plug, Plus, RefreshCw, Sparkles } from "lucide-react";
-import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
-import { type TemplatePipe } from "@/lib/hooks/use-pipes";
-import { FALLBACK_TEMPLATES, type CustomTemplate } from "@/lib/summary-templates";
+import { type CustomTemplate } from "@/lib/summary-templates";
 import { type Suggestion } from "@/lib/hooks/use-auto-suggestions";
 import { IntegrationIcon } from "@/components/settings/connections-section";
 import { CustomSummaryBuilder } from "./custom-summary-builder";
@@ -24,9 +22,9 @@ interface SummaryCardsProps {
   onSaveCustomTemplate: (template: CustomTemplate) => void;
   onDeleteCustomTemplate: (id: string) => void;
   userName?: string;
-  templatePipes?: TemplatePipe[];
-  pipesLoading?: boolean;
 }
+
+type SummaryPreset = { name: string; title: string; description?: string; icon?: string; prompt: string; featured?: boolean };
 
 export interface ConnectionSetupSuggestion {
   id: string;
@@ -133,17 +131,14 @@ export function SummaryCards({
   onSaveCustomTemplate,
   onDeleteCustomTemplate,
   userName,
-  templatePipes = [],
-  pipesLoading = false,
 }: SummaryCardsProps) {
   const [showAll, setShowAll] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
 
-  const templates = templatePipes.length > 0 ? templatePipes : FALLBACK_TEMPLATES;
-  const featured = templates.filter((t) => t.featured);
-  const discover = templates.filter((t) => !t.featured);
+  const featured: SummaryPreset[] = [];
+  const discover: SummaryPreset[] = [];
 
-  const handleCardClick = (pipe: TemplatePipe) => {
+  const handleCardClick = (pipe: SummaryPreset) => {
     onSendMessage(pipe.prompt, `${pipe.icon} ${pipe.title}`);
   };
 
@@ -162,7 +157,7 @@ export function SummaryCards({
       <div className="relative mx-auto mb-3 w-fit">
         <div className="absolute -inset-4 border border-dashed border-border/50" />
         <div className="absolute -inset-2 border border-border/30" />
-        <PipeAIIconLarge size={40} thinking={false} className="relative text-foreground/80" />
+        <Sparkles size={40} className="relative text-foreground/80" />
       </div>
       <h3 className="text-sm font-medium mb-0.5 text-foreground">
         {userName ? `How can I help, ${userName}?` : "How can I help today?"}

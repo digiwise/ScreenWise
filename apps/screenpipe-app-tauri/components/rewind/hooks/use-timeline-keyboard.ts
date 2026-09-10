@@ -8,7 +8,6 @@ import { listen } from "@tauri-apps/api/event";
 import { commands } from "@/lib/utils/tauri";
 import { getFrameAppName } from "@/components/rewind/timeline/timeline";
 import { toast } from "@/components/ui/use-toast";
-import type { TemplatePipe } from "@/lib/hooks/use-pipes";
 import type { StreamTimeSeriesResponse } from "@/components/rewind/timeline";
 
 export function useTimelineKeyboard(opts: {
@@ -37,7 +36,7 @@ export function useTimelineKeyboard(opts: {
 	arrowNavTimerRef: React.MutableRefObject<ReturnType<typeof setTimeout> | null>;
 	resetFilters: () => void;
 	selectionRange: any;
-	sendSelectionToChat: (pipe?: TemplatePipe) => Promise<void>;
+	sendSelectionToChat: () => Promise<void>;
 	selectedDeviceIdRef: React.MutableRefObject<string>;
 	selectedAppNameRef: React.MutableRefObject<string>;
 }): void {

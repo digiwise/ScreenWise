@@ -74,7 +74,7 @@ async function finishOpenHomeWindow(): Promise<void> {
   // The Home window persists across specs. A prior spec may have navigated it
   // to /settings (or elsewhere), and `show_window { Home: { page: null } }`
   // only focuses — it doesn't navigate. Force /home so every spec starts
-  // from the same route and testids like nav-pipes / home-page are present.
+  // from the same route and testids like nav-timeline / home-page are present.
   const currentPath = (await browser
     .execute(() => window.location.pathname)
     .catch(() => '')) as string;

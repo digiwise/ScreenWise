@@ -50,8 +50,7 @@ const CONSECUTIVE_UNHEALTHY_THRESHOLD: u32 = 120;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BootPhaseSnapshot {
-    /// One of: idle | starting | migrating_database | building_audio |
-    /// starting_pipes | ready | error
+    /// One of: idle | starting | migrating_database | building_audio | ready | error
     pub phase: String,
     /// Human-readable detail to show the user (may be long-running hint)
     pub message: Option<String>,
@@ -119,7 +118,7 @@ pub fn get_boot_phase_snapshot() -> BootPhaseSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootReadiness {
     /// Phase is still pre-ready (`starting`, `migrating_database`,
-    /// `building_audio`, `starting_pipes`). Process teardown is unsafe.
+    /// `building_audio`). Process teardown is unsafe.
     Pending,
     /// Phase is `ready`. Safe to restart.
     Ready,
@@ -171,7 +170,7 @@ pub async fn wait_for_boot_ready(timeout: Duration) -> BootReadiness {
 pub enum RecordingStatus {
     Starting,
     Recording,
-    /// Capture paused but server (HTTP/pipes/search) still alive.
+    /// Capture paused but server (HTTP/search) still alive.
     Paused,
     Stopped,
     Error,
@@ -1586,7 +1585,6 @@ mod tests {
             "starting",
             "migrating_database",
             "building_audio",
-            "starting_pipes",
         ] {
             with_boot_phase(phase, || {
                 assert_eq!(
