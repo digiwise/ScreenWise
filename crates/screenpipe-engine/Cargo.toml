@@ -95,9 +95,8 @@ uuid = { version = "1.5.0", features = ["v4"] }
 # the upstream eval transport.
 url = "2"
 
-# Cloud sync utilities
+# Local machine diagnostics
 hostname = "0.4"
-md5 = "0.7"
 
 tempfile = "3.3.0"
 

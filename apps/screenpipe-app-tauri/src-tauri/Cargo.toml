@@ -117,9 +117,6 @@ urlencoding = "2"
 url = "2"
 async-trait = "0.1"
 
-# Remote-device discovery (removed with the separate SFTP sync subsystem)
-hostname = "0.4"
-
 # Shared local core utilities and secret storage.
 screenpipe-core = { path = "../../../crates/screenpipe-core" }
 

@@ -1557,3 +1557,60 @@ platform-gated local engines are retained.
   lockfiles are unchanged. The documented Ninja `cargo build --release
   --locked --offline` passed in 8m 49s with only the established unrelated
   warnings.
+
+### Final workspace/model reachability boundary — 2026-09-10
+
+Post-removal `cargo metadata --no-deps` shows that
+`screenpipe-audio-eval` and `screenpipe-meeting-eval` are standalone developer
+harnesses: no production package depends on either, but both are included in
+the default bare-workspace build. They pull the full local audio/model and
+engine graphs into ordinary validation even though they are only invoked by
+explicit evaluation commands. They will remain workspace members so the tools
+and workspace inheritance stay available, but will leave `default-members`.
+
+The remaining model and cross-platform edges are reachable or structurally
+required. Windows uses the local Qwen/Parakeet and ONNX redaction features;
+DirectML is a Windows-capable optional audio path. Apple Intelligence,
+Parakeet-MLX, Metal/CUDA/Vulkan options, and `screenpipe-rfdetr-mlx` are
+target/feature-gated, and the MLX detector must remain a workspace member for
+manifest inheritance even though Windows excludes it from default builds.
+`screenpipe-connect` remains used by owned-browser control, native calendar
+access, and opt-in local-network mDNS. No crate, model, feature, or target-gated
+source beyond the two evaluation default-member entries is proven safe to
+remove in this audit. The audit also found an unused direct `md5` dependency
+left on `screenpipe-engine` by cloud sync and an unused duplicate desktop
+`hostname` edge; engine health/database diagnostics retain the actual
+`hostname` dependency.
+
+### Final workspace/model reachability audit complete — 2026-09-10
+
+- Removed the two evaluation-only crates from `workspace.default-members`
+  while retaining them as explicit workspace members. Removed the unused
+  cloud-sync `md5` dependency from `screenpipe-engine` and the unused duplicate
+  desktop `hostname` edge. Engine health and database diagnostics retain their
+  required `hostname` dependency.
+- Complete root and desktop lock diffs contain only the `md5 0.7.0` package
+  record and the corresponding `screenpipe-engine`/desktop dependency-list
+  entries; no surviving version, source, or checksum changed. Bun lockfiles
+  are unchanged. Offline lock regeneration itself could not run because the
+  cached `cidre` Git checkout lacks `refs/remotes/origin/HEAD`; the reviewed
+  removals were applied directly and both locked offline Cargo checks validate
+  the resulting resolutions.
+- Final residue searches found no active cloud-sync, product-account/login,
+  hosted AI/transcription, pipe scheduler/store, generic connector/OAuth,
+  enterprise upload, team, or fleet command path. Compatibility-only
+  `include_cloud` rejection, historical `cloud://` frame records, retired
+  provider normalization, and deprecated generated-skill cleanup remain so old
+  clients/data/settings fail safely or stay readable without network access.
+- Preserved network-capable boundaries are outside the removed subsystems and
+  remain explicit: the consumer updater, user-initiated support/log upload,
+  user-opened links and owned-browser navigation, opt-in LAN mDNS, and pinned
+  model/tool acquisition when local artifacts are missing. Pi/chat is retained
+  in genuinely local Ollama-only mode; browser control and native calendar
+  remain local capabilities. No owner architecture choice is required for the
+  simplification sequence completed here.
+- `cargo metadata --no-deps` confirms neither evaluation crate is a default
+  member. Root and desktop `cargo check --locked --offline`, `cargo fmt --all
+  -- --check`, and `git diff --check` passed with only the established
+  unrelated warnings. The documented Ninja `cargo build --release --locked
+  --offline` passed in 8m 27s.
