@@ -437,9 +437,6 @@ impl ServerCore {
         // own toggle. Both off by default; users opt in through
         // Settings → Privacy → "AI PII removal".
         //
-        // The persisted backend string is retained for settings-file
-        // compatibility, but every value resolves to local redaction.
-
         // User-selected redaction classes (the `piiRedactionLabels`
         // setting, default ["secret"]). Local adapters return spans and
         // we filter client-side via the text/image policies built from
@@ -453,19 +450,11 @@ impl ServerCore {
 
         if config.async_pii_redaction {
             use screenpipe_redact::adapters::onnx::{OnnxConfig, OnnxRedactor};
-            use screenpipe_redact::adapters::opf::{OpfAdapter, OpfConfig};
             use screenpipe_redact::pipeline::{Pipeline, PipelineConfig};
             use screenpipe_redact::worker::{Worker, WorkerConfig, ALL_TARGET_TABLES};
             use screenpipe_redact::Redactor;
             use screenpipe_redact::TextRedactionPolicy;
 
-            // Backend selection for the text "AI" step:
-            //   - "local"   → on-device candle OPF v3 (opf-rs). First
-            //                 run downloads ~2.8 GB from
-            //                 huggingface.co/screenpipe/pii-text-redactor
-            //                 in the background; until the download
-            //                 finishes the worker runs regex-only.
-            //
             // The worker is destructive-only: it overwrites the source
             // columns (`text` / `transcription` / `text_content` /
             // `accessibility_text`) with the redacted text and stamps
@@ -473,29 +462,19 @@ impl ServerCore {
             // removal" toggle means. The 20260507 migration drops the
             // dead duplicate columns the old non-destructive mode used.
             {
-                // Local mode: spawn the download+load off the boot path
-                // so a slow first-run HF pull doesn't block the app
-                // launch. The worker is created inside the spawned
-                // task once the model is ready.
+                // Model verification/loading stays off the boot path. It is
+                // local-only and never downloads missing files.
                 let pool = db.pool.clone();
                 let shutdown = redact_shutdown.clone();
                 let labels = pii_labels.clone();
                 tokio::spawn(async move {
                     let policy = TextRedactionPolicy::from_labels(&labels);
-                    // Prefer the local ONNX text redactor (~278 MB INT8,
-                    // sub-10 ms p50, gets CoreML on macOS / DirectML on
-                    // Windows / CPU on Linux via the redact-onnx-* CI
-                    // feature). Fall back to the legacy OPF candle
-                    // adapter (~2.8 GB) if the ONNX feature isn't
-                    // compiled in or the HF download fails. The concrete
-                    // model name + version are logged once it loads, so
-                    // these strings never drift on a model bump.
                     let onnx_cfg = OnnxConfig::default();
                     info!(
                         cache_dir = %onnx_cfg.model_dir.display(),
-                        "fetching local ONNX text redactor (~278 MB INT8 on first run)"
+                        "verifying explicitly provisioned local ONNX text redactor"
                     );
-                    let onnx_result = OnnxRedactor::load_or_download(onnx_cfg).await;
+                    let onnx_result = OnnxRedactor::load(onnx_cfg);
                     let pipeline = match onnx_result {
                         Ok(adapter) => {
                             info!(
@@ -514,34 +493,11 @@ impl ServerCore {
                         }
                         Err(onnx_err) => {
                             warn!(
-                                "couldn't load local ONNX text redactor ({onnx_err}); falling \
-                                 back to OPF candle"
+                                "Smart text-PII unavailable ({onnx_err}); running the text \
+                                 worker in regex-only mode. Provision and verify the ONNX \
+                                 model pack before enabling Smart mode."
                             );
-                            match OpfAdapter::load_or_download(OpfConfig::default()).await {
-                                Ok(adapter) => {
-                                    info!(
-                                        model = adapter.name(),
-                                        version = adapter.version(),
-                                        "starting async text-PII reconciliation worker \
-                                         (backend=local, fallback)"
-                                    );
-                                    let ai: Arc<dyn Redactor> = Arc::new(adapter);
-                                    Pipeline::regex_then_ai(
-                                        ai,
-                                        PipelineConfig {
-                                            policy: policy.clone(),
-                                            ..Default::default()
-                                        },
-                                    )
-                                }
-                                Err(e) => {
-                                    warn!(
-                                         "couldn't load OPF redactor either ({e}); running \
-                                         text-PII worker in regex-only mode."
-                                    );
-                                    Pipeline::regex_only_with_policy(policy.clone())
-                                }
-                            }
+                            Pipeline::regex_only_with_policy(policy.clone())
                         }
                     };
                     let pipeline_arc = Arc::new(pipeline) as Arc<dyn Redactor>;
@@ -562,15 +518,12 @@ impl ServerCore {
 
             let pool = db.pool.clone();
             {
-                // Local mode: rfdetr ONNX. First-run downloads ~108 MB
-                // from huggingface.co/screenpipe/pii-image-redactor and
-                // verifies SHA-256 before landing in ~/.screenpipe/models/.
-                // The concrete model name + version are logged once it
-                // loads, so they never drift on a model bump.
+                // Local mode: explicitly provisioned, checksum-verified
+                // RF-DETR ONNX model. Missing files never trigger network.
                 let shutdown = redact_shutdown.clone();
                 let labels = pii_labels.clone();
                 tokio::spawn(async move {
-                    match RfdetrRedactor::load_or_download(RfdetrConfig::default()).await {
+                    match RfdetrRedactor::load(RfdetrConfig::default()) {
                         Ok(detector) => {
                             info!(
                                 model = detector.name(),
@@ -590,8 +543,8 @@ impl ServerCore {
                         }
                         Err(e) => {
                             warn!(
-                                "image-PII (local) enabled but couldn't load local rfdetr image \
-                                 model; skipping: {e}."
+                                "Smart image-PII unavailable; skipping worker: {e}. Provision \
+                                 and verify rfdetr_v12.onnx before enabling Smart mode."
                             );
                         }
                     }

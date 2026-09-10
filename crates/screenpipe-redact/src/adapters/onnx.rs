@@ -48,7 +48,10 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::{RedactError, RedactedSpan, RedactionOutput, Redactor, SpanLabel};
+use crate::{
+    provisioning::inspect_model_file, ModelFileStatus, RedactError, RedactedSpan, RedactionOutput,
+    Redactor, SpanLabel,
+};
 
 const ONNX_REDACTOR_NAME: &str = "v45_phase5_pruned";
 const ONNX_REDACTOR_VERSION: u32 = 5;
@@ -104,15 +107,13 @@ impl OnnxConfig {
         self.model_dir.join("tokenizer.json")
     }
 
-    /// HuggingFace repo where the canonical v45 phase 3 ONNX artifacts
-    /// live. Pinned to `main` so a model bump goes through a deliberate
-    /// code change (URL + expected SHA-256 + [`ONNX_REDACTOR_VERSION`]
-    /// all bumped together — same discipline as `RfdetrConfig`).
+    /// Provisioning source for the canonical model files. ScreenWise never
+    /// requests this URL; users download the files with an external tool.
     pub const HF_REPO_BASE: &'static str =
         "https://huggingface.co/screenpipe/pii-redactor/resolve/main/v45_phase5_pruned";
 
-    /// Files to download from the HF repo on first run. Each is
-    /// (filename, expected sha256). Recompute via
+    /// Required locally provisioned files and their expected SHA-256 values.
+    /// Recompute via
     ///   shasum -a 256 model_quantized.onnx tokenizer.json config.json remap.json
     /// when bumping the model (and bump [`ONNX_REDACTOR_VERSION`]).
     ///
@@ -144,94 +145,39 @@ impl OnnxConfig {
         ),
     ];
 
-    /// Download the model + tokenizer + config from HuggingFace into
-    /// [`Self::model_dir`] if not already present. Idempotent.
-    ///
-    /// SHA-256 verification: when [`Self::FILES`] sha values are real
-    /// (post-upload), corrupt downloads are detected and re-attempted.
-    /// While the SHAs are placeholders, verification is skipped — the
-    /// caller MUST ship the model in the installer or accept that any
-    /// HTTP-200 response replaces the expected file.
-    pub async fn ensure_model_present(&self) -> Result<(), RedactError> {
-        tokio::fs::create_dir_all(&self.model_dir)
-            .await
-            .map_err(|e| {
-                RedactError::Runtime(format!("mkdir {}: {e}", self.model_dir.display()))
-            })?;
+    /// Inspect every required file without creating directories or making a
+    /// network request.
+    pub fn model_statuses(&self) -> Result<Vec<ModelFileStatus>, RedactError> {
+        Self::FILES
+            .iter()
+            .map(|(filename, expected_sha)| {
+                inspect_model_file(
+                    filename,
+                    &self.model_dir.join(filename),
+                    format!("{}/{}", Self::HF_REPO_BASE, filename),
+                    expected_sha,
+                )
+            })
+            .collect()
+    }
 
-        for (filename, expected_sha) in Self::FILES {
-            let target = self.model_dir.join(filename);
-            if target.exists() {
-                // Skip SHA check while placeholders are in place. Once
-                // the HF upload lands and SHAs are real, this becomes
-                // a real integrity check.
-                if !expected_sha.starts_with("REPLACE_") && !sha256_matches(&target, expected_sha)?
-                {
-                    tracing::warn!("v45 phase 3 {} sha256 mismatch, re-downloading", filename);
-                } else {
-                    continue;
-                }
-            }
-
-            let url = format!("{}/{}", Self::HF_REPO_BASE, filename);
-            let tmp = target.with_extension(format!(
-                "{}.partial",
-                target
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("download")
-            ));
-            tracing::info!("downloading {} -> {}", url, target.display());
-
-            let resp = reqwest::get(&url)
-                .await
-                .map_err(|e| RedactError::Runtime(format!("GET {url}: {e}")))?
-                .error_for_status()
-                .map_err(|e| RedactError::Runtime(format!("HTTP {url}: {e}")))?;
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| RedactError::Runtime(format!("download body {url}: {e}")))?;
-            tokio::fs::write(&tmp, &bytes)
-                .await
-                .map_err(|e| RedactError::Runtime(format!("write {}: {e}", tmp.display())))?;
-
-            if !expected_sha.starts_with("REPLACE_") && !sha256_matches(&tmp, expected_sha)? {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(RedactError::Runtime(format!(
-                    "{filename} sha256 mismatch after download from {url}"
-                )));
-            }
-
-            tokio::fs::rename(&tmp, &target).await.map_err(|e| {
-                RedactError::Runtime(format!(
-                    "rename {} -> {}: {e}",
-                    tmp.display(),
-                    target.display()
-                ))
-            })?;
+    /// Require a complete, checksum-verified local model pack.
+    pub fn verify_installed(&self) -> Result<(), RedactError> {
+        let unavailable: Vec<String> = self
+            .model_statuses()?
+            .into_iter()
+            .filter(|status| !status.is_verified())
+            .map(|status| format!("{} ({:?})", status.path.display(), status.state))
+            .collect();
+        if unavailable.is_empty() {
+            Ok(())
+        } else {
+            Err(RedactError::Unavailable(format!(
+                "ONNX text PII model is not fully provisioned and verified: {}",
+                unavailable.join(", ")
+            )))
         }
-
-        Ok(())
     }
-}
-
-fn sha256_matches(path: &std::path::Path, expected: &str) -> Result<bool, RedactError> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)
-        .map_err(|e| RedactError::Runtime(format!("read {}: {e}", path.display())))?;
-    let mut h = Sha256::new();
-    h.update(&bytes);
-    let got = hex_encode(&h.finalize());
-    Ok(got.eq_ignore_ascii_case(expected))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
 }
 
 /// Map `"private_person"` → [`SpanLabel::Person`], etc. Unknown labels
@@ -343,36 +289,11 @@ mod runtime {
     }
 
     impl OnnxRedactor {
-        /// Async convenience: download the model + tokenizer + config
-        /// from HuggingFace if missing, then load. Use this from the
-        /// engine startup path.
-        pub async fn load_or_download(cfg: OnnxConfig) -> Result<Self, RedactError> {
-            cfg.ensure_model_present().await?;
-            Self::load(cfg)
-        }
-
         pub fn load(cfg: OnnxConfig) -> Result<Self, RedactError> {
+            cfg.verify_installed()?;
             let model_path = cfg.resolve_model_file();
-            if !model_path.exists() {
-                return Err(RedactError::Unavailable(format!(
-                    "ONNX model not found at {}",
-                    model_path.display()
-                )));
-            }
             let tokenizer_path = cfg.tokenizer_path();
-            if !tokenizer_path.exists() {
-                return Err(RedactError::Unavailable(format!(
-                    "tokenizer not found at {}",
-                    tokenizer_path.display()
-                )));
-            }
             let config_path = cfg.model_dir.join("config.json");
-            if !config_path.exists() {
-                return Err(RedactError::Unavailable(format!(
-                    "config.json not found at {}",
-                    config_path.display()
-                )));
-            }
 
             let id2label = parse_id2label(&config_path)?;
 
@@ -936,12 +857,15 @@ mod cross_feature_tests {
     }
 
     #[test]
-    fn missing_model_path_is_unavailable() {
+    fn missing_model_pack_is_unavailable_without_creating_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_dir = temp.path().join("missing");
         let res = OnnxRedactor::load(OnnxConfig {
-            model_dir: PathBuf::from("/nonexistent/dir"),
+            model_dir: model_dir.clone(),
             model_file: None,
             max_seq_len: 256,
         });
         assert!(matches!(res, Err(RedactError::Unavailable(_))));
+        assert!(!model_dir.exists());
     }
 }

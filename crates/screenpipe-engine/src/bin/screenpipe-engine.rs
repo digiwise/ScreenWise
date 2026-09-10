@@ -1336,16 +1336,12 @@ async fn main() -> anyhow::Result<()> {
     if !config.async_pii_redaction {
         info!(
             "text-PII worker skipped at startup — async_pii_redaction=false. \
-             OPF model (~2.8 GB) will NOT be downloaded or loaded. \
-             Toggle via Settings → Privacy → AI PII removal."
+             Provision and verify the local ONNX model before enabling Smart PII removal."
         );
     }
     if config.async_pii_redaction {
         use screenpipe_redact::{
-            adapters::{
-                onnx::{OnnxConfig, OnnxRedactor},
-                opf::{OpfAdapter, OpfConfig},
-            },
+            adapters::onnx::{OnnxConfig, OnnxRedactor},
             pipeline::{Pipeline, PipelineConfig},
             worker::{Worker, WorkerConfig, ALL_TARGET_TABLES},
             Redactor, TextRedactionPolicy,
@@ -1354,19 +1350,9 @@ async fn main() -> anyhow::Result<()> {
 
         info!("starting async PII reconciliation worker (destructive overwrite of source columns)");
 
-        // Pipeline: regex pre-pass + AI fallback. Regex catches
-        // structural PII deterministically and on-device. AI step
-        // resolves to (preference order):
-        //   1. v45_phase3 ONNX (xlm-roberta-base fine-tune, INT8, ~278 MB,
-        //      9 ms p50 on CPU, CoreML on macOS / DirectML on Windows
-        //      via the redact-onnx-* CI feature). First run downloads
-        //      from huggingface.co/screenpipe/pii-redactor under
-        //      v45_phase3_onnx/.
-        //   2. Legacy opf-rs (candle, OPF v6, ~74 ms p50 on Mac CPU,
-        //      ~2.8 GB) if v45 ONNX isn't compiled in or the download
-        //      fails.
-        //   3. Regex-only otherwise (still destructive — overwrites
-        //      regex-redacted text into the source columns).
+        // Pipeline: deterministic regex first, then the explicitly provisioned
+        // and checksum-verified local ONNX model. Missing or invalid model
+        // files never trigger a network request; the worker remains regex-only.
         let pool = db.pool.clone();
         let labels = config.pii_redaction_labels.clone();
         tokio::spawn(async move {
@@ -1374,13 +1360,9 @@ async fn main() -> anyhow::Result<()> {
             // (default ["secret"]). Local adapters filter client-side via
             // this policy.
             let policy = TextRedactionPolicy::from_labels(&labels);
-            info!(
-                "fetching v45 phase 3 ONNX text redactor (~278 MB INT8 on first run, \
-                 cached at ~/.screenpipe/models/v45_phase3_onnx/)"
-            );
-            let pipeline = match OnnxRedactor::load_or_download(OnnxConfig::default()).await {
+            let pipeline = match OnnxRedactor::load(OnnxConfig::default()) {
                 Ok(adapter) => {
-                    info!("text-PII AI step: local v45_phase3 ONNX, sub-10 ms p50 on CPU");
+                    info!("text-PII AI step: verified local ONNX model");
                     let ai: Arc<dyn Redactor> = Arc::new(adapter);
                     Pipeline::regex_then_ai(
                         ai,
@@ -1392,41 +1374,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(onnx_err) => {
                     tracing::warn!(
-                        "couldn't load v45 phase 3 ONNX redactor ({onnx_err}); falling back \
-                         to OPF v6 candle"
+                        "Smart text-PII unavailable ({onnx_err}); worker will run regex-only. \
+                         Provision every listed ONNX model file under ~/.screenpipe/models/ \
+                         and verify it before enabling Smart mode."
                     );
-                    info!(
-                        "fetching local OPF v6 checkpoint (~2.8 GB on first run, cached at \
-                         ~/.screenpipe/models/opf-v6/)"
-                    );
-                    match OpfAdapter::load_or_download(OpfConfig::default()).await {
-                        Ok(adapter) => {
-                            info!(
-                                "text-PII AI step: local opf-rs (candle) fallback — lazy load \
-                                 on first batch, idle-unload after 60s of no work"
-                            );
-                            // Wrap in Arc first so we can spawn the idle
-                            // unloader (which needs `Arc<Self>`) and still
-                            // hand the same Arc to the Pipeline.
-                            let adapter = Arc::new(adapter);
-                            let _unloader = Arc::clone(&adapter).spawn_idle_unloader();
-                            let ai: Arc<dyn Redactor> = adapter;
-                            Pipeline::regex_then_ai(
-                                ai,
-                                PipelineConfig {
-                                    policy: policy.clone(),
-                                    ..Default::default()
-                                },
-                            )
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "text-PII AI step disabled — both v45 ONNX and opf-rs \
-                                 unavailable ({e}). Worker will run regex-only."
-                            );
-                            Pipeline::regex_only_with_policy(policy.clone())
-                        }
-                    }
+                    Pipeline::regex_only_with_policy(policy.clone())
                 }
             };
             let pipeline_arc = Arc::new(pipeline) as Arc<dyn Redactor>;
@@ -1439,7 +1391,7 @@ async fn main() -> anyhow::Result<()> {
             // The worker runs for the lifetime of the engine. We don't
             // join its handle — when the process exits the runtime
             // tears down the task. If we ever want graceful shutdown
-            // (drain in-flight HTTP calls), wire `_worker_handle` into
+            // (drain in-flight work), wire `_worker_handle` into
             // the shutdown_tx flow.
         });
     }
@@ -1451,8 +1403,7 @@ async fn main() -> anyhow::Result<()> {
     if !config.async_image_pii_redaction {
         info!(
             "image-PII worker skipped at startup — async_image_pii_redaction=false. \
-             rfdetr_v9 model (~108 MB) will NOT be downloaded or loaded. \
-             Toggle via Settings → Privacy → AI PII removal."
+             Provision and verify the local RF-DETR model before enabling Smart PII removal."
         );
     }
     if config.async_image_pii_redaction {
@@ -1473,29 +1424,19 @@ async fn main() -> anyhow::Result<()> {
             if std::env::var_os("SCREENPIPE_ENABLE_EXPERIMENTAL_RFDETR_MLX").is_some() {
                 use screenpipe_redact::adapters::rfdetr_mlx::{RfdetrMlxConfig, RfdetrMlxRedactor};
                 let mlx_cfg = RfdetrMlxConfig::default();
-                // Mirrors the ONNX adapter: download once, verify SHA-256,
-                // cache at ~/.screenpipe/models/rfdetr_v9.safetensors.
-                if let Err(e) = mlx_cfg.ensure_model_present().await {
-                    tracing::info!(
-                        "rfdetr-mlx safetensors download failed ({e}); falling back to ONNX adapter"
-                    );
-                } else {
-                    match RfdetrMlxRedactor::load(mlx_cfg) {
-                        Ok(d) => {
-                            info!("image-PII detector: rfdetr-mlx (Apple Silicon GPU)");
-                            // Lazy-load + 60 s idle-unload — frees the
-                            // ~150–200 MB MLX resident footprint when the
-                            // worker is paused or the reconciliation queue
-                            // has drained. Same pattern as OpfAdapter.
-                            let d = Arc::new(d);
-                            let _ = Arc::clone(&d).spawn_idle_unloader();
-                            detector_arc = Some(d as Arc<dyn ImageRedactor>);
-                        }
-                        Err(e) => {
-                            tracing::info!(
-                                "rfdetr-mlx load failed ({e}); falling back to ONNX adapter"
-                            );
-                        }
+                match RfdetrMlxRedactor::load(mlx_cfg) {
+                    Ok(d) => {
+                        info!("image-PII detector: rfdetr-mlx (Apple Silicon GPU)");
+                        // Lazy-load + 60 s idle-unload frees the MLX resident
+                        // footprint after the reconciliation queue drains.
+                        let d = Arc::new(d);
+                        let _ = Arc::clone(&d).spawn_idle_unloader();
+                        detector_arc = Some(d as Arc<dyn ImageRedactor>);
+                    }
+                    Err(e) => {
+                        tracing::info!(
+                            "rfdetr-mlx unavailable ({e}); falling back to verified ONNX adapter"
+                        );
                     }
                 }
             } else {
@@ -1506,20 +1447,16 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         if detector_arc.is_none() {
-            match RfdetrRedactor::load_or_download(RfdetrConfig::default()).await {
+            match RfdetrRedactor::load(RfdetrConfig::default()) {
                 Ok(d) => {
                     info!("image-PII detector: rfdetr (ONNX Runtime)");
                     detector_arc = Some(Arc::new(d) as Arc<dyn ImageRedactor>);
                 }
                 Err(e) => {
-                    // Loud-but-non-fatal: capture continues; user gets
-                    // an explicit "model missing or download failed"
-                    // message in the log, and the regular text
-                    // redactor (if enabled) keeps running.
                     tracing::warn!(
                         "image-PII redaction enabled but couldn't load model; skipping: {e}. \
-                         check network reachability to huggingface.co or pre-stage \
-                         rfdetr_v9.onnx at ~/.screenpipe/models/."
+                         Provision and verify rfdetr_v12.onnx under \
+                         ~/.screenpipe/models/ before enabling Smart mode."
                     );
                 }
             }

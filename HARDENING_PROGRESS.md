@@ -1614,3 +1614,90 @@ left on `screenpipe-engine` by cloud sync and an unused duplicate desktop
   -- --check`, and `git diff --check` passed with only the established
   unrelated warnings. The documented Ninja `cargo build --release --locked
   --offline` passed in 8m 27s.
+
+### Offline PII model provisioning boundary — 2026-09-10
+
+Selecting Smart PII removal currently starts runtime HTTPS acquisition of the
+local text ONNX and image RF-DETR weights when their cache files are absent or
+invalid. The downloads are checksum-verified, but they violate the product
+rule that ScreenWise itself never initiates Internet requests. If the preferred
+text ONNX path fails, startup also attempts the approximately 2.8 GB OPF model;
+there is no Windows quality comparison demonstrating that this heavyweight
+fallback improves on the approximately 167 MB ONNX pack. ONNX covers every OPF
+label plus the additional `Sensitive` class, while deterministic regex already
+runs before local model inference.
+
+This boundary will remove OPF and every PII adapter HTTP client, retain the
+published source locations and pinned SHA-256 manifests as provisioning
+instructions, and require the corresponding locally verified ONNX text or
+RF-DETR image pack before each Smart feature can be enabled. Basic regex
+remains model-free.
+Startup will independently reverify configured Smart models so files removed
+after enablement cannot trigger network or falsely start an unverified worker.
+The obsolete backend selector is removed rather than retained for baseline
+settings compatibility; no database migration is involved. The macOS-only MLX
+adapter remains target-gated but its automatic acquisition path will also be
+removed so the no-request invariant holds across retained source.
+
+### Offline PII model provisioning complete — 2026-09-10
+
+- Removed the OPF adapter, feature edges, integration test, pinned Git
+  dependency, and its Candle/OPF dependency graph. The ONNX text model is now
+  the only supported semantic text path; deterministic regex remains the
+  always-local, model-free fallback.
+- Removed automatic Hugging Face acquisition from the ONNX text, RF-DETR ONNX
+  image, and target-gated RF-DETR MLX adapters. Each adapter now performs a
+  side-effect-free, streaming SHA-256 check of explicitly provisioned files
+  before loading. Missing or invalid text files leave the text worker in
+  regex-only mode; missing or invalid image files prevent that image worker
+  from starting. No PII verification/load path creates directories, writes
+  partial files, or opens a network client.
+- Added a read-only desktop model-status command and settings UI that lists the
+  exact external download source, destination, and expected SHA-256 for every
+  file. Text and image Smart features are independently gated on their own
+  verified model packs. Basic regex remains selectable without any model.
+- Removed the obsolete `piiBackend` setting, CLI flag, restart key, and
+  generated TypeScript field. Per the product decision that baseline data has
+  no migration value, no compatibility shim or database migration was added;
+  Serde simply ignores that now-unknown field in an old settings document.
+- Root and desktop Cargo lockfiles remove OPF plus its now-orphaned Candle,
+  GEMM, tokenization, Metal, and support packages. Retained package versions,
+  sources, and checksums did not change; remaining dependency-list edits are
+  Cargo's expected disambiguation cleanup after duplicate versions vanished.
+  Reviewed lockfile SHA-256 values are
+  `5E8481B13C17A93B8C622046CA61D4AC3EA12CA345F0D9FDAD6E9A20659EE269`
+  and
+  `930F536C2F2101581B356E770C31830C4BBAD515842009E5C660FE64C0AEC9D0`.
+  The desktop Bun lock is unchanged at
+  `758A49562E49967F8B91F1169D64DA7C74242051CF1544889734BE0E47A3701D`.
+- Searches find no executable OPF, `opf-text`, `load_or_download`,
+  `ensure_model_present`, PII `reqwest`, or `piiBackend` edge. Historical
+  references remain only in earlier audit notes. The separate macOS/AArch64
+  Parakeet MLX build-time shader acquisition is not PII or Windows-reachable
+  and remains a later global no-Internet hardening boundary. Litepipe was not
+  consulted.
+
+Verification on Windows on 2026-09-10:
+
+- `cargo fmt --all -- --check`, locked/offline root checks, and `git diff
+  --check`: passed. `screenpipe-redact` with the supported `onnx-cpu` feature
+  passed 96 unit tests and 3 integration tests; 1 doc test was ignored.
+- A first DirectML-feature test build reached linking but failed on
+  `OrtSessionOptionsAppendExecutionProvider_DML` because the checked-in ORT
+  1.22.0 runtime is the documented CPU build. It is not counted as a passed
+  DirectML validation; the supported CPU matrix above passed.
+- The full desktop native run passed 151 tests and ignored 4, except the known
+  concurrent binding-export/freshness race: the freshness test observed the
+  generated file while the exporter had truncated it. Regeneration passed,
+  and the required isolated `tauri_bindings_are_current` rerun passed with
+  Ninja Multi-Config, the transient `knf-rs-sys` CRT override, and OpenBLAS on
+  runtime `PATH`. An earlier binding attempt outside Developer PowerShell
+  failed on missing `stdint.h` and is not counted.
+- Direct Node Vitest passed all 33 files and 380 tests. The Bun-hosted attempt
+  reproduced the documented Zod launcher interop failure after 32 files and
+  378 tests and is not counted. Direct TypeScript `tsc --noEmit` passed, and
+  the installed Next production build passed with only the established
+  `unpdf` `import.meta` warning.
+- `cargo build --release --locked --offline` passed in 6m 15s from the root
+  workspace using Visual Studio Developer PowerShell and the documented
+  Ninja/OpenBLAS/ORT release environment, with only established warnings.

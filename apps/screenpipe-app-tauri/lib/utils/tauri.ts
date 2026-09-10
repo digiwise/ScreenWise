@@ -512,6 +512,18 @@ async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Verify explicitly provisioned PII model files. This command is read-only
+ * and cannot initiate a network request.
+ */
+async getPiiModelStatus() : Promise<Result<PiiModelStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_pii_model_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async hideMainWindow() : Promise<void> {
     await TAURI_INVOKE("hide_main_window");
 },
@@ -1715,6 +1727,8 @@ preview: string;
  * label in the UI ("queued 4s ago").
  */
 queuedAtMs: number }
+export type PiiModelFileStatus = { name: string; path: string; sourceUrl: string; expectedSha256: string; actualSha256: string | null; state: string }
+export type PiiModelStatus = { textReady: boolean; imageReady: boolean; textDirectory: string; imageDirectory: string; textFiles: PiiModelFileStatus[]; imageFiles: PiiModelFileStatus[] }
 /**
  * A single schedule rule: a day-of-week + time range + what to record.
  */
@@ -2029,24 +2043,10 @@ asyncPiiRedaction?: boolean;
  * default — orthogonal to `async_pii_redaction` (text path),
  * independently togglable. Requires the `screenpipe-redact`
  * crate to be built with one of the `onnx-*` cargo features and
- * the `rfdetr_v8.onnx` model present at `~/.screenpipe/models/`.
+ * the checksum-verified `rfdetr_v12.onnx` model present at
+ * `~/.screenpipe/models/`.
  */
 asyncImagePiiRedaction?: boolean;
-/**
- * Where the AI PII redaction actually runs. One switch flips
- * BOTH modalities (text + image) because the user-facing
- * "AI PII removal" toggle is one knob.
- *
- * - `"local"` (default): on-device ONNX models. Privacy by
- * construction — pixels and text never leave the box. Slower,
- * especially on weak hardware (~1-3 s per text row, ~60-180 ms
- * per frame).
- * Legacy values such as `"tinfoil"`, `"cloud"`, and `"enclave"` are
- * accepted when reading existing settings and resolve to local mode.
- * New installations use `"local"`; captured data never leaves the
- * device for PII redaction.
- */
-piiBackend?: string;
 /**
  * Which PII classes the AI redaction workers actually rewrite
  * when `asyncPiiRedaction` / `asyncImagePiiRedaction` are on.

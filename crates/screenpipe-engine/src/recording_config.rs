@@ -39,16 +39,11 @@ pub struct RecordingConfig {
     /// overwrites the source columns with the redacted text. Off by
     /// default.
     pub async_pii_redaction: bool,
-    /// Async image PII redaction: runs rfdetr_v8 on each captured
+    /// Async image PII redaction: runs RF-DETR ONNX on each captured
     /// frame and blacks out detected PII regions, atomically
-    /// overwriting the source JPG. Off by default. First-run
-    /// downloads ~108 MB from huggingface.co/screenpipe/pii-image-redactor.
+    /// overwriting the source JPG. Off by default and requires an explicitly
+    /// provisioned, checksum-verified model.
     pub async_image_pii_redaction: bool,
-    /// Backend compatibility string for async PII workers. Legacy cloud/
-    /// enclave values are resolved to local redaction at runtime.
-    /// One toggle covers both modalities; the user-facing UI is a
-    /// single radio under the AI PII removal switch.
-    pub pii_backend: String,
     /// Which PII classes the AI redaction workers rewrite. Canonical
     /// snake_case `SpanLabel` names; defaults to `["secret"]`, with
     /// `secret` always included. Mirrors the `piiRedactionLabels`
@@ -231,9 +226,6 @@ impl RecordingConfig {
             use_pii_removal: settings.use_pii_removal,
             async_pii_redaction: settings.async_pii_redaction,
             async_image_pii_redaction: settings.async_image_pii_redaction,
-            // Keep legacy persisted settings readable, but never route
-            // captured content to a hosted redaction backend.
-            pii_backend: "local".to_string(),
             pii_redaction_labels: settings.pii_redaction_labels.clone(),
             filter_music: settings.filter_music,
             audio_transcription_engine: engine_str

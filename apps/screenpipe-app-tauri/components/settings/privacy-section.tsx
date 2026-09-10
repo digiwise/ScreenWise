@@ -43,6 +43,12 @@ import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { useInstalledApps } from "@/lib/hooks/use-installed-apps";
 import { commands } from "@/lib/utils/tauri";
 import {
+  anySmartPiiModelReady,
+  imagePiiModelReady,
+  textPiiModelReady,
+  type PiiModelStatus,
+} from "@/lib/utils/pii-models";
+import {
   validateField,
   sanitizeValue,
   debounce,
@@ -283,8 +289,12 @@ export function PrivacySection() {
   // Tracks a manually-typed key that hasn't been persisted yet. Set on input
   // change, cleared after handleUpdate saves it to the secret store.
   const [pendingApiKey, setPendingApiKey] = useState<string | null>(null);
+  const [piiModelStatus, setPiiModelStatus] = useState<PiiModelStatus | null>(null);
+  const [piiModelStatusError, setPiiModelStatusError] = useState<string | null>(null);
+  const [isVerifyingPiiModels, setIsVerifyingPiiModels] = useState(false);
   const pendingSettingsWriteRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSettingsRef = useRef<Partial<Settings>>({});
+  const normalizedUnavailableSmartRef = useRef<string | null>(null);
 
   const loadLiveApiKey = useCallback(async () => {
     try {
@@ -298,6 +308,27 @@ export function PrivacySection() {
   useEffect(() => {
     void loadLiveApiKey();
   }, [loadLiveApiKey]);
+
+  const loadPiiModelStatus = useCallback(async () => {
+    setIsVerifyingPiiModels(true);
+    setPiiModelStatusError(null);
+    try {
+      const result = await commands.getPiiModelStatus();
+      if (result.status === "error") throw new Error(result.error);
+      setPiiModelStatus(result.data as PiiModelStatus);
+    } catch (error) {
+      setPiiModelStatus(null);
+      setPiiModelStatusError(
+        error instanceof Error ? error.message : "Could not verify local PII models",
+      );
+    } finally {
+      setIsVerifyingPiiModels(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPiiModelStatus();
+  }, [loadPiiModelStatus]);
 
   const { items: windowItems, isLoading: isWindowItemsLoading } =
     useSqlAutocomplete("window");
@@ -330,6 +361,56 @@ export function PrivacySection() {
     },
     [updateSettings]
   );
+
+  const smartTextReady = textPiiModelReady(piiModelStatus);
+  const smartImageReady = imagePiiModelReady(piiModelStatus);
+  const anySmartPiiReady = anySmartPiiModelReady(piiModelStatus);
+
+  useEffect(() => {
+    const smartConfigured =
+      Boolean(settings.asyncPiiRedaction) || Boolean(settings.asyncImagePiiRedaction);
+    if (!smartConfigured) {
+      normalizedUnavailableSmartRef.current = null;
+      return;
+    }
+    if (!piiModelStatus) return;
+
+    const textConfigured = Boolean(settings.asyncPiiRedaction);
+    const imageConfigured = Boolean(settings.asyncImagePiiRedaction);
+    const textMustDisable = textConfigured && !smartTextReady;
+    const imageMustDisable = imageConfigured && !smartImageReady;
+    if (!textMustDisable && !imageMustDisable) {
+      normalizedUnavailableSmartRef.current = null;
+      return;
+    }
+
+    const normalizationKey = `${textConfigured}:${imageConfigured}:${smartTextReady}:${smartImageReady}`;
+    if (normalizedUnavailableSmartRef.current === normalizationKey) return;
+
+    normalizedUnavailableSmartRef.current = normalizationKey;
+    handleSettingsChange(
+      {
+        usePiiRemoval: true,
+        asyncPiiRedaction: textConfigured && smartTextReady,
+        asyncImagePiiRedaction: imageConfigured && smartImageReady,
+      },
+      true,
+    );
+    toast({
+      title: "Smart PII removal unavailable",
+      description:
+        "Unavailable Smart features were disabled because their local models are missing or invalid.",
+      variant: "destructive",
+    });
+  }, [
+    handleSettingsChange,
+    piiModelStatus,
+    settings.asyncImagePiiRedaction,
+    settings.asyncPiiRedaction,
+    smartImageReady,
+    smartTextReady,
+    toast,
+  ]);
 
   const handleUpdate = async () => {
     if (Object.keys(validationErrors).length > 0) {
@@ -390,7 +471,7 @@ export function PrivacySection() {
   //
   //   usePiiRemoval            → hot-path regex (screenpipe-core)
   //   asyncPiiRedaction        → text reconciliation worker (screenpipe-redact)
-  //   asyncImagePiiRedaction   → image redactor worker (rfdetr_v8)
+  //   asyncImagePiiRedaction   → image redactor worker (RF-DETR ONNX)
   //
   // Smart implies Basic — there's no reason to disable the cheap
   // deterministic safety net while running the expensive ML pass, and
@@ -407,25 +488,46 @@ export function PrivacySection() {
   })();
 
   const handlePiiModeChange = (next: PiiMode) => {
+    if (next === "smart" && !anySmartPiiReady) {
+      toast({
+        title: "Install and verify the local PII models first",
+        description:
+          "ScreenWise does not download models. Follow the provisioning instructions below, then verify the installed files.",
+        variant: "destructive",
+      });
+      return;
+    }
     handleSettingsChange(
       {
         usePiiRemoval: next !== "off",
-        asyncPiiRedaction: next === "smart",
-        asyncImagePiiRedaction: next === "smart",
+        asyncPiiRedaction: next === "smart" && smartTextReady,
+        asyncImagePiiRedaction: next === "smart" && smartImageReady,
       },
       true,
     );
   };
 
-  // Legacy boolean setting remains readable, while the UI exposes the local mode selector.
   const handlePiiRemovalChange = (checked: boolean) => {
     handlePiiModeChange(checked ? "basic" : "off");
   };
 
-  const aiPiiRemovalEnabled = piiMode === "smart";
+  const handleSmartTextChange = (checked: boolean) => {
+    if (checked && !smartTextReady) return;
+    handleSettingsChange(
+      { usePiiRemoval: true, asyncPiiRedaction: checked },
+      true,
+    );
+  };
 
-  // Where the AI workers run — one switch covers both modalities.
-  const piiBackend = "local" as const;
+  const handleSmartImageChange = (checked: boolean) => {
+    if (checked && !smartImageReady) return;
+    handleSettingsChange(
+      { usePiiRemoval: true, asyncImagePiiRedaction: checked },
+      true,
+    );
+  };
+
+  const aiPiiRemovalEnabled = piiMode === "smart";
 
   // Which PII classes the AI workers actually remove. Secret is the
   // always-on baseline (the backend forces it in too — see
@@ -1030,12 +1132,18 @@ export function PrivacySection() {
                       </span>
                     </span>
                   </label>
-                  <label className="flex cursor-pointer items-start gap-2 text-xs">
+                  <label
+                    className={cn(
+                      "flex items-start gap-2 text-xs",
+                      anySmartPiiReady ? "cursor-pointer" : "cursor-not-allowed opacity-70",
+                    )}
+                  >
                     <input
                       type="radio"
                       name="piiMode"
                       className="mt-0.5"
                       checked={piiMode === "smart"}
+                      disabled={!anySmartPiiReady}
                       onChange={() => handlePiiModeChange("smart")}
                     />
                     <span>
@@ -1046,31 +1154,130 @@ export function PrivacySection() {
                       <span className="text-muted-foreground">
                         {" "}— includes Basic, plus an AI background worker
                         for semantic PII (names, addresses, sensitive context)
-                        and image redaction on screen frames. Downloads a
-                        ~100 MB model on first run.
+                        and image redaction on screen frames. Requires locally
+                        provisioned, checksum-verified models.
                       </span>
                     </span>
                   </label>
+                </div>
+                <div className="rounded border border-border bg-muted/30 p-2.5 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-medium text-foreground">
+                        Local model provisioning
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {smartTextReady && smartImageReady
+                          ? "Text and image models are verified. Both Smart features are available."
+                          : anySmartPiiReady
+                          ? "One Smart feature is available; install the other pack to enable both."
+                          : "Smart stays disabled until at least one local pack is installed and verified."}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={isVerifyingPiiModels}
+                      onClick={() => void loadPiiModelStatus()}
+                    >
+                      <RefreshCw
+                        className={cn(
+                          "mr-1.5 h-3.5 w-3.5",
+                          isVerifyingPiiModels && "animate-spin",
+                        )}
+                      />
+                      Verify installed models
+                    </Button>
+                  </div>
+                  {piiModelStatusError && (
+                    <p className="text-[11px] text-destructive">{piiModelStatusError}</p>
+                  )}
+                  {piiModelStatus && (
+                    <details className="text-[11px] text-muted-foreground">
+                      <summary className="cursor-pointer font-medium text-foreground">
+                        Manual download instructions
+                      </summary>
+                      <p className="mt-2">
+                        Download these files with a browser or another external tool,
+                        place them at the exact destinations below, then verify again.
+                        ScreenWise never requests these Internet addresses itself.
+                      </p>
+                      <div className="mt-2 space-y-3">
+                        <div>
+                          <p className="font-medium text-foreground">
+                            Text ONNX pack (approximately 167 MB)
+                          </p>
+                          <p className="break-all select-text">
+                            Directory: {piiModelStatus.textDirectory}
+                          </p>
+                          {piiModelStatus.textFiles.map((file) => (
+                            <div key={file.name} className="mt-1 border-l border-border pl-2">
+                              <p className="font-medium text-foreground">
+                                {file.name} — {file.state}
+                              </p>
+                              <p className="break-all select-text">Source: {file.sourceUrl}</p>
+                              <p className="break-all select-text">Destination: {file.path}</p>
+                              <p className="break-all select-text">
+                                SHA-256: {file.expectedSha256}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                        <div>
+                          <p className="font-medium text-foreground">
+                            Image RF-DETR ONNX model (approximately 54 MB)
+                          </p>
+                          <p className="break-all select-text">
+                            Directory: {piiModelStatus.imageDirectory}
+                          </p>
+                          {piiModelStatus.imageFiles.map((file) => (
+                            <div key={file.name} className="mt-1 border-l border-border pl-2">
+                              <p className="font-medium text-foreground">
+                                {file.name} — {file.state}
+                              </p>
+                              <p className="break-all select-text">Source: {file.sourceUrl}</p>
+                              <p className="break-all select-text">Destination: {file.path}</p>
+                              <p className="break-all select-text">
+                                SHA-256: {file.expectedSha256}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </details>
+                  )}
                 </div>
               </div>
             )}
             {aiPiiRemovalEnabled && (
               <div className="mt-3 ml-6 space-y-2 border-l-2 border-border pl-3">
-                <p className="text-xs font-medium text-foreground">Where it runs</p>
-                <label className="flex items-start gap-2 text-xs cursor-pointer">
-                  <input
-                    type="radio"
-                    name="piiBackend"
-                    className="mt-0.5"
-                    checked={piiBackend === "local"}
-                    onChange={() => {}}
-                  />
+                <p className="text-xs font-medium text-foreground">Smart features</p>
+                <label className="flex items-start justify-between gap-3 text-xs">
                   <span>
-                    <span className="font-medium text-foreground">Local</span>
+                    <span className="font-medium text-foreground">Semantic text redaction</span>
                     <span className="text-muted-foreground">
-                      {" "}— on your device. Strongest privacy. Slower on weak hardware.
+                      {" "}— names, addresses, and sensitive context using local ONNX.
                     </span>
                   </span>
+                  <Switch
+                    checked={Boolean(settings.asyncPiiRedaction)}
+                    disabled={!smartTextReady}
+                    onCheckedChange={handleSmartTextChange}
+                  />
+                </label>
+                <label className="flex items-start justify-between gap-3 text-xs">
+                  <span>
+                    <span className="font-medium text-foreground">Image redaction</span>
+                    <span className="text-muted-foreground">
+                      {" "}— blacks out detected PII regions using local RF-DETR ONNX.
+                    </span>
+                  </span>
+                  <Switch
+                    checked={Boolean(settings.asyncImagePiiRedaction)}
+                    disabled={!smartImageReady}
+                    onCheckedChange={handleSmartImageChange}
+                  />
                 </label>
                 <p className="text-xs font-medium text-foreground pt-2">
                   Fields to redact

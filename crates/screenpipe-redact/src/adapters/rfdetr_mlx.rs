@@ -13,22 +13,18 @@
 //!
 //! ## Weight file
 //!
-//! MLX consumes safetensors, not ONNX, so this adapter ships its own
-//! download flow (mirroring [`super::rfdetr::RfdetrConfig`]): pulls
-//! `rfdetr_v9.safetensors` from
-//! `huggingface.co/screenpipe/pii-image-redactor` on first run
-//! (~108 MB), verifies SHA-256, atomic-renames into
-//! `~/.screenpipe/models/rfdetr_v9.safetensors`. Subsequent starts
-//! are instant.
+//! MLX consumes safetensors, not ONNX. The user must explicitly provision
+//! `rfdetr_v9.safetensors` under `~/.screenpipe/models/`; ScreenWise verifies
+//! its SHA-256 locally before loading and never downloads it.
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
 use crate::image::{ImageRedactor, ImageRegion};
-use crate::RedactError;
 #[cfg(all(feature = "mlx-mac", target_os = "macos", target_arch = "aarch64"))]
 use crate::SpanLabel;
+use crate::{provisioning::inspect_model_file, ModelFileStatus, RedactError};
 
 const NAME: &str = "rfdetr-mlx";
 const VERSION: u32 = 9; // tracks rfdetr_v9 weights
@@ -106,115 +102,46 @@ impl RfdetrMlxConfig {
             .join("rfdetr_v9.safetensors")
     }
 
-    /// HuggingFace download URL for the safetensors weights. Pinned to
-    /// `main` so a model bump goes through a deliberate code change
-    /// (URL + expected SHA-256 + [`VERSION`] all bumped together).
+    /// Provisioning source for the safetensors weights. ScreenWise never
+    /// requests this URL; users download the file with an external tool.
     pub const HF_DOWNLOAD_URL: &'static str =
         "https://huggingface.co/screenpipe/pii-image-redactor/resolve/main/rfdetr_v9.safetensors";
 
     /// Expected SHA-256 of the canonical `rfdetr_v9.safetensors`.
-    /// Verified after every download. If a future training run
+    /// If a future training run
     /// produces a new best, bump [`VERSION`], re-publish to HF,
     /// update this constant.
     pub const EXPECTED_SHA256: &'static str =
         "6afe6974653a68a2d56efe74c13adfa6b54dd8d0cf43b8eb0603c85e0884b6e6";
 
-    /// Make sure the safetensors is present on disk. Idempotent —
-    /// does nothing if [`Self::model_path`] already exists with the
-    /// expected SHA-256. Otherwise downloads from
-    /// [`Self::HF_DOWNLOAD_URL`], verifies, atomic-renames into place.
-    ///
-    /// Atomic semantics: download lands at
-    /// `<model_path>.partial`, gets verified, then renames over
-    /// `<model_path>`. A killed process leaves at most a `.partial`
-    /// that the next call cleans up.
-    ///
-    /// Returns [`RedactError::Unavailable`] without touching the disk
-    /// if the host macOS is too old for MLX at runtime (see
-    /// [`is_runtime_supported`]) — the engine falls through to the
-    /// ONNX adapter cleanly, and we don't waste a 108 MB download on
-    /// a machine that can't use it.
-    pub async fn ensure_model_present(&self) -> Result<(), RedactError> {
+    /// Inspect the provisioned file without creating directories or making a
+    /// network request.
+    pub fn model_status(&self) -> Result<ModelFileStatus, RedactError> {
         if !is_runtime_supported() {
             return Err(RedactError::Unavailable(format!(
                 "rfdetr-mlx requires macOS {MIN_MACOS_MAJOR}+ at runtime; \
                  fall through to the ONNX adapter"
             )));
         }
-        if self.model_path.exists() && Self::sha256_matches(&self.model_path)? {
-            return Ok(());
-        }
-
-        if let Some(parent) = self.model_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| RedactError::Runtime(format!("mkdir {}: {e}", parent.display())))?;
-        }
-
-        let tmp = self.model_path.with_extension("safetensors.partial");
-        let _ = tokio::fs::remove_file(&tmp).await;
-
-        tracing::info!(
-            url = Self::HF_DOWNLOAD_URL,
-            target = %self.model_path.display(),
-            "downloading rfdetr_v9.safetensors (~108 MB) — first-run only"
-        );
-        let resp = reqwest::Client::new()
-            .get(Self::HF_DOWNLOAD_URL)
-            .send()
-            .await
-            .map_err(|e| RedactError::Runtime(format!("rfdetr-mlx download GET: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(RedactError::Runtime(format!(
-                "rfdetr-mlx download returned {}",
-                resp.status()
-            )));
-        }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| RedactError::Runtime(format!("rfdetr-mlx download body: {e}")))?;
-
-        let actual = Self::hex_sha256(&bytes);
-        if actual != Self::EXPECTED_SHA256 {
-            return Err(RedactError::Runtime(format!(
-                "rfdetr-mlx download checksum mismatch: got {}, want {}",
-                actual,
-                Self::EXPECTED_SHA256
-            )));
-        }
-
-        tokio::fs::write(&tmp, &bytes)
-            .await
-            .map_err(|e| RedactError::Runtime(format!("rfdetr-mlx write tmp: {e}")))?;
-        tokio::fs::rename(&tmp, &self.model_path)
-            .await
-            .map_err(|e| RedactError::Runtime(format!("rfdetr-mlx rename: {e}")))?;
-        tracing::info!(
-            target = %self.model_path.display(),
-            bytes = bytes.len(),
-            "rfdetr_v9.safetensors ready"
-        );
-        Ok(())
+        inspect_model_file(
+            "rfdetr_v9.safetensors",
+            &self.model_path,
+            Self::HF_DOWNLOAD_URL.to_string(),
+            Self::EXPECTED_SHA256,
+        )
     }
 
-    fn hex_sha256(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        let digest = hasher.finalize();
-        let mut s = String::with_capacity(64);
-        for b in digest {
-            use std::fmt::Write;
-            let _ = write!(&mut s, "{b:02x}");
+    pub fn verify_installed(&self) -> Result<(), RedactError> {
+        let status = self.model_status()?;
+        if status.is_verified() {
+            Ok(())
+        } else {
+            Err(RedactError::Unavailable(format!(
+                "RF-DETR MLX image PII model is not provisioned and verified: {} ({:?})",
+                status.path.display(),
+                status.state
+            )))
         }
-        s
-    }
-
-    fn sha256_matches(path: &Path) -> Result<bool, RedactError> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| RedactError::Runtime(format!("read {}: {e}", path.display())))?;
-        Ok(Self::hex_sha256(&bytes) == Self::EXPECTED_SHA256)
     }
 }
 
@@ -229,9 +156,8 @@ mod imp {
     use tokio::sync::Mutex as TokioMutex;
 
     /// Drop the loaded MLX model + safetensors-resident weights after
-    /// this much idle time on the image-PII worker. Matches the OPF
-    /// text adapter (`super::opf::DEFAULT_IDLE_TIMEOUT`): bursty inference
-    /// → reload cost is acceptable, steady-state RAM matters more.
+    /// this much idle time on the image-PII worker. Bursty inference means
+    /// reload cost is acceptable while steady-state RAM still matters.
     /// On a 107 MB safetensors the resident footprint is ~150–200 MB
     /// including MLX activation buffers — small in absolute terms, but
     /// pure waste while recording is paused or the reconciliation queue
@@ -290,13 +216,7 @@ mod imp {
                     "rfdetr-mlx requires macOS {MIN_MACOS_MAJOR}+ at runtime"
                 )));
             }
-            if !cfg.model_path.exists() {
-                return Err(RedactError::Unavailable(format!(
-                    "rfdetr-mlx safetensors not found at {} \
-                     (download via RfdetrMlxConfig::ensure_model_present)",
-                    cfg.model_path.display()
-                )));
-            }
+            cfg.verify_installed()?;
             Ok(Self {
                 cfg,
                 state: TokioMutex::new(State {
@@ -340,7 +260,7 @@ mod imp {
 
         /// Spawn the idle-unload watchdog. Wakes every
         /// [`IDLE_CHECK_INTERVAL`], drops the model when idle exceeds
-        /// [`Self::idle_timeout`]. Mirrors `OpfAdapter::spawn_idle_unloader`.
+        /// [`Self::idle_timeout`].
         pub fn spawn_idle_unloader(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(IDLE_CHECK_INTERVAL);

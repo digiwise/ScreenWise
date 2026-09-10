@@ -69,6 +69,7 @@
 pub mod adapters;
 pub mod image;
 pub mod pipeline;
+pub mod provisioning;
 pub mod worker;
 
 mod cache;
@@ -78,6 +79,7 @@ mod span;
 pub use error::RedactError;
 pub use image::{ImageRedactionPolicy, ImageRedactor, ImageRegion};
 pub use pipeline::{Pipeline, PipelineConfig};
+pub use provisioning::{ModelFileState, ModelFileStatus};
 pub use span::{RedactedSpan, SpanLabel, TextRedactionPolicy};
 
 use async_trait::async_trait;

@@ -362,24 +362,10 @@ pub struct RecordingSettings {
     /// default — orthogonal to `async_pii_redaction` (text path),
     /// independently togglable. Requires the `screenpipe-redact`
     /// crate to be built with one of the `onnx-*` cargo features and
-    /// the `rfdetr_v8.onnx` model present at `~/.screenpipe/models/`.
+    /// the checksum-verified `rfdetr_v12.onnx` model present at
+    /// `~/.screenpipe/models/`.
     #[serde(rename = "asyncImagePiiRedaction", default)]
     pub async_image_pii_redaction: bool,
-
-    /// Where the AI PII redaction actually runs. One switch flips
-    /// BOTH modalities (text + image) because the user-facing
-    /// "AI PII removal" toggle is one knob.
-    ///
-    /// - `"local"` (default): on-device ONNX models. Privacy by
-    ///   construction — pixels and text never leave the box. Slower,
-    ///   especially on weak hardware (~1-3 s per text row, ~60-180 ms
-    ///   per frame).
-    /// Legacy values such as `"tinfoil"`, `"cloud"`, and `"enclave"` are
-    /// accepted when reading existing settings and resolve to local mode.
-    /// New installations use `"local"`; captured data never leaves the
-    /// device for PII redaction.
-    #[serde(rename = "piiBackend", default = "default_pii_backend")]
-    pub pii_backend: String,
 
     /// Which PII classes the AI redaction workers actually rewrite
     /// when `asyncPiiRedaction` / `asyncImagePiiRedaction` are on.
@@ -597,7 +583,6 @@ impl Default for RecordingSettings {
             use_pii_removal: false,
             async_pii_redaction: false,
             async_image_pii_redaction: false,
-            pii_backend: default_pii_backend(),
             pii_redaction_labels: default_pii_redaction_labels(),
             user_id: String::new(),
             user_name: None,
@@ -644,10 +629,6 @@ fn default_extraction_thread_priority() -> String {
 
 fn default_pause_extraction_on_input_ms() -> u64 {
     150
-}
-
-fn default_pii_backend() -> String {
-    "local".to_string()
 }
 
 /// Default redaction allow-list: secrets only. The safety baseline —

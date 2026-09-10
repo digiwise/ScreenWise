@@ -6,17 +6,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RedactError {
-    /// Network / HTTP error talking to a remote redactor.
-    #[error("redactor http request failed: {0}")]
-    Http(#[from] reqwest::Error),
-
-    /// Remote redactor returned a non-success status.
-    #[error("redactor returned status {status}: {body}")]
-    HttpStatus {
-        status: reqwest::StatusCode,
-        body: String,
-    },
-
     /// I/O or runtime failure inside a local redactor (model load,
     /// tokenization, etc.).
     #[error("redactor runtime error: {0}")]

@@ -1399,6 +1399,89 @@ pub async fn show_onboarding_window(app_handle: tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PiiModelFileStatus {
+    pub name: String,
+    pub path: String,
+    pub source_url: String,
+    pub expected_sha256: String,
+    pub actual_sha256: Option<String>,
+    pub state: String,
+}
+
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PiiModelStatus {
+    pub text_ready: bool,
+    pub image_ready: bool,
+    pub text_directory: String,
+    pub image_directory: String,
+    pub text_files: Vec<PiiModelFileStatus>,
+    pub image_files: Vec<PiiModelFileStatus>,
+}
+
+fn serialize_model_file_status(
+    status: screenpipe_redact::ModelFileStatus,
+) -> PiiModelFileStatus {
+    let state = match status.state {
+        screenpipe_redact::ModelFileState::Verified => "verified",
+        screenpipe_redact::ModelFileState::Missing => "missing",
+        screenpipe_redact::ModelFileState::Invalid => "invalid",
+    };
+    PiiModelFileStatus {
+        name: status.name,
+        path: status.path.display().to_string(),
+        source_url: status.source_url,
+        expected_sha256: status.expected_sha256,
+        actual_sha256: status.actual_sha256,
+        state: state.to_string(),
+    }
+}
+
+/// Verify explicitly provisioned PII model files. This command is read-only
+/// and cannot initiate a network request.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_pii_model_status() -> Result<PiiModelStatus, String> {
+    tokio::task::spawn_blocking(|| {
+        use screenpipe_redact::adapters::{
+            onnx::OnnxConfig,
+            rfdetr::RfdetrConfig,
+        };
+
+        let text_config = OnnxConfig::default();
+        let image_config = RfdetrConfig::default();
+        let text_directory = text_config.model_dir.display().to_string();
+        let image_directory = image_config
+            .model_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .display()
+            .to_string();
+        let text_files: Vec<PiiModelFileStatus> = text_config
+            .model_statuses()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(serialize_model_file_status)
+            .collect();
+        let image_files = vec![serialize_model_file_status(
+            image_config.model_status().map_err(|e| e.to_string())?,
+        )];
+
+        Ok(PiiModelStatus {
+            text_ready: text_files.iter().all(|file| file.state == "verified"),
+            image_ready: image_files.iter().all(|file| file.state == "verified"),
+            text_directory,
+            image_directory,
+            text_files,
+            image_files,
+        })
+    })
+    .await
+    .map_err(|e| format!("PII model verification task failed: {e}"))?
+}
+
 // Keychain / secure storage commands
 
 #[derive(serde::Serialize, specta::Type)]

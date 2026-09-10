@@ -133,12 +133,10 @@ screenpipe-secrets = { path = "../../../crates/screenpipe-secrets" }
 screenpipe-events = { path = "../../../crates/screenpipe-events" }
 eventkit-rs = { git = "https://github.com/divanshu-go/eventkit-rs", rev = "9dd52787c8435d734ed443e2d5641f45b0177cae", default-features = false, features = ["events"] }
 # Async PII reconciliation (issue #3185 / PR #3188). `onnx-coreml` is
-# the right execution-provider for Apple Silicon (image PII via
-# rfdetr_v8); `opf-text` enables the local pure-Rust candle text
-# redactor (OPF v3). Windows builds should
-# switch onnx-coreml → onnx-directml via a build-target override. No
-# CUDA / Vulkan / GPU-vendor SDKs bundled.
-screenpipe-redact = { path = "../../../crates/screenpipe-redact", features = ["onnx-coreml", "opf-text"] }
+# the portable CPU execution provider for text and image PII. Platform release
+# features may layer CoreML or DirectML on top. No CUDA / Vulkan / GPU-vendor
+# SDKs are bundled.
+screenpipe-redact = { path = "../../../crates/screenpipe-redact", features = ["onnx-cpu"] }
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
 image = "0.25.5"
 

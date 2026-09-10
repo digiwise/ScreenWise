@@ -340,19 +340,13 @@ pub struct RecordArgs {
     pub async_pii_redaction: bool,
 
     /// Enable the async IMAGE-PII reconciliation worker. Independent
-    /// of `--async-pii-redaction` (text). Runs the rfdetr_v11 detector
+    /// of `--async-pii-redaction` (text). Runs the RF-DETR ONNX detector
     /// over each captured frame, blacks out detected PII regions in
     /// the JPG (atomic overwrite of the source file). Requires
-    /// `rfdetr_v11.onnx` at `~/.screenpipe/models/` and the binary
+    /// a checksum-verified `rfdetr_v12.onnx` at `~/.screenpipe/models/` and the binary
     /// built with one of the `onnx-*` cargo features. Off by default.
     #[arg(long, default_value_t = false)]
     pub async_image_pii_redaction: bool,
-
-    /// Backend compatibility flag for the AI PII workers. `local` is the
-    /// only active backend; legacy `tinfoil`, `cloud`, and `enclave` values
-    /// are accepted and resolved locally so old settings remain readable.
-    #[arg(long, default_value = "local")]
-    pub pii_backend: String,
 
     /// Which PII classes the AI redaction workers rewrite when enabled.
     /// Comma-separated canonical labels: secret, person, email, phone,
@@ -581,7 +575,6 @@ pub struct RecordArgSources {
     pub use_pii_removal: bool,
     pub async_pii_redaction: bool,
     pub async_image_pii_redaction: bool,
-    pub pii_backend: bool,
     pub pii_redaction_labels: bool,
     pub filter_music: bool,
     pub disable_vision: bool,
@@ -628,7 +621,6 @@ impl RecordArgSources {
             use_pii_removal: from_command_line(record, "use_pii_removal"),
             async_pii_redaction: from_command_line(record, "async_pii_redaction"),
             async_image_pii_redaction: from_command_line(record, "async_image_pii_redaction"),
-            pii_backend: from_command_line(record, "pii_backend"),
             pii_redaction_labels: from_command_line(record, "pii_redaction_labels"),
             filter_music: from_command_line(record, "filter_music"),
             disable_vision: from_command_line(record, "disable_vision"),
@@ -667,7 +659,6 @@ impl RecordArgSources {
             || self.use_pii_removal
             || self.async_pii_redaction
             || self.async_image_pii_redaction
-            || self.pii_backend
             || self.pii_redaction_labels
             || self.filter_music
             || self.disable_vision
@@ -804,7 +795,6 @@ impl RecordArgs {
             use_pii_removal: self.use_pii_removal,
             async_pii_redaction: self.async_pii_redaction,
             async_image_pii_redaction: self.async_image_pii_redaction,
-            pii_backend: self.pii_backend.clone(),
             pii_redaction_labels: self.pii_redaction_labels.clone(),
             filter_music: self.filter_music,
             audio_transcription_engine: engine_str.to_string(),
@@ -1059,9 +1049,6 @@ impl RecordArgs {
         }
         if sources.async_image_pii_redaction {
             settings.async_image_pii_redaction = self.async_image_pii_redaction;
-        }
-        if sources.pii_backend {
-            settings.pii_backend = self.pii_backend.clone();
         }
         if sources.pii_redaction_labels {
             settings.pii_redaction_labels = self.pii_redaction_labels.clone();

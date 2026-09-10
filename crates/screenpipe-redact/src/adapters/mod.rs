@@ -14,7 +14,7 @@
 //!    fine-tuned `screenpipe-pii-redactor` text model. CoreML on Mac,
 //!    DirectML on Windows.
 //!
-//! The text reconciliation worker composes 1+3 through
+//! The text reconciliation worker composes regex + ONNX through
 //! [`Pipeline`](crate::Pipeline) — regex always first, AI only on
 //! residual text.
 //!
@@ -35,9 +35,6 @@ pub mod regex;
 
 #[cfg(feature = "onnx-cpu")]
 pub mod onnx;
-
-#[cfg(feature = "opf-text")]
-pub mod opf;
 
 pub mod rfdetr;
 pub mod rfdetr_mlx;
