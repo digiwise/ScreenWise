@@ -82,6 +82,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_count, 1);
+
+        let stored = db.get_recent_ui_events_by_app("Codex", 3).await.unwrap();
+        assert_eq!(stored.len(), 3);
+        assert!(stored.iter().all(|event| {
+            event.timestamp
+                == DateTime::parse_from_rfc3339("2026-05-18T15:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+        }));
     }
 
     #[tokio::test]

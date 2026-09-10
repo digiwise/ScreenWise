@@ -2274,3 +2274,21 @@ inheritance and supported non-Windows builds are not evidence of dead code.
 `cargo check --workspace --exclude screenpipe-rfdetr-mlx --locked --offline`,
 root formatting, and `git diff --check` passed. No Cargo or Bun lockfile changed;
 the removed declarations had no package edge of their own.
+
+### Current-schema UI-event timestamp boundary — 2026-09-10
+
+Pre-change reachability found one remaining database compatibility shim:
+`UiEventRow` decoded timestamps as arbitrary strings, accepted three historical
+formats, and silently converted malformed values to the Unix epoch. Current
+UI-event writes always serialize `DateTime<Utc>` with `to_rfc3339()`. Because
+baseline databases are unsupported, reads can use SQLx's strict current-schema
+`DateTime<Utc>` decoding directly. Nullable frame text-source and accessibility
+visibility fields remain because current capture paths produce unknown values;
+active OCR/video fallbacks likewise remain part of current local recording.
+The batch UI-event integration test now reads inserted events through the typed
+query path and verifies the exact UTC timestamp. It passed 3/3 under Visual
+Studio Developer PowerShell with the documented native environment; locked
+offline DB/engine checks, root formatting, and `git diff --check` also passed.
+No lockfile changed. A final exact-HEAD
+`cargo build --release --locked --offline` passed under normal Ninja in 5m35s
+with only the established audio `unused_mut` and engine `CommandExt` warnings.
