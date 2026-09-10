@@ -10,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ShareLogsButton } from "@/components/share-logs-button";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
 
 export function FeedbackDialog() {
@@ -22,11 +21,10 @@ export function FeedbackDialog() {
         <DialogHeader>
           <DialogTitle className="text-sm font-medium">report an issue</DialogTitle>
         </DialogHeader>
-        <ShareLogsButton
-          key={prefillText}
-          prefillText={prefillText}
-          onComplete={closeFeedback}
-        />
+        <p className="text-sm text-muted-foreground">
+          {prefillText ||
+            "For diagnostics, review the local log files and last-panic.log in your ScreenWise data directory."}
+        </p>
       </DialogContent>
     </Dialog>
   );

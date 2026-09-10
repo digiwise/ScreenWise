@@ -404,21 +404,4 @@ describe('Settings Persistence (S10)', () => {
         expect(bodyText).not.toContain('Unhandled Runtime Error');
     });
 
-    it('should have update check section (S8.7)', async () => {
-        await browser.execute(() => { window.location.href = '/settings'; });
-        await browser.pause(1000);
-
-        const pageText = await browser.execute(() => document.body.innerText.toLowerCase());
-        const hasUpdate = pageText.includes('update') ||
-            pageText.includes('version') ||
-            pageText.includes('changelog');
-        if (hasUpdate) {
-            console.log('Update/version info found in settings');
-        } else {
-            console.log('Warning: update section not found');
-        }
-
-        const bodyText = await browser.execute(() => document.body.innerText);
-        expect(bodyText).not.toContain('Unhandled Runtime Error');
-    });
 });

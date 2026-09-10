@@ -5,7 +5,6 @@
 
 import { useEffect } from "react";
 import { useToast } from "@/components/ui/use-toast";
-import { useChangelogDialog } from "@/lib/hooks/use-changelog-dialog";
 import { useStatusDialog } from "@/lib/hooks/use-status-dialog";
 import { commands } from "@/lib/utils/tauri";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -19,7 +18,6 @@ import {
 
 export function DeeplinkHandler() {
   const { toast } = useToast();
-  const { setShowChangelogDialog } = useChangelogDialog();
   const { open: openStatusDialog } = useStatusDialog();
   const setPendingNavigation = useTimelineStore((s) => s.setPendingNavigation);
 
@@ -47,22 +45,18 @@ export function DeeplinkHandler() {
         await openSettingsWindow();
       }
 
-      if (url.includes("changelog")) {
-        setShowChangelogDialog(true);
-      }
-
-          if (url.includes("onboarding")) {
-            try {
-              await commands.showWindow("Onboarding");
-              // Forward specific deep link events so onboarding components can react.
-              // Use a dedicated event name to avoid re-triggering the main deep-link listener.
-              if (url.includes("onboarding-read-complete")) {
-                await emit("onboarding-read-complete", url);
-              }
-            } catch (error) {
-              console.error("Failed to show onboarding window:", error);
-            }
+      if (url.includes("onboarding")) {
+        try {
+          await commands.showWindow("Onboarding");
+          // Forward specific deep link events so onboarding components can react.
+          // Use a dedicated event name to avoid re-triggering the main deep-link listener.
+          if (url.includes("onboarding-read-complete")) {
+            await emit("onboarding-read-complete", url);
           }
+        } catch (error) {
+          console.error("Failed to show onboarding window:", error);
+        }
+      }
 
       if (url.includes("status")) {
         openStatusDialog();
@@ -230,7 +224,7 @@ export function DeeplinkHandler() {
         unsubscribes.forEach((unsubscribe) => unsubscribe());
       });
     };
-  }, [toast, setShowChangelogDialog, openStatusDialog, setPendingNavigation]);
+  }, [toast, openStatusDialog, setPendingNavigation]);
 
   return null; // This component doesn't render anything
 } 

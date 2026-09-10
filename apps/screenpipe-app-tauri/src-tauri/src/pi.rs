@@ -1395,8 +1395,7 @@ pub async fn pi_start_inner(
             let sep = if cfg!(windows) { ";" } else { ":" };
             let new_path = format!("{}{}{}", bun_dir.display(), sep, current_path);
 
-            // On Windows, ensure bash is available for Pi's bash tool.
-            // Uses core crate's ensure_bash_available which downloads PortableGit if needed.
+            // On Windows, discover the user-provisioned bash used by Pi's bash tool.
             #[cfg(windows)]
             let new_path = {
                 let mut path = new_path;
@@ -1411,7 +1410,7 @@ pub async fn pi_start_inner(
                     Some(bash_dir) => {
                         // Also add the usr/bin dir which has common unix utils (grep, cat, etc.)
                         let usr_bin = Path::new(&bash_dir)
-                            .parent() // git-portable/
+                            .parent() // Git installation root
                             .map(|p| p.join("usr").join("bin"));
                         path = format!("{}{}{}", bash_dir, sep, path);
                         if let Some(ref ub) = usr_bin {
@@ -2432,9 +2431,7 @@ fn find_bun_executable() -> Option<String> {
 /// Runs on a dedicated thread, never panics, never blocks the caller.
 /// Sets `PI_INSTALL_DONE` when finished so `pi_start` can wait for it.
 pub fn ensure_pi_installed_background() {
-    // On Windows, ensure bash is available early (downloads PortableGit if needed).
-    // This runs before Pi install so bash is ready by the time Pi starts,
-    // even if pi_start_inner is interrupted (e.g., by an app update).
+    // On Windows, discover user-provisioned bash early so Pi can use it when present.
     #[cfg(windows)]
     {
         let _ = std::thread::Builder::new()
@@ -3175,9 +3172,7 @@ error: InstallFailed extracting tarball"#;
 
     // -- build_models_json tests --
 
-    use super::{
-        build_models_json, PiProviderConfig, LOCAL_OLLAMA_MODEL, LOCAL_OLLAMA_URL,
-    };
+    use super::{build_models_json, PiProviderConfig, LOCAL_OLLAMA_MODEL, LOCAL_OLLAMA_URL};
 
     fn make_provider_config(model: &str) -> PiProviderConfig {
         PiProviderConfig {

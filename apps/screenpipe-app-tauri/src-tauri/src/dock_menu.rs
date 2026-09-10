@@ -52,19 +52,6 @@ pub fn setup_dock_menu(app_handle: AppHandle) {
                 }
             }));
         }
-        extern "C" fn check_updates(_this: &Object, _sel: Sel, _sender: id) {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if let Some(app) = DOCK_APP_HANDLE.get() {
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app.state::<std::sync::Arc<crate::updates::UpdatesManager>>();
-                        if let Err(e) = state.check_for_updates(true).await {
-                            tracing::error!("dock menu: check for updates failed: {}", e);
-                        }
-                    });
-                }
-            }));
-        }
         extern "C" fn dock_menu(_this: &Object, _sel: Sel, _sender: id) -> id {
             unsafe {
                 let menu: id = msg_send![class!(NSMenu), new];
@@ -87,15 +74,6 @@ pub fn setup_dock_menu(app_handle: AppHandle) {
                 let _: () = msg_send![item, setTarget: _this];
                 let _: () = msg_send![menu, addItem: item];
 
-                // "Check for updates"
-                let title = NSString::alloc(nil).init_str("Check for updates");
-                let action = sel!(checkUpdates:);
-                let key = NSString::alloc(nil).init_str("");
-                let item: id = msg_send![class!(NSMenuItem), alloc];
-                let item: id = msg_send![item, initWithTitle:title action:action keyEquivalent:key];
-                let _: () = msg_send![item, setTarget: _this];
-                let _: () = msg_send![menu, addItem: item];
-
                 // Note: macOS adds native "Quit" to dock menu automatically
                 menu
             }
@@ -112,10 +90,6 @@ pub fn setup_dock_menu(app_handle: AppHandle) {
         decl.add_method(
             sel!(openSettings:),
             open_settings as extern "C" fn(&Object, Sel, id),
-        );
-        decl.add_method(
-            sel!(checkUpdates:),
-            check_updates as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
             sel!(applicationDockMenu:),

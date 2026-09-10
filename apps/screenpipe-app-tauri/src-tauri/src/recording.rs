@@ -461,7 +461,7 @@ pub async fn start_capture(
 // ---------------------------------------------------------------------------
 
 /// Stop capture AND server so the next spawn_screenpipe does a full restart.
-/// Called by "Apply & Restart", audio shortcuts, updates, and rollbacks.
+/// Called by "Apply & Restart" and audio shortcuts.
 /// The tray toggle uses stop_capture / start_capture to keep the server alive.
 #[tauri::command]
 #[specta::specta]
@@ -833,17 +833,14 @@ pub async fn spawn_screenpipe(
 
             server_runtime.block_on(async move {
                 // Phase 1: Start server
-                let server =
-                    match ServerCore::start(&recording_config, Some(owned_browser))
-                        .await
-                    {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("Failed to start server core: {}", e);
-                            let _ = result_tx.send(Err(e));
-                            return;
-                        }
-                    };
+                let server = match ServerCore::start(&recording_config, Some(owned_browser)).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Failed to start server core: {}", e);
+                        let _ = result_tx.send(Err(e));
+                        return;
+                    }
+                };
 
                 // Phase 2: Start capture
                 let capture = match CaptureSession::start(&server, &recording_config, true).await {

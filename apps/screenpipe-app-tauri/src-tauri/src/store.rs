@@ -642,10 +642,6 @@ pub struct SettingsStore {
     /// Unique device ID for AI usage tracking (generated on first launch)
     #[serde(rename = "deviceId", default = "generate_device_id")]
     pub device_id: String,
-    /// Auto-install updates and restart when a new version is available.
-    /// When disabled, users must click "update now" in the tray menu.
-    #[serde(rename = "autoUpdate", default = "default_false")]
-    pub auto_update: bool,
     /// Timeline overlay mode: "fullscreen" (floating panel above everything) or
     /// "window" (normal resizable window with title bar).
     #[serde(rename = "overlayMode", default = "default_overlay_mode")]
@@ -702,10 +698,6 @@ fn generate_device_id() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn default_overlay_size() -> String {
@@ -952,7 +944,6 @@ Rules:
             show_shortcut_overlay: true,
             shortcut_overlay_size: "small".to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
-            auto_update: false,
             #[cfg(target_os = "macos")]
             overlay_mode: "fullscreen".to_string(),
             #[cfg(not(target_os = "macos"))]
@@ -1129,7 +1120,10 @@ impl SettingsStore {
 
     pub fn audio_engine_resolution(&self) -> AudioEngineResolution {
         let engine = self.recording.audio_transcription_engine.clone();
-        let active = self.recording.local_audio_transcription_engine().to_string();
+        let active = self
+            .recording
+            .local_audio_transcription_engine()
+            .to_string();
         let mut resolution = AudioEngineResolution {
             requested: engine.clone(),
             active,
@@ -1142,7 +1136,8 @@ impl SettingsStore {
                 active_engine = %resolution.active,
                 "retired or unsupported transcription engine replaced with a local engine"
             );
-            resolution.fallback_reason = Some(AudioEngineFallbackReason::RetiredOrUnsupportedEngine);
+            resolution.fallback_reason =
+                Some(AudioEngineFallbackReason::RetiredOrUnsupportedEngine);
         }
 
         resolution
@@ -1218,8 +1213,8 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
             should_save = true;
         }
 
-        let local_meeting_provider = screenpipe_config::RecordingSettings::
-            normalize_meeting_live_transcription_provider(
+        let local_meeting_provider =
+            screenpipe_config::RecordingSettings::normalize_meeting_live_transcription_provider(
                 &store.recording.meeting_live_transcription_provider,
             )
             .to_string();
@@ -1311,32 +1306,6 @@ mod tests {
     use serde_json::json;
 
     const FALLBACK_ENGINE: &str = "whisper-large-v3-turbo-quantized";
-
-    #[test]
-    fn auto_update_defaults_to_disabled() {
-        assert!(!SettingsStore::default().auto_update);
-    }
-
-    #[test]
-    fn missing_auto_update_deserializes_disabled() {
-        let settings: SettingsStore = serde_json::from_value(json!({
-            "aiPresets": []
-        }))
-        .unwrap();
-
-        assert!(!settings.auto_update);
-    }
-
-    #[test]
-    fn explicit_auto_update_true_is_respected() {
-        let settings: SettingsStore = serde_json::from_value(json!({
-            "aiPresets": [],
-            "autoUpdate": true
-        }))
-        .unwrap();
-
-        assert!(settings.auto_update);
-    }
 
     #[test]
     fn retired_remote_engines_fall_back_even_with_legacy_credentials() {

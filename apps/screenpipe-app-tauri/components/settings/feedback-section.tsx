@@ -4,8 +4,7 @@
 "use client";
 
 import React from "react";
-import { ShareLogsButton } from "@/components/share-logs-button";
-import { MessageSquare, Github, Lightbulb, FileText, Youtube, BookOpen, Play } from "lucide-react";
+import { Github, Lightbulb, Youtube, BookOpen, Play } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 
 function DiscordIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -26,7 +25,7 @@ export function FeedbackSection() {
   return (
     <div className="space-y-5" data-testid="section-help">
       <p className="text-muted-foreground text-sm mb-4">
-        Get support, send logs, or suggest features
+        Find documentation and community support
       </p>
 
       <div className="space-y-2">
@@ -63,17 +62,6 @@ export function FeedbackSection() {
             watch →
           </span>
         </button>
-
-        <div className="px-3 py-2.5 bg-card border border-border">
-          <div className="flex items-center gap-2.5 mb-2.5">
-            <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
-            <div>
-              <h3 className="text-sm font-medium text-foreground">Send logs</h3>
-              <p className="text-xs text-muted-foreground">logs are included automatically</p>
-            </div>
-          </div>
-          <ShareLogsButton />
-        </div>
 
         <div className="px-3 py-2.5 bg-card border border-border">
           <div className="flex items-center justify-between">
@@ -162,24 +150,6 @@ export function FeedbackSection() {
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               join →
-            </button>
-          </div>
-        </div>
-
-        <div className="px-3 py-2.5 bg-card border border-border">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-              <div>
-                <h3 className="text-sm font-medium text-foreground">Changelog</h3>
-                <p className="text-xs text-muted-foreground">what&apos;s new in each version</p>
-              </div>
-            </div>
-            <button
-              onClick={() => open("https://screenpipe.com/changelog")}
-              className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
-            >
-              screenpipe.com/changelog →
             </button>
           </div>
         </div>

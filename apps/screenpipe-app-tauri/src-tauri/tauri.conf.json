@@ -45,10 +45,6 @@
     }
   },
   "plugins": {
-    "updater": {
-      "endpoints": [],
-      "pubkey": ""
-    },
     "deep-link": {
       "desktop": {
         "schemes": [
@@ -60,12 +56,6 @@
           "host": "screenpi.pe",
           "pathPrefix": [
             "/settings"
-          ]
-        },
-        {
-          "host": "screenpi.pe",
-          "pathPrefix": [
-            "/changelog"
           ]
         },
         {

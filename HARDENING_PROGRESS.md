@@ -1701,3 +1701,106 @@ Verification on Windows on 2026-09-10:
 - `cargo build --release --locked --offline` passed in 6m 15s from the root
   workspace using Visual Studio Developer PowerShell and the documented
   Ninja/OpenBLAS/ORT release environment, with only established warnings.
+
+### Remaining application-controlled Internet boundary — 2026-09-10
+
+After PII acquisition removal, runtime reachability still finds five
+ScreenWise-controlled non-loopback request classes: desktop update
+check/download/rollback, hosted support-log upload, hosted changelog fetch,
+automatic Google/Gstatic favicon images, and the local Pi bootstrap fallback
+that downloads PortableGit when Bash is missing. None is needed for Windows
+capture, OCR, local audio/transcription, SQLite search, local authenticated API,
+or local Ollama chat. Local structured logs and `last-panic.log` remain useful
+without upload; local application icons can replace remote favicons; missing
+Git Bash can be reported as an explicit prerequisite instead of acquired.
+
+This combined boundary will remove those independently safe egress paths and
+their stale UI/settings/bindings/dependencies together to avoid repeated full
+desktop link cycles. It deliberately preserves loopback HTTP/WebSocket traffic,
+local API bearer authentication, local Ollama, owned-browser control, captured
+URL handling/privacy filters, and explicit user-directed links opened in the
+system browser. Audio model acquisition is larger and remains a separate
+explicit-provisioning commit. Baseline database/settings migration is not a
+constraint; obsolete updater settings can be removed rather than shimmed.
+
+Pi package bootstrap is a separate material boundary: desktop startup and the
+core executor can still invoke Bun package installation, while a running Pi
+agent can intentionally use its shell and owned-browser tools to reach remote
+sites. This commit removes only the unrelated PortableGit fallback. A verified,
+offline Pi distribution and the policy for user-directed agent network tools
+need an owner decision after the independent model/build acquisition paths are
+closed.
+
+### Application-controlled desktop egress closure complete — 2026-09-10
+
+- Removed the Tauri updater implementation, plugin, permissions, endpoints,
+  signing configuration, update/rollback commands, pending-update state,
+  settings, banners, menu actions, E2E harness, and generated TypeScript
+  bindings. The application no longer checks, downloads, installs, or rolls
+  back releases. Explicit system-browser links remain user-directed.
+- Removed hosted support-log uploads from normal, onboarding, and failure UI,
+  then removed the residual arbitrary signed-URL upload command. Local log
+  persistence, log-folder access, resource diagnostics, and `last-panic.log`
+  remain available without transmission.
+- Removed hosted changelog fetching/dialog/deep links, automatic Google/Gstatic
+  favicon requests, and Google Fonts imports. Timeline/settings now use local
+  application or Lucide icons; small overlay windows use Windows-local
+  Cascadia Mono/Consolas fallbacks.
+- Removed the unused frontend/native Tauri HTTP plugin and its unrestricted
+  HTTP permission. A complete frontend reachability audit now finds only
+  loopback ScreenWise API/helper/Ollama requests. Remaining external URLs are
+  inert text or explicit user actions through the system/owned browser.
+- Removed PortableGit download, verification, extraction, cache cleanup, and
+  fallback execution. Pi now discovers user-provisioned Git Bash or `bash.exe`
+  on `PATH` and reports the prerequisite when absent; this does not remove the
+  separately retained local Pi/Ollama capability.
+- Regenerated the command bindings and Windows/desktop Tauri schemas. Because
+  Tauri only regenerates host-platform schema files, the identical obsolete
+  updater/HTTP permission nodes were mechanically pruned from the checked-in
+  macOS/Linux schemas and all six JSON schema files were parse-validated.
+  Searches find no updater command/plugin/permission, hosted log-upload edge,
+  changelog runtime route, remote favicon/font load, Tauri HTTP plugin, or
+  PortableGit acquisition path.
+- No database migration or settings compatibility shim was added. Obsolete
+  updater settings are simply gone, consistent with the decision not to
+  migrate baseline Screenpipe data.
+- The root Cargo lock is unchanged at
+  `5E8481B13C17A93B8C622046CA61D4AC3EA12CA345F0D9FDAD6E9A20659EE269`.
+  The reviewed desktop Cargo lock removes only the updater, HTTP plugin, their
+  orphaned packages, and dependency features enabled solely by those plugins;
+  its SHA-256 is
+  `BC527C35497626ACB7B9CD303033CDB4FA3A86B9BE93E347CEA18FB2AB0B70A4`.
+  The Bun lock removes only the two matching plugins and their private API
+  entries; its SHA-256 is
+  `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
+  No retained version, source, or checksum changed. Litepipe was not consulted.
+
+Verification on Windows on 2026-09-10:
+
+- Root and desktop `cargo fmt --all -- --check`, `cargo check -p
+  screenpipe-core --locked --offline`, and `git diff --check`: passed. The
+  desktop formatter initially exposed existing formatting drift in files
+  touched by the removal; applying rustfmt made both checks pass.
+- The locked/offline native binding export passed using Ninja Multi-Config,
+  the transient `knf-rs-sys` CRT override, and OpenBLAS on runtime `PATH`.
+  The required isolated `tauri_bindings_are_current` check passed after the
+  final manifest/schema changes, as did the focused tray-shutdown test.
+- The full desktop binary suite passed 144 tests and ignored 4 except for the
+  documented concurrent exporter/freshness truncation race; its isolated
+  freshness rerun passed. This failure is recorded rather than counted as a
+  full-suite pass.
+- Direct Node Vitest passed 33 files and 380 tests. Direct TypeScript
+  `tsc --noEmit` passed after the final frontend changes. The installed Next
+  production build passed after the final dependency/font removal with only
+  the established `unpdf` `import.meta` warning.
+- `cargo build --release --locked --offline` passed from the root workspace in
+  5m 26s under the documented Developer PowerShell Ninja/OpenBLAS/ORT release
+  environment, with only established warnings.
+- A generic all-platform `cargo metadata --offline` lock-refresh attempt could
+  not use an uncached Linux-only `alsa` package. The Windows-target desktop
+  `cargo check --offline` then regenerated the lock and schemas successfully;
+  every subsequent native command above used `--locked --offline`.
+
+Audio model acquisition, build-script tool/runtime acquisition, and Pi package
+bootstrap are explicitly not claimed complete here and remain the next audited
+boundaries.

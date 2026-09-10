@@ -6,15 +6,6 @@
 
 export const commands = {
 /**
- * Frontend-callable gate. The banner awaits this before calling
- * `downloadAndInstall` (Windows: triggers process::exit internally) or
- * `relaunch`. Returns one of `"proceed"`, `"errored"`, or `"pending"`
- * — frontend toasts on the latter two.
- */
-async awaitSafeRestart(timeoutSecs: number | null) : Promise<string> {
-    return await TAURI_INVOKE("await_safe_restart", { timeoutSecs });
-},
-/**
  * Request Calendar permission (shows one-time macOS popup).
  * Returns "granted", "denied", or an error message.
  */
@@ -492,21 +483,6 @@ async getMonitors() : Promise<Result<MonitorDevice[], string>> {
 async getOnboardingStatus() : Promise<Result<OnboardingStore, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_onboarding_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Hydrate the frontend banner state on mount. The `update-available` event
- * is broadcast once when the download completes — if the React app isn't
- * mounted yet (boot race) or the listener lives on a route the user hasn't
- * visited yet, that event is lost. The banner calls this command on mount
- * to pick up state it may have missed.
- */
-async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_pending_update") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1191,18 +1167,6 @@ async revealInDefaultBrowser(path: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Install a specific older version from R2. Downloads and installs via Tauri updater,
- * then restarts the app.
- */
-async rollbackToVersion(version: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rollback_to_version", { version }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Scan the standard locations for skill folders the user could import.
  */
 async scanDeviceSkills() : Promise<Result<DeviceSkill[], string>> {
@@ -1422,7 +1386,7 @@ async stopCapture() : Promise<Result<null, string>> {
 },
 /**
  * Stop capture AND server so the next spawn_screenpipe does a full restart.
- * Called by "Apply & Restart", audio shortcuts, updates, and rollbacks.
+ * Called by "Apply & Restart" and audio shortcuts.
  * The tray toggle uses stop_capture / start_capture to keep the server alive.
  */
 async stopScreenpipe() : Promise<Result<null, string>> {
@@ -1454,20 +1418,6 @@ async trainVoice(name: string, startTime: string, endTime: string) : Promise<Res
 }
 },
 /**
- * User-initiated update check from Settings → General. Returns:
- * - `Ok(true)`  when an update was found (banner will appear after download).
- * - `Ok(false)` when already up to date or the build can't auto-update.
- * - `Err(String)` when the check itself failed (network, server, etc.).
- */
-async triggerUpdateCheck() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trigger_update_check") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Unregister window-specific shortcuts when main window is hidden.
  * Only unregisters Escape and arrow keys. Global shortcuts (search, show, chat)
  * are NOT touched here — they must persist across window show/hide cycles.
@@ -1491,14 +1441,6 @@ async updateGlobalShortcuts(showShortcut: string, startShortcut: string, stopSho
 async updateShowScreenpipeShortcut(newShortcut: string, enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_show_screenpipe_shortcut", { newShortcut, enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async uploadFileToS3(filePath: string, signedUrl: string) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("upload_file_to_s3", { filePath, signedUrl }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1673,16 +1615,6 @@ export type OnboardingStore = { isCompleted: boolean; completedAt: string | null
  * Used to resume after app restart (e.g., after granting permissions)
  */
 currentStep?: string | null }
-/**
- * Snapshot of a pending update, exposed to the frontend via
- * `get_pending_update`. The banner queries this on mount so it can hydrate
- * state even when the `update-available` event fires before React mounts.
- */
-export type PendingUpdateSnapshot = { version: string; body: string;
-/**
- * True once the bundle is downloaded and the app is ready to restart.
- */
-downloaded: boolean }
 export type PiCheckResult = { available: boolean; path: string | null }
 /**
  * Image content for Pi RPC protocol (pi-ai ImageContent format)
@@ -2128,11 +2060,6 @@ shortcutOverlaySize?: string;
  * Unique device ID for AI usage tracking (generated on first launch)
  */
 deviceId?: string;
-/**
- * Auto-install updates and restart when a new version is available.
- * When disabled, users must click "update now" in the tray menu.
- */
-autoUpdate?: boolean;
 /**
  * Timeline overlay mode: "fullscreen" (floating panel above everything) or
  * "window" (normal resizable window with title bar).

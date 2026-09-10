@@ -75,12 +75,6 @@
       "layers": ["real-ui-e2e"]
     },
     {
-      "id": "pipes",
-      "label": "Pipes discover, install, and play",
-      "platforms": ["windows", "macos", "linux"],
-      "layers": ["pipes"]
-    },
-    {
       "id": "chat",
       "label": "Chat window, composer, and streaming state",
       "platforms": ["windows", "macos", "linux"],
@@ -97,18 +91,6 @@
       "label": "Storage retention safety UX",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["storage-privacy"]
-    },
-    {
-      "id": "updates",
-      "label": "Updater install and rollback safety",
-      "platforms": ["windows", "macos", "linux"],
-      "layers": ["os-integration"]
-    },
-    {
-      "id": "update-surfacing",
-      "label": "Update-available banner surfacing",
-      "platforms": ["windows", "macos", "linux"],
-      "layers": ["real-ui-e2e"]
     }
   ],
   "specs": [
@@ -296,11 +278,11 @@
       "spec": "home-window.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["real-ui-e2e", "window-lifecycle"],
-      "features": ["app-launch", "home-navigation", "timeline", "settings-recording", "pipes"],
+      "features": ["app-launch", "home-navigation", "timeline", "settings-recording"],
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Clicks through Home, Pipes, Timeline, Help, and Settings."
+      "notes": "Clicks through Home, Timeline, Help, and Settings."
     },
     {
       "spec": "macos-ui-performance.spec.ts",
@@ -391,16 +373,6 @@
       "confidence": "conditional",
       "ux": "real-user-flow",
       "notes": "macOS-only recovery window for missing TCC permissions."
-    },
-    {
-      "spec": "pipes.spec.ts",
-      "platforms": ["windows", "macos", "linux"],
-      "layers": ["pipes", "real-ui-e2e", "local-api"],
-      "features": ["pipes"],
-      "criticality": "high",
-      "confidence": "strong",
-      "ux": "real-user-flow",
-      "notes": "Pipes discover, install failure, connection modal, install, list, and play."
     },
     {
       "spec": "privacy-api-auth.spec.ts",
@@ -531,16 +503,6 @@
       "confidence": "smoke",
       "ux": "command",
       "notes": "Owned browser background navigation visibility."
-    },
-    {
-      "spec": "updater-banner.spec.ts",
-      "platforms": ["windows", "macos", "linux"],
-      "layers": ["real-ui-e2e"],
-      "features": ["update-surfacing"],
-      "criticality": "high",
-      "confidence": "partial",
-      "ux": "synthetic",
-      "notes": "Synthetic update-available event surfaces the restart-to-update banner (no relaunch). Real check/download/install + rollback stay manual via e2e/mock-updates; the debug e2e build disables the updater check under cfg!(debug_assertions)."
     },
     {
       "spec": "privacy-installed-apps.spec.ts",

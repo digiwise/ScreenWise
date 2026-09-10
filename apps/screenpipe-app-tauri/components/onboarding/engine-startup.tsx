@@ -5,7 +5,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Check, Upload, Loader, Calendar } from "lucide-react";
+import { Loader, Calendar } from "lucide-react";
 import { Button } from "../ui/button";
 import { commands } from "@/lib/utils/tauri";
 import { openPermissionSettingsWithFlow } from "@/lib/utils/permission-flow";
@@ -15,12 +15,6 @@ import { localFetch } from "@/lib/api";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir, join } from "@tauri-apps/api/path";
-import { readTextFile } from "@tauri-apps/plugin-fs";
-import { getVersion } from "@tauri-apps/api/app";
-import {
-  version as osVersion,
-  platform as osPlatform,
-} from "@tauri-apps/plugin-os";
 import { ParticleStream, ProgressSteps } from "./particle-stream";
 
 interface EngineStartupProps {
@@ -101,8 +95,6 @@ export default function EngineStartup({
   const [audioReady, setAudioReady] = useState(false);
   const [visionReady, setVisionReady] = useState(false);
   const [isTakingLonger, setIsTakingLonger] = useState(false);
-  const [isSendingLogs, setIsSendingLogs] = useState(false);
-  const [logsSent, setLogsSent] = useState(false);
   // When spawn_screenpipe rejects (e.g. TCC permission denied) we used to
   // swallow the error and let the 15s "stuck" timer fire with empty boot phase.
   // Earlier startup diagnostics showed most stuck users had
@@ -678,84 +670,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
     handleNextSlide();
   };
 
-  const sendLogs = async () => {
-    setIsSendingLogs(true);
-    try {
-      const BASE_URL = "https://screenpi.pe";
-      const machineId =
-        localStorage?.getItem("machineId") || crypto.randomUUID();
-      try {
-        localStorage?.setItem("machineId", machineId);
-      } catch {}
-      const identifier = machineId;
-      const type = "machine";
-      const logFilesResult = await commands.getLogFiles();
-      if (logFilesResult.status !== "ok")
-        throw new Error("Failed to get log files");
-      const logFiles = logFilesResult.data.slice(0, 3);
-      const MAX_LOG_SIZE = 50 * 1024;
-      const logContents = await Promise.all(
-        logFiles.map(async (file) => {
-          try {
-            const content = await readTextFile(file.path);
-            const truncated =
-              content.length > MAX_LOG_SIZE
-                ? `... [truncated] ...\n` + content.slice(-MAX_LOG_SIZE)
-                : content;
-            return { name: file.name, content: truncated };
-          } catch {
-            return { name: file.name, content: "[Error reading file]" };
-          }
-        })
-      );
-      const signedRes = await fetch(`${BASE_URL}/api/logs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identifier, type }),
-      });
-      const {
-        data: { signedUrl, path },
-      } = await signedRes.json();
-      const consoleLog = (localStorage?.getItem("console_logs") || "").slice(
-        -50000
-      );
-      const combinedLogs =
-        logContents
-          .map((log) => `\n=== ${log.name} ===\n${log.content}`)
-          .join("\n\n") +
-        "\n\n=== Browser Console Logs ===\n" +
-        consoleLog +
-        "\n\n=== Onboarding Stuck ===\nUser experienced startup issues during onboarding.";
-      await fetch(signedUrl, {
-        method: "PUT",
-        body: combinedLogs,
-        headers: { "Content-Type": "text/plain" },
-      });
-      const os = osPlatform();
-      const os_version = osVersion();
-      const app_version = await getVersion();
-      await fetch(`${BASE_URL}/api/logs/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path,
-          identifier,
-          type,
-          os,
-          os_version,
-          app_version,
-          feedback_text:
-            "Onboarding stuck - automatic log submission",
-        }),
-      });
-      setLogsSent(true);
-    } catch (err) {
-      console.error("Failed to send logs:", err);
-    } finally {
-      setIsSendingLogs(false);
-    }
-  };
-
   const openLogsFolder = async () => {
     try {
       const home = await homeDir();
@@ -1115,25 +1029,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
                   className="font-mono text-[10px] h-7 px-2"
                 >
                   logs
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={sendLogs}
-                  disabled={isSendingLogs || logsSent}
-                  className="font-mono text-[10px] h-7 px-2"
-                >
-                  {isSendingLogs ? (
-                    <Loader className="w-3 h-3 animate-spin" />
-                  ) : logsSent ? (
-                    <>
-                      <Check className="w-3 h-3 mr-1" /> sent
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-3 h-3 mr-1" /> send logs
-                    </>
-                  )}
                 </Button>
                 <Button
                   variant="outline"

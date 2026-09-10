@@ -4,27 +4,14 @@
 // app/providers.tsx
 "use client";
 import { useEffect, useState, Suspense } from "react";
-import { ChangelogDialogProvider } from "@/lib/hooks/use-changelog-dialog";
 import { SettingsProvider } from "@/lib/hooks/use-settings";
 import { ThemeProvider } from "@/components/theme-provider";
 import { PermissionMonitorProvider } from "@/lib/hooks/use-permission-monitor";
 import { forwardRef } from "react";
 import { NuqsAdapter } from "nuqs/adapters/next/app";
 import { commands } from "@/lib/utils/tauri";
-import { useUpdateListener } from "@/components/update-banner";
 import { DeeplinkHandler } from "@/components/deeplink-handler";
 import { usePathname } from "next/navigation";
-
-/// Global mount point for the updater event listener. Lives here (not in
-/// per-page hooks) so the listener is registered for the lifetime of the
-/// app — the `update-available` event fires once when the bundle download
-/// completes, and if the listener wasn't mounted at that moment the banner
-/// would never appear. The hook also hydrates from `get_pending_update` on
-/// mount so a late-mounting webview still picks up an event it missed.
-function UpdateListenerMount() {
-  useUpdateListener();
-  return null;
-}
 
 export const Providers = forwardRef<
   HTMLDivElement,
@@ -38,8 +25,8 @@ export const Providers = forwardRef<
   // resulting mismatch surfaces as React #419 (hydration recovery), and
   // React's fallback "re-render the entire root on the client" path then
   // trips React #185 (max update depth) deep in the message list — the
-  // symptom users see is the "something went wrong" boundary on every
-  // first launch after auto-update. mounted=false on the initial render
+  // symptom users see is the "something went wrong" boundary on first
+  // launch after replacement of the installed application. mounted=false on the initial render
   // matches the static prerender (both produce no children), so hydration
   // succeeds; the post-mount effect flips mounted=true and the real tree
   // renders client-only without a hydration step.
@@ -116,23 +103,20 @@ export const Providers = forwardRef<
 
   return (
     <Suspense>
-    <NuqsAdapter>
-      <SettingsProvider>
-        <ThemeProvider defaultTheme="system" storageKey="screenpipe-ui-theme">
-            <ChangelogDialogProvider>
-              <PermissionMonitorProvider>
-                <UpdateListenerMount />
-                {mounted ? (
-                  <>
-                    {!isOverlay && <DeeplinkHandler />}
-                    {children}
-                  </>
-                ) : null}
-              </PermissionMonitorProvider>
-            </ChangelogDialogProvider>
+      <NuqsAdapter>
+        <SettingsProvider>
+          <ThemeProvider defaultTheme="system" storageKey="screenpipe-ui-theme">
+            <PermissionMonitorProvider>
+              {mounted ? (
+                <>
+                  {!isOverlay && <DeeplinkHandler />}
+                  {children}
+                </>
+              ) : null}
+            </PermissionMonitorProvider>
           </ThemeProvider>
-      </SettingsProvider>
-    </NuqsAdapter>
+        </SettingsProvider>
+      </NuqsAdapter>
     </Suspense>
   );
 });

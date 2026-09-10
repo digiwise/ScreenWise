@@ -155,10 +155,6 @@ const createWindowOptions = (
   return [...windowOptions, ...installedOptions, ...customOptions];
 };
 
-const getFaviconUrl = (domain: string): string => {
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32`;
-};
-
 const createUrlOptions = (
   urlItems: { name: string; count: number }[],
   existingUrls: string[]
@@ -168,7 +164,6 @@ const createUrlOptions = (
     .map((item) => ({
       value: item.name,
       label: item.name,
-      iconUrl: getFaviconUrl(item.name),
       icon: Globe,
       description: `${formatCount(item.count)} visits this week`,
     }));
@@ -178,7 +173,6 @@ const createUrlOptions = (
     .map((url) => ({
       value: url,
       label: url,
-      iconUrl: getFaviconUrl(url),
       icon: Globe,
     }));
 

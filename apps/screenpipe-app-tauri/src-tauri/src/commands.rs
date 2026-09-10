@@ -1421,9 +1421,7 @@ pub struct PiiModelStatus {
     pub image_files: Vec<PiiModelFileStatus>,
 }
 
-fn serialize_model_file_status(
-    status: screenpipe_redact::ModelFileStatus,
-) -> PiiModelFileStatus {
+fn serialize_model_file_status(status: screenpipe_redact::ModelFileStatus) -> PiiModelFileStatus {
     let state = match status.state {
         screenpipe_redact::ModelFileState::Verified => "verified",
         screenpipe_redact::ModelFileState::Missing => "missing",
@@ -1445,10 +1443,7 @@ fn serialize_model_file_status(
 #[specta::specta]
 pub async fn get_pii_model_status() -> Result<PiiModelStatus, String> {
     tokio::task::spawn_blocking(|| {
-        use screenpipe_redact::adapters::{
-            onnx::OnnxConfig,
-            rfdetr::RfdetrConfig,
-        };
+        use screenpipe_redact::adapters::{onnx::OnnxConfig, rfdetr::RfdetrConfig};
 
         let text_config = OnnxConfig::default();
         let image_config = RfdetrConfig::default();
@@ -2491,31 +2486,6 @@ pub(crate) fn register_window_shortcuts_if_main_visible(app: tauri::AppHandle) {
     if main_overlay_is_visible(&app) {
         let _ = register_window_shortcuts_with_generation(app);
     }
-}
-
-/// Install a specific older version from R2. Downloads and installs via Tauri updater,
-/// then restarts the app.
-#[tauri::command]
-#[specta::specta]
-pub async fn rollback_to_version(
-    app_handle: tauri::AppHandle,
-    version: String,
-) -> Result<(), String> {
-    use crate::RecordingState;
-    info!("rollback_to_version: installing v{}", version);
-
-    // Stop recording first
-    if let Err(e) =
-        crate::stop_screenpipe(app_handle.state::<RecordingState>(), app_handle.clone()).await
-    {
-        error!("rollback: failed to stop recording: {}", e);
-    }
-
-    // Download and install the target version
-    crate::updates::install_specific_version(&app_handle, &version).await?;
-
-    info!("rollback: v{} installed, restarting", version);
-    app_handle.restart();
 }
 
 /// Perform OCR on a base64-encoded PNG image crop, using the user's configured OCR engine.

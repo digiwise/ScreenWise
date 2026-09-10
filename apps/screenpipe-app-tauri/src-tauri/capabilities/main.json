@@ -263,7 +263,6 @@
     "shell:allow-spawn",
     "permission-flow:default",
     "dialog:default",
-    "updater:default",
     "os:default",
     "os:allow-arch",
     "os:allow-hostname",
@@ -272,35 +271,6 @@
     "process:default",
     "core:webview:allow-internal-toggle-devtools",
     "core:webview:allow-create-webview-window",
-    {
-      "identifier": "http:default",
-      "allow": [
-        {
-          "url": "http://**/*",
-          "methods": [
-            "GET",
-            "POST",
-            "PUT",
-            "DELETE",
-            "PATCH",
-            "HEAD",
-            "OPTIONS"
-          ]
-        },
-        {
-          "url": "https://**/*",
-          "methods": [
-            "GET",
-            "POST",
-            "PUT",
-            "DELETE",
-            "PATCH",
-            "HEAD",
-            "OPTIONS"
-          ]
-        }
-      ]
-    },
     "deep-link:default",
     "fs:allow-write-text-file",
     {

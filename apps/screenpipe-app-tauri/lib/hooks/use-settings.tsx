@@ -38,8 +38,6 @@ export type AIPreset = {
 	prompt: string;
 } & { provider: "native-ollama" };
 
-export type UpdateChannel = "stable" | "beta";
-
 // Chat history types
 export interface ChatMessage {
 	id: string;
@@ -127,7 +125,6 @@ export interface ChatHistoryStore {
 // Extend SettingsStore with fields added before Rust types are regenerated
 export type Settings = SettingsStore & {
 	deviceId?: string;
-	updateChannel?: UpdateChannel;
 	chatHistory?: ChatHistoryStore;
 	ignoredUrls?: string[];
 	searchShortcut?: string;
@@ -345,8 +342,6 @@ let DEFAULT_SETTINGS: Settings = {
 				model: "ministral-3:latest",
 				port: 11434,
 			},
-		updateChannel: "stable",
-			autoUpdate: false,
 			autoStartEnabled: true,
 			platform: "unknown",
 			disabledShortcuts: [],

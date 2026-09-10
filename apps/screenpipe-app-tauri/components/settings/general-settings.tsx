@@ -16,14 +16,11 @@ import { Button } from "@/components/ui/button";
 import { Settings } from "@/lib/hooks/use-settings";
 import { getVersion } from "@tauri-apps/api/app";
 import { commands } from "@/lib/utils/tauri";
-import { UpdateBanner } from "@/components/update-banner";
 import type { SettingsField } from "./settings-search";
 
 /** Settings search index for this section. Co-located with the component so adding a field here means updating one file. See `SettingsField` in `./settings-search` for the schema. */
 export const searchIndex: SettingsField[] = [
   { label: "Auto-start", keywords: ["autostart", "launch", "startup"] },
-  { label: "Auto-update", keywords: ["updates"] },
-  { label: "Check for updates", keywords: ["version"] },
   { label: "Enhanced AI", keywords: ["cloud"] },
   { label: "Auto-generate chat titles" },
   { label: "Reset Onboarding", keywords: ["setup"] },
@@ -34,49 +31,6 @@ export default function GeneralSettings() {
   const { settings, updateSettings } = useSettings();
   const { toast } = useToast();
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
-  const [isCheckingForUpdate, setIsCheckingForUpdate] = useState(false);
-
-  const handleCheckForUpdates = async () => {
-    setIsCheckingForUpdate(true);
-    try {
-      const pendingRes = await commands.getPendingUpdate();
-      if (pendingRes.status === "ok" && pendingRes.data) {
-        const pending = pendingRes.data;
-        if (pending.downloaded) {
-          toast({
-            title: "update ready",
-            description: `v${pending.version} is ready — restart to update`,
-          });
-          return;
-        }
-
-        toast({
-          title: "update found",
-          description: `v${pending.version} is still downloading in the background`,
-        });
-        return;
-      }
-
-      const res = await commands.triggerUpdateCheck();
-      if (res.status === "error") throw new Error(res.error);
-      const updateFound = res.data;
-      toast({
-        title: updateFound ? "update found" : "you're up to date",
-        description: updateFound
-          ? "downloading in the background — banner will appear when ready"
-          : `running latest version${currentVersion ? ` (v${currentVersion})` : ""}`,
-      });
-    } catch (e: any) {
-      toast({
-        title: "update check failed",
-        description: e?.toString() || "please try again later",
-        variant: "destructive",
-      });
-    } finally {
-      setIsCheckingForUpdate(false);
-    }
-  };
-
   useEffect(() => {
     getVersion().then(setCurrentVersion).catch(() => {});
   }, []);
@@ -142,12 +96,8 @@ export default function GeneralSettings() {
   return (
     <div className="space-y-5" data-testid="section-settings-general">
       <p className="text-muted-foreground text-sm mb-4">
-        Startup, updates, and notifications
+        Startup and notifications
       </p>
-
-      <div className="flex items-center justify-end">
-          <UpdateBanner compact />
-      </div>
 
       <div className="space-y-2">
         <Card className="border-border bg-card">
@@ -169,51 +119,6 @@ export default function GeneralSettings() {
             </div>
           </CardContent>
         </Card>
-          <Card className="border-border bg-card">
-            <CardContent className="px-3 py-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <div>
-                    <h3 className="text-sm font-medium text-foreground">Auto-update</h3>
-                    <p className="text-xs text-muted-foreground">Restart automatically when an update is downloaded. Off: a "restart to update" banner appears instead.</p>
-                  </div>
-                </div>
-                <Switch
-                  id="auto-update-toggle"
-                  checked={settings?.autoUpdate ?? false}
-                  onCheckedChange={(checked) =>
-                    handleSettingsChange({ autoUpdate: checked })
-                  }
-                  className="ml-4"
-                />
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border bg-card">
-            <CardContent className="px-3 py-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <div>
-                    <h3 className="text-sm font-medium text-foreground">Check for updates</h3>
-                    <p className="text-xs text-muted-foreground">
-                      {currentVersion ? `Running v${currentVersion}` : "Look for a new version now"}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCheckForUpdates}
-                  disabled={isCheckingForUpdate}
-                  className="ml-4 h-8"
-                >
-                  {isCheckingForUpdate ? "checking..." : "check now"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">

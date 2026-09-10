@@ -1581,11 +1581,7 @@ mod tests {
 
     #[test]
     fn boot_readiness_pending_during_intermediate_phases() {
-        for phase in [
-            "starting",
-            "migrating_database",
-            "building_audio",
-        ] {
+        for phase in ["starting", "migrating_database", "building_audio"] {
             with_boot_phase(phase, || {
                 assert_eq!(
                     boot_readiness(),

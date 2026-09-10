@@ -18,11 +18,10 @@ export default function NotificationPanelLayout({
         overflow: "hidden",
         minHeight: "100vh",
         width: "100%",
-        fontFamily: '"IBM Plex Mono", monospace',
+        fontFamily: '"Cascadia Mono", Consolas, monospace',
       }}
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap');
         html, body {
           background: transparent !important;
           margin: 0;

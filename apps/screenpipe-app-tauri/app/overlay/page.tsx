@@ -11,25 +11,20 @@ import NotificationHandler from "@/components/notification-handler";
 import { useToast } from "@/components/ui/use-toast";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { checkFirstRunNotification } from "@/lib/notifications";
-import { ChangelogDialog } from "@/components/changelog-dialog";
 import { localFetch } from "@/lib/api";
 
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
 
 import { commands } from "@/lib/utils/tauri";
 import localforage from "localforage";
-import { UpdateBanner } from "@/components/update-banner";
 import { ModelDownloadTracker } from "@/components/model-download-tracker";
 import Timeline from "@/components/rewind/timeline";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { RefreshCw, AlertTriangle, WifiOff, Upload, Loader, Check, Calendar, X } from "lucide-react";
+import { RefreshCw, AlertTriangle, WifiOff, Calendar, X } from "lucide-react";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
 
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { readTextFile } from "@tauri-apps/plugin-fs";
-import { getVersion } from "@tauri-apps/api/app";
-import { version as osVersion, platform as osPlatform } from "@tauri-apps/plugin-os";
 import { PermissionButtons } from "@/components/status/permission-buttons";
 import { PermissionBanner } from "@/components/status/permission-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";
@@ -105,8 +100,6 @@ export default function OverlayPage() {
   const { isServerDown, isLoading: isHealthLoading } = useHealthCheck();
   const { isMac } = usePlatform();
   const [isRestarting, setIsRestarting] = useState(false);
-  const [isSendingLogs, setIsSendingLogs] = useState(false);
-  const [logsSent, setLogsSent] = useState(false);
   const isProcessingRef = useRef(false);
   
   // Optimistic UI: track if user has any data (cached or live)
@@ -191,60 +184,6 @@ export default function OverlayPage() {
     }
   }, [onboardingData.isCompleted]);
 
-  const sendLogs = async () => {
-    setIsSendingLogs(true);
-    try {
-      const BASE_URL = "https://screenpi.pe";
-      const machineId = localStorage?.getItem("machineId") || crypto.randomUUID();
-      try { localStorage?.setItem("machineId", machineId); } catch {}
-      const identifier = machineId;
-      const type = "machine";
-      const logFilesResult = await commands.getLogFiles();
-      if (logFilesResult.status !== "ok") throw new Error("Failed to get log files");
-      const logFiles = logFilesResult.data.slice(0, 3);
-      const MAX_LOG_SIZE = 50 * 1024;
-      const logContents = await Promise.all(
-        logFiles.map(async (file) => {
-          try {
-            const content = await readTextFile(file.path);
-            const truncated = content.length > MAX_LOG_SIZE
-              ? `... [truncated] ...\n` + content.slice(-MAX_LOG_SIZE)
-              : content;
-            return { name: file.name, content: truncated };
-          } catch {
-            return { name: file.name, content: "[Error reading file]" };
-          }
-        })
-      );
-      const signedRes = await fetch(`${BASE_URL}/api/logs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identifier, type }),
-      });
-      const { data: { signedUrl, path } } = await signedRes.json();
-      const consoleLog = (localStorage?.getItem("console_logs") || "").slice(-50000);
-      const combinedLogs = logContents
-        .map((log) => `\n=== ${log.name} ===\n${log.content}`)
-        .join("\n\n") +
-        "\n\n=== Browser Console Logs ===\n" + consoleLog +
-        "\n\n=== Server Not Active ===\nServer not active - user submitted logs";
-      await fetch(signedUrl, { method: "PUT", body: combinedLogs, headers: { "Content-Type": "text/plain" } });
-      const os = osPlatform();
-      const os_version = osVersion();
-      const app_version = await getVersion();
-      await fetch(`${BASE_URL}/api/logs/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, identifier, type, os, os_version, app_version, feedback_text: "Server not active - user submitted logs" }),
-      });
-      setLogsSent(true);
-    } catch (err) {
-      console.error("Failed to send logs:", err);
-    } finally {
-      setIsSendingLogs(false);
-    }
-  };
-
   const openBookingLink = () => {
     openUrl("https://cal.com/team/screenpipe/chat");
   };
@@ -319,10 +258,7 @@ export default function OverlayPage() {
       {/* Only render content after settings are loaded */}
       {isSettingsLoaded ? (
         <>
-          <ChangelogDialog />
-
           <ModelDownloadTracker />
-          <UpdateBanner />
           
           {showTimeline ? (
             <div className="w-full scrollbar-hide bg-background relative">
@@ -416,22 +352,6 @@ export default function OverlayPage() {
 
                 {/* Help Actions */}
                 <div className="flex items-center justify-center gap-3">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={sendLogs}
-                    disabled={isSendingLogs || logsSent}
-                    className="text-muted-foreground"
-                  >
-                    {logsSent ? (
-                      <Check className="h-4 w-4 mr-1.5" />
-                    ) : isSendingLogs ? (
-                      <Loader className="h-4 w-4 mr-1.5 animate-spin" />
-                    ) : (
-                      <Upload className="h-4 w-4 mr-1.5" />
-                    )}
-                    {logsSent ? "logs sent" : isSendingLogs ? "sending..." : "send logs"}
-                  </Button>
                   <Button
                     variant="outline"
                     size="sm"

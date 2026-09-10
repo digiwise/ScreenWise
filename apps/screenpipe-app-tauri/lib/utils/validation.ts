@@ -6,7 +6,7 @@ import { z } from "zod";
 import { SettingsStore, AIPreset, EmbeddedLLM } from "./tauri";
 
 // Extended settings type that includes fields not yet in generated SettingsStore
-type ExtendedSettingsKeys = keyof SettingsStore | "ignoredUrls" | "deviceId" | "updateChannel";
+type ExtendedSettingsKeys = keyof SettingsStore | "ignoredUrls" | "deviceId";
 
 // Zod schemas for validation
 export const embeddedLLMSchema = z.object({

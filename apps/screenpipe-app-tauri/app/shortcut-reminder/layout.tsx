@@ -20,7 +20,6 @@ export default function ShortcutReminderLayout({
       }}
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap');
         html, body, #__next, main {
           background: transparent !important;
           background-color: transparent !important;
@@ -31,7 +30,7 @@ export default function ShortcutReminderLayout({
           width: 100%;
         }
         body {
-          font-family: "IBM Plex Mono", monospace;
+          font-family: "Cascadia Mono", Consolas, monospace;
         }
       `}</style>
       {children}

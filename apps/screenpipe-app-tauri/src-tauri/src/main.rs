@@ -25,11 +25,8 @@ use tracing_subscriber::EnvFilter;
 
 #[cfg(target_os = "macos")]
 use tracing_oslog::OsLogger;
-use updates::start_update_check;
 use window::ShowRewindWindow;
 
-#[allow(deprecated)]
-mod icons;
 mod audio_exclusions;
 mod calendar;
 mod capture_session;
@@ -38,6 +35,8 @@ mod commands;
 mod disk_usage;
 mod embedded_server;
 mod hardware;
+#[allow(deprecated)]
+mod icons;
 mod livetext;
 #[cfg(target_os = "macos")]
 mod livetext_ffi;
@@ -66,7 +65,6 @@ mod space_monitor;
 mod store;
 mod suggestions;
 mod tray;
-mod updates;
 mod voice_training;
 mod window;
 mod windows_ca_bundle;
@@ -246,71 +244,6 @@ fn get_mime_type(path: &str) -> String {
     }
 }
 
-#[tauri::command]
-#[specta::specta]
-async fn upload_file_to_s3(file_path: &str, signed_url: &str) -> Result<bool, String> {
-    debug!("Starting upload for file: {}", file_path);
-
-    // Read file contents - do this outside retry loop to avoid multiple reads
-    let file_contents = match tokio::fs::read(file_path).await {
-        Ok(contents) => {
-            debug!("Successfully read file of size: {} bytes", contents.len());
-            contents
-        }
-        Err(e) => {
-            error!("Failed to read file: {}", e);
-            return Err(e.to_string());
-        }
-    };
-
-    let client = reqwest::Client::new();
-    let max_retries = 3;
-    let mut attempt = 0;
-    let mut last_error = String::new();
-
-    while attempt < max_retries {
-        attempt += 1;
-        debug!("Upload attempt {} of {}", attempt, max_retries);
-
-        match client
-            .put(signed_url)
-            .body(file_contents.clone())
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                if status.is_success() {
-                    debug!("Successfully uploaded file on attempt {}", attempt);
-                    return Ok(true);
-                }
-                // Surface the response body — S3/Supabase wraps the reason for
-                // 400/403 (signed URL expired, content-type mismatch, etc.) in
-                // an XML payload that we'd otherwise discard.
-                let body = response.text().await.unwrap_or_default();
-                let snippet: String = body.chars().take(500).collect();
-                last_error = format!("Upload failed with status: {} body: {}", status, snippet);
-                error!("{} (attempt {}/{})", last_error, attempt, max_retries);
-            }
-            Err(e) => {
-                last_error = format!("Request failed: {}", e);
-                error!("{} (attempt {}/{})", last_error, attempt, max_retries);
-            }
-        }
-
-        if attempt < max_retries {
-            let delay = Duration::from_secs(2u64.pow(attempt as u32 - 1)); // Exponential backoff
-            debug!("Waiting {}s before retry...", delay.as_secs());
-            sleep(delay).await;
-        }
-    }
-
-    Err(format!(
-        "Upload failed after {} attempts. Last error: {}",
-        max_retries, last_error
-    ))
-}
-
 // check if the server is running
 #[tauri::command]
 #[specta::specta]
@@ -390,7 +323,7 @@ async fn main() {
     // NODE_EXTRA_CA_CERTS before any bun/node subprocess can spawn. Fixes
     // "unable to verify the first certificate" on corporate networks where
     // antivirus (ESET, Zscaler, etc.) injects a private root CA. No-op on
-    // macOS/Linux. Must run before Pi and PortableGit download.
+    // macOS/Linux. Must run before user-provisioned bun/node subprocesses.
     windows_ca_bundle::install();
 
     // Handle --check-arc-automation / --trigger-arc-automation flags early,
@@ -595,7 +528,6 @@ async fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_http::init())
         .on_window_event(|window, event| match event {
             #[cfg(target_os = "macos")]
             tauri::WindowEvent::Focused(true) => {
@@ -684,7 +616,6 @@ async fn main() {
             _ => {}
         })
         .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
@@ -748,9 +679,6 @@ async fn main() {
                     .item(&PredefinedMenuItem::about(app, Some("About screenpipe"), None)?)
                     .separator();
                 app_submenu_builder = app_submenu_builder
-                    .item(&MenuItemBuilder::with_id("check_for_updates", "Check for Updates...")
-                        .build(app)?)
-                    .separator()
                     .item(&MenuItemBuilder::with_id("settings", "Settings...")
                         .accelerator("CmdOrCtrl+,")
                         .build(app)?)
@@ -782,15 +710,6 @@ async fn main() {
                             let app_for_closure = app_handle.clone();
                             let _ = app_handle.run_on_main_thread(move || {
                                 let _ = ShowRewindWindow::Home { page: Some("general".to_string()) }.show(&app_for_closure);
-                            });
-                        }
-                        "check_for_updates" => {
-                            let app = app_handle.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let state = app.state::<std::sync::Arc<crate::updates::UpdatesManager>>();
-                                if let Err(e) = state.check_for_updates(true).await {
-                                    tracing::error!("menu: check for updates failed: {}", e);
-                                }
                             });
                         }
                         _ => {}
@@ -1324,13 +1243,9 @@ async fn main() {
                     .expect("Failed to spawn server thread");
             }
 
-            // Initialize update check
-            let update_manager = start_update_check(&app_handle, 5)?;
-            app_handle.manage(update_manager.clone()); // Register for state::<Arc<UpdatesManager>>()
-
             // Setup tray
             if let Some(_) = app_handle.tray_by_id("screenpipe_main") {
-                if let Err(e) = tray::setup_tray(&app_handle, update_manager.update_now_menu_item_ref()) {
+                if let Err(e) = tray::setup_tray(&app_handle) {
                     error!("Failed to setup tray: {}", e);
                 }
             }

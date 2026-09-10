@@ -40,14 +40,12 @@ tauri-utils = { version = "=2.9.2", features = [] }
 # plugins
 tauri-plugin-fs = "=2.4.5"
 tauri-plugin-notification = "=2.3.3"
-tauri-plugin-updater = "=2.10.0"
 tauri-plugin-dialog = "=2.6.0"
 tauri-plugin-os = "=2.3.2"
 tauri-plugin-process = "=2.3.1"
 tauri-plugin-autostart = "=2.5.1"
 tauri-plugin-shell = "=2.3.5"
 tauri-plugin-store = "=2.4.2"
-tauri-plugin-http = "=2.5.7"
 tauri-plugin-permission-flow = { git = "https://github.com/divanshu-go/permission-flow", rev = "d7376a1b95acb78700e93505d8ca058e5ddb94ce", package = "tauri-plugin-permission-flow" }
 
 serde = { version = "1.0", features = ["derive"] }
@@ -151,7 +149,6 @@ tauri-plugin-webdriver = { version = "0.2", optional = true }
 
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-single-instance = { version = "2.3.7", features = ["deep-link"] }
-tauri-plugin-updater = "2.10.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tracing-oslog = "0.3.0"
@@ -290,7 +287,7 @@ lto = "thin"
 codegen-units = 16
 incremental = true
 
-# Maximum-speed local builds for updater e2e harness — no optimization, fastest compile.
+# Maximum-speed local E2E builds — no optimization, fastest compile.
 # Trades runtime perf and binary size for compile speed.
 [profile.release-local]
 inherits = "release"

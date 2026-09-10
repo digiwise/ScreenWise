@@ -11,13 +11,12 @@
 //! CA into Windows' store via Group Policy so the OS trusts re-signed
 //! certificates. Rust's reqwest with `rustls-tls-native-roots` honors that,
 //! but bun/node see an "unable to verify the first certificate" error on
-//! every HTTPS request — breaking PortableGit download, Pi's npm install,
-//! the Pi agent's Anthropic/OpenAI calls, and any pipe that uses `fetch()`.
+//! HTTPS requests made by explicitly provisioned bun/node tools fail.
 //!
 //! Fix: read the Windows `ROOT` + `CA` cert stores via Crypt32, write them
 //! to `%LOCALAPPDATA%\screenpipe\system-roots.pem`, and set
 //! `NODE_EXTRA_CA_CERTS=<path>` on the process env. Child processes
-//! (bun, node, Pi, Pi's npm-installed extensions, pipe scripts) inherit it
+//! (bun, node, and explicitly provisioned Pi extensions) inherit it
 //! automatically. One export → every bun/node path works.
 //!
 //! No-op on non-Windows.

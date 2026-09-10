@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { useSettings, ChatMessage, ChatConversation } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
-import { Loader2, Send, Square, Settings, ExternalLink, X, ImageIcon, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Calendar, Paperclip, Filter, RefreshCw, GitBranch, MoreHorizontal, Pencil, Pin, Sparkles, Plug, CornerDownRight } from "lucide-react";
+import { Loader2, Send, Square, Settings, ExternalLink, X, ImageIcon, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Calendar, Paperclip, Filter, RefreshCw, GitBranch, MoreHorizontal, Pencil, Pin, Sparkles, Plug, CornerDownRight, Globe } from "lucide-react";
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
@@ -120,7 +120,6 @@ import {
   sourceCitationsFromMessage,
   type SourceCitation,
 } from "@/lib/source-citations";
-import { getFaviconUrl } from "@/components/rewind/timeline/favicon-utils";
 import {
   formatSteerShortcut,
   getComposerPrimaryAction,
@@ -1077,29 +1076,12 @@ function WebTargetIcon({
   sizeClass = "w-5 h-5",
   letterClass = "text-[10px]",
 }: { target: WebTargetPresentation; sizeClass?: string; letterClass?: string }) {
-  const color = nameToColor(target.domain);
-  const [iconFailed, setIconFailed] = React.useState(false);
   return (
     <div
       className={cn("rounded-sm flex-shrink-0 flex items-center justify-center overflow-hidden bg-background", sizeClass)}
       title={target.label}
     >
-      {iconFailed ? (
-        <span
-          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-sm", letterClass)}
-          style={{ backgroundColor: color }}
-        >
-          {target.domain.charAt(0).toUpperCase()}
-        </span>
-      ) : (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={getFaviconUrl(target.domain)}
-          alt={target.domain}
-          className="w-full h-full object-contain"
-          onError={() => setIconFailed(true)}
-        />
-      )}
+      <Globe className="w-4 h-4 text-muted-foreground" aria-label={target.domain} />
     </div>
   );
 }

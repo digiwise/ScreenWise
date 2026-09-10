@@ -24,13 +24,13 @@ async fn mock_permission_monitor_loop() {
     }
 }
 
-// Simplified function mimicking the tray menu updater loop
-async fn mock_tray_menu_updater_loop() {
+// Simplified function mimicking the tray menu refresher loop
+async fn mock_tray_menu_refresher_loop() {
     let mut interval = tokio::time::interval(Duration::from_millis(5)); // Faster interval for test
     loop {
         interval.tick().await;
         if MOCK_QUIT_REQUESTED.load(Ordering::SeqCst) {
-            // info!("Mock tray menu updater received quit request, shutting down.");
+            // info!("Mock tray menu refresher received quit request, shutting down.");
             break;
         }
         // Simulate other work in the loop
@@ -45,7 +45,7 @@ async fn test_shutdown_tasks_terminate() {
 
     // Spawn both mock tasks
     let perm_monitor_handle = tokio::spawn(mock_permission_monitor_loop());
-    let tray_updater_handle = tokio::spawn(mock_tray_menu_updater_loop());
+    let tray_refresher_handle = tokio::spawn(mock_tray_menu_refresher_loop());
 
     // Let them run for a short period to ensure they are active
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -56,8 +56,8 @@ async fn test_shutdown_tasks_terminate() {
     // Wait for tasks to terminate, with a timeout
     let perm_monitor_result =
         tokio::time::timeout(Duration::from_millis(200), perm_monitor_handle).await;
-    let tray_updater_result =
-        tokio::time::timeout(Duration::from_millis(200), tray_updater_handle).await;
+    let tray_refresher_result =
+        tokio::time::timeout(Duration::from_millis(200), tray_refresher_handle).await;
 
     // Assert that both tasks completed successfully (i.e., didn't timeout)
     assert!(
@@ -65,8 +65,8 @@ async fn test_shutdown_tasks_terminate() {
         "Permission monitor task should have terminated within timeout"
     );
     assert!(
-        tray_updater_result.is_ok(),
-        "Tray menu updater task should have terminated within timeout"
+        tray_refresher_result.is_ok(),
+        "Tray menu refresher task should have terminated within timeout"
     );
 
     // Also assert that the spawned tasks themselves didn't panic and completed gracefully
@@ -75,8 +75,8 @@ async fn test_shutdown_tasks_terminate() {
         "Permission monitor task panicked or failed to complete"
     );
     assert!(
-        tray_updater_result.unwrap().is_ok(),
-        "Tray menu updater task panicked or failed to complete"
+        tray_refresher_result.unwrap().is_ok(),
+        "Tray menu refresher task panicked or failed to complete"
     );
 
     // Reset for subsequent tests if this were part of a larger suite

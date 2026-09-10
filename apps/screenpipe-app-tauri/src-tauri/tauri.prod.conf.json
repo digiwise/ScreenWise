@@ -9,7 +9,6 @@
     "devUrl": "http://localhost:3000"
   },
   "bundle": {
-    "createUpdaterArtifacts": true,
     "active": true,
     "publisher": "Mediar, Inc.",
     "category": "DeveloperTool",
@@ -51,14 +50,6 @@
     }
   },
   "plugins": {
-    "updater": {
-      "active": true,
-      "dialog": false,
-      "endpoints": [
-        "https://screenpi.pe/api/app-update/stable/{{target}}-{{arch}}/{{current_version}}"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyQjQ2RkQzMUNBOUFDMTcKUldRWHJLa2MwMiswSWl3RlBGUW5zYUE0Zm0vNFFRRTltNUZZTUVxR2FxUDNtSWdUSHgyL3JNcmcK"
-    },
     "deep-link": {
       "desktop": {
         "schemes": [
@@ -70,12 +61,6 @@
           "host": "screenpi.pe",
           "pathPrefix": [
             "/settings"
-          ]
-        },
-        {
-          "host": "screenpi.pe",
-          "pathPrefix": [
-            "/changelog"
           ]
         },
         {
