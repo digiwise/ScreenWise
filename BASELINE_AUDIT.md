@@ -37,33 +37,31 @@ This inventory distinguishes observed baseline startup behavior from optional co
 | --- | --- | --- | --- |
 | NPM version query: `https://registry.npmjs.org/screenpipe/latest` | The baseline automatic CLI startup check was removed after this audit. | Not required. | No version request is made during CLI startup or reminder rotation. Updates are an explicit user/package-management action. |
 | FFmpeg version/download: ffmpeg-sidecar latest check, then `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` | The baseline fallback was removed after this audit. Discovery accepts an existing matching FFmpeg/FFprobe pair only. | One-time tool acquisition only. | Preinstall and expose the pair on `PATH`, or bundle it beside the executable. Missing tools now produce setup guidance without network or filesystem mutation. |
-| ONNX Runtime: `https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-*-1.22.0.zip` | `screenpipe-audio/build.rs`; build-time when the pinned runtime package is absent. | Build/setup only; not needed after packaging. | Cache/package the pinned DLL; `CARGO_NET_OFFLINE`, `SCREENPIPE_SKIP_ONNX_DOWNLOAD`, or `ORT_SKIP_DOWNLOAD` suppresses download. |
+| ONNX Runtime 1.22.0 | Build input for `screenpipe-audio`; the audio build script no longer downloads it. | Build/setup only; not needed after packaging. | Provision `ORT_LIB_LOCATION` or the documented repository-local package. The Windows x64 DLL is verified before staging beside the executable. |
 | Speaker models: baseline used moving raw GitHub URLs for `segmentation-3.0.onnx` and `wespeaker_en_voxceleb_CAM++.onnx` | Runtime download was removed. Both MIT-baseline artifacts are verified by SHA-256 before ONNX Runtime loads them. | One-time explicit setup only. | Pre-stage under `%LOCALAPPDATA%\screenpipe\models`; a missing or mismatched file fails locally with no network fallback. |
 | Silero VAD v5: baseline used a moving `snakers4/silero-vad` raw `master` URL | Runtime download was removed and the accepted artifact hash is verified before loading. | One-time explicit setup only. | Pre-stage `silero_vad_v5.onnx` under `%LOCALAPPDATA%\screenpipe\vad`; record immutable source/tag/licence provenance when acquiring it, because the baseline URL was mutable. |
-| Parakeet: Hugging Face repo `istupakov/parakeet-tdt-0.6b-v3-onnx` through `audiopipe`/`hf-hub` | transcription model initialization/cache refresh. Successful run loaded the cached model. | One-time model acquisition. | Pre-stage/cache during setup; runtime code first attempts cache-only and background acquisition when unavailable. |
-| PostHog `https://us.i.posthog.com` and Sentry ingest | Product telemetry and crash-reporting transports, lifecycle/event call sites, settings, shims, permissions, and frontend dependencies were removed from the engine and desktop app. | Not required. | Local logs, local process CPU/memory diagnostics and their optional rotating JSONL file, and `last-panic.log` remain available. User-configured PostHog/Sentry connectors and secret-redaction rules are unrelated and remain. |
-| Screenpipe cloud sync, cloud archive, and SFTP remote sync | CLI sync commands, service startup, cloud-search metadata, sync/archive routes, and client transports were removed. | Not required for the local recorder. | Local retention remains available without any upload prerequisite. Cloud proxy, providers, and integrations remain separate follow-up removals. |
-| Screenpipe product account and cloud-completions proxy | Engine account CLI commands, cloud JWT state, and the `/v1/chat/completions` proxy were removed. | Not required for local capture/search. | The localhost API's distinct bearer authentication remains required and unchanged. Desktop account UI is a separate desktop build increment. |
+| Parakeet: Hugging Face repo `istupakov/parakeet-tdt-0.6b-v3-onnx` through `audiopipe`/`hf-hub` | Runtime performs cache-only model discovery and local verification. | One-time explicit setup only. | Pre-stage the pinned files under the documented model cache. Missing or mismatched files fail with provisioning guidance and never start a download. |
+| PostHog `https://us.i.posthog.com` and Sentry ingest | Product telemetry and crash-reporting transports, lifecycle/event call sites, settings, shims, permissions, and frontend dependencies were removed from the engine and desktop app. | Not required. | Local logs, local process CPU/memory diagnostics and their optional rotating JSONL file, and `last-panic.log` remain available. |
+| Screenpipe cloud sync, cloud archive, and SFTP remote sync | CLI sync commands, service startup, cloud-search metadata, sync/archive routes, and client transports were removed. | Not required for the local recorder. | Local retention remains available without any upload prerequisite; cloud proxies, providers, and integrations are absent. |
+| Screenpipe product account and cloud-completions proxy | Engine and desktop account commands, cloud JWT state, hosted checkout UI, and the `/v1/chat/completions` proxy were removed. | Not required for local capture/search. | The localhost API's distinct bearer authentication remains required and unchanged. |
 | External audio transcription and live meeting streaming | Deepgram/OpenAI-compatible batch clients plus Screenpipe Cloud/Deepgram meeting WebSocket clients were removed. | Not required. | Local Whisper, Qwen, and Parakeet transcription remain; meeting overlays use the selected local engine only. |
 | Cloud workflow classifier | The optional classifier that uploaded recent activity to the Screenpipe gateway was removed. | Not required. | No recorder startup task sends activity off-device to derive workflow events. |
 | Pipes and pipe registry | The pipe agent, scheduler, registry/store client, API, CLI, persistence, and permissions middleware were removed. | Not required. | Local capture/search routes do not install, run, or schedule automation. |
 | Enterprise/team CLI | Direct Screenpipe enterprise device/search/record queries were removed. | Not required. | The local recorder has no team-cloud command path. |
 | mDNS multicast | Server discovery path; only when `--enable-mdns`/environment opt-in is set. | Not required. | Off by default; observed skipped for loopback-only server. |
 
-With FFmpeg and all pinned models pre-staged, product telemetry removed, sync
-off, and local transcription selected, the recorder's capture/search path can
-operate locally. The automatic CLI NPM update check has been removed. A later
-network-deny soak test should confirm this at the OS firewall layer after the
-remaining surprise automatic paths are removed.
+With FFmpeg and all pinned models pre-staged, the recorder's capture/search and
+retained Ollama/Pi paths contain no automatic public Internet request. A later
+OS-firewall network-deny soak test remains useful defense-in-depth validation,
+not a prerequisite for removing another known runtime transport.
 
 ## Recommended first removal/hardening tranche
 
 The first tranche is complete: automatic CLI update checks and FFmpeg downloads
 were removed, model artifacts became explicit/checksummed setup inputs, and
 product telemetry/crash reporting was removed while local diagnostics stayed
-intact. Continue to isolate remaining cloud, account, provider, automation, and
-integration surfaces in separate reviewable commits because their reach is
-broader.
+intact. Subsequent commits also removed the cloud, account, external-provider,
+automation, integration, and enterprise runtime surfaces.
 
 The final telemetry-removal verification on 2026-09-04, with frontend checks
 repeated on 2026-09-07, passed direct TypeScript checking, 10 focused frontend

@@ -2215,8 +2215,10 @@ The final reachability audit found no application-initiated public Internet
 request in the Windows recorder or retained Pi/Ollama path. Production HTTP
 calls are limited to the authenticated ScreenWise loopback API, the desktop
 loopback notification service, and Ollama on loopback. Owned-browser navigation
-and ordinary help links remain explicit user actions. Build/CI acquisition is
-outside the runtime boundary and remains separately auditable.
+and ordinary help links remain explicit user actions. Owner decision on
+2026-09-10: the no-Internet invariant applies to the running application, not
+to building or packaging it. Build/CI acquisition may remain where required
+and is audited separately from runtime egress.
 
 Active docs and regression surfaces were aligned with that architecture:
 hosted provider endpoints and credentials, one-click third-party connection
