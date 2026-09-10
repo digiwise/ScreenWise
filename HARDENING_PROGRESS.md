@@ -1904,3 +1904,62 @@ Verification on Windows on 2026-09-10:
   `996D3482DF84390D1CC0DD4919F357CFF1A79A67B66A139309D6483BA2E42B77`,
   and unchanged Bun
   `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.
+
+### Windows build artifact acquisition boundary — 2026-09-10
+
+Pre-change reachability finds that every build of `screenpipe-audio` executes
+tool discovery unrelated to the audio crate and, when Bun is missing, invokes
+`npm install -g bun` on Windows (or a shell-piped remote installer elsewhere).
+The same Windows build script downloads and extracts ONNX Runtime 1.22.0 with
+`curl`/`unzip` whenever its repository-local package is absent. These paths are
+reachable during an ordinary Windows Cargo build, can modify the developer
+machine globally, and contradict explicit provisioning even though offline
+environment flags suppress the ORT download.
+
+The local DLL-staging fix remains required: the locked `ort` crate dynamically
+loads ONNX Runtime and a bare Cargo-built recorder must receive the validated
+1.22.0 DLL beside its executable instead of selecting the incompatible system
+1.17.1 DLL. This boundary will remove tool/runtime acquisition and archive
+handling while preserving staging from an explicitly supplied
+`ORT_LIB_LOCATION` or the documented repository-local package. It will not
+change the locked ORT version, modify cross-platform `download-binaries`
+features, or touch the separate macOS metallib/pre-build sidecar acquisition
+paths; those have different target and packaging implications.
+
+The Windows build boundary is complete. `screenpipe-audio` no longer probes for
+Bun, invokes npm or a shell installer, launches curl/unzip, creates archives,
+or modifies the repository-local runtime package. It accepts an explicitly
+provisioned `ORT_LIB_LOCATION` (with the documented repository-local package as
+a local fallback), verifies `lib\onnxruntime.dll`, and stages it beside the
+active Cargo profile exactly as before. The audited x64 DLL hash is enforced as
+`579B636403983254346A5C1D80BD28F1519CD1E284CD204F8D4FF41F8D711559`.
+ARM64 remains buildable only when the operator supplies its separately audited
+1.22.0 DLL hash through `SCREENPIPE_ORT_DLL_SHA256`; no unreviewed artifact is
+accepted.
+
+The obsolete `which 7.0.3` build dependency and its orphan `env_home 0.1.0`
+package were removed from both Cargo locks. `sha2 0.10.9` was already a direct
+audio dependency and is reused by the build script, so no version, source, or
+checksum was introduced or changed. The Bun lockfile is unchanged. No
+post-boundary Screenpipe or Litepipe source was consulted.
+
+Verification on Windows on 2026-09-10:
+
+- Root and desktop `cargo fmt --all -- --check` and `git diff --check` passed.
+- The build script was compiled and exercised directly against the configured
+  local runtime; staging passed. Its missing-runtime path failed locally with
+  the expected explicit-provisioning message and performed no external action.
+- Root `cargo check -p screenpipe-audio --features parakeet --offline` passed
+  after the reviewed lock refresh. The desktop `screenpipe-app` check passed
+  offline using Ninja Multi-Config, the transient `knf-rs-sys` CRT override,
+  the configured ORT path, and OpenBLAS runtime `PATH`.
+- `cargo build --release --locked --offline` passed in Visual Studio Developer
+  PowerShell with normal Ninja in 5m23s, verifying and staging the provisioned
+  x64 DLL. Only the established audio `unused_mut` and engine `CommandExt`
+  warnings remained.
+- Final lock SHA-256 values are root Cargo
+  `4DDBDDABA9C8D74B29C4D8F20A71C547F6176DCD115F44027370746B27A17D65`,
+  desktop Cargo
+  `5F3263CA1412F9C592702B54AB2DAD49AE23366BA432FC536CE6ADD8295026B3`,
+  and unchanged Bun
+  `2BF22C910039145D023EAF256589C76CB5DF66E1A7912A7E51C7F40FF1568BDA`.

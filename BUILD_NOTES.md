@@ -163,6 +163,28 @@ No product functionality, dependencies, or `CONTRIBUTING.md` were modified as pa
 - The enterprise/team cloud CLI has been removed; local recording does not
   query teammates' captured data through Screenpipe enterprise endpoints.
 
+## Explicit Windows build prerequisites (2026-09-10)
+
+`crates/screenpipe-audio/build.rs` no longer installs Bun or downloads/extracts
+ONNX Runtime. Provision ONNX Runtime 1.22.0 before building and set:
+
+```powershell
+$env:ORT_LIB_LOCATION = "D:\Data\NoSync\Repos\ScreenWise\screenpipe\apps\screenpipe-app-tauri\src-tauri\onnxruntime-win-x64-1.22.0"
+```
+
+The directory must contain `lib\onnxruntime.dll`. For Windows x64 the build
+script verifies SHA-256
+`579B636403983254346A5C1D80BD28F1519CD1E284CD204F8D4FF41F8D711559`
+before staging the DLL beside Cargo-built executables. Windows ARM64 builds
+must additionally provide the audited 1.22.0 DLL checksum in
+`SCREENPIPE_ORT_DLL_SHA256`; no ARM64 checksum is silently assumed. A missing or
+invalid runtime fails the build with provisioning instructions and never starts
+a network client or installer.
+
+Bun is not an audio-crate build dependency. Desktop packaging still requires a
+separately installed/provisioned Bun where its own pre-build tooling says so;
+the Rust audio build never probes for or globally installs it.
+
 ## Windows native Cargo test recipe (2026-09-07)
 
 Native-linking tests need a different generator setup from the normal release
