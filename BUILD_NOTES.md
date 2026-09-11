@@ -227,6 +227,42 @@ bindings passed the freshness assertion after the product-account commands
 were removed and the bindings regenerated. The cached test graph includes
 locked `assert-json-diff 2.0.2`.
 
+## Windows NSIS packaging recipe (2026-09-11)
+
+The Windows desktop build stages explicitly provisioned OpenBLAS and ONNX
+Runtime DLLs under `apps\screenpipe-app-tauri\src-tauri\windows-runtime` and
+the Windows Tauri resource map installs them beside the executable. That
+directory is generated and ignored. The existing Bun sidecar is also installed
+beside the executable as `bun.exe`; FFmpeg remains an explicit installed
+prerequisite and is not redistributed by this package.
+
+Packaging uses the same Developer PowerShell, `OPENBLAS_PATH`,
+`ORT_LIB_LOCATION`, and runtime `PATH` requirements as native desktop tests,
+but the release graph additionally needs:
+
+```powershell
+$env:CMAKE_GENERATOR = "Ninja Multi-Config"
+$env:CMAKE_CONFIGURATION_TYPES = "Debug;Release;RelWithDebInfo;MinSizeRel"
+node node_modules\@tauri-apps\cli\tauri.js build `
+  --config src-tauri\tauri.prod.conf.json `
+  --config src-tauri\tauri.windows.conf.json `
+  --bundles nsis --no-sign --ci -- --locked --offline
+```
+
+Run that command from `apps\screenpipe-app-tauri`. Config order matters: the
+Windows config supplies the target-qualified Bun sidecar path after the
+production config. Single-config Ninja failed in `libsamplerate-sys`; a
+Multi-Config attempt without `MinSizeRel` failed because Cargo's release CMake
+profile requested a missing `build-MinSizeRel.ninja`. Tauri fetched and
+checksum-validated its pinned NSIS 3.11 and `nsis_tauri_utils` build tools; this
+is a packaging-time acquisition, not application runtime behavior.
+
+The no-sign package completed in 14m17s after the production Next export. The
+generated NSIS script explicitly included `libopenblas.dll`,
+`onnxruntime.dll`, and `bun.exe`. The resulting installer was 55,289,530 bytes
+with SHA-256
+`F53B61C322EDFB67A24A2AB92BD5B4EF169F5647B98EE188F4147C1D8A6D173A`.
+
 ## Functional baseline fixes and verification (2026-09-01)
 
 - Root cause of the transcription panic: the locked `ort 2.0.0-rc.10` expects ONNX Runtime 1.22.x. `screenpipe-audio/build.rs` had already downloaded the correct Microsoft CPU package to `apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.22.0`, but bare Cargo builds did not stage its DLL beside `screenpipe.exe`. Windows consequently loaded `C:\Windows\System32\onnxruntime.dll` 1.17.1. The build script now copies the pinned runtime DLL into the active Cargo profile directory. This preserves `Cargo.lock` and dependency versions.

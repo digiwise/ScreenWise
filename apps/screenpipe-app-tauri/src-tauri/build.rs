@@ -318,7 +318,93 @@ void notif_free_string(char* ptr) { if (ptr) free(ptr); }
     println!("cargo:rustc-link-lib=static=notification_panel");
 }
 
+fn files_equal(left: &std::path::Path, right: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::{BufReader, Read};
+
+    if !right.exists() || std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+
+    let mut left = BufReader::new(std::fs::File::open(left)?);
+    let mut right = BufReader::new(std::fs::File::open(right)?);
+    let mut left_buf = [0_u8; 64 * 1024];
+    let mut right_buf = [0_u8; 64 * 1024];
+    loop {
+        let left_len = left.read(&mut left_buf)?;
+        let right_len = right.read(&mut right_buf)?;
+        if left_len != right_len || left_buf[..left_len] != right_buf[..right_len] {
+            return Ok(false);
+        }
+        if left_len == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn stage_windows_runtime_file(source: &std::path::Path, destination: &std::path::Path) {
+    if !source.is_file() {
+        panic!(
+            "required Windows runtime file is missing: {}",
+            source.display()
+        );
+    }
+    println!("cargo:rerun-if-changed={}", source.display());
+
+    if files_equal(source, destination).unwrap_or(false) {
+        return;
+    }
+    std::fs::copy(source, destination).unwrap_or_else(|error| {
+        panic!(
+            "failed to stage Windows runtime {} as {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+}
+
+/// Tauri's Windows resource map is static, while the reviewed native runtime
+/// inputs are explicitly provisioned outside the repository. Copy the two DLLs
+/// into one ignored directory before tauri-build resolves its resource globs.
+fn stage_windows_runtime_dependencies() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    println!("cargo:rerun-if-env-changed=OPENBLAS_PATH");
+    println!("cargo:rerun-if-env-changed=ORT_LIB_LOCATION");
+
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"),
+    );
+    let stage_dir = manifest_dir.join("windows-runtime");
+    std::fs::create_dir_all(&stage_dir).expect("create Windows runtime staging directory");
+
+    let openblas_root = std::path::PathBuf::from(
+        std::env::var("OPENBLAS_PATH")
+            .expect("OPENBLAS_PATH is required to package the Windows desktop runtime"),
+    );
+    stage_windows_runtime_file(
+        &openblas_root.join("bin").join("libopenblas.dll"),
+        &stage_dir.join("libopenblas.dll"),
+    );
+
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let ort_arch = if target_arch == "aarch64" {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let ort_root = std::env::var_os("ORT_LIB_LOCATION")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join(format!("onnxruntime-win-{ort_arch}-1.22.0")));
+    stage_windows_runtime_file(
+        &ort_root.join("lib").join("onnxruntime.dll"),
+        &stage_dir.join("onnxruntime.dll"),
+    );
+}
+
 fn main() {
+    stage_windows_runtime_dependencies();
     tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::default());
 
     #[cfg(target_os = "macos")]

@@ -2642,3 +2642,47 @@ Post-change evidence:
   changed. MCP TypeScript build and 20 tests passed; browser extension build
   and standalone TypeScript check passed; the full desktop TypeScript check,
   `cargo fmt --all -- --check`, and `git diff --check` passed.
+
+### Windows native runtime packaging boundary — 2026-09-11
+
+Pre-change reachability confirms that every Windows process using the retained
+local ASR graph dynamically requires `libopenblas.dll`, and the desktop PII and
+audio paths require ONNX Runtime 1.22.0. The build stages ONNX Runtime beside
+Cargo binaries, and the Windows Tauri configuration bundles it, but the NSIS
+resource map does not contain OpenBLAS. A packaged desktop can therefore fail
+in the Windows loader before Rust logging or setup guidance starts. Bun is
+already declared as a Tauri sidecar and provisioned under its target-qualified
+build name; FFmpeg remains an explicit user/build prerequisite rather than a
+bundled artifact.
+
+This increment will make the native DLL payload deterministic without adding a
+runtime download. The desktop build script will validate the explicit
+`OPENBLAS_PATH` and `ORT_LIB_LOCATION` (or the pinned repository-local ORT
+package), stage exactly `libopenblas.dll` and `onnxruntime.dll` in an ignored
+packaging directory, and the Windows Tauri resource map will flatten both next
+to the installed executable. Build inputs remain provisioned outside source
+control. Bundling FFmpeg is excluded because redistributing a particular build
+requires a separate licensing and package-size decision; the retained runtime
+continues to fail with explicit setup guidance when FFmpeg is absent.
+
+Post-change evidence:
+
+- The Windows desktop build now validates and stages the explicitly provisioned
+  `libopenblas.dll` and ONNX Runtime 1.22.0 DLL into an ignored packaging-only
+  directory. Copying is content-aware so an unchanged native input does not
+  rewrite the staged file.
+- The Windows Tauri resource map installs both DLLs next to
+  `screenpipe-app.exe`; the existing target-qualified Bun sidecar remains
+  installed as `bun.exe`. The generated NSIS script contains explicit `File`
+  and uninstall entries for all three runtime files.
+- Staged SHA-256 values were
+  `B554C45AF7B39154C561FB4879FD784D4928462E9A70335AADD9B1DE3C75E9E2`
+  for OpenBLAS and
+  `579B636403983254346A5C1D80BD28F1519CD1E284CD204F8D4FF41F8D711559`
+  for ONNX Runtime, matching the reviewed Windows prerequisites.
+- A locked/offline desktop `cargo check` passed under the documented native
+  test matrix. A no-sign production Next/Tauri build then completed and emitted
+  `screenpipe_2.5.28_x64-setup.exe` (55,289,530 bytes, SHA-256
+  `F53B61C322EDFB67A24A2AB92BD5B4EF169F5647B98EE188F4147C1D8A6D173A`).
+  Fetching the pinned NSIS packaging tool was a build-time-only acquisition;
+  the installed application gained no runtime network path.

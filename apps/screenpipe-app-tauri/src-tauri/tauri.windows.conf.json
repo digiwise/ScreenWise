@@ -16,7 +16,7 @@
             "nsis"
         ],
         "resources": {
-            "onnxruntime*\\lib\\onnxruntime.dll": "./",
+            "windows-runtime\\*.dll": "./",
             "assets/*": "./assets/"
         }
     }
