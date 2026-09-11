@@ -132,7 +132,7 @@ async fn silent_room_no_ghost_words() {
     let _ = tokio::time::timeout(Duration::from_secs(15), pipeline_handle).await;
 
     let transcription_engine =
-        TranscriptionEngine::new(engine_config, None, None, vec![Language::English], vec![])
+        TranscriptionEngine::new(engine_config, vec![Language::English], vec![])
             .await
             .expect("failed to load Whisper tiny");
 

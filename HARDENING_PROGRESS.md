@@ -2816,3 +2816,78 @@ started at that point. Repeating the same bounded harness from an elevated
 Administrator shell remains the human verification needed for an
 OS-firewall-enforced offline claim; this record does not misstate the sandbox
 run as that stronger check.
+
+### Windows password-field keyboard boundary — 2026-09-11
+
+Pre-change reachability: Windows UIA tree extraction already omits nodes marked
+`IsPassword`, but the independent low-level keyboard hook can still aggregate
+and emit typed text while such a control is focused. The UI recorder persists
+those opt-in text/key events without password-state context. Keyboard-content
+storage is off by default, but enabling it therefore creates a second path
+around the existing UIA password suppression. This increment will add a
+Windows-focused-control privacy gate while preserving non-persisted input
+activity/capture triggers where the event architecture permits it.
+
+Post-change evidence: Windows content capture now requires a recent explicit
+UIA `IsPassword=false` result for the same foreground HWND, focused control,
+process, and privacy generation. The UIA worker refreshes that decision every
+50 ms and grants it for at most 75 ms; focus events, mouse clicks, common
+focus-changing keys, screen lock, query/property failures, stale state, and a
+contended decision lock fail closed. Low-level hooks do not call COM. Buffered
+text is rechecked before emission, safe pre-navigation text is deferred out of
+the hook for PII processing, and clipboard content is checked both when queued
+and when read. Content-free `ActivityFeed` input signals remain available.
+
+Seven focused privacy tests and all 13 Windows hook tests passed locked and
+offline. The full accessibility library run completed 174 tests with 22
+ignored and one unrelated pre-existing failure:
+`tree::windows::tests::test_incognito_detection` expects the unchanged title
+`Enter Password - Chrome` to be classified as incognito. The normal Windows
+release build then passed locked and offline. This is a conservative control,
+not an absolute provider-independent guarantee: a provider that incorrectly
+reports `IsPassword=false`, or a programmatic same-control type change racing
+the asynchronous UIA event during the short permit lifetime, can defeat UIA's
+signal. Live typing into third-party password controls was deliberately not
+automated in this privacy-preserving validation.
+
+### Local audio integration-test drift — 2026-09-11
+
+Pre-change reachability: the local-only `TranscriptionEngine::new` constructor
+now accepts the selected engine, languages, and vocabulary, but several audio
+integration/benchmark targets still pass two removed external-provider
+arguments. Cargo therefore fails while compiling those test targets before a
+filtered local test can run. This is test-only drift from the completed
+external-transcription removal; production code and dependency versions are
+not involved.
+
+Post-change evidence: all nine stale integration/benchmark constructor calls
+now use the retained local three-argument interface. The complete audio test
+target set compiled without running model-dependent tests using the documented
+Developer PowerShell, Ninja Multi-Config, transient CRT override, OpenBLAS
+runtime path, and locked/offline dependency graph. Formatting and diff checks
+passed, and no dependency or lockfile changed.
+
+### Administrator firewall validation path — 2026-09-11
+
+Pre-change boundary: Codex can run the recorder under its restricted network
+sandbox but cannot acquire the elevated Windows token required by
+`New-NetFirewallRule`. A checked-in rule manager plus non-elevated runtime
+harness will let the owner install one exact-program outbound block from an
+Administrator PowerShell, after which Codex can inspect the rule and execute
+the same listener/auth/WGC validation directly. The rule remains independently
+removable by the owner even if a validation run fails.
+
+Post-change evidence: `scripts/windows/screenwise-offline-firewall.ps1`
+installs, inspects, or removes one named outbound block for the exact release
+executable and requires an Administrator token. The companion non-elevated
+`validate-offline-runtime.ps1` refuses to claim firewall coverage unless that
+rule is active, then uses a fresh disposable data directory without printing
+the bearer token or captured contents. Both scripts passed PowerShell syntax
+parsing. Against release executable SHA-256
+`3D184C7EBAEEA1B8D0F4774FABA8983A969E9EC3C148855943CBF8FADA744D2C`, its
+explicit non-firewall preflight passed in both Minimal and 12-second Vision
+modes: one `127.0.0.1:3047` listener, no UDP/helper listener or established
+external TCP connection, health 200, unauthenticated search/frame 403, and
+authenticated search 200. The stronger OS-firewall-enforced runs intentionally
+remain pending until the owner executes the documented Administrator install
+command; the preflight is not recorded as equivalent evidence.

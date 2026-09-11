@@ -263,6 +263,46 @@ generated NSIS script explicitly included `libopenblas.dll`,
 with SHA-256
 `F53B61C322EDFB67A24A2AB92BD5B4EF169F5647B98EE188F4147C1D8A6D173A`.
 
+## OS-firewall offline validation handoff (2026-09-11)
+
+Codex cannot obtain an elevated Windows token on this host. To install the
+exact-program outbound block needed for the final live validation, open
+**Windows PowerShell as Administrator** and run:
+
+```powershell
+Set-Location "D:\Data\NoSync\Repos\ScreenWise\screenpipe"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\windows\screenwise-offline-firewall.ps1 -Action Install
+```
+
+The script refuses conflicting duplicate/name/path state and prints the active
+rule's direction, action, profile, and exact executable. Leave the rule active
+and return control to Codex. Codex can then directly run both modes:
+
+```powershell
+pwsh.exe -NoProfile -File `
+  .\scripts\windows\validate-offline-runtime.ps1 -Mode Minimal
+pwsh.exe -NoProfile -File `
+  .\scripts\windows\validate-offline-runtime.ps1 -Mode Vision
+```
+
+The harness verifies the active firewall rule targets the current
+`target\release\screenpipe.exe`, creates a fresh ignored data directory, never
+prints its bearer token or captured content, checks loopback listener and API
+authentication behavior, and removes the temporary recorder directory in a
+`finally` block. It does not remove the firewall rule. To remove that rule from
+Administrator PowerShell after Codex records the results:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\windows\screenwise-offline-firewall.ps1 -Action Remove
+```
+
+Leaving the exact-program outbound block enabled is also compatible with the
+product's no-runtime-Internet policy. Re-run `-Action Status` after rebuilding
+or relocating the executable to confirm the rule still targets the intended
+path.
+
 ## Functional baseline fixes and verification (2026-09-01)
 
 - Root cause of the transcription panic: the locked `ort 2.0.0-rc.10` expects ONNX Runtime 1.22.x. `screenpipe-audio/build.rs` had already downloaded the correct Microsoft CPU package to `apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.22.0`, but bare Cargo builds did not stage its DLL beside `screenpipe.exe`. Windows consequently loaded `C:\Windows\System32\onnxruntime.dll` 1.17.1. The build script now copies the pinned runtime DLL into the active Cargo profile directory. This preserves `Cargo.lock` and dependency versions.

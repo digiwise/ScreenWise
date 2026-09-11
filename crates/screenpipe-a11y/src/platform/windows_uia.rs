@@ -36,11 +36,105 @@ use windows::Win32::UI::Accessibility::{
     UIA_PROPERTY_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-    MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT,
+    DispatchMessageW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
+    GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
+    GUITHREADINFO, MSG, PM_REMOVE, QS_ALLINPUT,
 };
 
 const LOCKED_SCREEN_UIA_BACKOFF: Duration = Duration::from_millis(1000);
+const KEYBOARD_PRIVACY_POLL_MS: u64 = 50;
+const KEYBOARD_PRIVACY_MAX_AGE: Duration = Duration::from_millis(75);
+
+/// Native focus identity is cheap to check inside a low-level input hook. UIA
+/// calls must stay on the worker: an unresponsive provider must not block input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeKeyboardFocus {
+    foreground: isize,
+    control: isize,
+    pid: u32,
+}
+
+impl NativeKeyboardFocus {
+    pub(crate) fn current() -> Option<Self> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_invalid() {
+                return None;
+            }
+            let mut pid = 0;
+            let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let mut info = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            GetGUIThreadInfo(thread, &mut info).ok()?;
+            if pid == 0 || info.hwndFocus.is_invalid() || GetForegroundWindow() != hwnd {
+                return None;
+            }
+            Some(Self {
+                foreground: hwnd.0 as isize,
+                control: info.hwndFocus.0 as isize,
+                pid,
+            })
+        }
+    }
+}
+
+struct KeyboardPrivacyDecision {
+    generation: u64,
+    focus: NativeKeyboardFocus,
+    checked_at: Instant,
+}
+
+/// Separate from the tree/context cache: only a recent, explicit UIA
+/// IsPassword=false decision permits keyboard content. Unknown, failed, stale,
+/// locked, or changing focus is denied. No UIA strings are read by this probe.
+/// Providers must report password state/focus correctly. UIA focus events are
+/// asynchronous: programmatic changes within the same native control can race
+/// the last decision until an event invalidates it or its short lifetime ends.
+#[derive(Default)]
+pub struct KeyboardPrivacy {
+    generation: AtomicU64,
+    decision: Mutex<Option<KeyboardPrivacyDecision>>,
+}
+
+impl KeyboardPrivacy {
+    pub(crate) fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn permit(&self, focus: Option<NativeKeyboardFocus>) -> Option<u64> {
+        let generation = self.generation.load(Ordering::SeqCst);
+        let decision = self.decision.try_lock()?;
+        let decision = decision.as_ref()?;
+        (decision.generation == generation
+            && Some(decision.focus) == focus
+            && decision.checked_at.elapsed() <= KEYBOARD_PRIVACY_MAX_AGE
+            && self.generation.load(Ordering::SeqCst) == generation)
+            .then_some(generation)
+    }
+
+    fn update(
+        &self,
+        generation: u64,
+        focus: Option<NativeKeyboardFocus>,
+        is_password: Option<bool>,
+        checked_at: Instant,
+    ) {
+        let decision = match (focus, is_password) {
+            (Some(focus), Some(false)) => Some(KeyboardPrivacyDecision {
+                generation,
+                focus,
+                checked_at,
+            }),
+            _ => {
+                self.invalidate();
+                None
+            }
+        };
+        *self.decision.lock() = decision;
+    }
+}
 
 /// Returns true if the user has produced a mouse/keyboard event within
 /// `pause_extraction_on_input_ms`. The UIA worker uses this to skip tree captures during
@@ -101,6 +195,42 @@ pub(crate) struct UiaContext {
 }
 
 impl UiaContext {
+    /// Refresh keyboard privacy independently of tree capture/debouncing. Query
+    /// the actual focused element, explicitly disallowing UIA default values:
+    /// an unsupported IsPassword property must not become a false permission.
+    fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy) {
+        let generation = privacy.generation.load(Ordering::SeqCst);
+        let checked_at = Instant::now();
+        let focus = NativeKeyboardFocus::current();
+        let is_password = (|| unsafe {
+            let focus = focus?;
+            let element = self.automation.GetFocusedElement().ok()?;
+            if !element.CurrentHasKeyboardFocus().ok()?.as_bool()
+                || element.CurrentProcessId().ok()? as u32 != focus.pid
+            {
+                return None;
+            }
+            let value = element
+                .GetCurrentPropertyValueEx(UIA_IsPasswordPropertyId, true)
+                .ok()?;
+            let is_password = bool::try_from(&value).ok()?;
+            let current = self.automation.GetFocusedElement().ok()?;
+            if NativeKeyboardFocus::current() != Some(focus)
+                || !self
+                    .automation
+                    .CompareElements(&element, &current)
+                    .ok()?
+                    .as_bool()
+            {
+                return None;
+            }
+            Some(is_password)
+        })();
+        // An event that invalidates focus while the COM query is in flight
+        // changes the generation, so this result cannot grant permission.
+        privacy.update(generation, focus, is_password, checked_at);
+    }
+
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
     pub(crate) fn new() -> windows::core::Result<Self> {
         unsafe {
@@ -526,6 +656,7 @@ impl UiaContext {
 #[implement(IUIAutomationFocusChangedEventHandler)]
 struct FocusChangedHandler {
     pending: Arc<Mutex<Option<PendingFocus>>>,
+    keyboard_privacy: Arc<KeyboardPrivacy>,
 }
 
 impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
@@ -533,6 +664,7 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
         &self,
         _sender: Option<&IUIAutomationElement>,
     ) -> windows::core::Result<()> {
+        self.keyboard_privacy.invalidate();
         // Record the time of focus change; the UIA thread will debounce and capture
         let hwnd = unsafe { GetForegroundWindow() };
         if !hwnd.is_invalid() {
@@ -555,6 +687,7 @@ pub fn run_uia_thread(
     element_tx: Sender<(ClickElementRequest, ElementContext)>,
     click_queue: Arc<Mutex<Vec<ClickElementRequest>>>,
     focused_element: Arc<Mutex<Option<ElementContext>>>,
+    keyboard_privacy: Arc<KeyboardPrivacy>,
     stop: Arc<AtomicBool>,
     config: UiCaptureConfig,
     start_time: Instant,
@@ -641,17 +774,23 @@ pub fn run_uia_thread(
     let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
     let handler = FocusChangedHandler {
         pending: pending_focus.clone(),
+        keyboard_privacy: keyboard_privacy.clone(),
     };
     let handler_interface: IUIAutomationFocusChangedEventHandler = handler.into();
 
-    if let Err(e) = uia.subscribe_focus_changes(&handler_interface) {
-        warn!(
-            "Failed to subscribe to focus changes: {:?}. Will use polling only.",
-            e
-        );
-    } else {
-        debug!("Subscribed to UIA focus change events");
-    }
+    let focus_events_available = match uia.subscribe_focus_changes(&handler_interface) {
+        Err(e) => {
+            warn!(
+                "Failed to subscribe to focus changes: {:?}. Trees will use polling; password-protected keyboard capture remains suppressed.",
+                e
+            );
+            false
+        }
+        Ok(()) => {
+            debug!("Subscribed to UIA focus change events");
+            true
+        }
+    };
 
     // State for debouncing and periodic capture
     let mut last_captured_hwnd: isize = 0;
@@ -660,6 +799,9 @@ pub fn run_uia_thread(
     let debounce_dur = Duration::from_millis(config.tree_debounce_ms);
     let interval_dur = Duration::from_millis(config.tree_capture_interval_ms);
     let mut was_lock_paused = false;
+    let check_keyboard_privacy = focus_events_available
+        && config.skip_password_fields
+        && (config.capture_text || config.capture_keystrokes || config.capture_clipboard_content);
 
     // Capture initial focused window (no input has happened yet, so input_too_recent is a no-op)
     let initial_hwnd = unsafe { GetForegroundWindow() };
@@ -696,9 +838,14 @@ pub fn run_uia_thread(
         }
 
         if pause_uia_while_screen_locked(&pending_focus, &click_queue, &mut last_capture_time) {
+            keyboard_privacy.invalidate();
             was_lock_paused = true;
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
             continue;
+        }
+
+        if check_keyboard_privacy {
+            uia.refresh_keyboard_privacy(&keyboard_privacy);
         }
 
         if was_lock_paused && config.capture_tree {
@@ -799,6 +946,9 @@ pub fn run_uia_thread(
             interval_dur,
             &config,
         );
+        if check_keyboard_privacy {
+            wait_ms = wait_ms.min(KEYBOARD_PRIVACY_POLL_MS);
+        }
         // If we just skipped a capture due to recent input, cap the wait so we wake up
         // shortly after the input cooldown expires and can retry the capture.
         if skip_capture && input_pause_dur_ms > 0 {
@@ -1048,6 +1198,90 @@ fn control_type_id_to_name(id: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_keyboard_focus() -> NativeKeyboardFocus {
+        NativeKeyboardFocus {
+            foreground: 10,
+            control: 11,
+            pid: 12,
+        }
+    }
+
+    #[test]
+    fn keyboard_privacy_requires_explicit_non_password_state() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = Some(test_keyboard_focus());
+        assert_eq!(privacy.permit(focus), None);
+        for is_password in [Some(true), None, Some(false)] {
+            let generation = privacy.generation.load(Ordering::SeqCst);
+            privacy.update(generation, focus, is_password, Instant::now());
+            assert_eq!(privacy.permit(focus).is_some(), is_password == Some(false));
+        }
+    }
+
+    #[test]
+    fn keyboard_privacy_rejects_stale_missing_or_changed_native_focus() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = Some(test_keyboard_focus());
+        privacy.update(
+            0,
+            focus,
+            Some(false),
+            Instant::now() - KEYBOARD_PRIVACY_MAX_AGE - Duration::from_millis(1),
+        );
+        assert_eq!(privacy.permit(focus), None);
+        privacy.update(0, focus, Some(false), Instant::now());
+        assert_eq!(privacy.permit(None), None);
+        for changed in [
+            NativeKeyboardFocus {
+                foreground: 20,
+                ..test_keyboard_focus()
+            },
+            NativeKeyboardFocus {
+                control: 20,
+                ..test_keyboard_focus()
+            },
+            NativeKeyboardFocus {
+                pid: 20,
+                ..test_keyboard_focus()
+            },
+        ] {
+            assert_eq!(privacy.permit(Some(changed)), None);
+        }
+        assert_eq!(privacy.permit(focus), Some(0));
+    }
+
+    #[test]
+    fn keyboard_privacy_invalidates_in_flight_probes_and_old_buffers() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = Some(test_keyboard_focus());
+        privacy.update(0, focus, Some(false), Instant::now());
+        let original = privacy.permit(focus).unwrap();
+        privacy.invalidate();
+        // A COM query started before the focus callback cannot reopen capture.
+        privacy.update(original, focus, Some(false), Instant::now());
+        assert_eq!(privacy.permit(focus), None);
+        let next = privacy.generation.load(Ordering::SeqCst);
+        privacy.update(next, focus, Some(false), Instant::now());
+        assert_ne!(privacy.permit(focus), Some(original));
+        assert_eq!(privacy.permit(focus), Some(next));
+        // An unsupported/password result invalidates buffered text even if the
+        // native control does not change (e.g. HTML toggles input type).
+        privacy.update(next, focus, Some(true), Instant::now());
+        let next = privacy.generation.load(Ordering::SeqCst);
+        privacy.update(next, focus, Some(false), Instant::now());
+        assert_ne!(privacy.permit(focus), Some(original));
+    }
+
+    #[test]
+    fn keyboard_privacy_never_blocks_a_hook_on_the_worker_lock() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = Some(test_keyboard_focus());
+        privacy.update(0, focus, Some(false), Instant::now());
+        let _guard = privacy.decision.lock();
+        assert_eq!(privacy.permit(focus), None);
+        privacy.invalidate(); // Also lock-free while the worker owns the lock.
+    }
 
     #[test]
     fn test_control_type_names() {
@@ -1703,6 +1937,7 @@ mod tests {
                 element_tx,
                 click_queue2,
                 focused_element2,
+                Arc::new(KeyboardPrivacy::default()),
                 stop2,
                 config2,
                 start_time,
@@ -1813,6 +2048,7 @@ mod tests {
                 element_tx,
                 click_queue2,
                 focused_element2,
+                Arc::new(KeyboardPrivacy::default()),
                 stop2,
                 config2,
                 wall_start,

@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Instant;
 use tracing::{debug, error, warn};
 
-use super::windows_uia::{self, ClickElementRequest};
+use super::windows_uia::{self, ClickElementRequest, KeyboardPrivacy, NativeKeyboardFocus};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -201,6 +201,7 @@ impl UiRecorder {
         // Shared state for UIA thread
         let click_queue = Arc::new(Mutex::new(Vec::<ClickElementRequest>::new()));
         let focused_element = Arc::new(Mutex::new(None::<ElementContext>));
+        let keyboard_privacy = Arc::new(KeyboardPrivacy::default());
 
         // Most recent input timestamp (ms since start), used by the UIA worker to skip
         // tree captures during/just after user input when prioritize_input_latency is on.
@@ -216,6 +217,7 @@ impl UiRecorder {
         let feed1 = activity_feed.clone();
         let click_queue1 = click_queue.clone();
         let focused_element1 = focused_element.clone();
+        let keyboard_privacy1 = keyboard_privacy.clone();
         let last_input_at_ms1 = last_input_at_ms.clone();
         threads.push(thread::spawn(move || {
             run_native_hooks(
@@ -228,6 +230,7 @@ impl UiRecorder {
                 feed1,
                 click_queue1,
                 focused_element1,
+                keyboard_privacy1,
                 last_input_at_ms1,
             );
         }));
@@ -264,6 +267,7 @@ impl UiRecorder {
                 element_tx,
                 click_queue3,
                 focused_element3,
+                keyboard_privacy,
                 stop3,
                 config3,
                 start_time,
@@ -326,6 +330,7 @@ struct PendingClipboard {
     relative_ms: u64,
     app_name: Option<String>,
     window_title: Option<String>,
+    privacy_generation: Option<u64>,
 }
 
 /// Consecutive `WM_MOUSEWHEEL` ticks within this window are coalesced into a
@@ -354,11 +359,16 @@ struct HookState {
     last_mouse_pos: (i32, i32),
     text_buf: String,
     last_text_time: Option<Instant>,
+    text_privacy_generation: Option<u64>,
+    /// Buffers confirmed permissible immediately before navigation changes
+    /// focus. PII processing is deferred out of the low-level hook.
+    pending_text: Vec<UiEvent>,
     current_app: Arc<Mutex<Option<String>>>,
     current_window: Arc<Mutex<Option<String>>>,
     activity_feed: Option<ActivityFeed>,
     click_queue: Arc<Mutex<Vec<ClickElementRequest>>>,
     focused_element: Arc<Mutex<Option<ElementContext>>>,
+    keyboard_privacy: Arc<KeyboardPrivacy>,
     /// Clipboard operations deferred from the LL hook to the message loop.
     pending_clipboard: Vec<PendingClipboard>,
     /// Shared timestamp (ms since start) of the most recent input event.
@@ -415,6 +425,7 @@ fn run_native_hooks(
     activity_feed: Option<ActivityFeed>,
     click_queue: Arc<Mutex<Vec<ClickElementRequest>>>,
     focused_element: Arc<Mutex<Option<ElementContext>>>,
+    keyboard_privacy: Arc<KeyboardPrivacy>,
     last_input_at_ms: Arc<AtomicU64>,
 ) {
     debug!("Starting native Windows hooks");
@@ -428,11 +439,14 @@ fn run_native_hooks(
             last_mouse_pos: (0, 0),
             text_buf: String::new(),
             last_text_time: None,
+            text_privacy_generation: None,
+            pending_text: Vec::new(),
             current_app,
             current_window,
             activity_feed,
             click_queue,
             focused_element,
+            keyboard_privacy,
             pending_clipboard: Vec::new(),
             last_input_at_ms,
             scroll_aggregator: None,
@@ -481,6 +495,9 @@ fn run_native_hooks(
                 // fire synchronously during DispatchMessageW above
                 if let Ok(mut guard) = state.try_borrow_mut() {
                     if let Some(ref mut s) = *guard {
+                        for event in std::mem::take(&mut s.pending_text) {
+                            emit_text(s, event);
+                        }
                         if let Some(last_time) = s.last_text_time {
                             if last_time.elapsed().as_millis() as u64 >= s.config.text_timeout_ms {
                                 flush_text_buffer(s);
@@ -507,7 +524,10 @@ fn run_native_hooks(
                             let capture_content = s.config.capture_clipboard_content;
                             let apply_pii = s.config.apply_pii_removal;
                             for p in pending {
-                                let content = if capture_content {
+                                let content = if capture_content
+                                    && p.privacy_generation.is_some_and(|generation| {
+                                        keyboard_capture_permit(s) == Some(generation)
+                                    }) {
                                     get_clipboard_text().map(|c| {
                                         if apply_pii {
                                             remove_pii(&c)
@@ -557,6 +577,9 @@ fn run_native_hooks(
         // so input buffered when recording stops isn't dropped.
         HOOK_STATE.with(|state| {
             if let Some(ref mut s) = *state.borrow_mut() {
+                for event in std::mem::take(&mut s.pending_text) {
+                    emit_text(s, event);
+                }
                 flush_text_buffer(s);
                 if let Some(agg) = s.scroll_aggregator.take() {
                     emit_aggregated_scroll(&s.tx, agg);
@@ -569,17 +592,83 @@ fn run_native_hooks(
 }
 
 fn flush_text_buffer(state: &mut HookState) {
-    if !state.text_buf.is_empty() {
-        let content = std::mem::take(&mut state.text_buf);
-        let text = if state.config.apply_pii_removal {
-            remove_pii(&content)
-        } else {
-            content
-        };
-        let event = UiEvent::text(Utc::now(), state.start.elapsed().as_millis() as u64, text);
-        let _ = state.tx.try_send(event);
-        state.last_text_time = None;
+    if let Some(event) = take_permitted_text_buffer(state) {
+        emit_text(state, event);
     }
+}
+
+fn take_permitted_text_buffer(state: &mut HookState) -> Option<UiEvent> {
+    if state.text_buf.is_empty() {
+        return None;
+    }
+    // Recheck at every emission (idle timeout and shutdown). Text from an old
+    // or uncertain focus must never survive into a later allowed field.
+    let permit = keyboard_capture_permit(state);
+    take_text_buffer_with_permit(state, permit)
+}
+
+fn take_text_buffer_with_permit(state: &mut HookState, permit: Option<u64>) -> Option<UiEvent> {
+    if permit.is_none() || permit != state.text_privacy_generation {
+        discard_text_buffer(state);
+        return None;
+    }
+    let content = std::mem::take(&mut state.text_buf);
+    state.last_text_time = None;
+    state.text_privacy_generation = None;
+    Some(UiEvent::text(
+        Utc::now(),
+        state.start.elapsed().as_millis() as u64,
+        content,
+    ))
+}
+
+fn emit_text(state: &HookState, mut event: UiEvent) {
+    if screenpipe_config::screen_is_locked() {
+        return;
+    }
+    if let EventData::Text {
+        content,
+        char_count,
+    } = &mut event.data
+    {
+        if state.config.apply_pii_removal {
+            *content = remove_pii(content);
+            *char_count = Some(content.chars().count());
+        }
+    }
+    let _ = state.tx.try_send(event);
+}
+
+fn discard_text_buffer(state: &mut HookState) {
+    state.text_buf.clear();
+    state.last_text_time = None;
+    state.text_privacy_generation = None;
+}
+
+/// Only native, bounded work in the LL hook; UIA runs on its worker. A missing
+/// provider, expired decision, contended lock, or focus mismatch suppresses
+/// content while ActivityFeed remains available for adaptive capture.
+fn keyboard_capture_permit(state: &HookState) -> Option<u64> {
+    if screenpipe_config::screen_is_locked() {
+        return None;
+    }
+    if !state.config.skip_password_fields {
+        return Some(0);
+    }
+    state
+        .keyboard_privacy
+        .permit(NativeKeyboardFocus::current())
+}
+
+fn invalidate_keyboard_focus(state: &mut HookState) {
+    if state.config.skip_password_fields {
+        // Preserve text that is still permitted in the source field before a
+        // click/Tab/Enter moves focus. Never run PII regex in the input hook.
+        if let Some(event) = take_permitted_text_buffer(state) {
+            state.pending_text.push(event);
+        }
+    }
+    state.keyboard_privacy.invalidate();
 }
 
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -621,6 +710,13 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 let t = s.start.elapsed().as_millis() as u64;
                 let mods = get_modifier_state();
 
+                // These keys can move focus before the asynchronous UIA focus
+                // callback arrives (including between controls in one HWND).
+                // Invalidate before forwarding them to the application.
+                if matches!(vk_code, 0x09 | 0x0D | 0x1B | 0x5B | 0x5C) || mods & 0x0C != 0 {
+                    invalidate_keyboard_focus(s);
+                }
+
                 // try_lock when prioritize_input_latency is set, mirroring mouse_hook_proc:
                 // avoid stalling the OS message queue if these locks are contended.
                 let (app_name, window_title) = if s.config.prioritize_input_latency {
@@ -643,7 +739,16 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     app_name.as_deref().unwrap_or_default(),
                     window_title.as_deref(),
                 ) {
+                    discard_text_buffer(s);
                     return;
+                }
+
+                let privacy_generation = keyboard_capture_permit(s);
+                if privacy_generation.is_none()
+                    || (s.text_privacy_generation.is_some()
+                        && s.text_privacy_generation != privacy_generation)
+                {
+                    discard_text_buffer(s);
                 }
 
                 // Check for clipboard operations (Ctrl+C, Ctrl+X, Ctrl+V)
@@ -665,10 +770,18 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                             relative_ms: t,
                             app_name: app_name.clone(),
                             window_title: window_title.clone(),
+                            privacy_generation,
                         });
                         return;
                     }
                 }
+
+                // Clipboard operation metadata above contains no key/text
+                // content. Its optional content is independently gated again
+                // when read in the message loop.
+                let Some(privacy_generation) = privacy_generation else {
+                    return;
+                };
 
                 // Record key events for shortcuts (with modifiers)
                 if mods & 0x0A != 0 {
@@ -700,6 +813,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                             s.text_buf.push(c);
                         }
                         s.last_text_time = Some(Instant::now());
+                        s.text_privacy_generation = Some(privacy_generation);
                     } else if s.config.capture_keystrokes {
                         // Unknown key, record as key event
                         let event = UiEvent {
@@ -760,6 +874,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 return;
             };
             if let Some(ref mut s) = *guard {
+                if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN) {
+                    invalidate_keyboard_focus(s);
+                }
                 // Record latest input timestamp unconditionally for all mouse messages
                 // (move/click/wheel). Cheap atomic store, lets the UIA worker know the user
                 // is actively driving the UI so it can defer captures.
@@ -1768,10 +1885,13 @@ mod tests {
     }
 
     fn make_test_state(tx: crossbeam_channel::Sender<UiEvent>, text: &str) -> HookState {
+        let mut config = crate::config::UiCaptureConfig::default();
+        // These buffer-unit tests do not depend on the user's real desktop.
+        config.skip_password_fields = false;
         HookState {
             tx,
             start: std::time::Instant::now(),
-            config: crate::config::UiCaptureConfig::default(),
+            config,
             last_mouse_pos: (0, 0),
             text_buf: text.to_string(),
             last_text_time: if text.is_empty() {
@@ -1779,11 +1899,14 @@ mod tests {
             } else {
                 Some(std::time::Instant::now())
             },
+            text_privacy_generation: (!text.is_empty()).then_some(0),
+            pending_text: Vec::new(),
             current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
             current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
             activity_feed: None,
             click_queue: Arc::new(parking_lot::Mutex::new(Vec::new())),
             focused_element: Arc::new(parking_lot::Mutex::new(None)),
+            keyboard_privacy: Arc::new(KeyboardPrivacy::default()),
             pending_clipboard: Vec::new(),
             last_input_at_ms: Arc::new(AtomicU64::new(0)),
             scroll_aggregator: None,
@@ -1816,6 +1939,87 @@ mod tests {
 
         flush_text_buffer(&mut state);
         assert!(rx.try_recv().is_err()); // No event sent
+    }
+
+    #[test]
+    fn keyboard_privacy_drops_buffer_on_unknown_focus_and_invalidation() {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let mut state = make_test_state(tx, "synthetic secret");
+        state.config.skip_password_fields = true;
+        flush_text_buffer(&mut state);
+        assert!(rx.try_recv().is_err());
+        assert!(state.text_buf.is_empty());
+        assert!(state.last_text_time.is_none());
+
+        state.text_buf.push_str("synthetic secret");
+        state.last_text_time = Some(Instant::now());
+        state.text_privacy_generation = Some(0);
+        invalidate_keyboard_focus(&mut state);
+        assert!(state.text_buf.is_empty());
+        assert!(state.last_text_time.is_none());
+        assert!(state.text_privacy_generation.is_none());
+    }
+
+    #[test]
+    fn keyboard_privacy_preserves_confirmed_text_before_navigation_and_applies_pii() {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let mut state = make_test_state(tx, "synthetic.person@example.com");
+        state.config.skip_password_fields = true;
+        state.config.apply_pii_removal = true;
+        // The hook snapshots a buffer confirmed safe in its source field. It
+        // then invalidates the generation before forwarding navigation, and
+        // the message loop applies PII before emitting the deferred buffer.
+        let event = take_text_buffer_with_permit(&mut state, Some(0)).unwrap();
+        state.keyboard_privacy.invalidate();
+        emit_text(&state, event);
+        assert!(state.text_buf.is_empty());
+        match rx.try_recv().unwrap().data {
+            EventData::Text {
+                content,
+                char_count,
+            } => {
+                assert!(!content.contains("synthetic.person@example.com"));
+                assert_eq!(char_count, Some(content.chars().count()));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // A buffer from an earlier focus cannot take the same path.
+        state.text_buf.push_str("synthetic secret");
+        state.text_privacy_generation = Some(0);
+        assert!(take_text_buffer_with_permit(&mut state, Some(1)).is_none());
+        assert!(state.text_buf.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn keyboard_privacy_suppresses_key_and_text_but_preserves_activity() {
+        for capture_text in [false, true] {
+            let (tx, rx) = crossbeam_channel::bounded(64);
+            let mut state = make_test_state(tx, "synthetic old buffer");
+            state.config.skip_password_fields = true;
+            state.config.capture_keystrokes = true;
+            state.config.capture_text = capture_text;
+            let feed = ActivityFeed::new();
+            state.activity_feed = Some(feed.clone());
+            HOOK_STATE.with(|slot| *slot.borrow_mut() = Some(Box::new(state)));
+            // Invoke the callback directly; this does not inject user input.
+            let key = KBDLLHOOKSTRUCT {
+                vkCode: 0x41,
+                ..Default::default()
+            };
+            unsafe {
+                keyboard_hook_proc(
+                    HC_ACTION as i32,
+                    WPARAM(WM_KEYDOWN as usize),
+                    LPARAM(&key as *const _ as isize),
+                );
+            }
+            let state = HOOK_STATE.with(|slot| slot.borrow_mut().take().unwrap());
+            assert!(rx.try_recv().is_err());
+            assert!(state.text_buf.is_empty());
+            assert!(state.pending_clipboard.is_empty());
+            assert!(feed.is_typing());
+        }
     }
 
     #[test]

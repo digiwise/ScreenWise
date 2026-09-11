@@ -537,6 +537,7 @@ fn test_full_pipeline_with_app() {
             element_tx,
             click_queue2,
             focused_element2,
+            Arc::new(windows_uia::KeyboardPrivacy::default()),
             stop2,
             config2,
             start_time,
