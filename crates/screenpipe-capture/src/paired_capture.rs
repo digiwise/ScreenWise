@@ -241,7 +241,7 @@ pub async fn paired_capture(
     } else {
         match tree_snapshot {
             Some(snap) if !snap.text_content.is_empty() => {
-                let json = serde_json::to_string(&snap.nodes).ok();
+                let json = serialize_accessibility_tree_nodes(&snap.nodes, ctx.use_pii_removal);
                 (
                     Some(snap.text_content.clone()),
                     json,
@@ -353,7 +353,7 @@ pub async fn paired_capture(
     Ok(PairedCaptureResult {
         frame_id,
         snapshot_path: snapshot_path_str,
-        accessibility_text,
+        accessibility_text: sanitized_text,
         text_source: text_source.map(String::from),
         capture_trigger: ctx.capture_trigger.to_string(),
         captured_at: ctx.captured_at,
@@ -600,6 +600,39 @@ fn sanitize_ocr_text_json(text_json: &str) -> String {
     serde_json::to_string(&sanitized).unwrap_or_else(|_| text_json.to_string())
 }
 
+/// Serialize accessibility nodes after sanitizing every field that may contain
+/// user-visible text. Structural metadata (role, hierarchy, geometry, state,
+/// and automation identifiers) is preserved unchanged.
+fn serialize_accessibility_tree_nodes(
+    nodes: &[screenpipe_a11y::tree::AccessibilityTreeNode],
+    use_pii_removal: bool,
+) -> Option<String> {
+    if !use_pii_removal {
+        return serde_json::to_string(nodes).ok();
+    }
+
+    let sanitized_nodes: Vec<_> = nodes
+        .iter()
+        .cloned()
+        .map(|mut node| {
+            node.text = remove_pii(&node.text);
+            sanitize_optional_text(&mut node.value);
+            sanitize_optional_text(&mut node.help_text);
+            sanitize_optional_text(&mut node.url);
+            sanitize_optional_text(&mut node.placeholder);
+            node
+        })
+        .collect();
+
+    serde_json::to_string(&sanitized_nodes).ok()
+}
+
+fn sanitize_optional_text(value: &mut Option<String>) {
+    if let Some(text) = value {
+        *text = remove_pii(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +747,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_paired_capture_sanitizes_accessibility_result_and_persisted_tree() {
+        const RAW_EMAIL: &str = "alice@example.com";
+        const RAW_SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let raw_text = format!("Contact {RAW_EMAIL}; token {RAW_SECRET}");
+
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: now,
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("TestApp"),
+            window_name: Some("Account settings"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "click",
+            use_pii_removal: true,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: true,
+        };
+
+        let snap = TreeSnapshot {
+            app_name: "TestApp".to_string(),
+            window_name: "Account settings".to_string(),
+            text_content: raw_text.clone(),
+            nodes: vec![AccessibilityTreeNode {
+                role: "AXTextField".to_string(),
+                text: raw_text,
+                depth: 2,
+                bounds: Some(screenpipe_a11y::tree::NodeBounds {
+                    left: 0.1,
+                    top: 0.2,
+                    width: 0.3,
+                    height: 0.4,
+                }),
+                on_screen: Some(true),
+                automation_id: Some("account-contact".to_string()),
+                value: Some(format!("Signed in as {RAW_EMAIL}")),
+                help_text: Some(format!("Never share token {RAW_SECRET}")),
+                placeholder: Some("Non-PII placeholder".to_string()),
+                ..Default::default()
+            }],
+            browser_url: None,
+            document_path: None,
+            timestamp: now,
+            node_count: 1,
+            walk_duration: std::time::Duration::from_millis(1),
+            content_hash: TreeSnapshot::compute_hash("raw content"),
+            simhash: TreeSnapshot::compute_simhash("raw content"),
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 2,
+        };
+
+        let result = paired_capture(&ctx, Some(&snap)).await.unwrap();
+        let result_text = result.accessibility_text.as_deref().unwrap();
+        assert!(!result_text.contains(RAW_EMAIL));
+        assert!(!result_text.contains(RAW_SECRET));
+        assert!(result_text.contains("[EMAIL]"));
+        assert!(result_text.contains("[OPENAI_KEY]"));
+
+        let (stored_text, stored_tree_json) = db
+            .get_frame_accessibility_data(result.frame_id)
+            .await
+            .unwrap();
+        let stored_text = stored_text.unwrap();
+        let stored_tree_json = stored_tree_json.unwrap();
+        assert!(!stored_text.contains(RAW_EMAIL));
+        assert!(!stored_text.contains(RAW_SECRET));
+        assert!(!stored_tree_json.contains(RAW_EMAIL));
+        assert!(!stored_tree_json.contains(RAW_SECRET));
+
+        let stored_nodes: Vec<AccessibilityTreeNode> =
+            serde_json::from_str(&stored_tree_json).unwrap();
+        let stored_node = &stored_nodes[0];
+        assert_eq!(stored_node.role, "AXTextField");
+        assert_eq!(stored_node.depth, 2);
+        assert_eq!(stored_node.on_screen, Some(true));
+        assert_eq!(
+            stored_node.automation_id.as_deref(),
+            Some("account-contact")
+        );
+        assert_eq!(
+            stored_node.placeholder.as_deref(),
+            Some("Non-PII placeholder")
+        );
+        let bounds = stored_node.bounds.as_ref().unwrap();
+        assert_eq!(
+            (bounds.left, bounds.top, bounds.width, bounds.height),
+            (0.1, 0.2, 0.3, 0.4)
+        );
+    }
+
+    #[tokio::test]
     async fn test_paired_capture_empty_accessibility_text() {
         let tmp = TempDir::new().unwrap();
         let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
@@ -810,6 +947,41 @@ mod tests {
             result.contains("safe text"),
             "non-PII text should be preserved"
         );
+    }
+
+    #[test]
+    fn test_serialize_accessibility_tree_nodes_sanitizes_content_fields_only() {
+        const RAW_EMAIL: &str = "alice@example.com";
+        const RAW_SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+
+        let nodes = vec![AccessibilityTreeNode {
+            role: "AXTextField".to_string(),
+            text: format!("Email: {RAW_EMAIL}"),
+            depth: 3,
+            on_screen: Some(false),
+            automation_id: Some("contact-field".to_string()),
+            value: Some(format!("Token: {RAW_SECRET}")),
+            help_text: Some(format!("Contact {RAW_EMAIL}")),
+            url: Some(format!("mailto:{RAW_EMAIL}")),
+            placeholder: Some("Safe placeholder".to_string()),
+            is_enabled: Some(true),
+            ..Default::default()
+        }];
+
+        let json = serialize_accessibility_tree_nodes(&nodes, true).unwrap();
+        assert!(!json.contains(RAW_EMAIL));
+        assert!(!json.contains(RAW_SECRET));
+        assert!(json.contains("[EMAIL]"));
+        assert!(json.contains("[OPENAI_KEY]"));
+
+        let sanitized: Vec<AccessibilityTreeNode> = serde_json::from_str(&json).unwrap();
+        let node = &sanitized[0];
+        assert_eq!(node.role, "AXTextField");
+        assert_eq!(node.depth, 3);
+        assert_eq!(node.on_screen, Some(false));
+        assert_eq!(node.automation_id.as_deref(), Some("contact-field"));
+        assert_eq!(node.placeholder.as_deref(), Some("Safe placeholder"));
+        assert_eq!(node.is_enabled, Some(true));
     }
 
     #[test]

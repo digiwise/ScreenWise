@@ -21,6 +21,11 @@ use crate::frame_linker_actor::{next_correlation_id, LinkerMessage, LinkerSender
 
 const UI_RECORDER_IDLE_RECV_TIMEOUT: Duration = Duration::from_secs(1);
 const UI_RECORDER_MIN_RECV_TIMEOUT: Duration = Duration::from_millis(1);
+const UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT: Duration = Duration::from_millis(100);
+
+fn privacy_persistence_paused() -> bool {
+    crate::schedule_monitor::schedule_paused() || crate::drm_detector::drm_content_paused()
+}
 
 /// A batched UI event plus an optional correlation id. Events that
 /// won't trigger a capture (Move, Idle, filtered-out targets) leave
@@ -579,11 +584,29 @@ pub async fn start_ui_recording(
                 break;
             }
 
+            // Schedule/DRM pauses are privacy boundaries for every capture
+            // modality, not just vision and audio. Drop anything buffered
+            // before the pause and keep draining producer events without
+            // persisting or turning them into capture triggers.
+            if privacy_persistence_paused() {
+                batch.clear();
+                scroll_burst.clear();
+                let _ = handle.recv_timeout(UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT);
+                last_flush = std::time::Instant::now();
+                continue;
+            }
+
             let recv_timeout =
                 next_ui_event_recv_timeout(&batch, last_flush, batch_timeout, &scroll_burst);
 
             match handle.recv_timeout(recv_timeout) {
                 Some(event) => {
+                    if privacy_persistence_paused() {
+                        batch.clear();
+                        scroll_burst.clear();
+                        last_flush = std::time::Instant::now();
+                        continue;
+                    }
                     let db_event = event.to_db_insert(Some(session_id.clone()));
                     let app_lower = db_event
                         .app_name
@@ -809,6 +832,10 @@ async fn flush_batch(
     if batch.is_empty() {
         return;
     }
+    if privacy_persistence_paused() {
+        batch.clear();
+        return;
+    }
 
     // The DB call borrows the events slice directly — no clones.
     // correlation_ids stays in `batch` so we can zip with the returned
@@ -971,6 +998,11 @@ impl ScrollBurstTracker {
     fn record(&mut self, corr_id: CorrelationId) {
         self.last_scroll_at = Some(std::time::Instant::now());
         self.last_scroll_corr_id = Some(corr_id);
+    }
+
+    fn clear(&mut self) {
+        self.last_scroll_at = None;
+        self.last_scroll_corr_id = None;
     }
 
     /// If a burst has settled, return the correlation id to fire a

@@ -5,8 +5,8 @@
 //! Background reconciliation worker.
 //!
 //! Runs on a separate tokio task off the capture hot path. Polls the
-//! database for un-redacted rows in the four target tables (OCR text,
-//! audio transcripts, accessibility text, clipboard) and writes
+//! database for un-redacted rows across OCR text, ordinary and meeting audio
+//! transcripts, accessibility text, keyboard, and clipboard, then writes
 //! redacted versions back. Mirrors the existing FTS / migration
 //! backfill workers in shape — pause / resume / status, idle-aware
 //! scheduling knobs, retry-with-backoff on transient errors.
@@ -48,8 +48,8 @@ pub struct WorkerConfig {
     pub idle_between_batches: Duration,
     /// Sleep when the queue IS empty (poll interval).
     pub poll_interval: Duration,
-    /// Tables to reconcile. Default: all five (ocr, audio, accessibility,
-    /// ui_events:keyboard, ui_events:clipboard).
+    /// Tables to reconcile. Default: all six (OCR, ordinary audio, meeting
+    /// transcript, accessibility, UI keyboard, UI clipboard).
     pub tables: Vec<TargetTable>,
 }
 

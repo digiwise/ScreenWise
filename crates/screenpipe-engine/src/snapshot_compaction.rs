@@ -41,6 +41,7 @@ const THROTTLED_FRAMES_PER_CHUNK: usize = 50;
 pub fn start_snapshot_compaction(
     db: Arc<DatabaseManager>,
     video_quality: String,
+    require_image_redaction: bool,
     mut shutdown_rx: broadcast::Receiver<()>,
     power_manager: Arc<PowerManagerHandle>,
     hot_frame_cache: Option<Arc<HotFrameCache>>,
@@ -84,7 +85,13 @@ pub fn start_snapshot_compaction(
             };
 
             let compacted = tokio::select! {
-                result = run_compaction_cycle(&db, &video_quality, chunk_size, &hot_frame_cache) => {
+                result = run_compaction_cycle(
+                    &db,
+                    &video_quality,
+                    require_image_redaction,
+                    chunk_size,
+                    &hot_frame_cache,
+                ) => {
                     match result {
                         Ok(n) => n,
                         Err(e) => {
@@ -127,24 +134,12 @@ pub fn start_snapshot_compaction(
 async fn run_compaction_cycle(
     db: &DatabaseManager,
     video_quality: &str,
+    require_image_redaction: bool,
     chunk_size: usize,
     hot_frame_cache: &Option<Arc<HotFrameCache>>,
 ) -> Result<usize> {
     let cutoff = Utc::now() - Duration::seconds(MIN_AGE_SECS);
-
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, snapshot_path, device_name, timestamp
-        FROM frames
-        WHERE snapshot_path IS NOT NULL
-          AND timestamp < ?1
-        ORDER BY device_name, timestamp ASC
-        LIMIT 5000
-        "#,
-    )
-    .bind(cutoff)
-    .fetch_all(&db.pool)
-    .await?;
+    let rows = fetch_eligible_snapshots(&db.pool, cutoff, require_image_redaction).await?;
 
     if rows.is_empty() {
         debug!("snapshot compaction: no eligible frames");
@@ -181,6 +176,29 @@ async fn run_compaction_cycle(
     }
 
     Ok(total)
+}
+
+async fn fetch_eligible_snapshots(
+    pool: &sqlx::SqlitePool,
+    cutoff: chrono::DateTime<Utc>,
+    require_image_redaction: bool,
+) -> Result<Vec<(i64, String, String, String)>> {
+    let rows = sqlx::query_as(
+        r#"
+        SELECT id, snapshot_path, device_name, timestamp
+        FROM frames
+        WHERE snapshot_path IS NOT NULL
+          AND timestamp < ?1
+          AND (?2 = 0 OR image_redacted_at IS NOT NULL)
+        ORDER BY device_name, timestamp ASC
+        LIMIT 5000
+        "#,
+    )
+    .bind(cutoff)
+    .bind(i64::from(require_image_redaction))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 /// Encode a batch of JPEG snapshots into a single MP4 chunk.
@@ -466,6 +484,43 @@ mod tests {
 
     fn make_frame(id: i64, path: &str, ts: &str) -> (i64, String, String) {
         (id, path.to_string(), ts.to_string())
+    }
+
+    #[tokio::test]
+    async fn image_redaction_gate_excludes_raw_snapshots() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE frames (\
+                id INTEGER PRIMARY KEY, \
+                snapshot_path TEXT, \
+                device_name TEXT NOT NULL, \
+                timestamp TEXT NOT NULL, \
+                image_redacted_at INTEGER\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO frames \
+                (id, snapshot_path, device_name, timestamp, image_redacted_at) \
+             VALUES \
+                (1, 'raw.jpg', 'monitor', '2025-01-01T00:00:00Z', NULL), \
+                (2, 'safe.jpg', 'monitor', '2025-01-01T00:00:01Z', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cutoff = Utc::now();
+        let all = fetch_eligible_snapshots(&pool, cutoff, false)
+            .await
+            .unwrap();
+        let redacted = fetch_eligible_snapshots(&pool, cutoff, true).await.unwrap();
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(redacted.len(), 1);
+        assert_eq!(redacted[0].0, 2);
     }
 
     #[test]

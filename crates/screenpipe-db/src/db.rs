@@ -73,9 +73,11 @@ pub struct DeleteTimeRangeResult {
     pub video_chunks_deleted: u64,
     pub accessibility_deleted: u64,
     pub ui_events_deleted: u64,
+    pub meeting_transcript_segments_deleted: u64,
+    pub meetings_deleted: u64,
     pub video_files: Vec<String>,
     pub audio_files: Vec<String>,
-    /// Snapshot JPEG files that were uploaded to cloud and can be deleted.
+    /// Snapshot JPEG files whose owning frame rows were deleted.
     pub snapshot_files: Vec<String>,
 }
 
@@ -5910,16 +5912,14 @@ impl DatabaseManager {
         let end_str = end.to_rfc3339();
 
         // 1. Collect local video file paths for chunks that become fully orphaned.
-        // NOTE: filter out NULL video_chunk_id in the NOT IN subquery — SQL `x NOT IN
-        // (NULL, ...)` evaluates to UNKNOWN for every row, silently zeroing out the
-        // result set. frames.video_chunk_id is nullable (snapshot-only frames have no
-        // mp4 chunk), so without this filter the entire deletion returned 0 files.
+        // Correlated NOT EXISTS below remains safe when frame references are NULL.
         let video_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM video_chunks
                WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
                             WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
+               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
+                              WHERE outside_frames.video_chunk_id = video_chunks.id
+                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -5938,13 +5938,14 @@ impl DatabaseManager {
         .await?;
 
         // 2. Collect audio file paths for chunks that become fully orphaned.
-        // Same NULL-in-NOT-IN pitfall as above — filter NULL audio_chunk_id explicitly.
+        // The correlated NOT EXISTS keeps nullable transcript references safe.
         let audio_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM audio_chunks
                WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                             WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
+               AND NOT EXISTS (SELECT 1 FROM audio_transcriptions outside_audio
+                              WHERE outside_audio.audio_chunk_id = audio_chunks.id
+                                AND outside_audio.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6034,7 +6035,7 @@ impl DatabaseManager {
 
         // 6. Delete orphaned video_chunks (no frames reference them anymore)
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE NOT EXISTS (SELECT 1 FROM frames f WHERE f.video_chunk_id = video_chunks.id)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -6051,7 +6052,7 @@ impl DatabaseManager {
 
         // 8. Delete orphaned audio_chunks — audio_tags CASCADE'd automatically
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE NOT EXISTS (SELECT 1 FROM audio_transcriptions at WHERE at.audio_chunk_id = audio_chunks.id)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -6068,6 +6069,21 @@ impl DatabaseManager {
                 .execute(&mut **tx.conn())
                 .await?;
         let ui_events_deleted = ui_events_result.rows_affected();
+
+        let meeting_segments_result = sqlx::query(
+            "DELETE FROM meeting_transcript_segments WHERE captured_at BETWEEN ?1 AND ?2",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
+        let meetings_result = sqlx::query(
+            "DELETE FROM meetings WHERE meeting_end IS NOT NULL AND meeting_end BETWEEN ?1 AND ?2",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
 
         // 11. Commit — if this fails, no files are touched (auto-rollback)
         tx.commit().await.map_err(|e| {
@@ -6088,6 +6104,8 @@ impl DatabaseManager {
             video_chunks_deleted,
             accessibility_deleted,
             ui_events_deleted,
+            meeting_transcript_segments_deleted: meeting_segments_result.rows_affected(),
+            meetings_deleted: meetings_result.rows_affected(),
             video_files,
             audio_files,
             snapshot_files,
@@ -6109,19 +6127,14 @@ impl DatabaseManager {
         let end_str = end.to_rfc3339();
 
         // 1. Collect ALL video file paths for chunks that become fully orphaned.
-        // SQL `x NOT IN (..., NULL)` evaluates to UNKNOWN for every row, which
-        // makes the whole WHERE clause silently filter out *everything*.
-        // frames.video_chunk_id is nullable (snapshot-only frames carry no
-        // mp4 chunk reference), so the inner subquery must exclude NULLs
-        // explicitly — otherwise the user clicks "delete last 15 minutes"
-        // and the API responds with 0 files deleted while the mp4s stay on
-        // disk.
+        // Correlated NOT EXISTS below remains safe when frame references are NULL.
         let video_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM video_chunks
                WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
                             WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
+               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
+                              WHERE outside_frames.video_chunk_id = video_chunks.id
+                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6146,8 +6159,9 @@ impl DatabaseManager {
             r#"SELECT file_path FROM audio_chunks
                WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                             WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
+               AND NOT EXISTS (SELECT 1 FROM audio_transcriptions outside_audio
+                              WHERE outside_audio.audio_chunk_id = audio_chunks.id
+                                AND outside_audio.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6231,7 +6245,7 @@ impl DatabaseManager {
 
         // 8. Delete orphaned video_chunks
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE NOT EXISTS (SELECT 1 FROM frames f WHERE f.video_chunk_id = video_chunks.id)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -6248,7 +6262,7 @@ impl DatabaseManager {
 
         // 10. Delete orphaned audio_chunks
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE NOT EXISTS (SELECT 1 FROM audio_transcriptions at WHERE at.audio_chunk_id = audio_chunks.id)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -6265,6 +6279,21 @@ impl DatabaseManager {
                 .execute(&mut **tx.conn())
                 .await?;
         let ui_events_deleted = ui_events_result.rows_affected();
+
+        let meeting_segments_result = sqlx::query(
+            "DELETE FROM meeting_transcript_segments WHERE captured_at BETWEEN ?1 AND ?2",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
+        let meetings_result = sqlx::query(
+            "DELETE FROM meetings WHERE meeting_end IS NOT NULL AND meeting_end BETWEEN ?1 AND ?2",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
 
         // 12. Commit — if this fails, no files are touched
         tx.commit().await.map_err(|e| {
@@ -6288,6 +6317,8 @@ impl DatabaseManager {
             video_chunks_deleted,
             accessibility_deleted,
             ui_events_deleted,
+            meeting_transcript_segments_deleted: meeting_segments_result.rows_affected(),
+            meetings_deleted: meetings_result.rows_affected(),
             video_files,
             audio_files,
             snapshot_files,
@@ -6316,18 +6347,18 @@ impl DatabaseManager {
         // Collect video chunks fully covered by the range and not already
         // evicted. We only consider chunks whose ALL frames fall inside the
         // window — straddling chunks are skipped so old playback still works.
-        // NOT IN (subquery) silently filters out everything if the subquery
-        // contains NULL — frames.video_chunk_id is nullable. Same trap applies
-        // to audio_transcriptions.audio_chunk_id. Filter NULLs in the inner
-        // SELECT.
+        // Correlated NOT EXISTS is intentionally used here because chunk IDs
+        // are nullable; NOT IN would suppress every result if its subquery
+        // yielded even one NULL.
         let video_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM video_chunks
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND id IN (SELECT DISTINCT video_chunk_id FROM frames
                           WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
+               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
+                              WHERE outside_frames.video_chunk_id = video_chunks.id
+                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6340,8 +6371,9 @@ impl DatabaseManager {
                AND file_path != ''
                AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                           WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
+               AND NOT EXISTS (SELECT 1 FROM audio_transcriptions outside_audio
+                              WHERE outside_audio.audio_chunk_id = audio_chunks.id
+                                AND outside_audio.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6367,7 +6399,9 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
+                              WHERE outside_frames.video_chunk_id = video_chunks.id
+                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6380,7 +6414,9 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND NOT EXISTS (SELECT 1 FROM audio_transcriptions outside_audio
+                              WHERE outside_audio.audio_chunk_id = audio_chunks.id
+                                AND outside_audio.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6437,7 +6473,9 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
+                              WHERE outside_frames.video_chunk_id = video_chunks.id
+                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6449,7 +6487,9 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND NOT EXISTS (SELECT 1 FROM audio_transcriptions outside_audio
+                              WHERE outside_audio.audio_chunk_id = audio_chunks.id
+                                AND outside_audio.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6482,7 +6522,7 @@ impl DatabaseManager {
     /// Fast batch delete: only deletes time-range-bounded rows (ocr_text,
     /// elements, frames, audio_transcriptions, ui_events). Skips the expensive
     /// orphan cleanup (video_chunks, audio_chunks) which requires full-table
-    /// NOT IN scans. Call `cleanup_orphaned_chunks` once after all batches.
+    /// reference scans. Call `cleanup_orphaned_chunks` once after all batches.
     ///
     /// Returns file paths and row counts. video_chunks_deleted and
     /// audio_chunks_deleted will always be 0 — orphans are cleaned separately.
@@ -6510,7 +6550,9 @@ impl DatabaseManager {
         // Collect video files that are fully within this batch (all frames in chunk are in range)
         let video_query = r#"SELECT file_path FROM video_chunks
                WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#;
+               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
+                              WHERE outside_frames.video_chunk_id = video_chunks.id
+                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#;
         let video_files: Vec<String> = sqlx::query_scalar(video_query)
             .bind(&start_str)
             .bind(&end_str)
@@ -6521,7 +6563,9 @@ impl DatabaseManager {
         let audio_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM audio_chunks
                WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND NOT EXISTS (SELECT 1 FROM audio_transcriptions outside_audio
+                              WHERE outside_audio.audio_chunk_id = audio_chunks.id
+                                AND outside_audio.timestamp NOT BETWEEN ?1 AND ?2)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -6628,6 +6672,21 @@ impl DatabaseManager {
                 .await?;
         let ui_events_deleted = ui_events_result.rows_affected();
 
+        let meeting_segments_result = sqlx::query(
+            "DELETE FROM meeting_transcript_segments WHERE captured_at BETWEEN ?1 AND ?2",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
+        let meetings_result = sqlx::query(
+            "DELETE FROM meetings WHERE meeting_end IS NOT NULL AND meeting_end BETWEEN ?1 AND ?2",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
+
         tx.commit().await.map_err(|e| {
             error!(
                 "failed to commit delete_time_range_batch transaction: {}",
@@ -6649,6 +6708,8 @@ impl DatabaseManager {
             video_chunks_deleted: 0,
             accessibility_deleted,
             ui_events_deleted,
+            meeting_transcript_segments_deleted: meeting_segments_result.rows_affected(),
+            meetings_deleted: meetings_result.rows_affected(),
             video_files,
             audio_files,
             snapshot_files,
@@ -6657,20 +6718,20 @@ impl DatabaseManager {
 
     /// Clean up orphaned video_chunks and audio_chunks that no longer have
     /// any referencing frames/transcriptions. This is the expensive operation
-    /// (full-table NOT IN scan) that should only run once after all batch
+    /// (full-table reference scan) that should only run once after all batch
     /// deletes are complete.
     pub async fn cleanup_orphaned_chunks(&self) -> Result<(u64, u64), sqlx::Error> {
         let mut tx = self.begin_immediate_with_retry().await?;
 
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE NOT EXISTS (SELECT 1 FROM frames f WHERE f.video_chunk_id = video_chunks.id)",
         )
         .execute(&mut **tx.conn())
         .await?;
         let video_chunks_deleted = video_chunks_result.rows_affected();
 
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE NOT EXISTS (SELECT 1 FROM audio_transcriptions at WHERE at.audio_chunk_id = audio_chunks.id)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -6692,7 +6753,7 @@ impl DatabaseManager {
         Ok((video_chunks_deleted, audio_chunks_deleted))
     }
 
-    /// Returns the oldest timestamp across frames and audio_transcriptions.
+    /// Returns the oldest timestamp across recorded and meeting-owned data.
     /// Used by retention to avoid scanning from epoch.
     pub async fn get_oldest_timestamp(&self) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
         let oldest: Option<String> = sqlx::query_scalar(
@@ -6700,6 +6761,14 @@ impl DatabaseManager {
                 SELECT MIN(timestamp) AS ts FROM frames
                 UNION ALL
                 SELECT MIN(timestamp) AS ts FROM audio_transcriptions
+                UNION ALL
+                SELECT MIN(timestamp) AS ts FROM ui_events
+                UNION ALL
+                SELECT MIN(meeting_start) AS ts FROM meetings
+                UNION ALL
+                SELECT MIN(meeting_end) AS ts FROM meetings
+                UNION ALL
+                SELECT MIN(captured_at) AS ts FROM meeting_transcript_segments
             )"#,
         )
         .fetch_one(&self.pool)
@@ -10172,6 +10241,142 @@ pub fn parse_all_text_positions(blocks: &[OcrTextBlock]) -> Vec<TextPosition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn test_database() -> DatabaseManager {
+        DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retention_media_queries_ignore_unrelated_null_chunk_references() {
+        let db = test_database().await;
+        let video_id: i64 = sqlx::query_scalar(
+            "INSERT INTO video_chunks (file_path) VALUES ('video.mp4') RETURNING id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name) \
+             VALUES (?1, 0, '2026-01-02T00:00:00Z', 'monitor'), \
+                    (NULL, 0, '2026-01-03T00:00:00Z', 'monitor')",
+        )
+        .bind(video_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let start = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-01-02T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = db.evict_media_in_range(start, end).await.unwrap();
+
+        assert_eq!(result.video_chunks_evicted, 1);
+        assert_eq!(result.video_files, vec!["video.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_is_null_safe() {
+        let db = test_database().await;
+        sqlx::query("INSERT INTO video_chunks (file_path) VALUES ('orphan-video.mp4')")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO audio_chunks (file_path) VALUES ('orphan-audio.wav')")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name) \
+             VALUES (NULL, 0, '2026-01-03T00:00:00Z', 'monitor')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(db.cleanup_orphaned_chunks().await.unwrap(), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn oldest_timestamp_includes_ui_and_meeting_only_history() {
+        let db = test_database().await;
+        sqlx::query(
+            "INSERT INTO ui_events (timestamp, event_type) \
+             VALUES ('2025-02-01T00:00:00Z', 'click')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO meetings (meeting_start, meeting_app, detection_source) \
+             VALUES ('2025-01-01T00:00:00Z', 'local', 'test')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let oldest = db.get_oldest_timestamp().await.unwrap().unwrap();
+        assert_eq!(oldest.to_rfc3339(), "2025-01-01T00:00:00+00:00");
+    }
+
+    #[tokio::test]
+    async fn retention_batch_removes_old_meeting_data_but_preserves_open_meeting() {
+        let db = test_database().await;
+        sqlx::query(
+            "INSERT INTO meetings
+                (id, meeting_start, meeting_end, meeting_app, detection_source)
+             VALUES
+                (1, '2026-01-01T09:00:00Z', '2026-01-01T10:00:00Z', 'closed', 'test'),
+                (2, '2026-01-01T11:00:00Z', NULL, 'open', 'test'),
+                (3, '2026-01-03T09:00:00Z', '2026-01-03T10:00:00Z', 'recent', 'test')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        for (meeting_id, item_id, captured_at) in [
+            (1_i64, "closed-item", "2026-01-01T09:30:00Z"),
+            (2_i64, "open-item", "2026-01-01T11:30:00Z"),
+            (3_i64, "recent-item", "2026-01-03T09:30:00Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO meeting_transcript_segments
+                    (meeting_id, provider, item_id, transcript, captured_at)
+                 VALUES (?1, 'selected-engine', ?2, 'private words', ?3)",
+            )
+            .bind(meeting_id)
+            .bind(item_id)
+            .bind(captured_at)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        let start = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = db.delete_time_range_batch(start, end).await.unwrap();
+
+        let meeting_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM meetings ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        let segment_meeting_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT meeting_id FROM meeting_transcript_segments ORDER BY meeting_id",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(meeting_ids, vec![2, 3]);
+        assert_eq!(segment_meeting_ids, vec![3]);
+        assert_eq!(result.meeting_transcript_segments_deleted, 2);
+        assert_eq!(result.meetings_deleted, 1);
+    }
 
     fn create_test_block(
         text: &str,

@@ -2719,6 +2719,14 @@ pub async fn run_meeting_detection_loop(
             }
         }
 
+        // Leave pending auto-end requests buffered while privacy persistence is
+        // paused. Processing them would otherwise update meeting metadata and
+        // typed-text summaries during a schedule or DRM pause.
+        if crate::schedule_monitor::schedule_paused() || crate::drm_detector::drm_content_paused() {
+            debug!("meeting v2: privacy pause active, skipping scan");
+            continue;
+        }
+
         if let Some(event) = auto_end_sub.next().now_or_never().flatten() {
             let request = event.data;
             let manual_matches = { *manual_meeting.read().await == Some(request.meeting_id) };

@@ -764,6 +764,7 @@ async fn main() -> anyhow::Result<()> {
         screenpipe_engine::start_snapshot_compaction(
             db.clone(),
             config.video_quality.clone(),
+            config.async_image_pii_redaction,
             shutdown_tx.subscribe(),
             power_manager.clone(),
             Some(hot_frame_cache.clone()),

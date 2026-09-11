@@ -256,6 +256,7 @@ impl CaptureSession {
         screenpipe_engine::start_snapshot_compaction(
             server.db.clone(),
             config.video_quality.clone(),
+            config.async_image_pii_redaction,
             shutdown_tx.subscribe(),
             server.power_manager.clone(),
             Some(server.hot_frame_cache.clone()),

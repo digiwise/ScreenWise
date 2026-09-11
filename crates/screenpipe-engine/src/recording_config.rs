@@ -225,6 +225,7 @@ impl RecordingConfig {
                 screenpipe_config::RecordingSettings::normalize_meeting_live_transcription_provider(
                     &settings.meeting_live_transcription_provider,
                 ),
+                settings.use_pii_removal,
                 single_language_code(&settings.languages),
                 settings.effective_user_name().map(str::to_string),
             ),
@@ -462,13 +463,16 @@ mod tests {
             capture_on_keystroke: Some(true),
             capture_on_clipboard: Some(false),
             capture_scroll: Some(true),
+            use_pii_removal: true,
             prioritize_input_latency: true,
             extraction_thread_priority: "lowest".to_string(),
             pause_extraction_on_input_ms: 400,
             ..Default::default()
         };
 
-        let ui = build(&settings).to_ui_recorder_config();
+        let config = build(&settings);
+        assert!(config.meeting_streaming.use_pii_removal);
+        let ui = config.to_ui_recorder_config();
 
         assert!(!ui.capture_clipboard);
         assert!(!ui.capture_clipboard_content);

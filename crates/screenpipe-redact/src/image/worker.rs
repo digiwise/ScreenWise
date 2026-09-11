@@ -211,7 +211,7 @@ impl ImageWorker {
              WHERE name IS NOT NULL
                AND image_redacted_at IS NULL
                AND ( strftime('%s','now') - CAST(strftime('%s', timestamp) AS INTEGER) ) >= ?1
-             ORDER BY id DESC
+             ORDER BY id ASC
              LIMIT 1
             "#,
         )
@@ -406,5 +406,53 @@ mod tests {
             .unwrap();
         let when: Option<i64> = row.get(0);
         assert!(when.is_some(), "must mark redacted_at to skip");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn processes_oldest_frame_first() {
+        let pool = setup().await;
+        let dir = tempfile::tempdir().unwrap();
+        let oldest = dir.path().join("oldest.png");
+        let newest = dir.path().join("newest.png");
+        image::ImageBuffer::from_pixel(20, 20, image::Rgb([200_u8, 180, 160]))
+            .save(&oldest)
+            .unwrap();
+        image::ImageBuffer::from_pixel(20, 20, image::Rgb([200_u8, 180, 160]))
+            .save(&newest)
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO frames (timestamp, name) VALUES (datetime('now', '-2 hours'), ?1)",
+        )
+        .bind(oldest.to_string_lossy().into_owned())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO frames (timestamp, name) VALUES (datetime('now', '-1 hour'), ?1)")
+            .bind(newest.to_string_lossy().into_owned())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let worker = ImageWorker::new(
+            pool.clone(),
+            Arc::new(StubRedactor),
+            ImageWorkerConfig::default(),
+        );
+        assert!(worker.process_one().await.unwrap().is_some());
+        let oldest_marked: Option<i64> =
+            sqlx::query_scalar("SELECT image_redacted_at FROM frames WHERE name = ?1")
+                .bind(oldest.to_string_lossy().into_owned())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let newest_marked: Option<i64> =
+            sqlx::query_scalar("SELECT image_redacted_at FROM frames WHERE name = ?1")
+                .bind(newest.to_string_lossy().into_owned())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(oldest_marked.is_some());
+        assert!(newest_marked.is_none());
     }
 }

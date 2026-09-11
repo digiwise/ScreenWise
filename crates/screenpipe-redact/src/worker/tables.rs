@@ -12,7 +12,7 @@
 //!
 //! ## What we redact
 //!
-//! Four logical surfaces, five [`TargetTable`] variants (UI events
+//! Five logical surfaces, six [`TargetTable`] variants (UI events
 //! split into keyboard vs clipboard):
 //!
 //! 1. **`ocr_text`** — OCR'd screen text. Source column `text`.
@@ -29,6 +29,8 @@
 //!    clipboard contents (`event_type = 'clipboard'`). Source column
 //!    `text_content`. Split into two variants so the row-fetch SQL
 //!    can filter by `event_type`.
+//! 5. **`meeting_transcript_segments`** — local live-meeting transcript
+//!    finals. Source column `transcript`.
 //!
 //! ## "Needs redaction" predicate
 //!
@@ -45,6 +47,8 @@ pub enum TargetTable {
     Ocr,
     /// Speech-to-text (`audio_transcriptions.transcription`).
     AudioTranscription,
+    /// Local live-meeting transcript finals.
+    MeetingTranscript,
     /// Accessibility-tree text — lives on `frames.accessibility_text`
     /// since the `accessibility` table was consolidated into `frames`
     /// by `20260312000001_drop_dead_fts_tables.sql`. The "is processed"
@@ -62,6 +66,7 @@ pub enum TargetTable {
 pub const ALL_TARGET_TABLES: &[TargetTable] = &[
     TargetTable::Ocr,
     TargetTable::AudioTranscription,
+    TargetTable::MeetingTranscript,
     TargetTable::Accessibility,
     TargetTable::UiEventsKeyboard,
     TargetTable::UiEventsClipboard,
@@ -80,6 +85,7 @@ impl TargetTable {
         match self {
             Self::Ocr => "ocr_text",
             Self::AudioTranscription => "audio_transcriptions",
+            Self::MeetingTranscript => "meeting_transcript_segments",
             // accessibility_text lives on frames after the 2026-03-12
             // consolidation; see the variant docs above.
             Self::Accessibility => "frames",
@@ -92,6 +98,7 @@ impl TargetTable {
         match self {
             Self::Ocr => "text",
             Self::AudioTranscription => "transcription",
+            Self::MeetingTranscript => "transcript",
             Self::Accessibility => "accessibility_text",
             Self::UiEventsKeyboard | Self::UiEventsClipboard => "text_content",
         }
@@ -133,6 +140,7 @@ impl TargetTable {
         match self {
             Self::Ocr => "ocr_text",
             Self::AudioTranscription => "audio_transcriptions",
+            Self::MeetingTranscript => "meeting_transcript_segments",
             Self::Accessibility => "frames:accessibility_text",
             Self::UiEventsKeyboard => "ui_events:keyboard",
             Self::UiEventsClipboard => "ui_events:clipboard",
@@ -191,6 +199,7 @@ pub async fn write_redacted(
     id: i64,
     redacted: &str,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     let q = format!(
         "UPDATE {tbl} SET \
             {src} = ?, \
@@ -204,8 +213,120 @@ pub async fn write_redacted(
     sqlx::query(&q)
         .bind(redacted)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    match table {
+        TargetTable::Ocr => {
+            clear_ocr_derivatives(&mut tx, id).await?;
+            rebuild_frame_full_text(&mut tx, id).await?;
+        }
+        TargetTable::Accessibility => {
+            clear_accessibility_derivatives(&mut tx, id).await?;
+            rebuild_frame_full_text(&mut tx, id).await?;
+        }
+        TargetTable::AudioTranscription
+        | TargetTable::MeetingTranscript
+        | TargetTable::UiEventsKeyboard
+        | TargetTable::UiEventsClipboard => {}
+    }
+
+    tx.commit().await
+}
+
+/// Remove OCR representations that would otherwise retain the pre-redaction
+/// text. Deduplicated frames may share the same element anchor; clearing the
+/// shared structure is privacy-safe and each frame's flat text is reconciled
+/// independently by the worker.
+async fn clear_ocr_derivatives(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    frame_id: i64,
+) -> Result<(), sqlx::Error> {
+    let anchor = element_anchor(tx, frame_id).await?;
+    sqlx::query(
+        "UPDATE ocr_text SET text_json = NULL
+         WHERE frame_id IN (
+             SELECT id FROM frames WHERE id = ?1 OR elements_ref_frame_id = ?1
+         )",
+    )
+    .bind(anchor)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM elements WHERE frame_id = ?1 AND source = 'ocr'")
+        .bind(anchor)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Remove accessibility JSON and shared structured elements.
+/// `elements_ref_frame_id` is cleared from every dependent frame so no later
+/// reader can follow the now-empty anchor.
+async fn clear_accessibility_derivatives(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    frame_id: i64,
+) -> Result<(), sqlx::Error> {
+    let anchor = element_anchor(tx, frame_id).await?;
+    sqlx::query(
+        "UPDATE frames
+         SET accessibility_tree_json = NULL, elements_ref_frame_id = NULL
+         WHERE id = ?1 OR elements_ref_frame_id = ?1",
+    )
+    .bind(anchor)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM elements WHERE frame_id = ?1 AND source = 'accessibility'")
+        .bind(anchor)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn element_anchor(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    frame_id: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, Option<i64>>("SELECT elements_ref_frame_id FROM frames WHERE id = ?1")
+        .bind(frame_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map(|anchor| anchor.flatten().unwrap_or(frame_id))
+}
+
+/// Recompute the single searchable text column from the now-redacted source
+/// columns. Updating `full_text` fires the production FTS trigger in the same
+/// transaction, removing the old terms and indexing the replacement.
+async fn rebuild_frame_full_text(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    frame_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE frames
+           SET full_text = CASE text_source
+             WHEN 'hybrid' THEN NULLIF(
+               TRIM(COALESCE(accessibility_text, '') ||
+                    CASE WHEN accessibility_text IS NOT NULL AND accessibility_text != ''
+                         AND EXISTS (SELECT 1 FROM ocr_text WHERE frame_id = frames.id AND text != '')
+                         THEN char(10) ELSE '' END ||
+                    COALESCE((SELECT text FROM ocr_text WHERE frame_id = frames.id LIMIT 1), '')),
+               '')
+             WHEN 'ocr' THEN COALESCE(
+               (SELECT NULLIF(text, '') FROM ocr_text WHERE frame_id = frames.id LIMIT 1),
+               NULLIF(accessibility_text, ''))
+             WHEN 'accessibility' THEN COALESCE(
+               NULLIF(accessibility_text, ''),
+               (SELECT NULLIF(text, '') FROM ocr_text WHERE frame_id = frames.id LIMIT 1))
+             ELSE COALESCE(
+               NULLIF(accessibility_text, ''),
+               (SELECT NULLIF(text, '') FROM ocr_text WHERE frame_id = frames.id LIMIT 1))
+           END
+         WHERE id = ?1
+        "#,
+    )
+    .bind(frame_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -230,6 +351,7 @@ mod tests {
             CREATE TABLE ocr_text (
                 frame_id INTEGER PRIMARY KEY,
                 text TEXT NOT NULL,
+                text_json TEXT,
                 redacted_at INTEGER
             );
             -- Accessibility text now lives on `frames` (the standalone
@@ -238,12 +360,41 @@ mod tests {
             CREATE TABLE frames (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 accessibility_text TEXT,
+                accessibility_tree_json TEXT,
+                elements_ref_frame_id INTEGER,
+                text_source TEXT,
+                full_text TEXT,
                 accessibility_redacted_at INTEGER
             );
+            CREATE TABLE elements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                frame_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                text TEXT,
+                parent_id INTEGER
+            );
+            CREATE VIRTUAL TABLE frames_fts USING fts5(full_text, id UNINDEXED);
+            CREATE VIRTUAL TABLE elements_fts USING fts5(text, frame_id UNINDEXED);
+            CREATE TRIGGER frames_au AFTER UPDATE OF full_text ON frames BEGIN
+                DELETE FROM frames_fts WHERE id = OLD.id;
+                INSERT INTO frames_fts(rowid, full_text, id)
+                SELECT NEW.id, NEW.full_text, NEW.id WHERE NEW.full_text IS NOT NULL AND NEW.full_text != '';
+            END;
+            CREATE TRIGGER elements_ai AFTER INSERT ON elements BEGIN
+                INSERT INTO elements_fts(rowid, text, frame_id) VALUES (NEW.id, NEW.text, NEW.frame_id);
+            END;
+            CREATE TRIGGER elements_ad AFTER DELETE ON elements BEGIN
+                DELETE FROM elements_fts WHERE rowid = OLD.id;
+            END;
             CREATE TABLE ui_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
                 text_content TEXT,
+                redacted_at INTEGER
+            );
+            CREATE TABLE meeting_transcript_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transcript TEXT NOT NULL,
                 redacted_at INTEGER
             );
             "#,
@@ -303,6 +454,237 @@ mod tests {
         let when: Option<i64> = row.get(1);
         assert_eq!(raw, "[EMAIL]", "source column must be overwritten");
         assert!(when.is_some(), "redacted_at must be stamped");
+    }
+
+    #[tokio::test]
+    async fn meeting_transcript_is_reconciled_destructively() {
+        let pool = setup().await;
+        sqlx::query(
+            "INSERT INTO meeting_transcript_segments (transcript) VALUES ('alice@example.com')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = fetch_unredacted(&pool, TargetTable::MeetingTranscript, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        write_redacted(&pool, TargetTable::MeetingTranscript, rows[0].id, "[EMAIL]")
+            .await
+            .unwrap();
+
+        let row: (String, Option<i64>) = sqlx::query_as(
+            "SELECT transcript, redacted_at FROM meeting_transcript_segments WHERE id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "[EMAIL]");
+        assert!(row.1.is_some());
+    }
+
+    #[tokio::test]
+    async fn ocr_write_clears_structured_copies_and_rebuilds_fts() {
+        let pool = setup().await;
+        let secret = "ORIGINAL_OCR_SECRET";
+        sqlx::query("INSERT INTO frames (id, text_source, full_text) VALUES (1, 'ocr', ?1)")
+            .bind(secret)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ocr_text (frame_id, text, text_json) VALUES (1, ?1, ?2)")
+            .bind(secret)
+            .bind(format!(r#"{{"text":"{secret}"}}"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO elements (frame_id, source, text) VALUES (1, 'ocr', ?1)")
+            .bind(secret)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO frames_fts(rowid, full_text, id) VALUES (1, ?1, 1)")
+            .bind(secret)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        write_redacted(&pool, TargetTable::Ocr, 1, "[SECRET]")
+            .await
+            .unwrap();
+
+        let copies: (String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT ot.text, ot.text_json, f.full_text, (SELECT text FROM elements WHERE frame_id = 1 AND source = 'ocr') FROM ocr_text ot JOIN frames f ON f.id = ot.frame_id WHERE ot.frame_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!copies.0.contains(secret));
+        assert!(copies.1.is_none());
+        assert_eq!(copies.2.as_deref(), Some("[SECRET]"));
+        assert!(copies.3.is_none());
+        let indexed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM frames_fts WHERE frames_fts MATCH ?1")
+                .bind(secret)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed, 0, "FTS retained the original OCR secret");
+        let element_indexed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM elements_fts WHERE elements_fts MATCH ?1")
+                .bind(secret)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            element_indexed, 0,
+            "element FTS retained the original OCR secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn ocr_fallback_rebuild_prefers_the_redacted_ocr_source() {
+        let pool = setup().await;
+        sqlx::query(
+            "INSERT INTO frames
+                (id, accessibility_text, text_source, full_text)
+             VALUES (1, 'ORIGINAL_OCR_SECRET', 'ocr', 'ORIGINAL_OCR_SECRET')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ocr_text (frame_id, text, text_json)
+             VALUES (1, 'ORIGINAL_OCR_SECRET', 'ORIGINAL_OCR_SECRET')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        write_redacted(&pool, TargetTable::Ocr, 1, "[SECRET]")
+            .await
+            .unwrap();
+
+        let full_text: Option<String> =
+            sqlx::query_scalar("SELECT full_text FROM frames WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(full_text.as_deref(), Some("[SECRET]"));
+    }
+
+    #[tokio::test]
+    async fn accessibility_write_clears_structured_copies_and_rebuilds_fts() {
+        let pool = setup().await;
+        let secret = "ORIGINAL_AX_SECRET";
+        sqlx::query(
+            "INSERT INTO frames (id, accessibility_text, accessibility_tree_json, full_text) VALUES (1, ?1, ?2, ?1)",
+        )
+        .bind(secret)
+        .bind(format!(r#"{{"text":"{secret}"}}"#))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO elements (frame_id, source, text) VALUES (1, 'accessibility', ?1)",
+        )
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO frames_fts(rowid, full_text, id) VALUES (1, ?1, 1)")
+            .bind(secret)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        write_redacted(&pool, TargetTable::Accessibility, 1, "[SECRET]")
+            .await
+            .unwrap();
+
+        let copies: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT accessibility_text, accessibility_tree_json, full_text FROM frames WHERE id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!copies.0.contains(secret));
+        assert!(copies.1.is_none());
+        assert_eq!(copies.2.as_deref(), Some("[SECRET]"));
+        let element_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM elements WHERE frame_id = 1 AND source = 'accessibility'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(element_count, 0);
+        let indexed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM frames_fts WHERE frames_fts MATCH ?1")
+                .bind(secret)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed, 0, "FTS retained the original accessibility secret");
+        let element_indexed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM elements_fts WHERE elements_fts MATCH ?1")
+                .bind(secret)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            element_indexed, 0,
+            "element FTS retained the original accessibility secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_element_anchor_is_cleared_without_leaving_raw_structure() {
+        let pool = setup().await;
+        sqlx::query(
+            "INSERT INTO frames
+                (id, accessibility_text, accessibility_tree_json, elements_ref_frame_id)
+             VALUES
+                (1, 'ORIGINAL_SHARED_SECRET', 'ORIGINAL_SHARED_SECRET', 2),
+                (2, 'anchor', 'ORIGINAL_SHARED_SECRET', NULL),
+                (3, 'other reference', 'ORIGINAL_SHARED_SECRET', 2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO elements (frame_id, source, text)
+             VALUES (2, 'accessibility', 'ORIGINAL_SHARED_SECRET')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        write_redacted(&pool, TargetTable::Accessibility, 1, "[SECRET]")
+            .await
+            .unwrap();
+
+        let source: String =
+            sqlx::query_scalar("SELECT accessibility_text FROM frames WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let structured_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM frames
+             WHERE accessibility_tree_json IS NOT NULL OR elements_ref_frame_id IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let element_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM elements WHERE frame_id = 2")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(source, "[SECRET]");
+        assert_eq!(structured_count, 0);
+        assert_eq!(element_count, 0);
     }
 
     #[tokio::test]

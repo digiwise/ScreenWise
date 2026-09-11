@@ -2686,3 +2686,98 @@ Post-change evidence:
   `F53B61C322EDFB67A24A2AB92BD5B4EF169F5647B98EE188F4147C1D8A6D173A`).
   Fetching the pinned NSIS packaging tool was a build-time-only acquisition;
   the installed application gained no runtime network path.
+
+### Privacy persistence boundary — 2026-09-11
+
+Pre-change reachability found several places where a privacy setting can stop
+or sanitize the obvious output while a second persisted representation remains:
+
+- Basic PII removal sanitizes flat accessibility and OCR text before insertion,
+  but persists raw accessibility-tree JSON and returns raw accessibility text to
+  the in-memory hot-frame cache. Smart reconciliation updates only selected flat
+  columns, leaving structured text, derived frame text, and FTS material to be
+  audited together.
+- Image PII reconciliation writes a temporary image and uses a rename operation
+  that cannot replace an existing destination on Windows. It also processes the
+  newest eligible frame first, increasing the exposure time of older raw files;
+  snapshot compaction does not currently wait for required image redaction.
+- Retention and preview queries use nullable `NOT IN` subqueries, so a single
+  `NULL` reference can suppress cleanup. Oldest-record discovery ignores UI and
+  meeting-only history, and meeting transcript segments are outside both Basic
+  PII sanitization and retention deletion.
+- Schedule and DRM pauses stop vision/audio managers but do not share their gate
+  with UI-event batching and meeting scans. Windows password-field suppression
+  is not wired into opt-in keyboard capture.
+- On Windows, configured focused-window/URL exclusions prevent capture when the
+  excluded window is focused but do not mask an excluded background window that
+  is visible on a monitor captured for an allowed foreground window. Missing
+  focused-window metadata can also fail open for some filters. Full background
+  pixel masking is an architectural capture change and is recorded separately
+  from the independently safe persistence corrections below.
+
+This phase will first close independently testable persistence gaps without
+weakening Windows WGC, UIA, OCR, local audio, or search: sanitize every Basic
+structured/hot-cache copy, make Windows image replacement and queue ordering
+reliable, make retention queries null-safe and include local meeting/UI history,
+and extend redaction to meeting transcripts. Compaction and privacy-pause gates
+will be changed only where the state can be made explicit and tested. The raw
+audio-file boundary remains intentional: transcript PII settings cannot redact
+speech embedded in local WAV media.
+
+Post-change evidence:
+
+- Basic PII removal now sanitizes every text-bearing accessibility-node field
+  before serializing the tree and returns the sanitized flat text to the hot
+  frame cache. The DB-backed capture test proves the raw email/key are absent
+  from both the returned frame and the persisted tree while roles, bounds, and
+  automation metadata remain intact.
+- Smart text reconciliation now overwrites the source and, in the same SQLite
+  transaction, removes raw OCR/accessibility JSON and structured elements and
+  rebuilds `frames.full_text`, which refreshes FTS. Explicit `text_source`
+  selection prevents an OCR-fallback frame from re-indexing its raw duplicate.
+  Shared element anchors are cleared safely; dependent flat rows remain marked
+  unprocessed and are reconciled on subsequent worker passes. Smart redaction
+  therefore retains its documented asynchronous exposure window, but draining
+  the worker leaves no reachable raw structured or FTS copy.
+- Live meeting finals and meeting retranscription now apply deterministic Basic
+  PII removal before persistence. Smart reconciliation includes
+  `meeting_transcript_segments`, backed by an additive `redacted_at` migration
+  and an end-to-end six-target worker test.
+- Image reconciliation processes the oldest pending frame first and uses a
+  write-through, replace-existing Win32 move rather than a rename that fails on
+  an existing Windows destination. When asynchronous image PII removal is
+  enabled, snapshot compaction excludes frames until `image_redacted_at` is set.
+- Schedule and DRM pauses now clear and suppress UI-event/scroll batches and
+  defer meeting scans and auto-end persistence. Stop/shutdown semantics remain
+  available so a recorder can still terminate cleanly.
+- Retention and orphan cleanup use correlated `NOT EXISTS` predicates, so
+  nullable references cannot disable cleanup. Oldest-record discovery includes
+  UI and meeting data; all-data retention deletes transcript segments by
+  capture time and closed meetings by end time, preserves an open meeting row,
+  and counts meeting deletions in retention status.
+- Locked/offline validation passed: `screenpipe-db` 90 unit tests;
+  `screenpipe-redact` 96 unit tests plus 3 worker integration tests; and the
+  native-linked `screenpipe-engine` suite 518 passed with 2 documented ignores
+  under the Developer PowerShell/Ninja Multi-Config/OpenBLAS/ORT matrix. The
+  focused native-linked live-meeting Basic PII persistence test also passed.
+  Its first package-wide invocation downloaded the exact already-locked
+  `infer 0.15.0` build/test dependency, then failed on pre-existing stale
+  `TranscriptionEngine::new` call sites in unrelated audio integration tests;
+  rerunning the scoped library test locked/offline passed. The normal Developer
+  PowerShell `cargo build --release --locked --offline` completed successfully.
+
+Audited boundaries that remain explicit rather than being hidden by these
+corrections:
+
+- Windows full-monitor WGC can include a configured excluded application when
+  it is visible in the background behind an allowed focused window. Fixing this
+  needs per-window capture/compositing or reliable post-capture window-region
+  masking and is a material capture-architecture/performance decision.
+- Windows opt-in keyboard text capture does not yet consult the UIA
+  `IsPassword` state. Keyboard/clipboard content storage remains off by default,
+  but password-field suppression needs a Windows UIA-aware event gate and live
+  multi-application validation before enabling those controls broadly.
+- Retention commits database removal before deleting returned media paths. A
+  transient sharing/permission failure is logged but is not durably retried
+  after the DB reference is gone. A deletion journal or audited orphan-file
+  sweep is required to guarantee eventual physical erasure.

@@ -36,6 +36,9 @@ pub struct MeetingStreamingConfig {
     pub language: Option<String>,
     pub local_speaker_name: Option<String>,
     pub persist_finals: bool,
+    /// Apply deterministic Basic PII removal before live transcript finals are persisted.
+    #[serde(default)]
+    pub use_pii_removal: bool,
 }
 
 impl Default for MeetingStreamingConfig {
@@ -53,6 +56,7 @@ impl Default for MeetingStreamingConfig {
             language: env_non_empty("SCREENPIPE_MEETING_TRANSCRIPTION_LANGUAGE"),
             local_speaker_name: env_non_empty("SCREENPIPE_MEETING_LOCAL_SPEAKER_NAME"),
             persist_finals: true,
+            use_pii_removal: false,
         }
     }
 }
@@ -89,6 +93,7 @@ impl MeetingStreamingConfig {
     pub fn from_settings(
         enabled: bool,
         provider: &str,
+        use_pii_removal: bool,
         language: Option<String>,
         local_speaker_name: Option<String>,
     ) -> Self {
@@ -97,6 +102,7 @@ impl MeetingStreamingConfig {
         Self {
             enabled,
             provider,
+            use_pii_removal,
             language: language.and_then(|value| non_empty_trimmed(&value)),
             local_speaker_name: local_speaker_name.and_then(|value| non_empty_trimmed(&value)),
             ..Self::default()

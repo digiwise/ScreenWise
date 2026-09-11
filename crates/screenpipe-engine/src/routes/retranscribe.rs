@@ -674,7 +674,7 @@ pub async fn retranscribe_meeting_handler(
                 device_name: segment.device.name.clone(),
                 device_type: device_type.to_string(),
                 speaker_name: None,
-                transcript: segment.transcript.clone(),
+                transcript: sanitize_meeting_transcript(&segment.transcript, state.use_pii_removal),
                 captured_at: segment.captured_at,
             }
         })
@@ -875,6 +875,14 @@ fn looks_like_capture_timestamp(value: &str) -> bool {
             .all(|(idx, ch)| matches!(idx, 4 | 7 | 10 | 13 | 16) || ch.is_ascii_digit())
 }
 
+fn sanitize_meeting_transcript(transcript: &str, use_pii_removal: bool) -> String {
+    if use_pii_removal {
+        screenpipe_core::pii_removal::remove_pii(transcript)
+    } else {
+        transcript.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,5 +948,19 @@ mod tests {
             meeting_retranscribe_max_batch_duration_secs(&AudioTranscriptionEngine::ParakeetMlx),
             30
         );
+    }
+
+    #[test]
+    fn meeting_retranscription_applies_basic_pii_before_replacement() {
+        const RAW_EMAIL: &str = "alice@example.com";
+        const RAW_SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+        let raw = format!("Contact {RAW_EMAIL}; token {RAW_SECRET}");
+
+        let sanitized = sanitize_meeting_transcript(&raw, true);
+        assert!(!sanitized.contains(RAW_EMAIL));
+        assert!(!sanitized.contains(RAW_SECRET));
+        assert!(sanitized.contains("[EMAIL]"));
+        assert!(sanitized.contains("[OPENAI_KEY]"));
+        assert_eq!(sanitize_meeting_transcript(&raw, false), raw);
     }
 }

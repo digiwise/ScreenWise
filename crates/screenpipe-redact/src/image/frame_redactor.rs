@@ -25,6 +25,57 @@ use image::{DynamicImage, ImageFormat, Rgb};
 use crate::image::{ImageRedactionPolicy, ImageRegion};
 use crate::RedactError;
 
+/// Replace `destination` with `source` without deleting the destination
+/// first. Windows' `std::fs::rename` refuses to replace an existing file,
+/// while removing it first would create an unredacted-data loss window if
+/// the subsequent rename failed.
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+        unsafe extern "system" {
+            fn MoveFileExW(
+                existing_file_name: *const u16,
+                new_file_name: *const u16,
+                flags: u32,
+            ) -> i32;
+        }
+
+        let source: Vec<u16> = OsStr::new(source)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let destination: Vec<u16> = OsStr::new(destination)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: both vectors are NUL-terminated UTF-16 paths and remain
+        // alive for the duration of the synchronous Win32 call.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(source, destination)
+    }
+}
+
 /// What the redactor did to one frame.
 #[derive(Debug, Clone, Default)]
 pub struct FrameRedactionOutcome {
@@ -131,7 +182,7 @@ pub fn redact_frame(
         .map_err(|e| RedactError::Runtime(format!("close {}: {e}", tmp_path.display())))?
         .sync_all()
         .map_err(|e| RedactError::Runtime(format!("fsync {}: {e}", tmp_path.display())))?;
-    std::fs::rename(&tmp_path, &output_path).map_err(|e| {
+    replace_file(&tmp_path, &output_path).map_err(|e| {
         // On rename failure, try to clean up the tempfile — best effort.
         let _ = std::fs::remove_file(&tmp_path);
         RedactError::Runtime(format!(
@@ -153,7 +204,7 @@ pub fn redact_frame(
 mod tests {
     use super::*;
     use crate::SpanLabel;
-    use image::{ImageBuffer, Rgb};
+    use image::{GenericImageView, ImageBuffer, Rgb};
     use tempfile::tempdir;
 
     fn make_test_jpg(dir: &Path) -> PathBuf {
@@ -181,6 +232,25 @@ mod tests {
             "must overwrite source path, not write a sibling"
         );
         assert_eq!(out.regions_redacted, 0);
+    }
+
+    #[test]
+    fn replaces_existing_source_without_deleting_it_first() {
+        let d = tempdir().unwrap();
+        let p = make_test_jpg(d.path());
+        let region = ImageRegion {
+            bbox: [0, 0, 20, 20],
+            label: SpanLabel::Secret,
+            score: 1.0,
+        };
+
+        redact_frame(&p, &[region], &ImageRedactionPolicy::default()).unwrap();
+        // A second replacement exercises the Windows-specific existing-file
+        // path. The source must remain present and valid after both writes.
+        redact_frame(&p, &[], &ImageRedactionPolicy::default()).unwrap();
+        let image = image::open(&p).unwrap();
+        assert_eq!(image.dimensions(), (100, 80));
+        assert!(p.exists());
     }
 
     #[test]

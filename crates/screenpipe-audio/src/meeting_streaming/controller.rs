@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use futures::StreamExt;
+use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use tokio::{
     sync::{broadcast, mpsc, RwLock},
@@ -200,8 +201,9 @@ pub fn start_meeting_streaming_loop(
                         continue;
                     }
                     let db = db.clone();
+                    let use_pii_removal = config.use_pii_removal;
                     tokio::spawn(async move {
-                        persist_live_final_with_retry(db, event.data).await;
+                        persist_live_final_with_retry(db, event.data, use_pii_removal).await;
                     });
                 }
                 Some(event) = delta_sub.next() => {
@@ -414,9 +416,13 @@ async fn mark_live_covered_chunks(db: &Arc<DatabaseManager>, meeting_id: i64) {
     }
 }
 
-async fn persist_live_final_with_retry(db: Arc<DatabaseManager>, event: MeetingTranscriptFinal) {
+async fn persist_live_final_with_retry(
+    db: Arc<DatabaseManager>,
+    event: MeetingTranscriptFinal,
+    use_pii_removal: bool,
+) {
     for attempt in 1..=LIVE_FINAL_PERSIST_ATTEMPTS {
-        match persist_live_final_once(db.clone(), &event).await {
+        match persist_live_final_once(db.clone(), &event, use_pii_removal).await {
             Ok(true) => return,
             Ok(false) if attempt < LIVE_FINAL_PERSIST_ATTEMPTS => {
                 sleep(LIVE_FINAL_PERSIST_RETRY_DELAY).await;
@@ -447,11 +453,17 @@ async fn persist_live_final_with_retry(db: Arc<DatabaseManager>, event: MeetingT
 async fn persist_live_final_once(
     db: Arc<DatabaseManager>,
     event: &MeetingTranscriptFinal,
+    use_pii_removal: bool,
 ) -> Result<bool, String> {
-    let transcript = event.transcript.trim();
-    if transcript.is_empty() {
+    let raw_transcript = event.transcript.trim();
+    if raw_transcript.is_empty() {
         return Ok(true);
     }
+    let transcript = if use_pii_removal {
+        remove_pii(raw_transcript)
+    } else {
+        raw_transcript.to_string()
+    };
 
     let id = db
         .insert_meeting_transcript_segment(
@@ -462,7 +474,7 @@ async fn persist_live_final_once(
             &event.device_name,
             &event.device_type,
             event.speaker_name.as_deref(),
-            transcript,
+            &transcript,
             event.captured_at,
         )
         .await
@@ -812,6 +824,48 @@ mod tests {
         MeetingAudioTap::new(tx, Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
 
+    #[tokio::test]
+    async fn basic_pii_redacts_live_final_before_persistence() {
+        const RAW_EMAIL: &str = "alice@example.com";
+        const RAW_SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let meeting_id = db
+            .insert_meeting("TestApp", "test", Some("Test meeting"), None)
+            .await
+            .unwrap();
+        let event = MeetingTranscriptFinal {
+            meeting_id,
+            provider: "selected-engine".to_string(),
+            model: Some("test-model".to_string()),
+            item_id: "item-1".to_string(),
+            device_name: "Test microphone".to_string(),
+            device_type: "input".to_string(),
+            speaker_name: None,
+            transcript: format!("Contact {RAW_EMAIL}; token {RAW_SECRET}"),
+            captured_at: Utc::now(),
+        };
+
+        assert!(persist_live_final_once(db.clone(), &event, true)
+            .await
+            .unwrap());
+
+        let segments = db
+            .list_meeting_transcript_segments(meeting_id)
+            .await
+            .unwrap();
+        assert_eq!(segments.len(), 1);
+        let transcript = &segments[0].transcript;
+        assert!(!transcript.contains(RAW_EMAIL));
+        assert!(!transcript.contains(RAW_SECRET));
+        assert!(transcript.contains("[EMAIL]"));
+        assert!(transcript.contains("[OPENAI_KEY]"));
+    }
+
     // `check_and_emit_stall_notifications` calls `screenpipe_events::send_event`,
     // which lazy-initializes a `tokio::spawn`ed cleanup task — that init panics
     // outside a runtime. Run the test under tokio so the lazy state survives
@@ -888,7 +942,8 @@ mod tests {
         let audio_tap = test_audio_tap();
         let transcription_engine = Arc::new(RwLock::new(None));
         let mut active = None;
-        let config = MeetingStreamingConfig::from_settings(true, "selected-engine", None, None);
+        let config =
+            MeetingStreamingConfig::from_settings(true, "selected-engine", false, None, None);
 
         start_streaming_session(
             &config,
@@ -914,7 +969,8 @@ mod tests {
         let mut active = None;
         // A retired provider name is treated as the selected local engine;
         // without an initialized local engine, the overlay stays inactive.
-        let config = MeetingStreamingConfig::from_settings(true, "legacy-remote", None, None);
+        let config =
+            MeetingStreamingConfig::from_settings(true, "legacy-remote", false, None, None);
 
         start_streaming_session(
             &config,
