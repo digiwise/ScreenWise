@@ -17,9 +17,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { useAppWindowTree } from "@/lib/hooks/use-sql-autocomplete";
-
-const APP_ICON_URL = (app: string) =>
-  `http://localhost:11435/app-icon?name=${encodeURIComponent(app)}`;
+import { NativeAppIcon } from "@/components/native-app-icon";
 
 function formatCount(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -56,8 +54,8 @@ interface MeetingAppsPickerProps {
 
 function AppIcon({ app }: { app: string }) {
   return (
-    <img
-      src={APP_ICON_URL(app)}
+    <NativeAppIcon
+      appName={app}
       alt=""
       className="h-4 w-4 rounded-sm object-contain shrink-0"
       onError={(e) => {

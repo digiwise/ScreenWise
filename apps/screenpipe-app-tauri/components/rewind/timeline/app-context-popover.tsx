@@ -11,6 +11,7 @@ import { format } from "date-fns";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { commands } from "@/lib/utils/tauri";
 import { localFetch } from "@/lib/api";
+import { NativeAppIcon } from "@/components/native-app-icon";
 
 interface UiEventSummary {
 	event_type: string;
@@ -236,9 +237,8 @@ export function AppContextPopover({
 								backgroundColor: `hsla(${[...name].reduce((h, c) => c.charCodeAt(0) + ((h << 5) - h), 0) % 360}, 40%, 55%, 0.3)`,
 							}}
 						>
-							{/* eslint-disable-next-line @next/next/no-img-element */}
-							<img
-								src={`http://localhost:11435/app-icon?name=${encodeURIComponent(name)}`}
+							<NativeAppIcon
+								appName={name}
 								className="w-full h-full rounded object-contain"
 								alt={name}
 								onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

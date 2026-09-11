@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 const MAX_ENTRIES: usize = 100;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, specta::Type, Debug, Clone)]
 pub struct NotificationHistoryEntry {
     pub id: String,
     #[serde(rename = "type")]

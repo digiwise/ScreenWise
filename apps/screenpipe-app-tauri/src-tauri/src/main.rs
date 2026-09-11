@@ -55,7 +55,6 @@ mod pi_command_queue;
 mod recording;
 mod retention;
 mod secrets;
-mod server;
 mod server_core;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
@@ -71,8 +70,6 @@ mod windows_overlay;
 #[cfg(target_os = "windows")]
 mod windows_webview_env;
 
-pub use server::*;
-
 pub use recording::*;
 
 pub use icons::*;
@@ -87,7 +84,6 @@ pub use commands::write_browser_log;
 pub use commands::write_browser_logs;
 pub use recording::spawn_screenpipe;
 pub use recording::stop_screenpipe;
-pub use server::spawn_server;
 // Removed: pub use store::get_profiles_store; // Profile functionality has been removed
 
 pub use permissions::do_permissions_check;
@@ -345,37 +341,6 @@ async fn main() {
                 _ => print!("error"),
             }
             return;
-        }
-    }
-
-    // Single-instance check: if sidecar server is already listening, hand off and exit.
-    // This covers Linux (where tauri-plugin-single-instance is disabled due to
-    // zbus/tokio conflict) and acts as a fallback on macOS/Windows.
-    {
-        let args: Vec<String> = std::env::args().collect();
-        let deep_link_url = args
-            .iter()
-            .find(|a| a.starts_with("screenpipe://"))
-            .cloned();
-
-        let focus_port: u16 = std::env::var("SCREENPIPE_FOCUS_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(11435);
-        if let Ok(resp) = reqwest::Client::new()
-            .post(format!("http://127.0.0.1:{}/focus", focus_port))
-            .timeout(std::time::Duration::from_secs(2))
-            .json(&serde_json::json!({
-                "args": args,
-                "deep_link_url": deep_link_url,
-            }))
-            .send()
-            .await
-        {
-            if resp.status().is_success() {
-                eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
-                std::process::exit(0);
-            }
         }
     }
 
@@ -929,14 +894,7 @@ async fn main() {
             // Get app handle once for all initializations
             let app_handle = app.handle().clone();
 
-            // Initialize server first (core service)
-            let focus_port: u16 = std::env::var("SCREENPIPE_FOCUS_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(11435);
-            let server_shutdown_tx = spawn_server(app_handle.clone(), focus_port);
-            app.manage(server_shutdown_tx);
-
+            notifications::client::initialize(app_handle.clone());
 
             // Startup permission gate: check CRITICAL permissions immediately after onboarding
             // and show recovery window only if screen or mic is missing.

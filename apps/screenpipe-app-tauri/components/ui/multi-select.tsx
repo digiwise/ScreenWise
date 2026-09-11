@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { useResolvedIconUrl } from "@/components/native-app-icon";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -41,11 +42,14 @@ function OptionIcon({
   className?: string;
 }) {
   const [imgFailed, setImgFailed] = React.useState(false);
+  const resolvedIconUrl = useResolvedIconUrl(iconUrl);
 
-  if (iconUrl && !imgFailed) {
+  React.useEffect(() => setImgFailed(false), [resolvedIconUrl]);
+
+  if (resolvedIconUrl && !imgFailed) {
     return (
       <img
-        src={iconUrl}
+        src={resolvedIconUrl}
         alt=""
         className={cn("rounded-sm object-contain", className)}
         onLoad={(e) => {

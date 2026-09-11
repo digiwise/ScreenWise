@@ -20,7 +20,6 @@ import {
 } from "@/components/ui/popover";
 import { useRouter } from "next/navigation";
 import { showChatWithPrefill } from "@/lib/chat-utils";
-import { invoke } from "@tauri-apps/api/core";
 
 interface NotificationEntry {
   id: string;
@@ -29,27 +28,6 @@ interface NotificationEntry {
   body: string;
   timestamp: string;
   read: boolean;
-}
-
-interface AppServerConfig {
-  port: number;
-}
-
-let appServerBaseUrl: Promise<string> | null = null;
-
-async function getAppServerBaseUrl(): Promise<string> {
-  appServerBaseUrl ??= invoke<AppServerConfig>("get_app_server_config")
-    .then((config) => `http://localhost:${config.port || 11435}`)
-    .catch(() => "http://localhost:11435");
-  return appServerBaseUrl;
-}
-
-async function notificationFetch(
-  path: string,
-  init?: RequestInit,
-): Promise<Response> {
-  const baseUrl = await getAppServerBaseUrl();
-  return fetch(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, init);
 }
 
 async function openNotificationLink(href: string) {
@@ -103,13 +81,9 @@ export function NotificationBell() {
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await notificationFetch("/notifications");
-      if (res.ok) {
-        const entries: NotificationEntry[] = await res.json();
-        setHistory(entries);
-      }
+      setHistory(await commands.listNotifications());
     } catch {
-      // server not ready yet
+      // native shell not ready yet
     }
   }, []);
 
@@ -124,14 +98,14 @@ export function NotificationBell() {
   const markAllRead = async () => {
     setHistory((prev) => prev.map((n) => ({ ...n, read: true })));
     try {
-      await notificationFetch("/notifications", { method: "POST" });
+      await commands.markNotificationsRead();
     } catch {}
   };
 
   const clearAll = async () => {
     setHistory([]);
     try {
-      await notificationFetch("/notifications", { method: "DELETE" });
+      await commands.clearNotifications();
     } catch {}
   };
 
@@ -139,7 +113,7 @@ export function NotificationBell() {
     setHistory((prev) => prev.filter((n) => n.id !== id));
     if (expandedId === id) setExpandedId(null);
     try {
-      await notificationFetch(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await commands.dismissNotification(id);
     } catch {}
   };
 

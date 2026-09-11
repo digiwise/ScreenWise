@@ -22,6 +22,7 @@ import { commands } from "@/lib/utils/tauri";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { ThumbnailHighlightOverlay } from "./thumbnail-highlight-overlay";
 import { appendAuthToken, localFetch, getApiBaseUrl } from "@/lib/api";
+import { NativeAppIcon } from "@/components/native-app-icon";
 
 interface SpeakerResult {
   id: number;
@@ -1398,9 +1399,8 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       : "border-border text-muted-foreground hover:border-foreground/40"
                   )}
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={`http://localhost:11435/app-icon?name=${encodeURIComponent(app)}`}
+                  <NativeAppIcon
+                    appName={app}
                     className="w-4 h-4 rounded-sm object-contain"
                     alt=""
                     onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
@@ -1886,9 +1886,8 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                           : "border-border text-muted-foreground hover:border-foreground/40"
                       )}
                     >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={`http://localhost:11435/app-icon?name=${encodeURIComponent(app)}`}
+                      <NativeAppIcon
+                        appName={app}
                         className="w-4 h-4 rounded-sm object-contain"
                         alt=""
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

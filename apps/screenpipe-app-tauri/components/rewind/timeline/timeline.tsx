@@ -17,58 +17,16 @@ import { AppContextPopover } from "./app-context-popover";
 import { TimelineTagToolbar } from "./timeline-tag-toolbar";
 import { extractDomain, FaviconImg } from "./favicon-utils";
 import { localFetch } from "@/lib/api";
+import { NativeAppIcon } from "@/components/native-app-icon";
 
-// Global cache: preloads app-icon images so they render instantly on scroll.
-// Maps app name → "loaded" | "error" | Promise (in-flight).
-const appIconCache = new Map<string, "loaded" | "error" | Promise<void>>();
-
-function preloadAppIcon(appName: string): "loaded" | "error" | "loading" {
-	const cached = appIconCache.get(appName);
-	if (cached === "loaded" || cached === "error") return cached;
-	if (cached) return "loading"; // promise in-flight
-	const url = `http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`;
-	const p = new Promise<void>((resolve) => {
-		const img = new Image();
-		img.onload = () => { appIconCache.set(appName, "loaded"); resolve(); };
-		img.onerror = () => { appIconCache.set(appName, "error"); resolve(); };
-		img.src = url;
-	});
-	appIconCache.set(appName, p);
-	return "loading";
-}
-
-/** App icon with in-memory cache — no flash of fallback letter on fast scroll */
+/** App icon loaded through native IPC and cached by NativeAppIcon. */
 const CachedAppIcon = React.memo(function CachedAppIcon({ appName, className }: { appName: string; className?: string }) {
-	const [status, setStatus] = useState<"loaded" | "error" | "loading">(() => preloadAppIcon(appName));
-
-	useEffect(() => {
-		const cached = appIconCache.get(appName);
-		if (cached === "loaded" || cached === "error") {
-			setStatus(cached);
-			return;
-		}
-		// Wait for in-flight preload
-		const p = cached || (() => { preloadAppIcon(appName); return appIconCache.get(appName)!; })();
-		if (p instanceof Promise) {
-			p.then(() => {
-				const result = appIconCache.get(appName);
-				if (result === "loaded" || result === "error") setStatus(result);
-			});
-		}
-	}, [appName]);
-
-	if (status === "error") {
-		return null; // let parent's fallback letter show
-	}
-
 	return (
-		// eslint-disable-next-line @next/next/no-img-element
-		<img
-			src={`http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`}
+		<NativeAppIcon
+			appName={appName}
 			className={className ?? "w-full h-full rounded-sm object-contain scale-110"}
 			alt={appName}
 			decoding="async"
-			style={{ display: status === "loaded" ? undefined : "none" }}
 		/>
 	);
 });
@@ -735,15 +693,6 @@ export const TimelineSlider = ({
 
 		return groups;
 	}, [visibleFrames, frameBrowserUrls]);
-
-	// Preload app icons for all visible groups so they're cached before scroll
-	useEffect(() => {
-		for (const group of appGroups) {
-			for (const name of group.appNames) {
-				preloadAppIcon(name);
-			}
-		}
-	}, [appGroups]);
 
 	// Compute time markers for the visible range
 	const timeMarkers = useMemo(() => {

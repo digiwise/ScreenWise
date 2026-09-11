@@ -2543,3 +2543,62 @@ retain only a narrowly authenticated focus bridge until Linux receives a native
 single-instance transport. Hardening the entire current multipurpose server is
 less attractive than this staged removal because most routes already have a
 natural in-process replacement.
+
+### Windows-only desktop helper removal — 2026-09-11
+
+Pre-change boundary and reachability: the product owner has selected a
+Windows-only runtime boundary, so the helper's Linux second-instance fallback
+no longer needs a replacement. Windows already uses Tauri's native
+single-instance plugin. The port 11435 listener remains reachable at desktop
+startup and still carries notification display/history, app-icon lookup,
+installed-app discovery, redundant window resizing, focus forwarding, and the
+uncalled inbox/log bridges. Its notification producers are all inside the
+desktop process; its retained frontend consumers already have Tauri IPC.
+
+This increment will remove the listener rather than harden it. App icons,
+installed-app discovery, and notification history/display will move to typed
+Tauri commands or direct in-process calls. The native Windows single-instance
+plugin remains responsible for focus/deep-link forwarding. The redundant and
+uncalled routes, helper lifecycle/configuration, HTTP clients, generated
+bindings, documentation, and listener-specific E2E tests will be removed.
+
+Post-change evidence:
+
+- Deleted the port 11435 Axum server, its startup/shutdown state, early HTTP
+  single-instance probe, `SCREENPIPE_FOCUS_PORT`, wildcard CORS, and the focus,
+  inbox, log, window-size, notification, app-icon, and installed-app routes.
+  Windows focus and deep-link forwarding remain on
+  `tauri-plugin-single-instance`; no replacement listener was introduced.
+- Added typed Tauri commands for notification display/history, native app-icon
+  data URLs, and cached installed-app discovery. Rust notification producers
+  now call the same in-process service through an initialized `AppHandle`.
+  Frontend icon consumers share a promise cache and never fetch a loopback URL.
+- Removed the helper-specific focus-server E2E test and port launcher setup;
+  notification and privacy flows now exercise native IPC. Removed the public
+  helper notification instructions from both API-skill sources and regenerated
+  the checked-in skill content and TypeScript command bindings.
+- Removed the desktop's direct `axum 0.6`, `http 0.2`, and `tower-http 0.4`
+  dependency edges. The desktop lockfile pruned only that obsolete duplicate
+  HTTP stack and normalized dependency names that no longer require version
+  disambiguation. Root `Cargo.lock` and Bun lockfiles are unchanged.
+- Residual searches find no active `11435`, `SCREENPIPE_FOCUS_PORT`,
+  `get_app_server_config`, `/installed-apps`, or `/app-icon` runtime edge. The
+  two remaining 11435 strings are intentionally malformed historical OCR
+  samples in URL-detection benchmark data, not executable configuration.
+- Validation passed: `cargo fmt --all -- --check`; desktop locked/offline
+  `cargo check` under the documented native-test environment (after one
+  unlocked/offline incremental lockfile regeneration); generated binding test
+  `tauri_bindings_are_current`; notification rewrite tests (15 tests);
+  frontend and E2E TypeScript checks; focused markdown network-image Vitest
+  (4 tests); Next production build; `git diff --check`;
+  and root `cargo build --release --locked --offline` in Developer PowerShell
+  with the normal Ninja/OpenBLAS/ORT environment (9m21s).
+- A standalone `cargo generate-lockfile --offline` attempt could not resolve
+  the cached `cidre` git repository's missing remote-HEAD reference. The
+  existing lockfile was instead updated incrementally by `cargo check
+  --offline`, then every subsequent Cargo command used `--locked --offline`.
+  The release build repeated only the documented audio `unused_mut` and engine
+  Windows `CommandExt` warnings. The Next build repeated the existing `unpdf`
+  direct-`import.meta` warning. An initial focused Vitest invocation from the
+  repository root used the wrong relative entrypoint and failed before loading
+  tests; rerunning from the desktop directory passed.

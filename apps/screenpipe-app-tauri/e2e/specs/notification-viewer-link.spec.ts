@@ -4,7 +4,7 @@
 
 // End-to-end coverage for the notification → viewer link path:
 // every pipe-authored notification that contains a local file path goes
-// through `rewrite_file_links` at the `/notify` boundary (rewrite.rs),
+// through `rewrite_file_links` at the native notification boundary (rewrite.rs),
 // then renders in the notification panel's ReactMarkdown with the
 // `notificationUrlTransform` (markdown.tsx), then on click dispatches
 // through `openNotificationLink` → `openScreenpipeViewerLink` →
@@ -23,16 +23,13 @@ import { resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, t, waitForAppReady } from "../helpers/test-utils.js";
-
-const FOCUS_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
-const NOTIFY_URL = `http://127.0.0.1:${FOCUS_PORT}/notify`;
-const NOTIFICATIONS_URL = `http://127.0.0.1:${FOCUS_PORT}/notifications`;
+import { invokeOrThrow } from "../helpers/tauri.js";
 
 interface NotificationHistoryEntry {
   id: string;
   title?: string;
   body?: string;
-  notification_type?: string;
+  type?: string;
   timestamp?: string;
   read?: boolean;
 }
@@ -41,54 +38,22 @@ async function postNotification(payload: {
   id?: string;
   title: string;
   body: string;
-  notification_type?: string;
+  type?: string;
 }): Promise<void> {
-  // Drive the POST through `browser.executeAsync` so the fetch happens
-  // from the app's webview context — that's how a real pipe-authored
-  // notification arrives (via the pi-agent or a user shell call to the
-  // local server), not from the test runner's host network. Avoids any
-  // CORS/host-binding surprises.
-  const res = await browser.executeAsync(
-    (
-      url: string,
-      body: object,
-      done: (r: { ok: boolean; status: number; text: string }) => void,
-    ) => {
-      void fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      })
-        .then(async (r) =>
-          done({ ok: r.ok, status: r.status, text: await r.text() }),
-        )
-        .catch((e) =>
-          done({ ok: false, status: 0, text: e instanceof Error ? e.message : String(e) }),
-        );
+  await invokeOrThrow("notify", {
+    payload: {
+      ...payload,
+      id: payload.id ?? null,
+      type: payload.type ?? null,
+      autoDismissMs: null,
+      timeout: null,
+      actions: [],
     },
-    NOTIFY_URL,
-    payload,
-  );
-  if (!(res as { ok: boolean }).ok) {
-    throw new Error(
-      `/notify failed: ${(res as { status: number; text: string }).status} ${(res as { text: string }).text}`,
-    );
-  }
+  });
 }
 
 async function readNotifications(): Promise<NotificationHistoryEntry[]> {
-  const res = await browser.executeAsync(
-    (
-      url: string,
-      done: (r: NotificationHistoryEntry[]) => void,
-    ) => {
-      void fetch(url)
-        .then(async (r) => done((await r.json()) as NotificationHistoryEntry[]))
-        .catch(() => done([]));
-    },
-    NOTIFICATIONS_URL,
-  );
-  return res as NotificationHistoryEntry[];
+  return invokeOrThrow<NotificationHistoryEntry[]>("list_notifications");
 }
 
 describe("Notification → viewer link rewrite + render", function () {
@@ -109,22 +74,22 @@ describe("Notification → viewer link rewrite + render", function () {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("POST /notify rewrites a file-path markdown link to screenpipe://view", async () => {
+  it("native notify rewrites a file-path markdown link to screenpipe://view", async () => {
     // Real local file path inside the body — the regression we're guarding
     // is `rewrite_file_links` either not running or skipping absolute Unix
     // paths. Pre-rewrite body must contain a bare `(/path)`; post-rewrite
-    // body returned by GET /notifications must contain `screenpipe://view`.
+    // body returned by native notification history must contain `screenpipe://view`.
     const rawPath = filePath();
     await postNotification({
       id: notificationId,
       title: "viewer link rewrite",
       body: `[Open sample](${rawPath})`,
-      notification_type: "pipe",
+      type: "pipe",
     });
 
     const entries = await readNotifications();
     const ours = entries.find((e) => e.id === notificationId);
-    if (!ours) throw new Error("notification not persisted to /notifications");
+    if (!ours) throw new Error("notification not persisted to native history");
     const body = ours.body ?? "";
     if (!body.includes("screenpipe://view?path=")) {
       throw new Error(`body was not rewritten — still contains raw path. body=${body}`);
@@ -145,7 +110,7 @@ describe("Notification → viewer link rewrite + render", function () {
       id: externalId,
       title: "external url",
       body: "[Docs](https://screenpi.pe/docs)",
-      notification_type: "pipe",
+      type: "pipe",
     });
 
     const entries = await readNotifications();
@@ -162,8 +127,8 @@ describe("Notification → viewer link rewrite + render", function () {
     // flaky on CI (.notif-md sometimes showed a stale notification when
     // we switched in, or the panel auto-dismissed mid-test). The load-
     // bearing rewrite contract is already covered by the first two `it`
-    // blocks; here we just verify persistence — i.e. that POST /notify
-    // wrote both notifications to `/notifications`, so any UI surface
+    // blocks; here we just verify persistence — i.e. that native notify
+    // wrote both notifications to history, so any UI surface
     // that lists history (panel, history view, agent context) sees them.
     const entries = await readNotifications();
     expect(entries.length).toBeGreaterThanOrEqual(2);

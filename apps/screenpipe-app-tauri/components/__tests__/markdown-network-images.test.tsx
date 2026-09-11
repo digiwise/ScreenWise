@@ -48,7 +48,7 @@ describe("Markdown image network boundary", () => {
   it("keeps loopback and embedded image sources inline", () => {
     expect(
       isInlineMarkdownImageSourceAllowed(
-        "http://localhost:11435/app-icon?name=screenpipe",
+        "http://localhost:3030/frames/1?token=test",
       ),
     ).toBe(true);
     expect(

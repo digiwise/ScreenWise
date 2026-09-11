@@ -429,65 +429,7 @@ When you learn something important about the user (preferences, decisions, proje
 
 ---
 
-## 12. Notifications — `POST http://localhost:11435/notify`
-
-Send a notification to the screenpipe desktop UI. This uses the Tauri sidecar server (port 11435), **not** the main API (port 3030).
-
-The notification body supports **markdown**: `**bold**`, `` `inline code` ``, and `[link text](url)`. Links can be web URLs, file paths, or screenpipe deeplinks.
-
-```bash
-# Simple notification
-curl -X POST http://localhost:11435/notify \
-  -H "Content-Type: application/json" \
-  -d '{"title": "3 new voice memos", "body": "found recordings from today"}'
-
-# Markdown body with links
-curl -X POST http://localhost:11435/notify \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Meeting summary", "body": "**Q3 Planning** notes saved\n\nopen [meeting notes](~/Documents/notes/q3.md) or view [recording](screenpipe://timeline)"}'
-
-# Link to a local file (absolute path or ~ path)
-curl -X POST http://localhost:11435/notify \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Export complete", "body": "saved to [report.csv](~/Downloads/report.csv)"}'
-
-# With action buttons
-# Use `type: "link"` for external URLs and `type: "deeplink"` for
-# screenpipe:// in-app routes. `type: "dismiss"` closes the notification.
-curl -X POST http://localhost:11435/notify \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Meeting summary", "body": "**Q3 Planning**\n- Budget approved", "actions": [{"id": "view", "label": "view", "type": "deeplink", "url": "screenpipe://timeline"}, {"id": "skip", "label": "skip", "type": "dismiss"}]}'
-
-# External URL action (opens in browser)
-curl -X POST http://localhost:11435/notify \
-  -H "Content-Type: application/json" \
-  -d '{"title": "PR ready for review", "body": "nice work", "actions": [{"id": "open", "label": "open pr", "type": "link", "url": "https://github.com/screenpipe/screenpipe/pull/1234"}]}'
-
-# Custom auto-dismiss (5 seconds)
-curl -X POST http://localhost:11435/notify \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Saved", "body": "Note saved", "timeout": 5000}'
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `title` | string | **Yes** | Notification title |
-| `body` | string | **Yes** | Markdown body (`**bold**`, `` `code` ``, `[text](url)`) |
-| `type` | string | No | Notification category |
-| `timeout` | integer | No | Auto-dismiss in ms (default 20000) |
-| `autoDismissMs` | integer | No | Alias for timeout |
-| `actions` | array | No | Action buttons |
-
-**Supported link types in body markdown:**
-- Web URLs: `[docs](https://docs.screenpi.pe)` — opens in browser
-- File paths: `[notes](~/notes/file.md)` or `[log](/var/log/app.log)` — opens in default app
-- Deeplinks: `[timeline](screenpipe://timeline)` — navigates within screenpipe
-
-Returns `{"success": true, "message": "Notification sent successfully"}`.
-
----
-
-## 13. Other Endpoints
+## 12. Other Endpoints
 
 ```bash
 curl http://localhost:3030/health              # Health check

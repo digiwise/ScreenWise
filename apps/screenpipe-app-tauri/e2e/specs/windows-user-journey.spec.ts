@@ -18,54 +18,21 @@ import { closeWindow, invokeOrThrow, waitForWindowHandle, waitForWindowUrl } fro
 const isWindows = process.platform === "win32";
 const SEARCH_QUERY = "screenpipe windows ux journey";
 const SEARCH_INPUT_SELECTOR = 'input[placeholder*="search memory"]';
-const APP_SERVER_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
-const APP_SERVER_BASE_URL = `http://127.0.0.1:${APP_SERVER_PORT}`;
 const MAIN_WINDOW_LABELS = ["main", "main-window"] as const;
 type MainWindowLabel = (typeof MAIN_WINDOW_LABELS)[number];
 
-async function appServerRequest(
-  path: string,
-  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
-): Promise<{ ok: boolean; status: number; text: string }> {
-  return (await browser.executeAsync(
-    (
-      url: string,
-      request: { method?: string; headers?: Record<string, string>; body?: string },
-      done: (r: { ok: boolean; status: number; text: string }) => void,
-    ) => {
-      void fetch(url, request)
-        .then(async (response) =>
-          done({ ok: response.ok, status: response.status, text: await response.text() }),
-        )
-        .catch((error) =>
-          done({
-            ok: false,
-            status: 0,
-            text: error instanceof Error ? error.message : String(error),
-          }),
-        );
-    },
-    `${APP_SERVER_BASE_URL}${path}`,
-    options,
-  )) as { ok: boolean; status: number; text: string };
-}
-
 async function postNotification(id: string, title: string, body: string): Promise<void> {
-  const response = await appServerRequest("/notify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  await invokeOrThrow("notify", {
+    payload: {
       id,
       title,
       body,
       type: "pipe",
       autoDismissMs: 2_000,
-    }),
+      timeout: null,
+      actions: [],
+    },
   });
-
-  if (!response.ok) {
-    throw new Error(`/notify failed: ${response.status} ${response.text}`);
-  }
 }
 
 async function clickFirstDisplayed(selector: string, timeoutMs = t(15_000)): Promise<void> {
@@ -789,9 +756,7 @@ describe("Windows user journey", function () {
       if (initialDisplayChanges !== null) {
         await setSwitchChecked(displayChangesSelector, initialDisplayChanges).catch(() => {});
       }
-      await appServerRequest(`/notifications/${encodeURIComponent(notificationId)}`, {
-        method: "DELETE",
-      }).catch(() => {});
+      await invokeOrThrow("dismiss_notification", { id: notificationId }).catch(() => {});
     }
   });
 

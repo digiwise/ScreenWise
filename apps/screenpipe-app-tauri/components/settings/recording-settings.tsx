@@ -91,6 +91,7 @@ import {
   CommandItem,
 } from "@/components/ui/command";
 import { commands, SettingsStore, MonitorDevice, AudioDeviceInfo, HardwareCapability, type AudioModelStatus } from "@/lib/utils/tauri";
+import { nativeAppIconSpecifier } from "@/components/native-app-icon";
 
 import {
   useSettings,
@@ -145,7 +146,7 @@ const formatCount = (count: number): string => {
 };
 
 const getAppIconUrl = (appName: string): string => {
-  return `http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`;
+  return nativeAppIconSpecifier(appName);
 };
 
 
@@ -1013,7 +1014,7 @@ const createWindowOptions = (
       ].filter(Boolean).join(" · "),
     }));
 
-  // Custom patterns try the app-icon endpoint; OptionIcon falls back to Lucide if it returns a placeholder
+  // Custom patterns try native icon resolution; OptionIcon falls back to Lucide when absent.
   const customOptions = existingPatterns
     .filter((pattern) => !windowItems.some((item) => item.name === pattern))
     .map((pattern) => ({

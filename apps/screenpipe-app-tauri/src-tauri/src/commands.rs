@@ -494,16 +494,84 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     fallback_local_api_config(crate::store::resolved_api_auth_key())
 }
 
-/// Get the app-local focus/notification server port.
+/// Resolve a native application icon without exposing a local HTTP listener.
 #[tauri::command]
 #[specta::specta]
-pub fn get_app_server_config() -> serde_json::Value {
-    let port = std::env::var("SCREENPIPE_FOCUS_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(11435);
+pub async fn get_app_icon_data_url(
+    app_name: String,
+    app_path: Option<String>,
+) -> Result<Option<String>, String> {
+    use base64::Engine as _;
 
-    serde_json::json!({ "port": port })
+    let icon = crate::icons::get_app_icon(&app_name, app_path).await?;
+    Ok(icon.map(|icon| {
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(icon.data)
+        )
+    }))
+}
+
+/// List installed Windows applications for privacy/filter pickers. The scan is
+/// cached briefly because it walks registry and Start Menu entries.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_installed_apps() -> Vec<String> {
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Lazy<Mutex<Option<(Instant, Vec<String>)>>> = Lazy::new(|| Mutex::new(None));
+    const TTL: Duration = Duration::from_secs(60);
+
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, apps)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return apps.clone();
+            }
+        }
+    }
+
+    let apps = tokio::task::spawn_blocking(crate::icons::list_installed_apps)
+        .await
+        .unwrap_or_default();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), apps.clone()));
+    }
+    apps
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn notify(
+    app_handle: tauri::AppHandle,
+    payload: crate::notifications::routes::NotifyPayload,
+) -> Result<(), String> {
+    crate::notifications::routes::send_notification(app_handle, payload).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn list_notifications() -> Vec<crate::notifications::store::NotificationHistoryEntry> {
+    crate::notifications::store::read_all()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn mark_notifications_read() {
+    crate::notifications::store::mark_all_read();
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn clear_notifications() {
+    crate::notifications::store::clear();
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn dismiss_notification(id: String) -> bool {
+    crate::notifications::store::remove_by_id(&id)
 }
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract

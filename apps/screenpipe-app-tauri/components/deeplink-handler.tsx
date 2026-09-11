@@ -97,7 +97,7 @@ export function DeeplinkHandler() {
 
       // Handle in-app file viewer: screenpipe://view?path=<encoded-path>
       // Notification bodies with markdown links to local files are rewritten
-      // to this scheme by the /notify route in src-tauri/src/notifications/rewrite.rs
+      // to this scheme by the native notification service in src-tauri/src/notifications/rewrite.rs
       if (parsedUrl.host === "view" || parsedUrl.pathname === "view") {
         const filePath = screenpipeViewerPathFromHref(url);
         if (filePath) {

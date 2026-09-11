@@ -345,7 +345,7 @@ struct MarkdownText: View {
 
     /// A parsed inline segment.
     /// `viewerOverridePath` is set when the link is a `screenpipe://view?path=…`
-    /// deeplink (rewritten from a local file path by the /notify route). It
+    /// deeplink (rewritten from a local file path by notification handling). It
     /// carries the original file path so the panel can render an ↗ button
     /// next to the link to open the file in the OS default app — escape
     /// hatch for users who want Xcode/Obsidian/Preview instead of the
@@ -425,7 +425,7 @@ struct MarkdownText: View {
                             // `addingPercentEncoding(.urlQueryAllowed)` will
                             // re-encode existing `%xx` escapes (e.g. the
                             // `%2F`s in a `screenpipe://view?path=…` link
-                            // produced by the /notify rewrite). That
+                            // produced by notification rewriting). That
                             // double-encoding silently corrupts the path,
                             // so the viewer ends up calling
                             // `read_viewer_file` with literal `%2F` in the

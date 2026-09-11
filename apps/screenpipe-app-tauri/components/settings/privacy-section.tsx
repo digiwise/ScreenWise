@@ -41,6 +41,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { useInstalledApps } from "@/lib/hooks/use-installed-apps";
 import { commands } from "@/lib/utils/tauri";
+import { nativeAppIconSpecifier } from "@/components/native-app-icon";
 import {
   anySmartPiiModelReady,
   imagePiiModelReady,
@@ -60,7 +61,7 @@ const formatCount = (count: number): string => {
 };
 
 const getAppIconUrl = (appName: string): string => {
-  return `http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`;
+  return nativeAppIconSpecifier(appName);
 };
 
 const createWindowOptions = (

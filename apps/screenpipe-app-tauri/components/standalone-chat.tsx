@@ -113,6 +113,7 @@ import {
   type WebTargetPresentation,
 } from "@/lib/chat/tool-presentation";
 import { appendAuthToken, localFetch, getApiBaseUrl } from "@/lib/api";
+import { useNativeAppIconUrl } from "@/components/native-app-icon";
 import {
   computeChatCitationPlan,
   formatSourceCitationsMarkdown,
@@ -977,7 +978,7 @@ function formatMinutes(minutes: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-// Static fallback for web/SaaS apps the OS won't give us via /app-icon. Keys
+// Static fallback for web/SaaS apps native icon discovery cannot resolve. Keys
 // are normalized (trim + lowercase, .app/.exe stripped). Paths point at the
 // existing assets in apps/screenpipe-app-tauri/public/images/.
 const STATIC_APP_ICONS: Record<string, string> = {
@@ -1042,10 +1043,12 @@ function AppIcon({
   const color = nameToColor(name);
   const [iconFailed, setIconFailed] = React.useState(false);
   const staticPath = STATIC_APP_ICONS[normalizeAppKey(name)];
-  const iconUrl = staticPath ?? `http://localhost:11435/app-icon?name=${encodeURIComponent(name)}`;
+  const nativeIconUrl = useNativeAppIconUrl(staticPath ? null : name);
+  const iconUrl = staticPath ?? nativeIconUrl;
+  React.useEffect(() => setIconFailed(false), [name, iconUrl]);
   return (
     <div className={cn("rounded-sm flex-shrink-0 flex items-center justify-center overflow-hidden", sizeClass)}>
-      {iconFailed ? (
+      {iconFailed || !iconUrl ? (
         <span
           className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-sm", letterClass)}
           style={{ backgroundColor: color }}

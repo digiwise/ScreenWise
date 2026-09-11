@@ -142,6 +142,9 @@ async checkPermission(permission: OSPermission) : Promise<OSPermissionStatus> {
 async checkScreenRecordingPermission() : Promise<OSPermissionStatus> {
     return await TAURI_INVOKE("check_screen_recording_permission");
 },
+async clearNotifications() : Promise<void> {
+    await TAURI_INVOKE("clear_notifications");
+},
 async closeWindow(window: ShowRewindWindow) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("close_window", { window }) };
@@ -234,6 +237,9 @@ async disableOverlayClickThrough() : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async dismissNotification(id: string) : Promise<boolean> {
+    return await TAURI_INVOKE("dismiss_notification", { id });
 },
 async doPermissionsCheck(initialCheck: boolean) : Promise<OSPermissionsCheck> {
     return await TAURI_INVOKE("do_permissions_check", { initialCheck });
@@ -344,6 +350,17 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
 }
 },
 /**
+ * Resolve a native application icon without exposing a local HTTP listener.
+ */
+async getAppIconDataUrl(appName: string, appPath: string | null) : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_app_icon_data_url", { appName, appPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Return the macOS bundle identifier of the running app
  * (e.g. `screenpi.pe`, `screenpi.pe.beta`, or `screenpi.pe.dev`). The
  * onboarding stuck-screen surfaces this so
@@ -353,12 +370,6 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
  */
 async getAppIdentifier() : Promise<string> {
     return await TAURI_INVOKE("get_app_identifier");
-},
-/**
- * Get the app-local focus/notification server port.
- */
-async getAppServerConfig() : Promise<JsonValue> {
-    return await TAURI_INVOKE("get_app_server_config");
 },
 async getAudioDevices() : Promise<Result<AudioDeviceInfo[], string>> {
     try {
@@ -577,6 +588,16 @@ async listImportedSkills() : Promise<Result<ImportedSkill[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * List installed Windows applications for privacy/filter pickers. The scan is
+ * cached briefly because it walks registry and Start Menu entries.
+ */
+async listInstalledApps() : Promise<string[]> {
+    return await TAURI_INVOKE("list_installed_apps");
+},
+async listNotifications() : Promise<NotificationHistoryEntry[]> {
+    return await TAURI_INVOKE("list_notifications");
+},
 async livetextAnalyze(imagePath: string, frameId: string, x: number, y: number, w: number, h: number) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("livetext_analyze", { imagePath, frameId, x, y, w, h }) };
@@ -654,6 +675,17 @@ async livetextSetGuardRect(key: string, x: number, y: number, w: number, h: numb
 async livetextUpdatePosition(frameId: string, x: number, y: number, w: number, h: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("livetext_update_position", { frameId, x, y, w, h }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async markNotificationsRead() : Promise<void> {
+    await TAURI_INVOKE("mark_notifications_read");
+},
+async notify(payload: NotifyPayload) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("notify", { payload }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1609,6 +1641,8 @@ export type KeychainStatus = { state: string }
 export type LogFile = { name: string; path: string; modified_at: number }
 export type MeetingExportSummary = { output_path: string; frame_count: number; audio_chunk_count: number; duration_secs: number; file_size_bytes: number }
 export type MonitorDevice = { id: number; stableId: string; name: string; isDefault: boolean; width: number; height: number }
+export type NotificationHistoryEntry = { id: string; type: string; title: string; body: string; pipe_name: string | null; timestamp: string; read: boolean }
+export type NotifyPayload = { title: string; body: string; id: string | null; type: string | null; autoDismissMs: number | null; timeout: number | null; actions?: JsonValue[] }
 export type OSPermission = "screenRecording" | "microphone" | "accessibility" | "automation" | "inputMonitoring" | "calendar"
 export type OSPermissionStatus = "notNeeded" | "empty" | "granted" | "denied"
 export type OSPermissionsCheck = { screenRecording: OSPermissionStatus; microphone: OSPermissionStatus; accessibility: OSPermissionStatus }
