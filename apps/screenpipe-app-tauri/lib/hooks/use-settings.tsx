@@ -206,7 +206,6 @@ export type Settings = SettingsStore & {
 		endTime: string;
 		recordMode: string;
 	}>;
-	apiAuth?: boolean;
 	apiKey?: string;
 	/** Default behavior when a meeting is detected.
 	 * - `"ask"` (default): the existing meeting-start notification grows
@@ -221,14 +220,6 @@ export type Settings = SettingsStore & {
 	/** Capture debounce (ms) installed while an HD session is active.
 	 * Default 100 ≈ 10 fps. Clamped to >= 33 ms (30 fps ceiling). */
 	hdRecordingIntervalMs?: number;
-	/**
-	 * When true the backend binds the HTTP API to 0.0.0.0 instead of 127.0.0.1
-	 * so other devices on the LAN can reach it. api_auth is force-enabled
-	 * whenever this is true — the backend mirrors the guard in
-	 * RecordingConfig::from_settings so the two flags stay consistent even
-	 * if someone edits the settings file by hand.
-	 */
-	listenOnLan?: boolean;
 	encryptStore?: boolean;
 	/** Global blanket permission: allow screenpipe to copy browser cookies
 	 *  into the owned browser so the agent can browse sites the user is
@@ -538,7 +529,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 				const { configureApi } = await import("@/lib/api");
 				configureApi({
 					port: loadedSettings.port ?? 3030,
-					authEnabled: loadedSettings.apiAuth ?? true,
+					authEnabled: true,
 				});
 
 				// Hydrate Rust's owned-browser runtime cache from persisted settings.
@@ -576,12 +567,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 		await settingsStore.set(updates);
 		// Settings will be updated via the listener
 
-		// Only update the port in the API module immediately — auth changes
-		// (apiAuth / apiKey) must NOT be applied until after the server restarts.
-		// Calling configureApi({ authEnabled: false }) before restart clears the
-		// auth cookie, causing every frontend WebSocket to reconnect without a
-		// token and flood the logs with 403 rejections (the server still requires
-		// auth until it restarts with the new setting).
+		// Only update the port in the API module immediately. A replacement API
+		// key takes effect after the recorder restarts.
 		if ("port" in updates) {
 			const { configureApi } = await import("@/lib/api");
 			const merged = { ...settings, ...updates };

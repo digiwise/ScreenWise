@@ -10,7 +10,7 @@
 // the input stayed empty until the user closed and reopened Settings.
 //
 // The fix made the helper fall back to the process-global
-// `resolved_api_auth_key()` cache (seeded at app start whenever apiAuth is
+// `resolved_api_auth_key()` cache (seeded at app start before the mandatory
 // on), so the helper now NEVER returns `{key: null, auth_enabled: true}`.
 // This spec exercises the IPC directly — rather than the privacy panel UI —
 // so a regression of either branch (server-spawned OR cold-spawn fallback)

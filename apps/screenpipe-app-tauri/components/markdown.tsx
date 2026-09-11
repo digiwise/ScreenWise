@@ -5,7 +5,7 @@ import { FC, memo } from 'react'
 import ReactMarkdown, { defaultUrlTransform, Options } from 'react-markdown'
 import { commands } from "@/lib/utils/tauri";
 import { MediaComponent } from "@/components/rewind/media";
-import { getApiBaseUrl } from "@/lib/api";
+import { appendAuthToken, getApiBaseUrl } from "@/lib/api";
 import { isMediaFilePath, normalizeLocalMediaMarkdown, normalizeMediaFilePath } from "@/lib/utils/media-file-path";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -255,7 +255,7 @@ export function createMediaAwareMarkdownComponents(
         try {
           imgSrc = convertFileSrc(localPath);
         } catch {
-          imgSrc = `${getApiBaseUrl()}/experimental/frames/from-file?path=${encodeURIComponent(localPath)}`;
+          imgSrc = appendAuthToken(`${getApiBaseUrl()}/experimental/frames/from-file?path=${encodeURIComponent(localPath)}`);
         }
       }
 

@@ -464,12 +464,6 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = 150)]
     pub pause_extraction_on_input_ms: u64,
 
-    /// Enable mDNS LAN discovery (advertise this instance + browse for peers).
-    /// Off by default: it opens a multicast socket, which triggers the macOS
-    /// "Local Network" permission prompt. Opt in for multi-device sync.
-    #[arg(long, env = "SCREENPIPE_ENABLE_MDNS", default_value_t = false)]
-    pub enable_mdns: bool,
-
     /// Pause screen and audio capture when a DRM-protected streaming app
     /// (Netflix, Disney+, etc.) or a remote-desktop client (Omnissa/VMware
     /// Horizon) is focused — these blank their windows while any app is
@@ -490,18 +484,6 @@ pub struct RecordArgs {
     /// remote LLM (secrets get typed).
     #[arg(long, default_value_t = false)]
     pub disable_keyboard_capture: bool,
-
-    /// Require authentication for local API access. When enabled, protected
-    /// requests must include the token printed by `screenpipe auth token`.
-    #[arg(long, default_value_t = true)]
-    pub api_auth: bool,
-
-    /// Bind the HTTP server to 0.0.0.0 so other devices on the LAN can
-    /// reach it. Off by default — the server binds 127.0.0.1 only.
-    /// `--api-auth` is forced on whenever this flag is used; you can't
-    /// accidentally expose an unauthenticated API on your network.
-    #[arg(long, default_value_t = false)]
-    pub listen_on_lan: bool,
 
     /// Encrypt secrets (API keys, OAuth tokens) at rest using the OS keychain.
     /// Creates a keychain key if one doesn't exist. Without this flag, the CLI
@@ -580,8 +562,6 @@ pub struct RecordArgSources {
     pub pause_on_drm_content: bool,
     pub disable_clipboard_capture: bool,
     pub disable_keyboard_capture: bool,
-    pub api_auth: bool,
-    pub listen_on_lan: bool,
     pub encrypt_secrets: bool,
     pub disable_snapshot_compaction: bool,
     pub disable_meeting_detector: bool,
@@ -626,8 +606,6 @@ impl RecordArgSources {
             pause_on_drm_content: from_command_line(record, "pause_on_drm_content"),
             disable_clipboard_capture: from_command_line(record, "disable_clipboard_capture"),
             disable_keyboard_capture: from_command_line(record, "disable_keyboard_capture"),
-            api_auth: from_command_line(record, "api_auth"),
-            listen_on_lan: from_command_line(record, "listen_on_lan"),
             encrypt_secrets: from_command_line(record, "encrypt_secrets"),
             disable_snapshot_compaction: from_command_line(record, "disable_snapshot_compaction"),
             disable_meeting_detector: from_command_line(record, "disable_meeting_detector"),
@@ -664,8 +642,6 @@ impl RecordArgSources {
             || self.pause_on_drm_content
             || self.disable_clipboard_capture
             || self.disable_keyboard_capture
-            || self.api_auth
-            || self.listen_on_lan
             || self.encrypt_secrets
             || self.disable_snapshot_compaction
             || self.disable_meeting_detector
@@ -829,7 +805,6 @@ impl RecordArgs {
             pause_on_drm_content: self.pause_on_drm_content,
             disable_clipboard_capture: self.disable_clipboard_capture,
             disable_keyboard_capture: self.disable_keyboard_capture,
-            listen_on_lan: self.listen_on_lan,
             // Passing any `--schedule-rule` implies the schedule is on.
             schedule_enabled: self.schedule_enabled || !self.schedule_rules.is_empty(),
             schedule_rules: self.schedule_rules.clone(),
@@ -937,27 +912,18 @@ impl RecordArgs {
 
         let mut config =
             crate::recording_config::RecordingConfig::from_settings(&settings, data_dir, None);
-        // Mirror the CLI flag, but never let the user turn auth OFF when
-        // the API is bound to the LAN — that would publish an unauthenticated
-        // service. `from_settings` already enforces this; we reapply it
-        // here so a `--no-api-auth --listen-on-lan` combo still authenticates.
-        config.api_auth = self.api_auth || self.listen_on_lan;
-        if self.listen_on_lan && !self.api_auth {
-            tracing::warn!(
-                "--listen-on-lan was set but --api-auth=false — forcing api_auth on for safety. Use `screenpipe auth token` to view your key."
-            );
-        }
-        if config.api_auth {
-            let settings_key = if settings.api_key.is_empty() {
-                None
-            } else {
-                Some(settings.api_key.as_str())
-            };
-            match crate::auth_key::resolve_api_auth_key(&config.data_dir, settings_key).await {
-                Ok(key) => config.api_auth_key = Some(key),
-                Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
-            }
-        }
+        let settings_key = if settings.api_key.is_empty() {
+            None
+        } else {
+            Some(settings.api_key.as_str())
+        };
+        config.api_auth_key = Some(
+            crate::auth_key::resolve_api_auth_key(&config.data_dir, settings_key)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to resolve API authentication key: {error}")
+                })?,
+        );
 
         config.encrypt_secrets = self.encrypt_secrets;
 
@@ -1094,12 +1060,6 @@ impl RecordArgs {
         }
         if sources.disable_keyboard_capture {
             settings.disable_keyboard_capture = self.disable_keyboard_capture;
-        }
-        if sources.api_auth {
-            settings.api_auth = self.api_auth;
-        }
-        if sources.listen_on_lan {
-            settings.listen_on_lan = self.listen_on_lan;
         }
         if sources.disable_snapshot_compaction {
             settings.disable_snapshot_compaction = self.disable_snapshot_compaction;

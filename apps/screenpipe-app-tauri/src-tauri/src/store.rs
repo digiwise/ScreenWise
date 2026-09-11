@@ -1000,21 +1000,18 @@ impl SettingsStore {
         // asynchronously by `recording::spawn_screenpipe` via the shared helper
         // (`screenpipe_engine::auth_key::resolve_api_auth_key`) — which is the
         // single source of truth used by the CLI path, the auth CLI, and MCP.
-        // If this function is called before the server has spawned (e.g. an
-        // early frontend poll), fall back to the settings value if present;
-        // otherwise leave `api_auth_key` as `None` so the caller knows the
-        // key hasn't been resolved yet rather than receiving a fresh UUID
-        // that would drift from every other reader.
-        if config.api_auth {
-            let settings_key = settings.api_key.as_str();
-            config.api_auth_key = resolved_api_auth_key().or_else(|| {
-                if settings_key.is_empty() {
-                    None
-                } else {
-                    Some(settings_key.to_string())
-                }
-            });
-        }
+        // If this function is called before the server has spawned, fall back
+        // to the settings value if present. Otherwise leave the key unresolved;
+        // ServerCore will refuse to bind until the startup resolver has seeded
+        // the canonical value rather than minting a divergent UUID here.
+        let settings_key = settings.api_key.as_str();
+        config.api_auth_key = resolved_api_auth_key().or_else(|| {
+            if settings_key.is_empty() {
+                None
+            } else {
+                Some(settings_key.to_string())
+            }
+        });
         // E2E/dev escape hatch: bind the local server to a non-default port so a
         // throwaway instance can run alongside another screenpipe already on
         // :3030 instead of piggy-backing on it.

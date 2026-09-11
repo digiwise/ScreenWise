@@ -10,8 +10,7 @@
  *
  *   - GET /health            — unauthed; the canonical "is the server up"
  *     ping the tray + permission monitor + cold-start poll already use.
- *   - GET /audio/device/status — unauthed; lightweight audio-side health
- *     bit that should still report a sane shape with audio disabled.
+ *   - GET /audio/device/status — verifies mandatory auth rejects a bare request.
  *   - get_local_api_config IPC — resolves the in-memory bearer key the
  *     server core holds; needed for any authed call.
  *   - GET /search             — authed; minimal local search request.
@@ -133,16 +132,14 @@ describe("Local HTTP API", function () {
     expect(res.body).toHaveProperty("status");
   });
 
-  it("GET /audio/device/status — unauthed, returns object with audio disabled", async () => {
+  it("GET /audio/device/status — unauthed, rejects with 403", async () => {
     const res = await fetchJson(`http://127.0.0.1:${port}/audio/device/status`);
-    // 404 is acceptable here only if the route is gated off; status code
-    // shouldn't be a server error.
-    expect(res.status).toBeLessThan(500);
+    expect(res.status).toBe(403);
   });
 
   it("GET /search — authed, returns 2xx", async function () {
     if (!key) {
-      // api_auth defaults TRUE — if this is null the server didn't seed a
+      // Auth is mandatory — if this is null the server didn't seed a
       // key, which is itself a bug worth surfacing. Skip cleanly so the
       // failure attributes correctly to a separate spec.
       this.skip();
@@ -160,14 +157,10 @@ describe("Local HTTP API", function () {
     expect(typeof res.body).toBe("object");
   });
 
-  it("rejects unauthed /search with a 4xx when api_auth is on", async function () {
+  it("rejects unauthed /search with 403", async function () {
     if (!key) this.skip();
     const res = await fetchJson(`http://127.0.0.1:${port}/search?limit=1`);
-    // Auth middleware can return 401 (missing token) or 403 (bad token);
-    // both are correct rejections. Anything outside the 4xx range is the
-    // real regression we'd want to flag.
     expect(res.ok).toBe(false);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    expect(res.status).toBe(403);
   });
 });

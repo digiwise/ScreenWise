@@ -415,7 +415,7 @@ $uniqueNames = @($names | Sort-Object -Unique)
 
     const [health, deviceStatus] = await Promise.all([
       fetchJson(apiUrl(api, "/health")),
-      fetchJson(apiUrl(api, "/audio/device/status")),
+      fetchJson(apiUrl(api, "/audio/device/status"), authHeaders(api.key)),
     ]);
     const healthBody = health.body as HealthBody;
 

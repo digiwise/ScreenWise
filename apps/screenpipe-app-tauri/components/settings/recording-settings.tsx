@@ -152,9 +152,7 @@ const getAppIconUrl = (appName: string): string => {
 const SERVER_RESTART_SETTINGS = new Set<keyof SettingsStore>([
   "port",
   "dataDir",
-  "apiAuth",
   "apiKey",
-  "listenOnLan",
   "encryptStore",
   "asyncPiiRedaction",
   "asyncImagePiiRedaction",

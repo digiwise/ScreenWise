@@ -38,7 +38,7 @@ use screenpipe_engine::{
 use screenpipe_screen::monitor::list_monitors;
 use std::{
     env, fs,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Deref,
     path::PathBuf,
     sync::Arc,
@@ -387,10 +387,6 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .into_recording_config(local_data_dir.clone(), &record_arg_sources)
         .await?;
-
-    // mDNS LAN discovery is opt-in (off by default) so we don't trigger the
-    // macOS "Local Network" permission prompt unless the user wants it.
-    screenpipe_connect::mdns::set_enabled(record_args.enable_mdns);
 
     // Store the guard in a variable that lives for the entire main function
     let _log_guard = Some(setup_logging(&local_data_dir, record_args.debug)?);
@@ -929,30 +925,24 @@ async fn main() -> anyhow::Result<()> {
     let manual_meeting: std::sync::Arc<tokio::sync::RwLock<Option<i64>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
-    if config.listen_address.is_loopback() {
-        info!(
-            "API server listening on 127.0.0.1:{} (localhost only)",
-            config.port
-        );
-    } else {
-        warn!(
-            "API server listening on {}:{} — accessible from the network",
-            config.listen_address, config.port
-        );
-    }
-    if config.api_auth {
-        info!("API auth enabled — run `screenpipe auth token` to view your key");
-    }
+    info!(
+        "Authenticated API server listening on 127.0.0.1:{} (localhost only)",
+        config.port
+    );
+    let api_auth_key = config.api_auth_key.clone().ok_or_else(|| {
+        anyhow::anyhow!("refusing to start recorder API without an authentication key")
+    })?;
 
     let mut server = SCServer::new(
         db_server,
-        SocketAddr::new(IpAddr::V4(config.listen_address), config.port),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
         local_data_dir_clone_2,
         config.disable_vision,
         config.disable_audio,
         audio_manager.clone(),
         config.use_pii_removal,
         config.video_quality.clone(),
+        api_auth_key.clone(),
     );
     server.vision_metrics = vision_metrics;
     server.audio_metrics = audio_manager.metrics.clone();
@@ -960,8 +950,6 @@ async fn main() -> anyhow::Result<()> {
     server.timeline_disabled = config.disable_timeline;
     server.power_manager = Some(power_manager);
     server.manual_meeting = Some(manual_meeting.clone());
-    server.api_auth = config.api_auth;
-    server.api_auth_key = config.api_auth_key.clone();
     // Initialize secret store for unified credential management
     let encryption_requested =
         config.encrypt_secrets || screenpipe_secrets::is_encryption_requested(&local_data_dir);
@@ -1074,14 +1062,7 @@ async fn main() -> anyhow::Result<()> {
         "│ auto-destruct pid      │ {:<34} │",
         record_args.auto_destruct_pid.unwrap_or(0)
     );
-    println!(
-        "│ api auth               │ {:<34} │",
-        if config.api_auth {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
+    println!("│ api auth               │ {:<34} │", "enabled (required)");
     println!(
         "│ encrypt secrets        │ {:<34} │",
         if encryption_requested {
@@ -1291,7 +1272,7 @@ async fn main() -> anyhow::Result<()> {
         let retention_days = record_args.retention_days;
         let retention_mode = record_args.retention_mode;
         let retention_enabled = retention_days > 0;
-        let api_auth_key = config.api_auth_key.clone();
+        let api_auth_key = api_auth_key.clone();
         tokio::spawn(async move {
             if !retention_enabled {
                 tracing::info!("local retention disabled (--retention-days 0)");
@@ -1300,10 +1281,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let client = reqwest::Client::new();
             let url = format!("http://localhost:{}/retention/configure", port);
-            let mut request = client.post(&url);
-            if let Some(key) = api_auth_key {
-                request = request.bearer_auth(key);
-            }
+            let request = client.post(&url).bearer_auth(api_auth_key);
             match request
                 .json(&serde_json::json!({
                     "enabled": true,

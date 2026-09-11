@@ -21,6 +21,19 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt; // for `oneshot` and `ready`
 
+    const TEST_API_KEY: &str = "screenwise-test-api-key";
+
+    async fn add_test_auth(
+        mut request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer screenwise-test-api-key"),
+        );
+        next.run(request).await
+    }
+
     // Before the test function, add:
     #[derive(Deserialize)]
     struct TestErrorResponse {
@@ -65,9 +78,38 @@ mod tests {
             audio_manager,
             false, // use_pii_removal
             "balanced".to_string(),
+            TEST_API_KEY.to_string(),
         );
 
         let router = app.create_router().await;
+
+        let health = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        for protected_path in ["/search", "/frames/1"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(protected_path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        let router = router.layer(axum::middleware::from_fn(add_test_auth));
         init();
         (router, db)
     }

@@ -20,18 +20,9 @@ async function openPrivacySettings(): Promise<void> {
   await navPrivacy.waitForExist({ timeout: t(20_000) });
   await navPrivacy.click();
 
-  const apiAuthSwitch = await $('[data-testid="privacy-api-auth-switch"]');
-  await apiAuthSwitch.waitForExist({ timeout: t(20_000) });
+  const keyInput = await $('[data-testid="privacy-api-key-input"]');
+  await keyInput.waitForExist({ timeout: t(20_000) });
   await browser.pause(t(750));
-}
-
-type HasGetAttribute = {
-  getAttribute: (name: string) => Promise<string | null>;
-};
-
-async function isSwitchChecked(el: HasGetAttribute): Promise<boolean> {
-  const state = await el.getAttribute("data-state");
-  return state === "checked";
 }
 
 describe("Privacy: API authentication controls", function () {
@@ -43,14 +34,11 @@ describe("Privacy: API authentication controls", function () {
   });
 
   it("masks the local API key, reveal toggles read-only, copy shows toast", async () => {
-    const apiAuthSwitch = await $('[data-testid="privacy-api-auth-switch"]');
-    if (!(await isSwitchChecked(apiAuthSwitch))) {
-      await apiAuthSwitch.click();
-      await browser.pause(t(600));
-    }
-
     const keyInput = await $('[data-testid="privacy-api-key-input"]');
     await keyInput.waitForExist({ timeout: t(20_000) });
+
+    const removedAuthSwitch = await $$('[data-testid="privacy-api-auth-switch"]');
+    expect(removedAuthSwitch.length).toBe(0);
 
     const revealBtn = await $('[data-testid="privacy-api-key-reveal"]');
     await revealBtn.waitForExist({ timeout: t(20_000) });

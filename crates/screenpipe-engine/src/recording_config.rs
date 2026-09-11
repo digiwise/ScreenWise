@@ -170,18 +170,9 @@ pub struct RecordingConfig {
     /// Skip UIA tree captures within this many ms after the most recent input.
     pub pause_extraction_on_input_ms: u64,
 
-    /// Require authentication for protected local API routes.
-    /// When true, requests must include the locally resolved bearer token.
-    pub api_auth: bool,
-
     /// The API key for this instance (from SCREENPIPE_API_KEY env or auth.json).
-    /// Used to validate incoming remote requests when api_auth is enabled.
+    /// Used to validate incoming requests to the loopback recorder API.
     pub api_auth_key: Option<String>,
-
-    /// IP address the HTTP server listens on. Default: 127.0.0.1 (localhost only).
-    /// Set to 0.0.0.0 to allow access from other devices on the network.
-    /// When set to 0.0.0.0, api_auth should be enabled for security.
-    pub listen_address: std::net::Ipv4Addr,
 
     /// When true, create a keychain encryption key if one doesn't exist.
     /// Without this, the CLI only uses an existing key (created by the desktop app).
@@ -303,19 +294,7 @@ impl RecordingConfig {
             prioritize_input_latency: settings.prioritize_input_latency,
             extraction_thread_priority: settings.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: settings.pause_extraction_on_input_ms,
-            // LAN exposure is opt-in. We force `api_auth` on whenever
-            // `listen_on_lan` is true so a user can never accidentally
-            // publish an unauthenticated API on their local network. The
-            // UI makes the dependency explicit; this guard is the safety
-            // net if someone edits the settings JSON by hand or flips the
-            // field via an older frontend that doesn't know about it.
-            api_auth: settings.api_auth || settings.listen_on_lan,
             api_auth_key: None,
-            listen_address: if settings.listen_on_lan {
-                std::net::Ipv4Addr::UNSPECIFIED // 0.0.0.0 — all interfaces
-            } else {
-                std::net::Ipv4Addr::LOCALHOST
-            },
             encrypt_secrets: false, // desktop app handles keychain via Tauri commands
         }
     }
@@ -433,53 +412,9 @@ fn single_language_code(languages: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
-
-    fn settings_with(lan: bool, api_auth: bool) -> screenpipe_config::RecordingSettings {
-        screenpipe_config::RecordingSettings {
-            listen_on_lan: lan,
-            api_auth,
-            ..Default::default()
-        }
-    }
 
     fn build(s: &screenpipe_config::RecordingSettings) -> RecordingConfig {
         RecordingConfig::from_settings(s, std::path::PathBuf::from("/tmp/sp_test"), None)
-    }
-
-    #[test]
-    fn defaults_to_loopback() {
-        let c = build(&screenpipe_config::RecordingSettings::default());
-        assert_eq!(c.listen_address, Ipv4Addr::LOCALHOST);
-        assert!(c.api_auth, "api_auth defaults to true for safety");
-    }
-
-    #[test]
-    fn listen_on_lan_binds_unspecified() {
-        let c = build(&settings_with(true, true));
-        assert_eq!(c.listen_address, Ipv4Addr::UNSPECIFIED);
-        assert!(c.api_auth);
-    }
-
-    #[test]
-    fn listen_on_lan_forces_api_auth_on_even_if_disabled() {
-        // The UI or a hand-edited settings file might flip api_auth off
-        // while listen_on_lan is on — we refuse to let that combo ship.
-        let c = build(&settings_with(true, false));
-        assert_eq!(c.listen_address, Ipv4Addr::UNSPECIFIED);
-        assert!(
-            c.api_auth,
-            "api_auth must be forced on when LAN access is enabled"
-        );
-    }
-
-    #[test]
-    fn listen_on_lan_off_respects_api_auth_off() {
-        // If the user has explicitly disabled auth AND kept the bind on
-        // loopback, leave them alone — localhost-only is already safe.
-        let c = build(&settings_with(false, false));
-        assert_eq!(c.listen_address, Ipv4Addr::LOCALHOST);
-        assert!(!c.api_auth);
     }
 
     #[test]

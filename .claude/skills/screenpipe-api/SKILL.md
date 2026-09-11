@@ -165,7 +165,7 @@ OCR-only roles (fallback when accessibility unavailable): `line`, `word`, `block
 ## 4. Frames (Screenshots) — `GET /frames/{frame_id}`
 
 ```bash
-curl -o /tmp/frame.png "http://localhost:3030/frames/12345"
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" -o /tmp/frame.png "http://localhost:3030/frames/12345"
 ```
 
 Returns raw PNG. **Never fetch more than 2-3 frames per query** (~1000-2000 tokens each).
@@ -206,6 +206,7 @@ Always use `-y`, save to `~/.screenpipe/exports/`.
 ```bash
 curl -X POST http://localhost:3030/audio/retranscribe \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"start": "1h ago", "end": "now"}'
 ```
 
@@ -220,6 +221,7 @@ Keep ranges short (1h max). Show old vs new transcription.
 ```bash
 curl -X POST http://localhost:3030/raw_sql \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"query": "SELECT ... LIMIT 100"}'
 ```
 
@@ -330,32 +332,38 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" "http://localhost:3030
 # Update speaker name/metadata
 curl -X POST http://localhost:3030/speakers/update \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"id": 29, "name": "Jordan"}'
 
 # Reassign speaker for an audio chunk (propagates to similar chunks by default)
 curl -X POST http://localhost:3030/speakers/reassign \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"audio_chunk_id": 456, "new_speaker_name": "Jordan", "propagate_similar": true}'
 # Returns: new_speaker_id, transcriptions_updated, old_assignments (for undo)
 
 # Undo a speaker reassignment
 curl -X POST http://localhost:3030/speakers/undo-reassign \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"old_assignments": [{"transcription_id": 1, "old_speaker_id": 29}]}'
 
 # Merge two speakers (keeps one, merges the other into it)
 curl -X POST http://localhost:3030/speakers/merge \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"speaker_to_keep_id": 5, "speaker_to_merge_id": 29}'
 
 # Mark speaker as hallucination (false detection)
 curl -X POST http://localhost:3030/speakers/hallucination \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"speaker_id": 29}'
 
 # Delete a speaker (also removes associated audio chunk files)
 curl -X POST http://localhost:3030/speakers/delete \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"id": 29}'
 ```
 
@@ -398,15 +406,17 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" "http://localhost:3030
 # Create a memory
 curl -X POST http://localhost:3030/memories \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"content": "User prefers dark mode", "source": "user", "tags": ["preference", "ui"], "importance": 0.7}'
 
 # Update a memory
 curl -X PUT http://localhost:3030/memories/1 \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -d '{"content": "User prefers dark mode in all apps", "importance": 0.8}'
 
 # Delete a memory
-curl -X DELETE http://localhost:3030/memories/1
+curl -X DELETE -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" http://localhost:3030/memories/1
 ```
 
 Parameters for `GET /memories`: `q` (FTS search), `source`, `tags`, `min_importance`, `start_time`, `end_time`, `limit`, `offset`.
@@ -481,8 +491,8 @@ Returns `{"success": true, "message": "Notification sent successfully"}`.
 
 ```bash
 curl http://localhost:3030/health              # Health check
-curl http://localhost:3030/audio/list           # Audio devices
-curl http://localhost:3030/vision/list          # Monitors
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" http://localhost:3030/audio/list   # Audio devices
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" http://localhost:3030/vision/list  # Monitors
 ```
 
 ---

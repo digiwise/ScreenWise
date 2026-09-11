@@ -2419,3 +2419,127 @@ Post-change evidence:
   capability. Full diff, root/desktop Cargo and Bun lockfile, residual-reference,
   and whitespace inspections found no unrelated dependency or private-smoke
   changes.
+
+### Inbound listener and recorder-authentication boundary — 2026-09-11
+
+Pre-change reachability: the main recorder HTTP/WebSocket API binds to
+`127.0.0.1` and enables bearer authentication by default, but the retained
+`listenOnLan` setting and `--listen-on-lan` CLI option deliberately change the
+bind address to `0.0.0.0`. LAN mode forces authentication, while loopback mode
+still permits authentication to be disabled. Even with authentication enabled,
+`/ws/health`, `/audio/device/status`, every `/frames/*` route, and the stale
+`/notify` exemption bypass the bearer check. The frame exemption includes
+recorded image and text content and is not an acceptable public boundary.
+
+The separate desktop focus/notification/helper server is hard-bound to
+`127.0.0.1`, but has no authentication and permits every browser origin; its
+removal/replacement cost is being audited separately and will not be obscured
+inside this recorder-server change. The `screenpipe-connect` mDNS daemon is
+runtime-reachable through an explicit CLI/environment opt-in and opens LAN
+multicast sockets. The optional `screenpipe-apple-intelligence` `fm-server`
+binary is not part of a default desktop build, but its `server` feature binds
+an unauthenticated API to `0.0.0.0`.
+
+This increment will remove LAN binding and mDNS discovery, remove the optional
+standalone `fm-server`, make recorder API authentication non-disableable, and
+reduce unauthenticated recorder routes to the minimal non-sensitive liveness
+endpoint required during startup. It preserves authenticated HTTP/WebSocket
+access, local Pi/Ollama, the embedded macOS Apple Intelligence routes inside the
+authenticated recorder API, owned-browser control, and the separate loopback
+desktop helper while its replacement boundary is documented.
+
+Post-change evidence:
+
+- The recorder and desktop now construct `SCServer` only with
+  `127.0.0.1`. The `listenOnLan` persisted setting and CLI wiring are gone.
+  Recorder authentication no longer has a boolean enable/disable state: startup
+  must resolve a non-empty local API key or fail closed, and the desktop reports
+  `auth_enabled: true` even during its key-seeding startup window.
+- Only `/health` bypasses recorder authentication. `/ws/health`,
+  `/audio/device/status`, `/notify`, and every `/frames/*` route now pass through
+  the bearer/cookie/query-token check. The engine route test explicitly proves
+  that unauthenticated `/search` and `/frames/1` return 403 while `/health`
+  remains public.
+- All retained frontend raw-frame image callers now append the local token;
+  ordinary frame/context/text requests continue to use authenticated
+  `localFetch`. Ignored live WebSocket diagnostics now require
+  `SCREENPIPE_LOCAL_API_KEY`, and the API skill plus generated desktop copy no
+  longer describe the removed exemptions.
+- The mDNS implementation, runtime/CLI/environment activation, and `mdns-sd`
+  dependency are removed. Both Cargo locks drop only `mdns-sd`, `if-addrs`, and
+  the now-unneeded `log` edge on `mio`. The optional Apple `fm-server` binary,
+  its `server` feature, and its server-only Axum/UUID/stream dependencies are
+  removed; the embedded Apple Intelligence query route remains behind the main
+  authenticated recorder listener.
+- Locked/offline root checks for the changed engine/config/connect/Apple crates
+  and the locked/offline desktop check passed. The focused engine endpoint test
+  passed (1 run, 5 model-dependent tests ignored), including the new auth
+  assertions. After staging the repository's checksum-verified ONNX Runtime
+  1.22 DLL beside the debug test binary, all 5 tag endpoint tests passed. The
+  transcription endpoint test compiled and ran with 3 passes, 2 failures, and
+  1 ignored test; its two stale assertions concern removed external-engine and
+  OpenAI-compatibility behavior, not authentication, and are recorded rather
+  than hidden.
+- Root and desktop formatting, the direct TypeScript typecheck, the focused API
+  URL Vitest suite (3 tests), the generated-binding export, and the native
+  `tauri_bindings_are_current` test passed. The production Next build also
+  passed. The full frontend Vitest run had 34 passing suites and 370 passing
+  tests; one suite failed during setup in the pre-existing validation test
+  because its imported `z` value was undefined.
+- The ignored live frame-stream, event-WebSocket, and first-frame diagnostics
+  compile with their new explicit `SCREENPIPE_LOCAL_API_KEY` requirement; they
+  were not executed because they require a separately running recorder.
+- The normal locked/offline root release build passed under Developer
+  PowerShell with Ninja and the documented OpenBLAS/ORT environment. Lockfile
+  inspection found only the dependency removals described above; the root
+  manifest and Bun lockfile are unchanged.
+- Residual listener/configuration searches find no recorder mDNS, LAN-bind, or
+  authentication-disable edge. They do still find the separately launched
+  `packages/screenpipe-mcp` HTTP wrapper: it is not the recorder or desktop
+  helper, defaults to loopback, and retains an explicit LAN option that refuses
+  to start without its own API key. That optional package was outside this
+  recorder-authentication change and remains a distinct future boundary.
+
+#### Desktop helper listener audit
+
+The remaining desktop helper is
+`apps/screenpipe-app-tauri/src-tauri/src/server.rs`: an unauthenticated Axum
+server fixed to loopback, normally port 11435, with wildcard CORS. It is not the
+recorder/search API. Its reachable jobs are:
+
+- `/focus` forwards second-instance arguments and deep links. Windows and macOS
+  already use Tauri's single-instance plugin, while Linux currently relies on
+  this early HTTP fallback.
+- `/notify` and notification CRUD are used by Rust notification producers and
+  the desktop notification bell.
+- `/app-icon` and `/installed-apps` expose native application discovery to
+  several settings/timeline surfaces.
+- `/window-size` duplicates an existing Tauri command. `/inbox` and `/log` have
+  no retained production caller found by the reachability scan and appear to be
+  legacy local integration bridges.
+
+Complete removal is a medium-sized IPC migration, not a safe one-line listener
+deletion. It requires extracting the shared `bind_listener` helper used by the
+recorder, replacing app-icon and installed-app discovery with typed Tauri
+commands, moving notification CRUD and internal producers to direct Rust/Tauri
+events, deleting the redundant/uncalled routes, removing helper startup,
+shutdown, port configuration and generated binding, and rewriting its E2E
+tests. A separate platform decision is required for Linux second-instance/deep-
+link forwarding; on the Windows-first product, the existing native plugin
+already covers the primary target.
+
+Hardening while it remains is smaller but still substantive: issue an
+unguessable per-process token through Tauri IPC and require it on every route;
+replace wildcard CORS with exact packaged/development origins; cap and validate
+payloads, dimensions, paths, and window names; and remove the current behavior
+that can forcibly terminate an unrelated process occupying the fixed port.
+Using an OS-assigned port or same-user named-pipe/local-socket transport would
+further reduce browser-origin and fixed-port exposure.
+
+Recommended boundary: remove the simple HTTP jobs first (icons, installed apps,
+window sizing, notification CRUD/producers, inbox, and log) through typed native
+IPC. Then either remove `/focus` with the helper on the Windows-first target or
+retain only a narrowly authenticated focus bridge until Linux receives a native
+single-instance transport. Hardening the entire current multipurpose server is
+less attractive than this staged removal because most routes already have a
+natural in-process replacement.

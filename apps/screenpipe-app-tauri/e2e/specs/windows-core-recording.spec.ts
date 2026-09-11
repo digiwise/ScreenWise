@@ -829,7 +829,10 @@ describe("Windows core recording pipeline", function () {
     expect(typeof health.audio_status).toBe("string");
     expect((health.audio_status ?? "").length).toBeGreaterThan(0);
 
-    const audioStatus = await fetchJson(apiUrl(cfg, "/audio/device/status"));
+    const audioStatus = await fetchJson(
+      apiUrl(cfg, "/audio/device/status"),
+      authHeaders(cfg.key),
+    );
     expect(audioStatus.status).toBeGreaterThan(0);
     expect(audioStatus.status).toBeLessThan(500);
   });

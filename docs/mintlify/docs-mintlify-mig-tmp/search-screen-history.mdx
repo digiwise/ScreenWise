@@ -122,26 +122,11 @@ the desktop app offers two ways to find content:
 3. use the timeline to visually locate the content, then ask chat about it
 4. if still missing, check that the app or window isn't in your ignored-windows list
 
-## accessing the API from other devices on your network
+## API network boundary
 
-by default, the screenpipe API only listens on `127.0.0.1` (localhost). to access it from other devices on your LAN, start screenpipe with the `--listen-on-lan` flag:
-
-```bash
-screenpipe --listen-on-lan
-```
-
-this binds the server to `0.0.0.0`, making it reachable at `http://<your-machine-ip>:3030/`. note that `--listen-on-lan` automatically enables API authentication to protect your data on the network.
-
-**example:** if your machine's local IP is `192.168.1.100`, you can now query from another device:
-
-```bash
-curl "http://192.168.1.100:3030/search?q=my+query" \
-  -H "Authorization: Bearer <your-api-key>"
-```
-
-to find your machine's local IP:
-- **macOS/Linux**: `ifconfig | grep "inet " | grep -v 127.0.0.1`
-- **Windows**: `ipconfig | find "IPv4"`
+The recorder API always listens on `127.0.0.1` (localhost) and requires its
+local bearer token for every route except `/health`. Use API clients on the
+same machine; LAN exposure is intentionally unsupported.
 
 ## privacy
 

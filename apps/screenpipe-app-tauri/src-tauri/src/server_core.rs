@@ -42,7 +42,7 @@ pub struct ServerCore {
     pub port: u16,
     /// Local API auth key — exposed to the frontend via Tauri command so
     /// localFetch can inject it synchronously (no async store race).
-    pub local_api_key: Option<String>,
+    pub local_api_key: String,
     /// Shutdown signal for the redaction reconciliation workers. Fired
     /// from `shutdown()` so the workers exit before the tokio runtime
     /// tears down — otherwise their in-flight sqlx queries (which use
@@ -84,6 +84,9 @@ impl ServerCore {
             "migrating_database",
             Some("updating database — this may take several minutes on large installs"),
         );
+        let api_auth_key = config.api_auth_key.clone().ok_or_else(|| {
+            "refusing to start recorder API without a resolved authentication key".to_string()
+        })?;
 
         // DB init with bounded retry on lock contention.
         //
@@ -255,13 +258,14 @@ impl ServerCore {
         // --- HTTP server ---
         let mut server = SCServer::new(
             db.clone(),
-            SocketAddr::new(IpAddr::V4(config.listen_address), config.port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
             local_data_dir.clone(),
             config.disable_vision,
             config.disable_audio,
             audio_manager.clone(),
             config.use_pii_removal,
             config.video_quality.clone(),
+            api_auth_key.clone(),
         );
         server.vision_metrics = vision_metrics.clone();
         server.audio_metrics = audio_manager.metrics.clone();
@@ -269,8 +273,6 @@ impl ServerCore {
         server.timeline_disabled = config.disable_timeline;
         server.power_manager = Some(power_manager.clone());
         server.manual_meeting = Some(manual_meeting.clone());
-        server.api_auth = config.api_auth;
-        server.api_auth_key = config.api_auth_key.clone();
         server.owned_browser = owned_browser;
 
         // Secret store — read-only keychain access on startup.
@@ -394,7 +396,7 @@ impl ServerCore {
 
         // Bind HTTP listener before returning (catches port conflicts early)
         let listener = bind_listener(SocketAddr::new(
-            IpAddr::V4(config.listen_address),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
             config.port,
         ))
         .await
@@ -415,17 +417,6 @@ impl ServerCore {
 
         info!("Server core started successfully");
         crate::health::set_boot_phase("ready", None);
-
-        // mDNS LAN discovery is opt-in (off by default) so the app doesn't
-        // trigger the macOS "Local Network" permission prompt unless the user
-        // wants multi-device discovery. Enable with SCREENPIPE_ENABLE_MDNS=1.
-        let mdns_enabled = std::env::var("SCREENPIPE_ENABLE_MDNS")
-            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
-            .unwrap_or(false);
-        screenpipe_connect::mdns::set_enabled(mdns_enabled);
-        if let Err(e) = screenpipe_connect::mdns::advertise(config.port) {
-            warn!("mdns advertisement failed (non-fatal): {}", e);
-        }
 
         // ── Async PII reconciliation workers (issue #3185 / PR #3188) ─────
         // Two independent workers — text and image — each gated by its
@@ -558,7 +549,7 @@ impl ServerCore {
             data_dir: local_data_dir,
             data_path,
             port: config.port,
-            local_api_key: config.api_auth_key.clone(),
+            local_api_key: api_auth_key,
             redact_shutdown,
         })
     }
@@ -566,7 +557,6 @@ impl ServerCore {
     /// Shut down the server core. Called only on app quit.
     pub async fn shutdown(self) {
         info!("Shutting down server core");
-        screenpipe_connect::mdns::shutdown();
 
         // Tell redaction workers to exit BEFORE the tokio runtime tears
         // down — otherwise their in-flight sqlx queries panic with

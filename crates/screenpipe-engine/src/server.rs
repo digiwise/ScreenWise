@@ -158,10 +158,6 @@ pub struct AppState {
     /// `browser_registry`. Held separately so the desktop shell can attach a
     /// transport handle after the engine has started.
     pub owned_browser: Arc<screenpipe_connect::connections::browser::OwnedBrowser>,
-    /// When true, protected requests require Authorization: Bearer <api_key>
-    pub api_auth: bool,
-    /// The API key to validate against (from SCREENPIPE_API_KEY or auth.json)
-    pub api_auth_key: Option<String>,
     /// Local secret store used for the recorder bearer token.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
     /// Runtime control for the high-FPS screen-capture override. Shared
@@ -194,10 +190,8 @@ pub struct SCServer {
     /// the engine creates a default unattached instance and owned-browser
     /// requests return 503 until a handle is wired up.
     pub owned_browser: Option<Arc<screenpipe_connect::connections::browser::OwnedBrowser>>,
-    /// Require bearer authentication for protected API access.
-    pub api_auth: bool,
     /// Local bearer token used for API authentication.
-    pub api_auth_key: Option<String>,
+    api_auth_key: String,
     /// Local secret store, including the local API bearer token.
     pub secret_store: Option<Arc<screenpipe_secrets::SecretStore>>,
     /// Shared high-FPS controller. Set before `start()` so AppState and
@@ -207,14 +201,6 @@ pub struct SCServer {
     /// warming the hot frame cache from the DB at startup (the cache is only
     /// read by the timeline streaming endpoint). Set before `start()`.
     pub timeline_disabled: bool,
-    /// Advertise this instance over mDNS. Disabled for loopback-only binds
-    /// because LAN clients cannot reach those addresses and Windows may show a
-    /// firewall prompt for an otherwise local-only CLI run.
-    pub advertise_mdns: bool,
-}
-
-fn should_advertise_mdns(addr: SocketAddr) -> bool {
-    !addr.ip().is_loopback()
 }
 
 impl SCServer {
@@ -228,6 +214,7 @@ impl SCServer {
         audio_manager: Arc<AudioManager>,
         use_pii_removal: bool,
         video_quality: String,
+        api_auth_key: String,
     ) -> Self {
         let audio_metrics = audio_manager.metrics.clone();
         SCServer {
@@ -245,12 +232,10 @@ impl SCServer {
             power_manager: None,
             manual_meeting: None,
             owned_browser: None,
-            api_auth: false,
-            api_auth_key: None,
+            api_auth_key,
             secret_store: None,
             high_fps_controller: None,
             timeline_disabled: false,
-            advertise_mdns: should_advertise_mdns(addr),
         }
     }
 
@@ -271,15 +256,6 @@ impl SCServer {
         // Create the listener (SO_REUSEADDR on Windows to avoid TIME_WAIT conflicts)
         let listener = bind_listener(self.addr).await?;
         info!("Server listening on {}", self.addr);
-
-        // Advertise via mDNS only when this server is reachable off-machine.
-        if self.advertise_mdns {
-            if let Err(e) = screenpipe_connect::mdns::advertise(self.addr.port()) {
-                tracing::warn!("mdns advertisement failed (non-fatal): {}", e);
-            }
-        } else {
-            debug!("mdns advertisement skipped for loopback-only server");
-        }
 
         // Start serving
         serve(
@@ -385,8 +361,6 @@ impl SCServer {
             owned_browser: self.owned_browser.clone().unwrap_or_else(
                 screenpipe_connect::connections::browser::OwnedBrowser::default_instance,
             ),
-            api_auth: self.api_auth,
-            api_auth_key: self.api_auth_key.clone(),
             secret_store: self.secret_store.clone(),
             high_fps_controller: self.high_fps_controller.clone(),
         });
@@ -632,32 +606,19 @@ impl SCServer {
                 crate::routes::timezone::timestamp_middleware,
             ))
             .layer({
-                // API auth middleware — when api_auth is enabled, ALL requests
-                // (including localhost) must include a valid bearer token.
+                // API auth middleware — every request except the minimal
+                // liveness probe must include a valid bearer token.
                 // The Tauri frontend injects it via localFetch (key loaded once
-                // via get_local_api_config IPC). /health and a few other paths
-                // are exempt so polling works before the frontend has the key.
-                let auth_enabled = self.api_auth;
+                // via get_local_api_config IPC). /health remains public so
+                // startup and process supervisors can detect readiness before
+                // the frontend has the key.
                 let auth_key = self.api_auth_key.clone();
                 axum::middleware::from_fn(
                     move |req: axum::extract::Request, next: axum::middleware::Next| {
-                        let auth_enabled = auth_enabled;
                         let auth_key = auth_key.clone();
                         async move {
-                            if !auth_enabled {
-                                return next.run(req).await;
-                            }
-
-                            // Allow specific endpoints without auth:
-                            // - /health: device monitor, tray status, startup polling
-                            //   (called before frontend loads API key via IPC)
                             let path = req.uri().path();
-                            if path == "/health"
-                                || path == "/ws/health"
-                                || path == "/audio/device/status"
-                                || path.starts_with("/frames/")
-                                || path == "/notify"
-                            {
+                            if path == "/health" {
                                 return next.run(req).await;
                             }
 
@@ -693,9 +654,8 @@ impl SCServer {
                                 });
 
                             let token = header_token.or(cookie_token).or(query_token);
-                            let authorized = token
-                                .map(|t| auth_key.as_deref() == Some(t.as_str()))
-                                .unwrap_or(false);
+                            let authorized = !auth_key.is_empty()
+                                && token.map(|t| auth_key == t).unwrap_or(false);
 
                             if authorized {
                                 next.run(req).await
@@ -737,35 +697,5 @@ impl SCServer {
             })
             .layer(cors)
             .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::should_advertise_mdns;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-
-    #[test]
-    fn mdns_advertising_skips_loopback_binds() {
-        assert!(!should_advertise_mdns(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            3030,
-        )));
-        assert!(!should_advertise_mdns(SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-            3030,
-        )));
-    }
-
-    #[test]
-    fn mdns_advertising_runs_for_lan_binds() {
-        assert!(should_advertise_mdns(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            3030,
-        )));
-        assert!(should_advertise_mdns(SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            3030,
-        )));
     }
 }

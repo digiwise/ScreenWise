@@ -180,7 +180,7 @@ describe('Settings sections', () => {
     await browser.pause(800);
 
     const body = (await browser.execute(() => document.body.innerText.toLowerCase())) as string;
-    // Privacy is where api_auth + keychain encryption + LAN-access controls
+    // Privacy is where the mandatory API key and keychain encryption controls
     // live. The keychain-toggle path is the same one that broke chris's
     // pipe install (covered in #3259) — having a smoke test pinned to this
     // panel means a future refactor that drops the regenerate / encryption

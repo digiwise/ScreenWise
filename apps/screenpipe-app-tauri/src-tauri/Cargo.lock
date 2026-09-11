@@ -4454,16 +4454,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "if-addrs"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "image"
 version = "0.24.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5461,20 +5451,6 @@ checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
 dependencies = [
  "cfg-if 1.0.4",
  "digest",
-]
-
-[[package]]
-name = "mdns-sd"
-version = "0.13.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328f4e1041f7cfeb3affccb814ddbe2f004856a2ce769c8bf22080d74c5204c6"
-dependencies = [
- "fastrand",
- "flume 0.11.1",
- "if-addrs",
- "log",
- "mio",
- "socket2 0.5.10",
 ]
 
 [[package]]
@@ -8811,7 +8787,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "eventkit-rs",
- "mdns-sd",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

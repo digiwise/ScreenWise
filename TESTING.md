@@ -327,7 +327,7 @@ commits: `8a5f51dd`, `0b0d8090`, `7e58564e`, `2522a7e2`, `f3e55dbc`, `79f2913f`
 - [ ] **Pi restart on preset switch** — Switch between different AI presets. Verify that the Pi agent restarts if required by the new preset.
 - [ ] **No hosted web search** — Verify local Pi chat does not install or invoke the removed hosted web-search extension.
 - [ ] **standalone settings page** — Verify that clicking settings in the tray menu opens a standalone `/settings` page instead of a modal overlay. (`ec2a5789e`)
-- [ ] **optional API auth** — Enable API auth in settings (or via `--api-auth`). Verify that remote access to the API requires the configured token. (`09f18141a`, `cfc1a74e1`)
+- [ ] **mandatory API auth** — Verify that `/health` remains public, every other recorder endpoint rejects a missing/invalid token, and authenticated HTTP, WebSocket, and frame-image requests succeed. (`09f18141a`, `cfc1a74e1`)
 - [ ] **privacy settings reordering** — Verify that the Security section appears first in the Privacy settings tab. (`4718785b6`)
 - [ ] **password field filtering** — Verify that password fields are skipped in the accessibility tree and not stored as OCR/text. (`8159641f5`, `d39e42e5b`)
 - [ ] **browser extension popup filtering** — Verify that browser extension popups (like Bitwarden) are filtered and not captured in the accessibility tree or as black frames. (`52d20987a`, `449ae7a68`, `931db40b6`)
@@ -650,7 +650,7 @@ commits: `ad431b513`, `d9722bccc`, `4df21e83d`
 - [ ] **Ignore incognito toggle** — Verify that the "Ignore Incognito Windows" toggle in settings correctly prevents recording of private windows. (`d9722bccc`)
 - [ ] **Incognito detection UI feedback** — Verify that the UI correctly reflects when an incognito window is being ignored.
 - [ ] **DRM pause behavior** — Play DRM-protected content (e.g., Netflix in Safari). Verify that Screenpipe pauses recording gracefully and resumes automatically once the DRM content is closed, without crashing the server. (`3d9f0e8bb`)
-- [ ] **LAN-access toggle** — Toggle "Enable LAN access" in API settings. Verify that the API binds to `0.0.0.0` and that `api_auth` is forcibly enabled for security. (`c8d9c83f0`)
+- [ ] **Recorder network boundary** — The LAN-access and authentication toggles are removed. Verify that the recorder binds only to `127.0.0.1`, always requires its local bearer token, and leaves only `/health` public.
 
 commits: `fc830b43`
 

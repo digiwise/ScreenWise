@@ -1012,21 +1012,19 @@ async fn main() {
                             // cache; without this step the server would start with
                             // `api_auth_key = None` on the app-auto-start path and every
                             // request would 403. Mirrors the path in `spawn_screenpipe`.
-                            if store_clone.recording.api_auth {
-                                let settings_key_opt = if store_clone.recording.api_key.is_empty() {
-                                    None
-                                } else {
-                                    Some(store_clone.recording.api_key.clone())
-                                };
-                                match screenpipe_engine::auth_key::resolve_api_auth_key(
-                                    &data_dir_clone,
-                                    settings_key_opt.as_deref(),
-                                )
-                                .await
-                                {
-                                    Ok(key) => crate::store::seed_api_auth_key(key),
-                                    Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
-                                }
+                            let settings_key_opt = if store_clone.recording.api_key.is_empty() {
+                                None
+                            } else {
+                                Some(store_clone.recording.api_key.clone())
+                            };
+                            match screenpipe_engine::auth_key::resolve_api_auth_key(
+                                &data_dir_clone,
+                                settings_key_opt.as_deref(),
+                            )
+                            .await
+                            {
+                                Ok(key) => crate::store::seed_api_auth_key(key),
+                                Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
                             }
                             let config = store_clone.to_recording_config(data_dir_clone.clone());
 
@@ -1217,7 +1215,7 @@ async fn main() {
                             let port = core.port;
                             let key = core.local_api_key.clone();
                             drop(guard);
-                            crate::engine_events::start(app_handle_clone.clone(), port, key);
+                            crate::engine_events::start(app_handle_clone.clone(), port, Some(key));
                             return;
                         }
                     }

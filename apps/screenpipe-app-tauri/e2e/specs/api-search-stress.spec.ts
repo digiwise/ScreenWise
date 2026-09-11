@@ -426,9 +426,9 @@ describe("Local API search and stability", function () {
     expect(res.body).toHaveProperty("status");
   });
 
-  it("keeps /audio/device/status public before auth headers are available", async () => {
+  it("rejects unauthenticated /audio/device/status", async () => {
     const res = await fetchJson(apiUrl("/audio/device/status"));
-    expectNoServerError(res, "public audio status");
+    expect(res.status).toBe(403);
   });
 
   it("handles 20 concurrent authenticated search requests", async function () {
@@ -462,9 +462,7 @@ describe("Local API search and stability", function () {
       Array.from({ length: 4 }, () => endpoints)
         .flat()
         .map((path) =>
-          path === "/health" || path === "/audio/device/status"
-            ? fetchJson(apiUrl(path))
-            : authedGet(path),
+          path === "/health" ? fetchJson(apiUrl(path)) : authedGet(path),
         ),
     );
     expect(results.filter((r) => r.status >= 500 || r.status === 0)).toHaveLength(0);

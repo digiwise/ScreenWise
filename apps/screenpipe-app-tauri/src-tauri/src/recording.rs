@@ -94,7 +94,7 @@ pub fn local_api_context_from_app(app: &tauri::AppHandle) -> LocalApiContext {
         if let Ok(guard) = state.server.try_lock() {
             if let Some(ref core) = *guard {
                 return LocalApiContext {
-                    api_key: core.local_api_key.clone(),
+                    api_key: Some(core.local_api_key.clone()),
                     port: core.port,
                 };
             }
@@ -421,12 +421,10 @@ pub async fn start_capture(
         (core.port, core.local_api_key.clone())
     };
 
-    let mut req = reqwest::Client::new()
+    let req = reqwest::Client::new()
         .get(format!("http://localhost:{}/health", port))
-        .timeout(std::time::Duration::from_secs(2));
-    if let Some(ref key) = api_key {
-        req = req.header("Authorization", format!("Bearer {}", key));
-    }
+        .timeout(std::time::Duration::from_secs(2))
+        .header("Authorization", format!("Bearer {}", api_key));
     let healthy = matches!(req.send().await, Ok(r) if r.status().is_success());
     if !healthy {
         warn!(
@@ -772,21 +770,19 @@ pub async fn spawn_screenpipe(
     // helper handles env var / settings / secret-store / auth.json lookup
     // and persists auto-generated keys to the secret store itself, so every
     // reader (server, MCP, auth CLI) sees the same value.
-    if store.recording.api_auth {
-        let settings_key_opt = if store.recording.api_key.is_empty() {
-            None
-        } else {
-            Some(store.recording.api_key.clone())
-        };
-        match screenpipe_engine::auth_key::resolve_api_auth_key(
-            &data_dir,
-            settings_key_opt.as_deref(),
-        )
-        .await
-        {
-            Ok(key) => crate::store::seed_api_auth_key(key),
-            Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
-        }
+    let settings_key_opt = if store.recording.api_key.is_empty() {
+        None
+    } else {
+        Some(store.recording.api_key.clone())
+    };
+    match screenpipe_engine::auth_key::resolve_api_auth_key(
+        &data_dir,
+        settings_key_opt.as_deref(),
+    )
+    .await
+    {
+        Ok(key) => crate::store::seed_api_auth_key(key),
+        Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
     }
 
     notify_audio_engine_fallback(&store);

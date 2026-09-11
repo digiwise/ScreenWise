@@ -5,7 +5,6 @@
 //! Browser-control abstractions retained for the local recorder.
 
 pub mod connections;
-pub mod mdns;
 
 #[cfg(target_os = "macos")]
 pub mod calendar;

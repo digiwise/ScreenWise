@@ -728,38 +728,28 @@ export function PrivacySection() {
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
           Security
         </h2>
-        <>
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center">
               <div className="flex items-center space-x-2.5">
                 <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
                   <h3 className="text-sm font-medium text-foreground">
-                    Require API Authentication
+                    API Authentication
                   </h3>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    All API requests require a valid token when enabled — including local ones. Most apps pair automatically; use this key only for manual API clients and troubleshooting.
+                    Authentication is always required, including for local requests. Most apps pair automatically; use this key only for manual API clients and troubleshooting.
                   </p>
                 </div>
               </div>
-              <Switch
-                checked={settings.apiAuth ?? true}
-                onCheckedChange={(checked) => {
-                  handleSettingsChange({ apiAuth: checked });
-                }}
-                data-testid="privacy-api-auth-switch"
-              />
             </div>
             {hasUnsavedChanges && (
               <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 flex items-center gap-1">
                 <RefreshCw className="h-3 w-3 shrink-0" />
-                click &quot;Apply &amp; Restart&quot; above for auth changes to take effect; existing browser connections keep using the old key until then
+                click &quot;Apply &amp; Restart&quot; above for key changes to take effect; existing browser connections keep using the old key until then
               </p>
             )}
-            <>
-            {(settings.apiAuth ?? true) && (
-              <div className="mt-2.5 flex items-center space-x-2.5 pl-6.5">
+            <div className="mt-2.5 flex items-center space-x-2.5 pl-6.5">
                 <Input
                   type="text"
                   readOnly={!revealApiKey}
@@ -868,51 +858,9 @@ export function PrivacySection() {
                 >
                   <RefreshCw className={cn("h-3.5 w-3.5", regeneratingKey && "animate-spin")} />
                 </Button>
-              </div>
-            )}
-            </>
-          </CardContent>
-        </Card>
-        </>
-
-
-        {/* LAN access — off by default. Toggling on force-enables api_auth
-            (the backend mirrors this guard in RecordingConfig::from_settings
-            so the API is never exposed to the network unauthenticated). */}
-        <>
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
-                <div>
-                  <h3 className="text-sm font-medium text-foreground">
-                    Allow LAN access
-                  </h3>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Bind the API to <code className="text-[10px]">0.0.0.0</code> so other devices on your local
-                    network can query it. API authentication is force-enabled
-                    whenever this is on. Restart the app to apply.
-                  </p>
-                </div>
-              </div>
-              <Switch
-                checked={settings.listenOnLan ?? false}
-                onCheckedChange={(checked) => {
-                  // Keep the UI consistent with the backend guard: flipping
-                  // LAN on also flips api_auth on, so the user can't
-                  // accidentally leave themselves open.
-                  if (checked) {
-                    handleSettingsChange({ listenOnLan: true, apiAuth: true });
-                  } else {
-                    handleSettingsChange({ listenOnLan: false });
-                  }
-                }}
-              />
             </div>
           </CardContent>
         </Card>
-        </>
 
         <EncryptDataCard
           encryptStore={settings.encryptStore ?? true}

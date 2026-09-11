@@ -16,6 +16,19 @@ use tower::ServiceExt;
 use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{ContentItem, PaginatedResponse, SCServer};
 
+const TEST_API_KEY: &str = "screenwise-test-api-key";
+
+async fn add_test_auth(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_static("Bearer screenwise-test-api-key"),
+    );
+    next.run(request).await
+}
+
 // Add this function to initialize the logger
 fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -45,9 +58,13 @@ async fn setup_test_app() -> (Router, Arc<DatabaseManager>) {
         audio_manager,
         false, // use_pii_removal
         "balanced".to_string(),
+        TEST_API_KEY.to_string(),
     );
 
-    let router = app.create_router().await;
+    let router = app
+        .create_router()
+        .await
+        .layer(axum::middleware::from_fn(add_test_auth));
     init();
     (router, db)
 }

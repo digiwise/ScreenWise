@@ -305,7 +305,7 @@ mod tests {
     // populating `RecordingState.server`. The privacy panel's `loadLiveApiKey`
     // runs once on mount and latches, so the input stayed empty until the user
     // closed and reopened Settings. Fix: fall back to the process-global cache
-    // (`resolved_api_auth_key`) seeded at app start whenever apiAuth is on.
+    // (`resolved_api_auth_key`) seeded at app start.
     //
     // The integration with `RecordingState` needs a tauri::AppHandle to
     // exercise end-to-end, so these tests cover the contract of the pure
@@ -322,11 +322,11 @@ mod tests {
     }
 
     #[test]
-    fn fallback_emits_null_key_with_auth_disabled_when_unseeded() {
+    fn fallback_emits_null_key_but_keeps_auth_required_when_unseeded() {
         let v = fallback_local_api_config(None);
         assert!(v["key"].is_null());
         assert_eq!(v["port"], 3030);
-        assert_eq!(v["auth_enabled"], false);
+        assert_eq!(v["auth_enabled"], true);
     }
 }
 
@@ -479,9 +479,9 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
         let guard = state.server.lock().await;
         if let Some(ref core) = *guard {
             return serde_json::json!({
-                "key": core.local_api_key,
+                "key": core.local_api_key.clone(),
                 "port": core.port,
-                "auth_enabled": core.local_api_key.is_some(),
+                "auth_enabled": true,
             });
         }
     }
@@ -511,11 +511,10 @@ pub fn get_app_server_config() -> serde_json::Value {
 /// well-known default because the server hasn't bound yet — the UI will refresh
 /// once the server registers itself in `RecordingState`.
 fn fallback_local_api_config(cached_key: Option<String>) -> serde_json::Value {
-    let auth_enabled = cached_key.is_some();
     serde_json::json!({
         "key": cached_key,
         "port": 3030,
-        "auth_enabled": auth_enabled,
+        "auth_enabled": true,
     })
 }
 
@@ -1829,11 +1828,9 @@ pub async fn show_shortcut_reminder(
                     let mut metrics_ws_url = format!("ws://127.0.0.1:{}/ws/metrics", core.port);
                     let mut events_ws_url =
                         format!("ws://127.0.0.1:{}/ws/meeting-status", core.port);
-                    if let Some(ref key) = core.local_api_key {
-                        let enc = urlencoding::encode(key);
-                        metrics_ws_url = format!("{}?token={}", metrics_ws_url, enc);
-                        events_ws_url = format!("{}?token={}", events_ws_url, enc);
-                    }
+                    let enc = urlencoding::encode(&core.local_api_key);
+                    metrics_ws_url = format!("{}?token={}", metrics_ws_url, enc);
+                    events_ws_url = format!("{}?token={}", events_ws_url, enc);
                     map.insert(
                         "metrics_ws_url".to_string(),
                         serde_json::json!(metrics_ws_url),

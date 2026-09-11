@@ -2021,22 +2021,9 @@ scheduleEnabled?: boolean;
  */
 scheduleRules?: ScheduleRule[];
 /**
- * Require authentication for remote (non-localhost) API access.
+ * Custom bearer token for the authenticated loopback API. If empty, one is generated.
  */
-apiAuth?: boolean;
-/**
- * Custom bearer token for protected local API access. If empty, one is generated.
- */
-apiKey?: string;
-/**
- * When true, the HTTP server binds to `0.0.0.0` so other devices on the
- * LAN can reach the screenpipe API. Off by default — the server binds
- * `127.0.0.1` (localhost only) which is the safe choice.
- *
- * `api_auth` is force-enabled whenever this is true; [`RecordingConfig::from_settings`]
- * overrides it, so a user can't accidentally expose the API unauthenticated on their network.
- */
-listenOnLan?: boolean }) &
+apiKey?: string }) &
 /**
  * Catch-all for fields added by the frontend (e.g. chatHistory)
  * that the Rust struct doesn't know about. Without this, `save()` would

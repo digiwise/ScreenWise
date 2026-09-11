@@ -17,6 +17,19 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    const TEST_API_KEY: &str = "screenwise-test-api-key";
+
+    async fn add_test_auth(
+        mut request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer screenwise-test-api-key"),
+        );
+        next.run(request).await
+    }
+
     async fn setup_test_app() -> Router {
         let db = Arc::new(
             DatabaseManager::new("sqlite::memory:", Default::default())
@@ -41,9 +54,12 @@ mod tests {
             audio_manager,
             false,
             "balanced".to_string(),
+            TEST_API_KEY.to_string(),
         );
 
-        app.create_router().await
+        app.create_router()
+            .await
+            .layer(axum::middleware::from_fn(add_test_auth))
     }
 
     fn build_multipart_body(
