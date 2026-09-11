@@ -169,8 +169,7 @@ export function DeeplinkHandler() {
     });
 
     const unlisten = Promise.all([
-      // Listen for deep-link URLs forwarded from single-instance handoff
-      // (emitted by the /focus endpoint or the single-instance plugin callback)
+      // Listen for deep-link URLs forwarded by the single-instance callback.
       listen<string>("deep-link-received", async (event) => {
         console.log("received deep-link-received event:", event.payload);
         await processDeepLinkUrl(event.payload);

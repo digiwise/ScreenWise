@@ -51,7 +51,6 @@ type PairStatusResponse = {
 const PAIR_POLL_MS = 1_000;
 const PAIR_TIMEOUT_MS = 2 * 60_000;
 const CONNECTED_RECHECK_MS = 5_000;
-const SCREENPIPE_FOCUS_URL = "http://127.0.0.1:11435/focus";
 let pairingInProgress = false;
 
 const $ = <T extends HTMLElement>(id: string): T =>
@@ -99,24 +98,6 @@ function getBrowserName(): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function openScreenpipeForApproval(): Promise<boolean> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2_000);
-  try {
-    const res = await fetch(SCREENPIPE_FOCUS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: "browser_pairing" }),
-      signal: controller.signal,
-    });
-    return res.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 async function loadSettings(): Promise<{ token: string; baseUrl: string }> {
@@ -246,15 +227,12 @@ async function onConnectClick(): Promise<void> {
   }
 
   try {
-    setStatus("pairing", "opening approval request in screenpipe…");
+    setStatus("pairing", "waiting for approval in ScreenWise…");
     const pair = await startPairing(baseUrl);
     setPairCode(pair.code);
-    const focused = await openScreenpipeForApproval();
     setStatus(
       "pairing",
-      focused
-        ? "screenpipe should come to front. click Allow there"
-        : "approve in screenpipe. if it did not come forward, open the app manually"
+      "open ScreenWise and approve this pairing request"
     );
 
     const approval = await waitForPairApproval(baseUrl, pair.id);

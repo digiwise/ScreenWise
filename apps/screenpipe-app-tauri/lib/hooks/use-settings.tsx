@@ -189,7 +189,7 @@ export type Settings = SettingsStore & {
 		meetingLiveNotes?: boolean;
 		/** OS notification when a meeting starts but no audio frames arrive within 60s. Default true. */
 		audioCaptureStalled?: boolean;
-		/** In-app /notify when audio is captured but no live transcript arrives within 60s. Default true. */
+		/** In-app notification when audio is captured but no live transcript arrives within 60s. Default true. */
 		liveTranscriptStalled?: boolean;
 	};
 	/** Locally configured recorder devices for the retained LAN health monitor. */

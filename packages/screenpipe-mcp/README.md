@@ -28,20 +28,19 @@ The easiest way to use screenpipe-mcp is with npx. Edit your Claude Desktop conf
 }
 ```
 
-### Option 2: HTTP Server (Remote / Network Access)
+### Option 2: Authenticated Local HTTP Server
 
-The MCP server can run over HTTP using the [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http), allowing remote MCP clients to connect over the network instead of stdio. This is ideal when your AI assistant (e.g., OpenClaw) runs on a different machine than screenpipe.
+The MCP server can run over HTTP using the Streamable HTTP transport for local
+clients which cannot launch a stdio child process. It always binds to
+`127.0.0.1`, and every request requires the recorder's local API bearer token.
 
 ```bash
-# loopback only (default)
-npx -y screenpipe-mcp --http --port 3031
-
-# expose to your LAN with bearer auth
-npx -y screenpipe-mcp --http --listen-on-lan --api-key $(openssl rand -hex 16)
+# loopback-only and authenticated
+npx -y screenpipe-mcp --http --port 3031 --api-key <local-api-key>
 
 # or from source — must build first so dist/ exists
 bun install && bun run build
-bun run start:http -- --port 3031
+bun run start:http -- --port 3031 --api-key <local-api-key>
 ```
 
 > Tip: `npx screenpipe-mcp-http` (without `--http`) does **not** work —
@@ -52,17 +51,16 @@ bun run start:http -- --port 3031
 
 The server exposes:
 - **MCP endpoint**: `http://localhost:3031/mcp` — Streamable HTTP transport (POST for requests, GET for SSE stream)
-- **Health check**: `http://localhost:3031/health` — always unauthenticated, for monitors
+- **Health check**: `http://localhost:3031/health` — authenticated like every other endpoint
 
 **Options:**
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--port` | Port for the MCP HTTP server | `3031` |
 | `--screenpipe-port` | Port where screenpipe API is running | `3030` |
-| `--listen-on-lan` | Bind `0.0.0.0` so other devices on the LAN can connect. Requires `--api-key`. | off (binds `127.0.0.1`) |
-| `--api-key <secret>` | Bearer token required for non-loopback requests (`Authorization: Bearer <secret>`). Loopback always allowed. | none |
+| `--api-key <key>` | Local API bearer token required by both the wrapper and recorder | required |
 
-**Connecting a remote MCP client:**
+**Connecting a local HTTP MCP client:**
 
 Point any MCP client that supports HTTP transport at the `/mcp` endpoint:
 
@@ -70,16 +68,14 @@ Point any MCP client that supports HTTP transport at the `/mcp` endpoint:
 {
   "mcpServers": {
     "screenpipe": {
-      "url": "http://<your-ip>:3031/mcp",
+      "url": "http://127.0.0.1:3031/mcp",
       "headers": {
-        "Authorization": "Bearer <your-secret>"
+        "Authorization": "Bearer <local-api-key>"
       }
     }
   }
 }
 ```
-
-If your machines are on different networks, expose port 3031 via Tailscale, SSH tunnel, or similar — see the [OpenClaw integration guide](https://docs.screenpi.pe/openclaw) for detailed examples.
 
 > **Note:** The HTTP server currently exposes `search_content` only. The stdio server has the full tool set (export-video, list-meetings, activity-summary, search-elements, frame-context). We're working on bringing HTTP to full parity.
 
@@ -122,7 +118,7 @@ npx @modelcontextprotocol/inspector npx screenpipe-mcp
 | Mode | Command | Use Case |
 |------|---------|----------|
 | **stdio** (default) | `npx screenpipe-mcp` | Claude Desktop, local MCP clients |
-| **HTTP** | `npx screenpipe-mcp --http` | Remote clients, network access, OpenClaw on VPS |
+| **HTTP** | `npx screenpipe-mcp --http --api-key <key>` | Authenticated clients on the same machine |
 
 ## Available Tools
 

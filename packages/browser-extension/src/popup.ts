@@ -16,7 +16,6 @@ import {
 
 type ConnStatus = "checking" | "ok" | "bridge_down" | "auth_required" | "server_down" | "error";
 
-const SCREENPIPE_FOCUS_URL = "http://127.0.0.1:11435/focus";
 const PAIR_POLL_MS = 1_000;
 const PAIR_TIMEOUT_MS = 120_000;
 const SESSION_PAIR_KEY = "screenpipe_pending_pair";
@@ -110,20 +109,6 @@ async function pollPairStatus(baseUrl: string, pairId: string): Promise<PairStat
   });
   if (!res.ok) throw new Error(`pair status HTTP ${res.status}`);
   return res.json();
-}
-
-async function tryFocusScreenpipe(): Promise<void> {
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2000);
-    await fetch(SCREENPIPE_FOCUS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: "browser_pairing" }),
-      signal: ctrl.signal,
-    });
-    clearTimeout(t);
-  } catch { /* app may not be listening — ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -242,10 +227,6 @@ async function runPairingFlow(baseUrl: string, existingPair?: PairState): Promis
     bar.dataset.state = "bridge_down";
     text.textContent = "waiting for approval…";
 
-    // Try to bring Screenpipe to front. The popup will close as soon as the
-    // OS focuses another window — that's fine, session storage keeps state.
-    await tryFocusScreenpipe();
-
     // Poll until approved, denied, expired, or timed out.
     const deadline = existingPair
       ? existingPair.startedAt + PAIR_TIMEOUT_MS
@@ -312,14 +293,13 @@ async function runPairingFlow(baseUrl: string, existingPair?: PairState): Promis
 // Open Screenpipe flow (server_down state)
 // ---------------------------------------------------------------------------
 
-async function tryOpenScreenpipe(baseUrl: string): Promise<void> {
+async function retryScreenpipe(baseUrl: string): Promise<void> {
   const btn = $<HTMLButtonElement>("open-btn");
   const hint = $<HTMLSpanElement>("action-hint");
   btn.disabled = true;
-  hint.textContent = "Trying to open Screenpipe…";
+  hint.textContent = "Checking for Screenpipe…";
 
-  await tryFocusScreenpipe();
-  await new Promise((r) => setTimeout(r, 1500));
+  await new Promise((r) => setTimeout(r, 500));
 
   const { token } = await getConfig();
   const status = await probeStatus(token, baseUrl);
@@ -345,7 +325,7 @@ async function init(): Promise<void> {
   });
 
   $<HTMLButtonElement>("open-btn").addEventListener("click", () => {
-    void tryOpenScreenpipe(baseUrl);
+    void retryScreenpipe(baseUrl);
   });
 
   // Wake SW so the WS has a chance to establish, then probe.

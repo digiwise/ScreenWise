@@ -302,36 +302,6 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: "send-notification",
-    description:
-      "Send a notification to the screenpipe desktop UI. " +
-      "Use to alert the user about findings, completed tasks, or actions needing attention.",
-    annotations: { title: "Send Notification", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Notification title (short, descriptive)" },
-        body: { type: "string", description: "Notification body (markdown supported)" },
-        timeout_secs: { type: "integer", description: "Auto-dismiss after N seconds (default 20). Use 0 for persistent.", default: 20 },
-        actions: {
-          type: "array",
-          description: "Up to 5 action buttons. Each needs id, label, type ('link'|'api'|'deeplink'|'dismiss').",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Unique action ID" },
-              label: { type: "string", description: "Button label" },
-              type: { type: "string", enum: ["link", "api", "deeplink", "dismiss"], description: "Action type" },
-              url: { type: "string", description: "URL for link/api/deeplink actions" },
-            },
-            required: ["id", "label", "type"],
-          },
-        },
-      },
-      required: ["title"],
-    },
-  },
-  {
     name: "health-check",
     description:
       "Check if screenpipe is running and healthy. Returns recording status, frame/audio stats, timestamps.",
@@ -1218,39 +1188,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             { type: "text", text: `Memory created (id: ${newMemory.id}): "${newMemory.content}"` },
           ],
-        };
-      }
-
-      case "send-notification": {
-        const notifBody: Record<string, unknown> = {
-          title: args.title,
-          body: args.body || "",
-        };
-        if (args.timeout_secs) notifBody.timeout = Number(args.timeout_secs) * 1000;
-        if (args.actions) notifBody.actions = args.actions;
-        // send-notification hits the desktop notify daemon on a separate port
-        // (11435), not the screenpipe API. Keep direct fetch with friendlier
-        // error so the model sees an actionable message if the daemon's down.
-        let notifResponse: Response;
-        try {
-          notifResponse = await fetch("http://localhost:11435/notify", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(notifBody),
-          });
-        } catch (e) {
-          throw new Error(
-            "notification daemon not reachable on localhost:11435 — is the screenpipe desktop app running?",
-          );
-        }
-        if (!notifResponse.ok) {
-          let body = "";
-          try { body = await notifResponse.text(); } catch {}
-          throw new Error(`notify daemon HTTP ${notifResponse.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-        }
-        const notifResult = await notifResponse.json();
-        return {
-          content: [{ type: "text", text: `Notification sent: ${notifResult.message}` }],
         };
       }
 

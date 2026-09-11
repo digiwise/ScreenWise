@@ -29,7 +29,6 @@ function browserPairStatusUrl(baseHttpUrl, id) {
 }
 
 // src/popup.ts
-var SCREENPIPE_FOCUS_URL = "http://127.0.0.1:11435/focus";
 var PAIR_POLL_MS = 1000;
 var PAIR_TIMEOUT_MS = 120000;
 var SESSION_PAIR_KEY = "screenpipe_pending_pair";
@@ -106,19 +105,6 @@ async function pollPairStatus(baseUrl, pairId) {
   if (!res.ok)
     throw new Error(`pair status HTTP ${res.status}`);
   return res.json();
-}
-async function tryFocusScreenpipe() {
-  try {
-    const ctrl = new AbortController;
-    const t = setTimeout(() => ctrl.abort(), 2000);
-    await fetch(SCREENPIPE_FOCUS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: "browser_pairing" }),
-      signal: ctrl.signal
-    });
-    clearTimeout(t);
-  } catch {}
 }
 function openOptionsPage() {
   chrome.tabs.create({ url: chrome.runtime.getURL("options.html") }).finally(() => window.close());
@@ -209,7 +195,6 @@ async function runPairingFlow(baseUrl, existingPair) {
     setPairingUI(code, "Switch to Screenpipe and click Allow.");
     bar.dataset.state = "bridge_down";
     text.textContent = "waiting for approval…";
-    await tryFocusScreenpipe();
     const deadline = existingPair ? existingPair.startedAt + PAIR_TIMEOUT_MS : Date.now() + PAIR_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, PAIR_POLL_MS));
@@ -261,13 +246,12 @@ async function runPairingFlow(baseUrl, existingPair) {
   }
   pairingActive = false;
 }
-async function tryOpenScreenpipe(baseUrl) {
+async function retryScreenpipe(baseUrl) {
   const btn = $("open-btn");
   const hint = $("action-hint");
   btn.disabled = true;
-  hint.textContent = "Trying to open Screenpipe…";
-  await tryFocusScreenpipe();
-  await new Promise((r) => setTimeout(r, 1500));
+  hint.textContent = "Checking for Screenpipe…";
+  await new Promise((r) => setTimeout(r, 500));
   const { token } = await getConfig();
   const status = await probeStatus(token, baseUrl);
   if (status !== "server_down") {
@@ -284,7 +268,7 @@ async function init() {
     runPairingFlow(baseUrl);
   });
   $("open-btn").addEventListener("click", () => {
-    tryOpenScreenpipe(baseUrl);
+    retryScreenpipe(baseUrl);
   });
   try {
     chrome.runtime.sendMessage({ type: "wake" });

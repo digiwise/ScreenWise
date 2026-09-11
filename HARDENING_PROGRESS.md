@@ -2602,3 +2602,43 @@ Post-change evidence:
   direct-`import.meta` warning. An initial focused Vitest invocation from the
   repository root used the wrong relative entrypoint and failed before loading
   tests; rerunning from the desktop directory passed.
+
+### Residual helper and MCP listener boundary — 2026-09-11
+
+Pre-change reachability found that removing the desktop's port 11435 listener
+left three active callers behind: the browser-extension popup and options page
+still POST to `/focus`, and the standalone `screenpipe-mcp` package still POSTs
+notifications to `/notify`. Those requests can no longer succeed. The same MCP
+package also retains an independently launched Streamable HTTP server which can
+bind to `0.0.0.0`; its loopback requests bypass authentication, and its upstream
+recorder requests do not attach the now-mandatory local API bearer token.
+
+This increment will remove the dead focus and notification callers while
+preserving browser pairing and stdio MCP. The optional MCP HTTP transport will
+be fixed to `127.0.0.1`, require an explicit bearer token for every endpoint,
+and forward that same token to the authenticated recorder. Its LAN option,
+loopback authentication bypass, stale documentation, tests, generated browser
+extension output, and obsolete listener assumptions in CI will be removed.
+
+Post-change evidence:
+
+- Removed the browser extension's dead `/focus` calls and changed its server
+  action to an explicit retry; pairing still starts through the authenticated
+  recorder API and tells the user to approve it in ScreenWise. Rebuilt the
+  checked-in extension JavaScript.
+- Removed the MCP `send-notification` tool and its guaranteed-failing port
+  11435 request. Stdio MCP and all unrelated tools remain intact.
+- Fixed the optional MCP HTTP wrapper to `127.0.0.1`, rejected the former LAN
+  option, required an explicit API key at startup, authenticated `/health` and
+  `/mcp`, removed wildcard browser CORS, and forwarded the same bearer token to
+  the recorder. A regression test observes the forwarded header.
+- Updated the package documentation, native notification comments, desktop
+  deep-link comment, and legacy CI log assertion. Residual executable searches
+  find no port 11435 edge; the former LAN flag remains only in fail-closed
+  parser tests and rejection code.
+- The MCP package's exact locked dependencies and browser extension Chrome
+  types were installed from Bun's offline cache after the initial sandboxed
+  install could not use Bun's temporary directory. No dependency or lockfile
+  changed. MCP TypeScript build and 20 tests passed; browser extension build
+  and standalone TypeScript check passed; the full desktop TypeScript check,
+  `cargo fmt --all -- --check`, and `git diff --check` passed.

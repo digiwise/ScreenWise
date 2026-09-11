@@ -8,14 +8,12 @@
  *
  * This allows web apps to call MCP tools over HTTP instead of stdio.
  *
- * Run on localhost (default):
- *   npx ts-node src/http-server.ts --port 3031
+ * Run on authenticated localhost:
+ *   npx ts-node src/http-server.ts --port 3031 --api-key <local-api-key>
  *
- * Expose to your LAN (requires --api-key):
- *   npx ts-node src/http-server.ts --listen-on-lan --api-key <secret>
- *
- * Loopback callers are always allowed without auth. Non-loopback callers
- * must send `Authorization: Bearer <secret>` whenever --api-key is set.
+ * The listener never accepts a non-loopback bind. Every request must send
+ * `Authorization: Bearer <local-api-key>`, and the same key authenticates the
+ * wrapper's requests to the recorder.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
@@ -31,10 +29,10 @@ import {
 export interface CliConfig {
   mcpPort: number;
   screenpipePort: number;
-  /** Bind address: "127.0.0.1" (default) or "0.0.0.0" when --listen-on-lan. */
+  /** Fixed loopback bind address. */
   host: string;
-  /** Required bearer token for non-loopback requests. Loopback skips auth. */
-  apiKey?: string;
+  /** Required bearer token for both this listener and the recorder. */
+  apiKey: string;
 }
 
 export class CliError extends Error {}
@@ -42,14 +40,12 @@ export class CliError extends Error {}
 /**
  * Parse CLI args. Pure for testability.
  *
- * Mirrors the screenpipe-engine CLI: --listen-on-lan flips bind to 0.0.0.0
- * and *requires* --api-key so we never accidentally expose an unauthenticated
- * MCP endpoint on the user's network.
+ * The HTTP wrapper is deliberately narrower than the recorder CLI: its bind
+ * address is not configurable and its bearer token is mandatory.
  */
 export function parseArgs(argv: string[]): CliConfig {
   let mcpPort = 3031;
   let screenpipePort = 3030;
-  let listenOnLan = false;
   let apiKey: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -59,7 +55,7 @@ export function parseArgs(argv: string[]): CliConfig {
     } else if (a === "--screenpipe-port" && argv[i + 1]) {
       screenpipePort = parseInt(argv[++i], 10);
     } else if (a === "--listen-on-lan") {
-      listenOnLan = true;
+      throw new CliError("--listen-on-lan is not supported; the MCP HTTP server is loopback-only");
     } else if (a === "--api-key" && argv[i + 1]) {
       apiKey = argv[++i];
     } else if (a === "--help" || a === "-h") {
@@ -73,17 +69,14 @@ export function parseArgs(argv: string[]): CliConfig {
   if (Number.isNaN(screenpipePort) || screenpipePort <= 0 || screenpipePort > 65535) {
     throw new CliError(`invalid --screenpipe-port: ${screenpipePort}`);
   }
-  if (listenOnLan && !apiKey) {
-    throw new CliError(
-      "--listen-on-lan requires --api-key <secret> — refusing to expose " +
-        "an unauthenticated MCP endpoint on your network."
-    );
+  if (!apiKey) {
+    throw new CliError("--api-key <local-api-key> is required for the MCP HTTP server");
   }
 
   return {
     mcpPort,
     screenpipePort,
-    host: listenOnLan ? "0.0.0.0" : "127.0.0.1",
+    host: "127.0.0.1",
     apiKey,
   };
 }
@@ -94,38 +87,17 @@ function usage(): string {
     "",
     "  --port <n>             listen port (default 3031)",
     "  --screenpipe-port <n>  upstream screenpipe API port (default 3030)",
-    "  --listen-on-lan        bind 0.0.0.0 instead of 127.0.0.1",
-    "                         (requires --api-key)",
-    "  --api-key <secret>     bearer token for non-loopback requests",
+    "  --api-key <key>        required local API bearer token",
     "  --help, -h             show this message",
   ].join("\n");
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────
 
-/**
- * True if `req` came from the local machine. Covers IPv4 loopback,
- * IPv6 loopback, and IPv4-mapped-IPv6 loopback (`::ffff:127.x`).
- */
-export function isLoopbackRequest(req: { socket: { remoteAddress?: string } }): boolean {
-  const addr = req.socket.remoteAddress ?? "";
-  if (addr === "127.0.0.1" || addr === "::1") return true;
-  if (addr.startsWith("::ffff:127.")) return true;
-  return false;
-}
-
-/**
- * Authorization decision. Loopback is always allowed; non-loopback requires
- * a matching bearer token when one is configured. If no api key is set
- * (loopback-only deployment), non-loopback shouldn't even be reachable —
- * but we still 401 it as belt-and-suspenders.
- */
 export function isAuthorized(
-  req: { socket: { remoteAddress?: string }; headers: { authorization?: string } },
-  apiKey: string | undefined
+  req: { headers: { authorization?: string } },
+  apiKey: string
 ): boolean {
-  if (isLoopbackRequest(req)) return true;
-  if (!apiKey) return false;
   const expected = `Bearer ${apiKey}`;
   const got = req.headers.authorization ?? "";
   return constantTimeEq(got, expected);
@@ -184,12 +156,16 @@ const TOOLS = [
 
 // ── Tool handlers ───────────────────────────────────────────────────────
 
-function makeFetchAPI(screenpipePort: number) {
+export function makeFetchAPI(screenpipePort: number, apiKey: string) {
   const base = `http://localhost:${screenpipePort}`;
   return async (endpoint: string, options: RequestInit = {}): Promise<Response> =>
     fetch(`${base}${endpoint}`, {
       ...options,
-      headers: { "Content-Type": "application/json", ...options.headers },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...options.headers,
+      },
     });
 }
 
@@ -292,39 +268,23 @@ function createMcpServer(fetchAPI: ReturnType<typeof makeFetchAPI>): Server {
 // ── HTTP server ─────────────────────────────────────────────────────────
 
 export function buildHttpServer(config: CliConfig) {
-  const fetchAPI = makeFetchAPI(config.screenpipePort);
+  const fetchAPI = makeFetchAPI(config.screenpipePort, config.apiKey);
   const sessions = new Map<
     string,
     { server: Server; transport: StreamableHTTPServerTransport }
   >();
 
   return createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, mcp-session-id"
-    );
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    // Health check is unauthenticated — monitors / load balancers need it.
-    // It only reveals session count, no user data.
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", sessions: sessions.size }));
-      return;
-    }
-
-    // Auth gate for everything else.
+    // Authenticate every endpoint, including health, before routing.
     if (!isAuthorized(req, config.apiKey)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", sessions: sessions.size }));
       return;
     }
 
@@ -380,13 +340,10 @@ export function runFromArgv(argv: string[]): void {
 
   const server = buildHttpServer(config);
   server.listen(config.mcpPort, config.host, () => {
-    const printable = config.host === "0.0.0.0" ? "0.0.0.0 (LAN)" : config.host;
-    console.log(`Screenpipe MCP HTTP server listening on ${printable}:${config.mcpPort}`);
+    console.log(`Screenpipe MCP HTTP server listening on ${config.host}:${config.mcpPort}`);
     console.log(`  MCP endpoint:  http://${config.host}:${config.mcpPort}/mcp`);
     console.log(`  Health check:  http://${config.host}:${config.mcpPort}/health`);
-    if (config.apiKey) {
-      console.log("  Auth required for non-loopback requests (Authorization: Bearer …)");
-    }
+    console.log("  Auth required for every request (Authorization: Bearer …)");
   });
 }
 

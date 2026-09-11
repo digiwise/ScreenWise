@@ -32,7 +32,6 @@ function browserPairStatusUrl(baseHttpUrl, id) {
 var PAIR_POLL_MS = 1000;
 var PAIR_TIMEOUT_MS = 2 * 60000;
 var CONNECTED_RECHECK_MS = 5000;
-var SCREENPIPE_FOCUS_URL = "http://127.0.0.1:11435/focus";
 var pairingInProgress = false;
 var $ = (id) => document.getElementById(id);
 function setStatus(status, message) {
@@ -73,23 +72,6 @@ function getBrowserName() {
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function openScreenpipeForApproval() {
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), 2000);
-  try {
-    const res = await fetch(SCREENPIPE_FOCUS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: "browser_pairing" }),
-      signal: controller.signal
-    });
-    return res.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 async function loadSettings() {
   const s = await chrome.storage.local.get([STORAGE_KEY_TOKEN, STORAGE_KEY_BASE_URL]);
@@ -188,11 +170,10 @@ async function onConnectClick() {
     return;
   }
   try {
-    setStatus("pairing", "opening approval request in screenpipe…");
+    setStatus("pairing", "waiting for approval in ScreenWise…");
     const pair = await startPairing(baseUrl);
     setPairCode(pair.code);
-    const focused = await openScreenpipeForApproval();
-    setStatus("pairing", focused ? "screenpipe should come to front. click Allow there" : "approve in screenpipe. if it did not come forward, open the app manually");
+    setStatus("pairing", "open ScreenWise and approve this pairing request");
     const approval = await waitForPairApproval(baseUrl, pair.id);
     setPairCode(null);
     if (approval.status === "approved") {

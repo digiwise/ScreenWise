@@ -9,7 +9,7 @@
 //! - audio stall → OS-level notification via tauri_plugin_notification. Likely
 //!   the user is in their meeting (Zoom in front), not the live note pane —
 //!   they need a signal that breaks out of the app.
-//! - transcript stall → in-app `/notify` panel. The user is presumably already
+//! - transcript stall → in-app notification panel. The user is presumably already
 //!   looking at the empty live note pane wondering what's wrong; the panel
 //!   shows up there with a deep link.
 //!

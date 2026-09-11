@@ -5,11 +5,10 @@
 //! Rewrite file-path markdown links in notification bodies into in-app
 //! viewer deeplinks (`screenpipe://view?path=…`).
 //!
-//! Pipes commonly emit notifications like `[View log](/Users/.../foo.md)`.
+//! Local producers can emit notifications like `[View log](C:\...\foo.md)`.
 //! Without this rewrite, clicking the link calls the OS default app for
-//! the file extension (e.g. Xcode for `.md`), which is rarely what the
-//! user wants. By rewriting at the `/notify` boundary, every existing
-//! pipe gets the new behavior without a content change.
+//! the file extension, which is rarely what the user wants. Rewriting before
+//! in-process display gives every producer consistent viewer behavior.
 //!
 //! External URLs (`http://`, `https://`) are left alone — they should
 //! still open in the user's browser.
