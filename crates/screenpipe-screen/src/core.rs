@@ -7,6 +7,10 @@ use crate::apple::perform_ocr_apple;
 use crate::capture_screenshot_by_window::{
     get_excluded_sck_window_ids, CapturedWindow, WindowFilters,
 };
+#[cfg(target_os = "windows")]
+use crate::capture_screenshot_by_window::{
+    plan_windows_monitor_capture, WindowsMonitorCapturePlan,
+};
 use crate::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use crate::metrics::PipelineMetrics;
 #[cfg(target_os = "windows")]
@@ -151,6 +155,69 @@ impl std::fmt::Display for ContinuousCaptureError {
 /// Activity feed for adaptive FPS (from screenpipe-a11y)
 pub type ActivityFeedOption = Option<screenpipe_a11y::ActivityFeed>;
 
+const MAX_CAPTURE_RETRIES: u32 = 3;
+const MAX_CONSECUTIVE_FAILURES: u32 = 30;
+
+async fn capture_full_monitor_with_retries(
+    monitor: &mut crate::monitor::SafeMonitor,
+    monitor_id: u32,
+    window_filters: &WindowFilters,
+    consecutive_capture_failures: &mut u32,
+) -> Result<Option<(DynamicImage, Duration)>, ContinuousCaptureError> {
+    let mut last_err = None;
+
+    for attempt in 0..=MAX_CAPTURE_RETRIES {
+        match capture_monitor_image(monitor, &get_excluded_sck_window_ids(window_filters)).await {
+            Ok(result) => {
+                if attempt > 0 {
+                    debug!(
+                        "capture succeeded after {} retries for monitor {}",
+                        attempt, monitor_id
+                    );
+                }
+                *consecutive_capture_failures = 0;
+                return Ok(Some(result));
+            }
+            Err(error) => {
+                last_err = Some(error);
+                if attempt < MAX_CAPTURE_RETRIES {
+                    debug!(
+                        "capture failed for monitor {} (attempt {}/{}), refreshing handle",
+                        monitor_id,
+                        attempt + 1,
+                        MAX_CAPTURE_RETRIES
+                    );
+                    if let Err(refresh_error) = monitor.refresh().await {
+                        debug!("monitor refresh failed: {}", refresh_error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    *consecutive_capture_failures += 1;
+    let error = last_err.expect("capture retry loop always records an error");
+    if *consecutive_capture_failures >= MAX_CONSECUTIVE_FAILURES {
+        error!(
+            "monitor {} failed {} consecutive captures, bailing: {}",
+            monitor_id, *consecutive_capture_failures, error
+        );
+        return Err(ContinuousCaptureError::ErrorCapturingScreenshot(
+            error.to_string(),
+        ));
+    }
+    debug!(
+        "all {} capture retries failed for monitor {} ({}/{}): {}",
+        MAX_CAPTURE_RETRIES,
+        monitor_id,
+        *consecutive_capture_failures,
+        MAX_CONSECUTIVE_FAILURES,
+        error
+    );
+    Ok(None)
+}
+
 pub async fn continuous_capture(
     result_tx: Sender<RawCaptureResult>,
     interval: Duration,
@@ -194,80 +261,116 @@ pub async fn continuous_capture(
         }
     };
     let mut consecutive_capture_failures: u32 = 0;
-    const MAX_CAPTURE_RETRIES: u32 = 3;
-    const MAX_CONSECUTIVE_FAILURES: u32 = 30;
-
     loop {
-        // 3. Capture monitor screenshot and wall-clock time atomically.
-        //    Window capture is deferred until after frame comparison to skip
-        //    expensive per-window work on unchanged frames.
-        let captured_at = Utc::now();
-        let (image, _capture_duration) = {
-            let mut last_err = None;
-            let mut captured = None;
-
-            for attempt in 0..=MAX_CAPTURE_RETRIES {
-                match capture_monitor_image(&monitor, &get_excluded_sck_window_ids(&window_filters))
-                    .await
-                {
-                    Ok(result) => {
-                        if attempt > 0 {
-                            debug!(
-                                "capture succeeded after {} retries for monitor {}",
-                                attempt, monitor_id
-                            );
-                        }
-                        consecutive_capture_failures = 0;
-                        captured = Some(result);
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = Some(e);
-                        if attempt < MAX_CAPTURE_RETRIES {
-                            // Refresh the cached monitor handle — resolution may have
-                            // changed, or the display may have been reconnected.
-                            debug!(
-                                "capture failed for monitor {} (attempt {}/{}), refreshing handle",
-                                monitor_id,
-                                attempt + 1,
-                                MAX_CAPTURE_RETRIES
-                            );
-                            if let Err(refresh_err) = monitor.refresh().await {
-                                debug!("monitor refresh failed: {}", refresh_err);
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                }
+        #[cfg(target_os = "windows")]
+        let initial_windows_plan = match plan_windows_monitor_capture(&monitor, &window_filters) {
+            Ok(WindowsMonitorCapturePlan::Skip) => {
+                metrics.record_skip();
+                tokio::time::sleep(interval).await;
+                continue;
             }
-
-            match captured {
-                Some(result) => result,
-                None => {
-                    consecutive_capture_failures += 1;
-                    let err = last_err.unwrap();
-                    if consecutive_capture_failures >= MAX_CONSECUTIVE_FAILURES {
-                        error!(
-                            "monitor {} failed {} consecutive captures, bailing: {}",
-                            monitor_id, consecutive_capture_failures, err
-                        );
-                        return Err(ContinuousCaptureError::ErrorCapturingScreenshot(
-                            err.to_string(),
-                        ));
-                    }
-                    debug!(
-                        "all {} capture retries failed for monitor {} ({}/{}): {}",
-                        MAX_CAPTURE_RETRIES,
-                        monitor_id,
-                        consecutive_capture_failures,
-                        MAX_CONSECUTIVE_FAILURES,
-                        err
-                    );
-                    tokio::time::sleep(interval).await;
-                    continue;
-                }
+            Ok(plan) => plan,
+            Err(error) => {
+                debug!(
+                    "unable to establish a safe Windows capture plan for monitor {}: {}",
+                    monitor_id, error
+                );
+                metrics.record_skip();
+                tokio::time::sleep(interval).await;
+                continue;
             }
         };
+
+        // 3. Capture the permitted Windows surface (full monitor or active
+        //    window only) and wall-clock time. Other platforms retain their
+        //    native monitor-level exclusion path.
+        let captured_at = Utc::now();
+
+        #[cfg(target_os = "windows")]
+        let (mut image, _capture_duration, mut active_only_window) = match initial_windows_plan {
+            WindowsMonitorCapturePlan::FullMonitor => {
+                let Some((image, duration)) = capture_full_monitor_with_retries(
+                    &mut monitor,
+                    monitor_id,
+                    &window_filters,
+                    &mut consecutive_capture_failures,
+                )
+                .await?
+                else {
+                    tokio::time::sleep(interval).await;
+                    continue;
+                };
+                (image, duration, None)
+            }
+            WindowsMonitorCapturePlan::ActiveWindow(window) => {
+                let capture_start = Instant::now();
+                match window.capture_for_monitor(&monitor) {
+                    Ok((image, captured_window)) => {
+                        consecutive_capture_failures = 0;
+                        (image, capture_start.elapsed(), Some(captured_window))
+                    }
+                    Err(error) => {
+                        debug!(
+                            "active-window-only capture failed for monitor {}: {}",
+                            monitor_id, error
+                        );
+                        metrics.record_skip();
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    }
+                }
+            }
+            WindowsMonitorCapturePlan::Skip => unreachable!(),
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let (image, _capture_duration) = {
+            let Some(result) = capture_full_monitor_with_retries(
+                &mut monitor,
+                monitor_id,
+                &window_filters,
+                &mut consecutive_capture_failures,
+            )
+            .await?
+            else {
+                tokio::time::sleep(interval).await;
+                continue;
+            };
+            result
+        };
+
+        // Re-evaluate after capture so a newly visible excluded window cannot
+        // make a raw monitor bitmap eligible. If the first snapshot selected
+        // active-only capture, its pixels are already independent of every
+        // background window and remain safe unless the active window is now
+        // excluded.
+        #[cfg(target_os = "windows")]
+        match plan_windows_monitor_capture(&monitor, &window_filters) {
+            Ok(WindowsMonitorCapturePlan::FullMonitor) => {}
+            Ok(WindowsMonitorCapturePlan::ActiveWindow(window)) if active_only_window.is_none() => {
+                match window.capture_for_monitor(&monitor) {
+                    Ok((replacement, captured_window)) => {
+                        image = replacement;
+                        active_only_window = Some(captured_window);
+                    }
+                    Err(error) => {
+                        debug!(
+                            "post-capture active-window replacement failed for monitor {}: {}",
+                            monitor_id, error
+                        );
+                        metrics.record_skip();
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    }
+                }
+            }
+            Ok(WindowsMonitorCapturePlan::ActiveWindow(_)) => {}
+            Ok(WindowsMonitorCapturePlan::Skip) | Err(_) => {
+                metrics.record_skip();
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+        }
 
         // 4. Optimized frame comparison: downscales once (proportional to preserve
         //    ultrawide aspect ratios), hashes the thumbnail, then compares histograms.
@@ -310,11 +413,16 @@ pub async fn continuous_capture(
         }
 
         // 4b. Capture windows only for frames that passed the change threshold.
-        //     This avoids expensive per-window screenshots + CGWindowList enumeration
-        //     on unchanged frames (major CPU savings on multi-monitor setups).
-        //     Note: window capture is still needed even when OCR is disabled because
-        //     the metadata (app_name, window_name, browser_url, focused) is used by
-        //     the timeline and DB frame insertion.
+        //     A Windows active-only frame reuses its single safe window; the normal
+        //     path avoids expensive per-window screenshots on unchanged frames.
+        //     Window metadata is still needed with OCR disabled for timeline/DB rows.
+        #[cfg(target_os = "windows")]
+        let window_images = match active_only_window {
+            Some(window) => vec![window],
+            None => capture_windows(&monitor, &window_filters, capture_unfocused_windows).await,
+        };
+
+        #[cfg(not(target_os = "windows"))]
         let window_images =
             capture_windows(&monitor, &window_filters, capture_unfocused_windows).await;
 

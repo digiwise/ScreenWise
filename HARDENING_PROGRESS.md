@@ -2891,3 +2891,48 @@ external TCP connection, health 200, unauthenticated search/frame 403, and
 authenticated search 200. The stronger OS-firewall-enforced runs intentionally
 remain pending until the owner executes the documented Administrator install
 command; the preflight is not recorded as equivalent evidence.
+
+### Windows excluded-background capture policy — 2026-09-11
+
+Pre-change boundary: Windows monitor WGC produces the full monitor bitmap
+before per-window filtering, so a configured excluded window can remain in the
+persisted image when it is visible behind an allowed active window. The owner
+selected a conservative hybrid policy: an active excluded window discards the
+monitor frame; an excluded background window replaces full-monitor capture
+with a black monitor-sized frame containing only the allowed active window.
+Window enumeration and policy evaluation must happen before persistence, OCR,
+hashing, or downstream queues, and uncertainty must not fall back to the raw
+monitor image.
+
+Post-change evidence: the Windows capture loop now enumerates visible,
+non-minimized top-level windows before acquiring pixels and repeats the policy
+check after acquisition. An excluded active window, missing safe active window,
+inconsistent focus snapshot, enumeration failure, or failed replacement skips
+the monitor frame. An excluded background window captures only the allowed
+active HWND through window WGC and composites it at its monitor-relative
+position on an opaque black monitor-sized image; only that active window is
+forwarded for OCR/metadata. The previously captured monitor bitmap is replaced
+before comparison, hashing, OCR, queues, or persistence if the second snapshot
+newly requires active-only mode. Exclusions on a different monitor do not
+degrade this monitor, while a monitor containing an exclusion but no portion of
+the active window is skipped.
+
+Background browser URLs cannot be read reliably without activation, so any
+background browser conservatively triggers active-only mode when URL
+exclusions are configured. Likewise, Windows-visible but fully occluded
+excluded windows can trigger the fallback; this favors privacy over capture
+availability. Pre/post enumeration closes stable and boundary-crossing cases,
+but it cannot make monitor WGC and Win32 window enumeration atomic: a window
+that appears after the first snapshot and disappears before the second remains
+a narrow OS-level race.
+
+The complete locked/offline `screenpipe-screen` library suite passed 107 tests,
+including seven new policy and black-compositing tests. The finalized normal
+Developer PowerShell/Ninja release build passed locked and offline in 6m35s.
+Minimal and 12-second Vision live preflights passed against executable SHA-256
+`C321A51E70FD7547CF138B2325ABCE91435E87C3878727D27BB9C84CFB6DF6A7`: one
+`127.0.0.1:3047` listener, no UDP/helper/external connection, health 200,
+unauthenticated search/frame 403, and authenticated search 200. Those runs had
+no intentionally opened excluded background window, so they validate retained
+normal WGC/UIA/OCR startup rather than substituting for a human visual privacy
+exercise.

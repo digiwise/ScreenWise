@@ -274,6 +274,18 @@ impl WindowFilters {
         screenpipe_a11y::url_filter::is_url_blocked(url, &self.ignored_urls)
     }
 
+    #[cfg(target_os = "windows")]
+    fn has_configured_privacy_filters(&self) -> bool {
+        !self.ignore_patterns.is_empty()
+            || !self.include_patterns.is_empty()
+            || !self.ignored_urls.is_empty()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn has_ignored_urls(&self) -> bool {
+        !self.ignored_urls.is_empty()
+    }
+
     /// Check if a window title suggests it's a blocked site (fallback for unfocused windows)
     /// This is less precise but catches cases where URL detection isn't available
     pub fn is_title_suggesting_blocked_url(&self, window_title: &str) -> bool {
@@ -814,6 +826,282 @@ fn get_process_exe_name(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsCaptureChoice {
+    FullMonitor,
+    ActiveWindow(u32),
+    Skip,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct WindowsPrivacySnapshot {
+    id: u32,
+    bounds: Rect,
+    is_focused: bool,
+    is_excluded: bool,
+    can_capture: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn choose_windows_capture(
+    windows: &[WindowsPrivacySnapshot],
+    monitor_bounds: &Rect,
+) -> WindowsCaptureChoice {
+    let visible = windows
+        .iter()
+        .filter(|window| window.bounds.overlaps(monitor_bounds));
+    let focused: Vec<_> = visible.clone().filter(|window| window.is_focused).collect();
+
+    // More than one focused window means the snapshot changed while it was
+    // being assembled. Never fall back to monitor pixels in an uncertain state.
+    if focused.len() > 1 {
+        return WindowsCaptureChoice::Skip;
+    }
+
+    if focused.first().is_some_and(|window| window.is_excluded) {
+        return WindowsCaptureChoice::Skip;
+    }
+
+    if !visible.clone().any(|window| window.is_excluded) {
+        return WindowsCaptureChoice::FullMonitor;
+    }
+
+    match focused.first() {
+        Some(window) if window.can_capture => WindowsCaptureChoice::ActiveWindow(window.id),
+        _ => WindowsCaptureChoice::Skip,
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) struct WindowsActiveWindow {
+    source: Window,
+    app_name: String,
+    window_name: String,
+    process_id: i32,
+    browser_url: Option<String>,
+    window_x: i32,
+    window_y: i32,
+    window_width: u32,
+    window_height: u32,
+}
+
+#[cfg(target_os = "windows")]
+fn compose_active_window(
+    monitor_bounds: Rect,
+    window_image: &DynamicImage,
+    window_x: i32,
+    window_y: i32,
+) -> DynamicImage {
+    let mut monitor_image = image::RgbaImage::from_pixel(
+        monitor_bounds.width,
+        monitor_bounds.height,
+        image::Rgba([0, 0, 0, 255]),
+    );
+    image::imageops::overlay(
+        &mut monitor_image,
+        window_image,
+        i64::from(window_x - monitor_bounds.x),
+        i64::from(window_y - monitor_bounds.y),
+    );
+    DynamicImage::ImageRgba8(monitor_image)
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsActiveWindow {
+    pub(crate) fn capture_for_monitor(
+        self,
+        monitor: &SafeMonitor,
+    ) -> Result<(DynamicImage, CapturedWindow), Box<dyn Error>> {
+        let window_image = DynamicImage::ImageRgba8(self.source.capture_image()?);
+        let monitor_image = compose_active_window(
+            Rect {
+                x: monitor.x(),
+                y: monitor.y(),
+                width: monitor.width(),
+                height: monitor.height(),
+            },
+            &window_image,
+            self.window_x,
+            self.window_y,
+        );
+
+        let captured = CapturedWindow {
+            image: window_image,
+            app_name: self.app_name,
+            window_name: self.window_name,
+            process_id: self.process_id,
+            is_focused: true,
+            browser_url: self.browser_url,
+            window_x: self.window_x,
+            window_y: self.window_y,
+            window_width: self.window_width,
+            window_height: self.window_height,
+        };
+
+        Ok((monitor_image, captured))
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) enum WindowsMonitorCapturePlan {
+    FullMonitor,
+    ActiveWindow(WindowsActiveWindow),
+    Skip,
+}
+
+/// Decide whether Windows may use monitor WGC or must use only the active
+/// window. This enumerates metadata only; background windows are never captured.
+/// Browser URL exclusions fail closed for background browsers because Windows
+/// exposes a reliable URL only for the active browser window.
+#[cfg(target_os = "windows")]
+pub(crate) fn plan_windows_monitor_capture(
+    monitor: &SafeMonitor,
+    window_filters: &WindowFilters,
+) -> Result<WindowsMonitorCapturePlan, Box<dyn Error>> {
+    struct RuntimeWindow {
+        source: Window,
+        snapshot: WindowsPrivacySnapshot,
+        app_name: String,
+        window_name: String,
+        process_id: i32,
+        browser_url: Option<String>,
+        window_x: i32,
+        window_y: i32,
+        window_width: u32,
+        window_height: u32,
+    }
+
+    let monitor_bounds = Rect {
+        x: monitor.x(),
+        y: monitor.y(),
+        width: monitor.width(),
+        height: monitor.height(),
+    };
+    let mut runtime_windows = Vec::new();
+
+    for source in Window::all()? {
+        if source.is_minimized()? {
+            continue;
+        }
+
+        let window_x = source.x()?;
+        let window_y = source.y()?;
+        let window_width = source.width()?;
+        let window_height = source.height()?;
+        let bounds = Rect {
+            x: window_x,
+            y: window_y,
+            width: window_width,
+            height: window_height,
+        };
+        if window_width == 0 || window_height == 0 || !bounds.overlaps(&monitor_bounds) {
+            continue;
+        }
+
+        let id = source.id()?;
+        let process_id = source.pid()? as i32;
+        let app_name = source.app_name().unwrap_or_default();
+        let app_name = if app_name.is_empty() {
+            get_process_exe_name(process_id as u32).unwrap_or_default()
+        } else {
+            app_name
+        };
+        let window_name = source.title().unwrap_or_default();
+        let is_focused = source.is_focused()?;
+        let app_name_lower = app_name.to_lowercase();
+        let is_browser = BROWSER_NAMES
+            .iter()
+            .any(|browser| app_name_lower.contains(browser));
+
+        let mut browser_url = None;
+        let mut url_uncertain = false;
+        if is_browser && is_focused {
+            match create_url_detector().get_active_url(&app_name, process_id, &window_name) {
+                Ok(url) => browser_url = url,
+                Err(error) => {
+                    debug!("failed to resolve active browser URL for capture policy: {error}");
+                    url_uncertain = window_filters.has_ignored_urls();
+                }
+            }
+            if browser_url.is_none() && window_filters.has_ignored_urls() {
+                url_uncertain = true;
+            }
+        } else if is_browser && window_filters.has_ignored_urls() {
+            // Background browser URLs cannot be verified without activating
+            // them, so they force the active-window-only path.
+            url_uncertain = true;
+        }
+
+        let is_screenpipe_ui = app_name_lower.contains("screenpipe");
+        let metadata_uncertain = window_filters.has_configured_privacy_filters()
+            && (app_name.is_empty() || window_name.is_empty());
+        let url_excluded = browser_url
+            .as_deref()
+            .is_some_and(|url| window_filters.is_url_blocked(url));
+        let is_excluded = is_screenpipe_ui
+            || metadata_uncertain
+            || url_uncertain
+            || url_excluded
+            || !window_filters.is_valid(&app_name, &window_name);
+        let can_capture = !is_excluded
+            && !SKIP_APPS.contains(app_name.as_str())
+            && !app_name.is_empty()
+            && !window_name.is_empty()
+            && !SKIP_TITLES.contains(window_name.as_str());
+
+        runtime_windows.push(RuntimeWindow {
+            source,
+            snapshot: WindowsPrivacySnapshot {
+                id,
+                bounds,
+                is_focused,
+                is_excluded,
+                can_capture,
+            },
+            app_name,
+            window_name,
+            process_id,
+            browser_url,
+            window_x,
+            window_y,
+            window_width,
+            window_height,
+        });
+    }
+
+    let snapshots: Vec<_> = runtime_windows
+        .iter()
+        .map(|window| window.snapshot.clone())
+        .collect();
+    match choose_windows_capture(&snapshots, &monitor_bounds) {
+        WindowsCaptureChoice::FullMonitor => Ok(WindowsMonitorCapturePlan::FullMonitor),
+        WindowsCaptureChoice::Skip => Ok(WindowsMonitorCapturePlan::Skip),
+        WindowsCaptureChoice::ActiveWindow(id) => {
+            let window = runtime_windows
+                .into_iter()
+                .find(|window| window.snapshot.id == id)
+                .ok_or_else(|| {
+                    std::io::Error::other("active window disappeared from capture snapshot")
+                })?;
+            Ok(WindowsMonitorCapturePlan::ActiveWindow(
+                WindowsActiveWindow {
+                    source: window.source,
+                    app_name: window.app_name,
+                    window_name: window.window_name,
+                    process_id: window.process_id,
+                    browser_url: window.browser_url,
+                    window_x: window.window_x,
+                    window_y: window.window_y,
+                    window_width: window.window_width,
+                    window_height: window.window_height,
+                },
+            ))
+        }
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn get_all_windows() -> Result<Vec<WindowData>, Box<dyn Error>> {
     let windows = Window::all()?;
@@ -1145,6 +1433,166 @@ pub async fn capture_all_visible_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    fn privacy_snapshot(
+        id: u32,
+        bounds: Rect,
+        is_focused: bool,
+        is_excluded: bool,
+        can_capture: bool,
+    ) -> WindowsPrivacySnapshot {
+        WindowsPrivacySnapshot {
+            id,
+            bounds,
+            is_focused,
+            is_excluded,
+            can_capture,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_uses_full_monitor_when_no_visible_window_is_excluded() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let windows = [privacy_snapshot(1, monitor, true, false, true)];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::FullMonitor
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_skips_when_the_active_window_is_excluded() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let windows = [privacy_snapshot(1, monitor, true, true, false)];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::Skip
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_uses_only_active_window_for_excluded_background() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let windows = [
+            privacy_snapshot(7, monitor, true, false, true),
+            privacy_snapshot(9, monitor, false, true, false),
+        ];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::ActiveWindow(7)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_skips_monitor_without_the_active_window() {
+        let monitor = Rect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let primary = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let windows = [
+            privacy_snapshot(7, primary, true, false, true),
+            privacy_snapshot(9, monitor, false, true, false),
+        ];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::Skip
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_ignores_exclusions_outside_this_monitor() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let other_monitor = Rect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let windows = [
+            privacy_snapshot(7, monitor, true, false, true),
+            privacy_snapshot(9, other_monitor, false, true, false),
+        ];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::FullMonitor
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_skips_an_inconsistent_focus_snapshot() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let windows = [
+            privacy_snapshot(7, monitor, true, false, true),
+            privacy_snapshot(8, monitor, true, false, true),
+        ];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::Skip
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_active_window_frame_blacks_out_every_other_pixel() {
+        let monitor = Rect {
+            x: 100,
+            y: 200,
+            width: 6,
+            height: 5,
+        };
+        let active = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            3,
+            2,
+            image::Rgba([200, 30, 10, 255]),
+        ));
+        let composed = compose_active_window(monitor, &active, 102, 201).to_rgba8();
+
+        assert_eq!(composed.dimensions(), (6, 5));
+        assert_eq!(*composed.get_pixel(0, 0), image::Rgba([0, 0, 0, 255]));
+        assert_eq!(*composed.get_pixel(2, 1), image::Rgba([200, 30, 10, 255]));
+        assert_eq!(*composed.get_pixel(4, 2), image::Rgba([200, 30, 10, 255]));
+        assert_eq!(*composed.get_pixel(5, 4), image::Rgba([0, 0, 0, 255]));
+    }
 
     // ==================== is_url_blocked tests ====================
 
