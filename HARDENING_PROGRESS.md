@@ -2781,3 +2781,38 @@ corrections:
   transient sharing/permission failure is logged but is not durably retried
   after the DB reference is gone. A deletion journal or audited orphan-file
   sweep is required to guarantee eventual physical erasure.
+
+### Live offline and listener-security validation — 2026-09-11
+
+Pre-validation scope: unit and build evidence proved the intended bind/auth
+configuration but did not prove the final release executable's live socket set,
+the `/frames/*` middleware boundary, or retained Windows WGC/UIA/OCR startup
+under denied outbound networking. The run used a fresh ignored directory under
+`target`, never printed the bearer token or captured content, and removed the
+directory after stopping the process.
+
+Two live release runs passed inside the Codex workspace sandbox, whose outbound
+network restriction independently blocked uncached Cargo acquisition earlier in
+this phase:
+
+- A minimal server run disabled screen, audio, meetings, input/clipboard
+  persistence, and compaction. A second 12-second run enabled the retained
+  Windows vision/UIA/OCR path while keeping audio and sensitive input storage
+  disabled. Both initialized a fresh database and secret store successfully.
+- Each process had exactly one TCP listener, `127.0.0.1:3047`; no non-loopback
+  listener, UDP endpoint, mDNS socket, port-11435 helper listener, or external
+  established TCP connection was present.
+- `/health` returned 200 without credentials. `/search?limit=1` and `/frames/1`
+  returned 403 without a bearer token. The token read from the same fresh data
+  directory made `/search?limit=1` return 200.
+- Both processes stopped and their disposable data/log directories were
+  removed without inspecting recorded frame contents.
+
+An attempted stronger run with a temporary outbound-block Windows Firewall
+rule for the exact `target/release/screenpipe.exe` path could not start because
+`New-NetFirewallRule` returned Windows error 5 (`Access is denied`) even through
+the available escalation path. No rule was created and no recorder process had
+started at that point. Repeating the same bounded harness from an elevated
+Administrator shell remains the human verification needed for an
+OS-firewall-enforced offline claim; this record does not misstate the sandbox
+run as that stronger check.
