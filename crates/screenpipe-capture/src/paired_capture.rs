@@ -77,6 +77,10 @@ pub struct CaptureContext<'a> {
     /// The accessibility tree walk still runs — metadata row is still written.
     /// Set by AudioPaused and FullPause power profiles.
     pub screenshot_disabled: bool,
+    /// Fixed, non-sensitive marker for a generated disclosure frame. When set,
+    /// accessibility and OCR extraction are bypassed entirely and the marker is
+    /// stored with `text_source=privacy_placeholder`.
+    pub placeholder_text: Option<&'a str>,
 }
 
 /// Result of a paired capture operation.
@@ -147,20 +151,22 @@ pub async fn paired_capture(
     // which returns non-empty but low-quality text (raw buffer content
     // without visual formatting). For these apps we always run OCR to get
     // proper bounding-box text positions for the selectable overlay.
-    let app_prefers_ocr = ctx.app_name.is_some_and(|name| {
-        let n = name.to_lowercase();
-        // Terminal emulators whose AX text is raw buffer and not useful
-        // for bounding-box overlay. OCR produces better results.
-        // Note: Ghostty, iTerm2, and Terminal.app were removed — they have
-        // full AX support and the thin-detection heuristic handles them
-        // correctly. See https://github.com/screenpipe/screenpipe/issues/2685
-        n.contains("wezterm")
-            || n.contains("alacritty")
-            || n.contains("kitty")
-            || n.contains("hyper")
-            || n.contains("warp")
-    });
-    let has_accessibility_text = !app_prefers_ocr
+    let app_prefers_ocr = ctx.placeholder_text.is_none()
+        && ctx.app_name.is_some_and(|name| {
+            let n = name.to_lowercase();
+            // Terminal emulators whose AX text is raw buffer and not useful
+            // for bounding-box overlay. OCR produces better results.
+            // Note: Ghostty, iTerm2, and Terminal.app were removed — they have
+            // full AX support and the thin-detection heuristic handles them
+            // correctly. See https://github.com/screenpipe/screenpipe/issues/2685
+            n.contains("wezterm")
+                || n.contains("alacritty")
+                || n.contains("kitty")
+                || n.contains("hyper")
+                || n.contains("warp")
+        });
+    let has_accessibility_text = ctx.placeholder_text.is_none()
+        && !app_prefers_ocr
         && tree_snapshot
             .map(|s| !s.text_content.is_empty())
             .unwrap_or(false);
@@ -175,7 +181,9 @@ pub async fn paired_capture(
             .unwrap_or(false);
 
     // Run OCR when: no a11y text, app prefers OCR, OR a11y text is thin (hybrid)
-    let (ocr_text, ocr_text_json) = if !has_accessibility_text || a11y_is_thin {
+    let (ocr_text, ocr_text_json) = if ctx.placeholder_text.is_some() {
+        (String::new(), "[]".to_string())
+    } else if !has_accessibility_text || a11y_is_thin {
         // Windows native OCR is async, so call it directly (not inside spawn_blocking)
         #[cfg(target_os = "windows")]
         let raw = {
@@ -224,50 +232,55 @@ pub async fn paired_capture(
     // When app_prefers_ocr (terminals), always prefer OCR over accessibility tree
     // because the tree only returns window chrome (Minimize/Maximize/Close), not
     // the actual terminal content.
-    let (accessibility_text, tree_json, content_hash, simhash) = if app_prefers_ocr {
-        // Terminal apps: OCR is the only useful source. The accessibility tree
-        // only returns window chrome ("System, Minimize, Restore, Close") which
-        // is noise. If OCR fails, store nothing rather than chrome.
-        if !ocr_text.is_empty() {
-            (
-                Some(ocr_text.clone()),
-                None,
-                Some(TreeSnapshot::compute_hash(&ocr_text) as i64),
-                None,
-            )
-        } else {
-            (None, None, None, None)
-        }
-    } else {
-        match tree_snapshot {
-            Some(snap) if !snap.text_content.is_empty() => {
-                let json = serialize_accessibility_tree_nodes(&snap.nodes, ctx.use_pii_removal);
+    let (accessibility_text, tree_json, content_hash, simhash) =
+        if let Some(marker) = ctx.placeholder_text {
+            (Some(marker.to_string()), None, None, None)
+        } else if app_prefers_ocr {
+            // Terminal apps: OCR is the only useful source. The accessibility tree
+            // only returns window chrome ("System, Minimize, Restore, Close") which
+            // is noise. If OCR fails, store nothing rather than chrome.
+            if !ocr_text.is_empty() {
                 (
-                    Some(snap.text_content.clone()),
-                    json,
-                    Some(snap.content_hash as i64),
-                    Some(snap.simhash as i64),
+                    Some(ocr_text.clone()),
+                    None,
+                    Some(TreeSnapshot::compute_hash(&ocr_text) as i64),
+                    None,
                 )
+            } else {
+                (None, None, None, None)
             }
-            _ => {
-                // OCR fallback: accessibility returned no text (games, bad a11y apps)
-                if ocr_text.is_empty() {
-                    (None, None, None, None)
-                } else {
+        } else {
+            match tree_snapshot {
+                Some(snap) if !snap.text_content.is_empty() => {
+                    let json = serialize_accessibility_tree_nodes(&snap.nodes, ctx.use_pii_removal);
                     (
-                        Some(ocr_text.clone()),
-                        None,
-                        Some(TreeSnapshot::compute_hash(&ocr_text) as i64),
-                        None,
+                        Some(snap.text_content.clone()),
+                        json,
+                        Some(snap.content_hash as i64),
+                        Some(snap.simhash as i64),
                     )
                 }
+                _ => {
+                    // OCR fallback: accessibility returned no text (games, bad a11y apps)
+                    if ocr_text.is_empty() {
+                        (None, None, None, None)
+                    } else {
+                        (
+                            Some(ocr_text.clone()),
+                            None,
+                            Some(TreeSnapshot::compute_hash(&ocr_text) as i64),
+                            None,
+                        )
+                    }
+                }
             }
-        }
-    };
+        };
 
     // Determine text source: "accessibility" when tree nodes were available,
     // "ocr" for fallback, "hybrid" when both ran (thin a11y supplemented by OCR)
-    let (final_text, text_source) = if let Some(ref text) = accessibility_text {
+    let (final_text, text_source) = if ctx.placeholder_text.is_some() {
+        (accessibility_text.as_deref(), Some("privacy_placeholder"))
+    } else if let Some(ref text) = accessibility_text {
         if text.is_empty() {
             (None, None)
         } else if tree_json.is_some() && a11y_is_thin && !ocr_text.is_empty() {
@@ -672,6 +685,7 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            placeholder_text: None,
         };
 
         let result = paired_capture(&ctx, None).await.unwrap();
@@ -681,6 +695,68 @@ mod tests {
         assert_eq!(result.capture_trigger, "click");
         assert!(result.accessibility_text.is_none());
         assert!(result.text_source.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_placeholder_capture_bypasses_accessibility_and_ocr_content() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: now,
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: None,
+            window_name: None,
+            browser_url: None,
+            document_path: None,
+            focused: false,
+            capture_trigger: "manual",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            placeholder_text: Some("CAPTURE REDACTED"),
+        };
+        let snap = TreeSnapshot {
+            app_name: "ExcludedApp".to_string(),
+            window_name: "Sensitive window".to_string(),
+            text_content: "must not be retained".to_string(),
+            nodes: vec![],
+            browser_url: Some("https://sensitive.invalid".to_string()),
+            document_path: None,
+            timestamp: now,
+            node_count: 0,
+            walk_duration: std::time::Duration::from_millis(1),
+            content_hash: 42,
+            simhash: 43,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+        };
+
+        let result = paired_capture(&ctx, Some(&snap)).await.unwrap();
+
+        assert_eq!(result.text_source.as_deref(), Some("privacy_placeholder"));
+        assert_eq!(
+            result.accessibility_text.as_deref(),
+            Some("CAPTURE REDACTED")
+        );
+        assert_eq!(result.content_hash, None);
+        assert_eq!(result.app_name, None);
+        assert_eq!(result.window_name, None);
+        let (stored_text, stored_tree) = db
+            .get_frame_accessibility_data(result.frame_id)
+            .await
+            .unwrap();
+        assert_eq!(stored_text.as_deref(), Some("CAPTURE REDACTED"));
+        assert_eq!(stored_tree, None);
     }
 
     #[tokio::test]
@@ -711,6 +787,7 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            placeholder_text: None,
         };
 
         let snap = TreeSnapshot {
@@ -776,6 +853,7 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: true,
+            placeholder_text: None,
         };
 
         let snap = TreeSnapshot {
@@ -878,6 +956,7 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            placeholder_text: None,
         };
 
         // Empty accessibility text should be treated as no text

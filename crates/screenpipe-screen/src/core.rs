@@ -4,13 +4,13 @@
 
 #[cfg(target_os = "macos")]
 use crate::apple::perform_ocr_apple;
-use crate::capture_screenshot_by_window::{
-    get_excluded_sck_window_ids, CapturedWindow, WindowFilters,
-};
+#[cfg(not(target_os = "windows"))]
+use crate::capture_screenshot_by_window::get_excluded_sck_window_ids;
 #[cfg(target_os = "windows")]
 use crate::capture_screenshot_by_window::{
-    plan_windows_monitor_capture, WindowsMonitorCapturePlan,
+    capture_windows_monitor_privacy_safe, WindowsCaptureOutcome,
 };
+use crate::capture_screenshot_by_window::{CapturedWindow, WindowFilters};
 use crate::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use crate::metrics::PipelineMetrics;
 #[cfg(target_os = "windows")]
@@ -18,7 +18,9 @@ use crate::microsoft::perform_ocr_windows;
 use crate::monitor::get_monitor_by_id;
 use crate::ocr_cache::{WindowCacheKey, WindowOcrCache};
 use crate::tesseract::perform_ocr_tesseract;
-use crate::utils::{capture_monitor_image, capture_windows, OcrEngine};
+#[cfg(not(target_os = "windows"))]
+use crate::utils::capture_monitor_image;
+use crate::utils::{capture_windows, OcrEngine};
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
@@ -38,7 +40,7 @@ use std::{
 };
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 fn serialize_image<S>(image: &Option<Arc<DynamicImage>>, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -155,9 +157,12 @@ impl std::fmt::Display for ContinuousCaptureError {
 /// Activity feed for adaptive FPS (from screenpipe-a11y)
 pub type ActivityFeedOption = Option<screenpipe_a11y::ActivityFeed>;
 
+#[cfg(not(target_os = "windows"))]
 const MAX_CAPTURE_RETRIES: u32 = 3;
+#[cfg(not(target_os = "windows"))]
 const MAX_CONSECUTIVE_FAILURES: u32 = 30;
 
+#[cfg(not(target_os = "windows"))]
 async fn capture_full_monitor_with_retries(
     monitor: &mut crate::monitor::SafeMonitor,
     monitor_id: u32,
@@ -253,6 +258,7 @@ pub async fn continuous_capture(
         monitor_id
     );
     // 1. Get monitor (mutable so we can refresh() the cached handle on failure)
+    #[allow(unused_mut)]
     let mut monitor = match get_monitor_by_id(monitor_id).await {
         Some(m) => m,
         None => {
@@ -260,68 +266,53 @@ pub async fn continuous_capture(
             return Err(ContinuousCaptureError::MonitorNotFound);
         }
     };
+    #[cfg(not(target_os = "windows"))]
     let mut consecutive_capture_failures: u32 = 0;
+    #[cfg(target_os = "windows")]
+    let mut last_windows_outcome: Option<WindowsCaptureOutcome> = None;
     loop {
-        #[cfg(target_os = "windows")]
-        let initial_windows_plan = match plan_windows_monitor_capture(&monitor, &window_filters) {
-            Ok(WindowsMonitorCapturePlan::Skip) => {
-                metrics.record_skip();
-                tokio::time::sleep(interval).await;
-                continue;
-            }
-            Ok(plan) => plan,
-            Err(error) => {
-                debug!(
-                    "unable to establish a safe Windows capture plan for monitor {}: {}",
-                    monitor_id, error
-                );
-                metrics.record_skip();
-                tokio::time::sleep(interval).await;
-                continue;
-            }
-        };
-
         // 3. Capture the permitted Windows surface (full monitor or active
         //    window only) and wall-clock time. Other platforms retain their
         //    native monitor-level exclusion path.
         let captured_at = Utc::now();
 
         #[cfg(target_os = "windows")]
-        let (mut image, _capture_duration, mut active_only_window) = match initial_windows_plan {
-            WindowsMonitorCapturePlan::FullMonitor => {
-                let Some((image, duration)) = capture_full_monitor_with_retries(
-                    &mut monitor,
-                    monitor_id,
-                    &window_filters,
-                    &mut consecutive_capture_failures,
-                )
-                .await?
-                else {
-                    tokio::time::sleep(interval).await;
-                    continue;
-                };
-                (image, duration, None)
-            }
-            WindowsMonitorCapturePlan::ActiveWindow(window) => {
-                let capture_start = Instant::now();
-                match window.capture_for_monitor(&monitor) {
-                    Ok((image, captured_window)) => {
-                        consecutive_capture_failures = 0;
-                        (image, capture_start.elapsed(), Some(captured_window))
-                    }
-                    Err(error) => {
+        let safe_capture = capture_windows_monitor_privacy_safe(&monitor, &window_filters).await;
+        #[cfg(target_os = "windows")]
+        let windows_outcome = safe_capture.outcome;
+        #[cfg(target_os = "windows")]
+        let (image, _capture_duration, active_only_window) = (
+            safe_capture.image,
+            safe_capture.duration,
+            safe_capture.active_window,
+        );
+
+        #[cfg(target_os = "windows")]
+        if last_windows_outcome != Some(windows_outcome) {
+            match windows_outcome {
+                WindowsCaptureOutcome::FullMonitor => {
+                    if last_windows_outcome.is_some() {
                         debug!(
-                            "active-window-only capture failed for monitor {}: {}",
-                            monitor_id, error
+                            "monitor {} Windows capture returned to full-monitor mode",
+                            monitor_id
                         );
-                        metrics.record_skip();
-                        tokio::time::sleep(interval).await;
-                        continue;
                     }
                 }
+                WindowsCaptureOutcome::BackgroundRedacted => warn!(
+                    "monitor {} Windows capture is active-window-only with a visible background-redaction banner",
+                    monitor_id
+                ),
+                WindowsCaptureOutcome::CaptureRedacted(reason) => warn!(
+                    "monitor {} Windows capture uses a visible redaction frame: {}",
+                    monitor_id, reason
+                ),
+                WindowsCaptureOutcome::CaptureFailed(stage) => error!(
+                    "monitor {} Windows capture uses a visible failure frame: {} failed",
+                    monitor_id, stage
+                ),
             }
-            WindowsMonitorCapturePlan::Skip => unreachable!(),
-        };
+            last_windows_outcome = Some(windows_outcome);
+        }
 
         #[cfg(not(target_os = "windows"))]
         let (image, _capture_duration) = {
@@ -338,39 +329,6 @@ pub async fn continuous_capture(
             };
             result
         };
-
-        // Re-evaluate after capture so a newly visible excluded window cannot
-        // make a raw monitor bitmap eligible. If the first snapshot selected
-        // active-only capture, its pixels are already independent of every
-        // background window and remain safe unless the active window is now
-        // excluded.
-        #[cfg(target_os = "windows")]
-        match plan_windows_monitor_capture(&monitor, &window_filters) {
-            Ok(WindowsMonitorCapturePlan::FullMonitor) => {}
-            Ok(WindowsMonitorCapturePlan::ActiveWindow(window)) if active_only_window.is_none() => {
-                match window.capture_for_monitor(&monitor) {
-                    Ok((replacement, captured_window)) => {
-                        image = replacement;
-                        active_only_window = Some(captured_window);
-                    }
-                    Err(error) => {
-                        debug!(
-                            "post-capture active-window replacement failed for monitor {}: {}",
-                            monitor_id, error
-                        );
-                        metrics.record_skip();
-                        tokio::time::sleep(interval).await;
-                        continue;
-                    }
-                }
-            }
-            Ok(WindowsMonitorCapturePlan::ActiveWindow(_)) => {}
-            Ok(WindowsMonitorCapturePlan::Skip) | Err(_) => {
-                metrics.record_skip();
-                tokio::time::sleep(interval).await;
-                continue;
-            }
-        }
 
         // 4. Optimized frame comparison: downscales once (proportional to preserve
         //    ultrawide aspect ratios), hashes the thumbnail, then compares histograms.
@@ -417,9 +375,14 @@ pub async fn continuous_capture(
         //     path avoids expensive per-window screenshots on unchanged frames.
         //     Window metadata is still needed with OCR disabled for timeline/DB rows.
         #[cfg(target_os = "windows")]
-        let window_images = match active_only_window {
-            Some(window) => vec![window],
-            None => capture_windows(&monitor, &window_filters, capture_unfocused_windows).await,
+        let window_images = match windows_outcome {
+            WindowsCaptureOutcome::BackgroundRedacted => active_only_window.into_iter().collect(),
+            WindowsCaptureOutcome::FullMonitor => {
+                capture_windows(&monitor, &window_filters, capture_unfocused_windows).await
+            }
+            WindowsCaptureOutcome::CaptureRedacted(_) | WindowsCaptureOutcome::CaptureFailed(_) => {
+                Vec::new()
+            }
         };
 
         #[cfg(not(target_os = "windows"))]

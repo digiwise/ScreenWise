@@ -2936,3 +2936,57 @@ unauthenticated search/frame 403, and authenticated search 200. Those runs had
 no intentionally opened excluded background window, so they validate retained
 normal WGC/UIA/OCR startup rather than substituting for a human visual privacy
 exercise.
+
+### Windows capture redaction and failure observability — 2026-09-14
+
+Pre-change correction and boundary: the preceding excluded-background change
+wired its fail-closed policy into `screenpipe-screen::continuous_capture`, but
+the shipped recorder uses `screenpipe-engine::event_driven_capture_loop`.
+Production warm checks, periodic visual checks, and persisted captures still
+acquire monitor pixels directly, so the earlier implementation is not yet a
+complete runtime control. In addition, its redaction and capture-error branches
+drop frames with debug-only or no durable indication. This increment will move
+the policy onto every production Windows bitmap acquisition, transition-log
+sanitized outcomes without window titles or URLs, and persist unmistakable
+monitor-sized `BACKGROUND REDACTED`, `CAPTURE REDACTED`, or `CAPTURE FAILED`
+imagery wherever the snapshot/DB pipeline remains available. Deliberate
+no-capture states (locked screen, DRM pause, schedule pause, and disabled
+screenshots) remain no-capture controls rather than creating potentially
+misleading placeholder records.
+
+Post-change evidence: one shared Windows wrapper now evaluates the current
+window/filter snapshot before and after every production bitmap acquisition.
+The startup capture, Warm visual probe, normal visual-change probe, persisted
+event capture, and legacy capture loop all consume only its returned safe
+bitmap. A visible excluded background produces active-window-only WGC on an
+opaque monitor-sized canvas with a red `BACKGROUND REDACTED` banner. An
+excluded active window or unavailable safe active window produces a dark
+`CAPTURE REDACTED` frame. Window-enumeration, monitor-WGC, active-window-WGC,
+or post-capture verification failure produces `CAPTURE FAILED`. These fixed
+labels are drawn with an embedded bitmap font, adding no dependency or runtime
+font lookup.
+
+Production redaction/failure frames are written through a dedicated paired
+capture mode with `text_source=privacy_placeholder`, no app/window/URL/document
+metadata, no accessibility tree, no OCR invocation, no content hash, and no
+element reference. If UIA or the final metadata check identifies an exclusion
+after the image decision, the safe bitmap is replaced by the same generic
+redaction frame before persistence. Per-monitor logs report only transitions
+among full-monitor, background-redacted, capture-redacted, and failure stages;
+they contain no window title, URL, HWND, or captured content. The older
+per-window privacy diagnostics that printed a blocked URL/title were also
+replaced with content-free reason messages.
+
+The locked/offline `screenpipe-capture` and `screenpipe-screen` library suites
+passed 23 and 108 tests respectively, including placeholder no-OCR/no-tree
+persistence and visible notice/compositor assertions. The full locked/offline
+engine library suite passed 518 tests with two explicitly ignored live/export
+tests. The finalized normal Developer PowerShell/Ninja release build passed
+locked and offline in 4m43s. Minimal and Vision runtime preflights passed against release
+executable SHA-256
+`DEF3FA89644F931A8617001D48965134DCF21506AD712D1B7833DA858E038B20`: one
+`127.0.0.1:3047` listener, no UDP/helper/external connection, health 200,
+unauthenticated search/frame 403, and authenticated search 200. No excluded
+content was intentionally displayed during those automated runs, so a human
+visual exercise of each disclosure state remains useful and the narrow
+non-atomic Windows enumeration/WGC race documented above still applies.

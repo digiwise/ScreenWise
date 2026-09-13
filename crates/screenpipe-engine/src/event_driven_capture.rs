@@ -17,10 +17,19 @@ use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
-use screenpipe_screen::capture_screenshot_by_window::{get_excluded_sck_window_ids, WindowFilters};
+#[cfg(not(target_os = "windows"))]
+use screenpipe_screen::capture_screenshot_by_window::get_excluded_sck_window_ids;
+use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
+#[cfg(target_os = "windows")]
+use screenpipe_screen::capture_screenshot_by_window::{
+    capture_windows_monitor_privacy_safe, plan_windows_monitor_capture,
+    render_windows_capture_notice, WindowsCaptureFailureStage, WindowsCaptureOutcome,
+    WindowsMonitorCapturePlan,
+};
 use screenpipe_screen::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use screenpipe_screen::monitor::{list_monitors, SafeMonitor};
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
+#[cfg(not(target_os = "windows"))]
 use screenpipe_screen::utils::capture_monitor_image;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -656,6 +665,8 @@ pub async fn event_driven_capture_loop(
     // then suppress until success. Prevents monitor disconnect from flooding
     // the local logs with 100k+ identical events.
     let mut consecutive_capture_errors: u32 = 0;
+    #[cfg(target_os = "windows")]
+    let mut last_windows_capture_outcome: Option<WindowsCaptureOutcome> = None;
     // Whether an HD (high-FPS) session is currently active. Refreshed each
     // tick from the controller snapshot below. When true, content dedup is
     // bypassed (see `dedup_applies`) so dense replay captures every change at
@@ -707,6 +718,12 @@ pub async fn event_driven_capture_loop(
         {
             Ok(Ok(output)) => {
                 state.mark_captured();
+                #[cfg(target_os = "windows")]
+                log_windows_capture_transition(
+                    &mut last_windows_capture_outcome,
+                    output.windows_outcome,
+                    monitor_id,
+                );
                 if let Some(ref mut comparer) = frame_comparer {
                     let _ = comparer.compare(&output.image);
                 }
@@ -757,6 +774,7 @@ pub async fn event_driven_capture_loop(
     // Cache sorted excluded SCK window IDs to avoid recreating the persistent
     // SCK stream every time a transient window (tooltip, popup, badge) appears
     // or disappears.  Only update when the sorted set actually changes.
+    #[cfg(not(target_os = "windows"))]
     let mut cached_excluded_ids: Vec<u32> = Vec::new();
 
     // Track whether this monitor is currently in Cold state so we release
@@ -829,32 +847,53 @@ pub async fn event_driven_capture_loop(
                         continue;
                     };
 
-                    // Use cached excluded window ids if available to avoid
-                    // re-enumerating every Warm tick. If the list hasn't been
-                    // seeded yet (Active path fills it), this snapshot pass
-                    // is still correct — it just might include pixels from
-                    // soon-to-be-excluded transient windows.
-                    let snap = capture_monitor_image(&monitor, &cached_excluded_ids).await;
-                    match snap {
-                        Ok((image, _)) => {
-                            let diff = comparer.compare(&image);
-                            if diff > visual_change_threshold {
-                                debug!(
-                                    "warm visual change on monitor {} (diff={:.4})",
-                                    monitor_id, diff
-                                );
-                                warm_trigger_override = Some(CaptureTrigger::VisualChange);
-                                // Fall through to normal capture path with
-                                // warm_trigger_override set.
-                            } else {
+                    #[cfg(target_os = "windows")]
+                    {
+                        let filters = WindowFilters::new(
+                            &capture_params.tree_walker_config.ignored_windows,
+                            &capture_params.tree_walker_config.included_windows,
+                            &capture_params.tree_walker_config.ignored_urls,
+                        );
+                        let safe = capture_windows_monitor_privacy_safe(&monitor, &filters).await;
+                        log_windows_capture_transition(
+                            &mut last_windows_capture_outcome,
+                            safe.outcome,
+                            monitor_id,
+                        );
+                        let diff = comparer.compare(&safe.image);
+                        if diff > visual_change_threshold {
+                            debug!(
+                                "warm visual change on monitor {} (diff={:.4})",
+                                monitor_id, diff
+                            );
+                            warm_trigger_override = Some(CaptureTrigger::VisualChange);
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let snap = capture_monitor_image(&monitor, &cached_excluded_ids).await;
+                        match snap {
+                            Ok((image, _)) => {
+                                let diff = comparer.compare(&image);
+                                if diff > visual_change_threshold {
+                                    debug!(
+                                        "warm visual change on monitor {} (diff={:.4})",
+                                        monitor_id, diff
+                                    );
+                                    warm_trigger_override = Some(CaptureTrigger::VisualChange);
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(250)).await;
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                debug!("warm visual check failed on monitor {}: {}", monitor_id, e);
                                 tokio::time::sleep(Duration::from_millis(250)).await;
                                 continue;
                             }
-                        }
-                        Err(e) => {
-                            debug!("warm visual check failed on monitor {}: {}", monitor_id, e);
-                            tokio::time::sleep(Duration::from_millis(250)).await;
-                            continue;
                         }
                     }
                 }
@@ -1183,13 +1222,34 @@ pub async fn event_driven_capture_loop(
                 &capture_params.tree_walker_config.included_windows,
                 &capture_params.tree_walker_config.ignored_urls,
             );
-            let mut fresh_ids = get_excluded_sck_window_ids(&vc_filters);
-            fresh_ids.sort_unstable();
-            fresh_ids.dedup();
-            if fresh_ids != cached_excluded_ids {
-                cached_excluded_ids = fresh_ids;
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut fresh_ids = get_excluded_sck_window_ids(&vc_filters);
+                fresh_ids.sort_unstable();
+                fresh_ids.dedup();
+                if fresh_ids != cached_excluded_ids {
+                    cached_excluded_ids = fresh_ids;
+                }
             }
             if let Some(ref mut comparer) = frame_comparer {
+                #[cfg(target_os = "windows")]
+                {
+                    let safe = capture_windows_monitor_privacy_safe(&monitor, &vc_filters).await;
+                    log_windows_capture_transition(
+                        &mut last_windows_capture_outcome,
+                        safe.outcome,
+                        monitor_id,
+                    );
+                    let diff = comparer.compare(&safe.image);
+                    if diff > visual_change_threshold {
+                        debug!(
+                            "visual change detected on monitor {} (diff={:.4}, threshold={:.4})",
+                            monitor_id, diff, visual_change_threshold
+                        );
+                        trigger = Some(CaptureTrigger::VisualChange);
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
                 match capture_monitor_image(&monitor, &cached_excluded_ids).await {
                     Ok((image, _dur)) => {
                         let diff = comparer.compare(&image);
@@ -1306,6 +1366,13 @@ pub async fn event_driven_capture_loop(
                 match capture_result {
                     Ok(Ok(output)) => {
                         state.mark_captured();
+
+                        #[cfg(target_os = "windows")]
+                        log_windows_capture_transition(
+                            &mut last_windows_capture_outcome,
+                            output.windows_outcome,
+                            monitor_id,
+                        );
 
                         if consecutive_capture_errors > 0 {
                             info!(
@@ -1566,6 +1633,88 @@ struct CaptureOutput {
     image: image::DynamicImage,
     /// Whether elements were deduped (referenced another frame's elements).
     elements_deduped: bool,
+    #[cfg(target_os = "windows")]
+    windows_outcome: WindowsCaptureOutcome,
+}
+
+#[cfg(target_os = "windows")]
+fn log_windows_capture_transition(
+    previous: &mut Option<WindowsCaptureOutcome>,
+    current: WindowsCaptureOutcome,
+    monitor_id: u32,
+) {
+    if *previous == Some(current) {
+        return;
+    }
+
+    match current {
+        WindowsCaptureOutcome::FullMonitor => {
+            if previous.is_some() {
+                info!(
+                    "monitor {} Windows capture returned to an unredacted full-monitor frame",
+                    monitor_id
+                );
+            }
+        }
+        WindowsCaptureOutcome::BackgroundRedacted => warn!(
+            "monitor {} Windows capture is active-window-only; excluded background pixels are visibly redacted",
+            monitor_id
+        ),
+        WindowsCaptureOutcome::CaptureRedacted(reason) => warn!(
+            "monitor {} Windows capture is replaced by a visible redaction frame: {}",
+            monitor_id, reason
+        ),
+        WindowsCaptureOutcome::CaptureFailed(stage) => error!(
+            "monitor {} Windows capture is replaced by a visible failure frame: {} failed",
+            monitor_id, stage
+        ),
+    }
+    *previous = Some(current);
+}
+
+#[cfg(target_os = "windows")]
+async fn persist_windows_placeholder(
+    params: &CaptureParams<'_>,
+    trigger: &CaptureTrigger,
+    captured_at: chrono::DateTime<Utc>,
+    outcome: WindowsCaptureOutcome,
+    screenshot_disabled: bool,
+) -> Result<CaptureOutput> {
+    let marker = outcome
+        .marker_text()
+        .expect("placeholder capture outcomes always expose marker text");
+    let notice = outcome
+        .notice()
+        .expect("placeholder capture outcomes always expose a disclosure notice");
+    let image =
+        render_windows_capture_notice(params.monitor.width(), params.monitor.height(), notice);
+    let ctx = CaptureContext {
+        db: params.db,
+        snapshot_writer: params.snapshot_writer,
+        image: Arc::new(image),
+        captured_at,
+        monitor_id: params.monitor_id,
+        device_name: params.device_name,
+        app_name: None,
+        window_name: None,
+        browser_url: None,
+        document_path: None,
+        focused: false,
+        capture_trigger: trigger.as_str(),
+        use_pii_removal: false,
+        languages: Vec::new(),
+        elements_ref_frame_id: None,
+        screenshot_disabled,
+        placeholder_text: Some(marker),
+    };
+    let result = paired_capture(&ctx, None).await?;
+    let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());
+    Ok(CaptureOutput {
+        result: Some(result),
+        image,
+        elements_deduped: false,
+        windows_outcome: outcome,
+    })
 }
 
 fn resolve_capture_metadata(
@@ -1750,19 +1899,34 @@ async fn do_capture(
     let captured_at = Utc::now();
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
 
-    // Resolve ignored windows to SCK window IDs so ScreenCaptureKit
-    // excludes them from the capture buffer (zero overhead, pixel-perfect).
-    // Sort + dedup so the persistent stream isn't needlessly recreated when
-    // transient windows (tooltips, popups) cause ordering changes.
     let window_filters = WindowFilters::new(
         &params.tree_walker_config.ignored_windows,
         &params.tree_walker_config.included_windows,
         &params.tree_walker_config.ignored_urls,
     );
+
+    #[cfg(target_os = "windows")]
+    let windows_capture =
+        capture_windows_monitor_privacy_safe(params.monitor, &window_filters).await;
+    #[cfg(target_os = "windows")]
+    let (image, windows_outcome, capture_dur) = (
+        windows_capture.image,
+        windows_capture.outcome,
+        windows_capture.duration,
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    // Resolve ignored windows to SCK window IDs so ScreenCaptureKit
+    // excludes them from the capture buffer (zero overhead, pixel-perfect).
+    // Sort + dedup so the persistent stream isn't needlessly recreated when
+    // transient windows (tooltips, popups) cause ordering changes.
     let mut excluded_ids = get_excluded_sck_window_ids(&window_filters);
+    #[cfg(not(target_os = "windows"))]
     excluded_ids.sort_unstable();
+    #[cfg(not(target_os = "windows"))]
     excluded_ids.dedup();
 
+    #[cfg(not(target_os = "windows"))]
     // Take screenshot (with ignored windows excluded at the OS level)
     let (image, capture_dur) = capture_monitor_image(params.monitor, &excluded_ids).await?;
     debug!(
@@ -1770,12 +1934,25 @@ async fn do_capture(
         capture_dur, params.monitor_id
     );
 
+    #[cfg(target_os = "windows")]
+    if windows_outcome.is_placeholder() {
+        return persist_windows_placeholder(
+            params,
+            trigger,
+            captured_at,
+            windows_outcome,
+            screenshot_disabled,
+        )
+        .await;
+    }
+
     // When an ignored window covers most of a monitor, SCK replaces its
     // pixels with black.  The resulting frame is nearly all-black — storing
     // it wastes the tree walk, OCR, DB write, and produces ugly black frames
     // in the timeline.  Detect this cheaply by sampling pixels: if >95% are
     // near-black, skip everything but still return the image so the frame
     // comparer stays updated (prevents re-triggering on the same black frame).
+    #[cfg(not(target_os = "windows"))]
     if is_frame_mostly_black(&image) {
         debug!(
             "captured frame is mostly black on monitor {} — skipping DB write (likely ignored window covering screen)",
@@ -1785,7 +1962,35 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            #[cfg(target_os = "windows")]
+            windows_outcome,
         });
+    }
+
+    // The shared wrapper already verifies after pixel acquisition. Verify once
+    // more immediately before UIA so a newly focused excluded window never has
+    // its accessibility tree paired with the previously safe bitmap.
+    #[cfg(target_os = "windows")]
+    let pre_walk_outcome = match plan_windows_monitor_capture(params.monitor, &window_filters) {
+        Ok(WindowsMonitorCapturePlan::FullMonitor)
+        | Ok(WindowsMonitorCapturePlan::ActiveWindow(_)) => None,
+        Ok(WindowsMonitorCapturePlan::Redacted(reason)) => {
+            Some(WindowsCaptureOutcome::CaptureRedacted(reason))
+        }
+        Err(_) => Some(WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+        )),
+    };
+    #[cfg(target_os = "windows")]
+    if let Some(outcome) = pre_walk_outcome {
+        return persist_windows_placeholder(
+            params,
+            trigger,
+            captured_at,
+            outcome,
+            screenshot_disabled,
+        )
+        .await;
     }
 
     // Walk accessibility tree on blocking thread (AX APIs are synchronous).
@@ -1831,6 +2036,8 @@ async fn do_capture(
                     result: None,
                     image,
                     elements_deduped: false,
+                    #[cfg(target_os = "windows")]
+                    windows_outcome,
                 });
             }
         }
@@ -1853,6 +2060,8 @@ async fn do_capture(
                 result: None,
                 image,
                 elements_deduped: false,
+                #[cfg(target_os = "windows")]
+                windows_outcome,
             });
         } else if !decision.walk {
             debug!(
@@ -1892,16 +2101,35 @@ async fn do_capture(
 
     let tree_snapshot = match tree_walk_result {
         TreeWalkResult::Found(snap) => Some(snap),
-        TreeWalkResult::Skipped(reason) => {
-            debug!(
-                "skipping capture: window filtered ({}) on monitor {}",
-                reason, params.monitor_id
-            );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-            });
+        TreeWalkResult::Skipped(_reason) => {
+            #[cfg(target_os = "windows")]
+            {
+                let outcome = WindowsCaptureOutcome::CaptureRedacted(
+                    screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
+                );
+                return persist_windows_placeholder(
+                    params,
+                    trigger,
+                    captured_at,
+                    outcome,
+                    screenshot_disabled,
+                )
+                .await;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                debug!(
+                    "skipping capture: window filtered ({}) on monitor {}",
+                    _reason, params.monitor_id
+                );
+                return Ok(CaptureOutput {
+                    result: None,
+                    image,
+                    elements_deduped: false,
+                    #[cfg(target_os = "windows")]
+                    windows_outcome,
+                });
+            }
         }
         TreeWalkResult::NotFound => None,
     };
@@ -1922,15 +2150,34 @@ async fn do_capture(
             // scoped `App::Title` patterns defer to the post-resolution gate
             // below where the full pair is known.
             if window_pattern::matches_any(&ignored_patterns, &app_lower, "") {
-                debug!(
+                #[cfg(target_os = "windows")]
+                {
+                    let outcome = WindowsCaptureOutcome::CaptureRedacted(
+                        screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
+                    );
+                    return persist_windows_placeholder(
+                        params,
+                        trigger,
+                        captured_at,
+                        outcome,
+                        screenshot_disabled,
+                    )
+                    .await;
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    debug!(
                     "skipping capture: focused app '{}' matches ignored window on monitor {} (tree walk was NotFound)",
                     app, params.monitor_id
                 );
-                return Ok(CaptureOutput {
-                    result: None,
-                    image,
-                    elements_deduped: false,
-                });
+                    return Ok(CaptureOutput {
+                        result: None,
+                        image,
+                        elements_deduped: false,
+                        #[cfg(target_os = "windows")]
+                        windows_outcome,
+                    });
+                }
             }
         }
     }
@@ -1955,6 +2202,8 @@ async fn do_capture(
                             result: None,
                             image,
                             elements_deduped: false,
+                            #[cfg(target_os = "windows")]
+                            windows_outcome,
                         });
                     }
                 }
@@ -1985,6 +2234,8 @@ async fn do_capture(
                 result: None,
                 image,
                 elements_deduped: false,
+                #[cfg(target_os = "windows")]
+                windows_outcome,
             });
         } else if crate::sleep_monitor::screen_is_locked() {
             // Screen was marked locked but now a real app is focused — unlock
@@ -2006,6 +2257,8 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            #[cfg(target_os = "windows")]
+            windows_outcome,
         });
     }
 
@@ -2022,15 +2275,34 @@ async fn do_capture(
             .unwrap_or_default()
             .to_lowercase();
         if window_pattern::matches_any(&ignored_patterns, &check_app, &check_win) {
-            debug!(
+            #[cfg(target_os = "windows")]
+            {
+                let outcome = WindowsCaptureOutcome::CaptureRedacted(
+                    screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
+                );
+                return persist_windows_placeholder(
+                    params,
+                    trigger,
+                    captured_at,
+                    outcome,
+                    screenshot_disabled,
+                )
+                .await;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                debug!(
                 "skipping capture: resolved app='{}' / window='{}' matches ignored pattern on monitor {}",
                 check_app, check_win, params.monitor_id
             );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-            });
+                return Ok(CaptureOutput {
+                    result: None,
+                    image,
+                    elements_deduped: false,
+                    #[cfg(target_os = "windows")]
+                    windows_outcome,
+                });
+            }
         }
     }
 
@@ -2046,6 +2318,8 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            #[cfg(target_os = "windows")]
+            windows_outcome,
         });
     }
 
@@ -2066,6 +2340,7 @@ async fn do_capture(
         languages: params.languages.to_vec(),
         elements_ref_frame_id,
         screenshot_disabled,
+        placeholder_text: None,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
@@ -2077,6 +2352,8 @@ async fn do_capture(
         result: Some(result),
         image,
         elements_deduped: deduped,
+        #[cfg(target_os = "windows")]
+        windows_outcome,
     })
 }
 
@@ -2167,6 +2444,7 @@ fn query_frontmost_app_name_uncached() -> Option<String> {
 /// an RGB sum below a threshold.  Real content — even dark-mode apps — has
 /// variation (scrollbars, text, status bar).  Pure SCK-excluded regions are
 /// exactly `(0, 0, 0)` or very close to it.
+#[cfg(any(not(target_os = "windows"), test))]
 fn is_frame_mostly_black(image: &image::DynamicImage) -> bool {
     let rgb = image.to_rgb8();
     let (w, h) = rgb.dimensions();
