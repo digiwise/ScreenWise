@@ -414,8 +414,8 @@ async fn deduplicate_speaker_by_name(
             };
 
             info!(
-                "speaker dedup: merging {} into {} (same voice + name: '{}' ≈ '{}', samples {} vs {})",
-                merge_id, keep_id, name, candidate.name, our_count, their_count
+                "speaker dedup: merging {} into {} (same voice + normalized name, samples {} vs {})",
+                merge_id, keep_id, our_count, their_count
             );
 
             if let Err(e) = db.merge_speakers(keep_id, merge_id).await {
@@ -487,8 +487,8 @@ async fn deduplicate_existing_speaker_aliases(db: &screenpipe_db::DatabaseManage
             };
 
             info!(
-                "speaker alias cleanup: merging {} into {} (same voice + alias: '{}' ≈ '{}')",
-                merge_id, keep_id, speaker_name, candidate.name
+                "speaker alias cleanup: merging {} into {} (same voice + normalized alias)",
+                merge_id, keep_id
             );
 
             match db.merge_speakers(keep_id, merge_id).await {
@@ -582,8 +582,8 @@ async fn auto_name_input_speaker(db: Arc<screenpipe_db::DatabaseManager>, user_n
                 match db.update_speaker_name(speaker_id, user_name).await {
                     Ok(_) => {
                         info!(
-                            "auto speaker identification: named dominant input speaker {} as '{}'",
-                            speaker_id, user_name
+                            "auto speaker identification: named dominant input speaker {} from configured local identity",
+                            speaker_id
                         );
                         deduplicate_speaker_by_name(&db, speaker_id, user_name).await;
                         // Done — the dominant input speaker is now named.
@@ -615,8 +615,10 @@ async fn run_speaker_identification_loop(
     use futures::StreamExt;
 
     info!(
-        "speaker identification: started (user_name={})",
-        user_name.as_deref().unwrap_or("<not set>")
+        configured_local_identity = user_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty()),
+        "speaker identification started"
     );
 
     let mut meeting_sub =
@@ -685,9 +687,8 @@ async fn run_speaker_identification_loop(
                                 ).await {
                                     Ok(_) => {
                                         info!(
-                                            "speaker identification: named speaker {} as '{}' ({})",
+                                            "speaker identification: named speaker {} from local meeting context ({})",
                                             decision.speaker_id,
-                                            decision.name,
                                             decision.reason,
                                         );
                                         named_in_meeting.insert(decision.speaker_id);

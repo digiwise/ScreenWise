@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::transcription::redact_pii_text as remove_pii;
 use chrono::{DateTime, Utc};
-use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::{
     ChunkOutcome, DatabaseManager, NewDiarizationSegment, ReplacementAudioTranscription,
     UntranscribedChunk,
@@ -47,8 +47,10 @@ use crate::utils::ffmpeg::{read_audio_from_file, write_audio_to_file};
 /// A completed transcription result persisted to disk as a JSON file.
 /// If the DB write fails (e.g. pool timeout), this file survives and is
 /// retried on the next reconciliation sweep.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct PendingTranscription {
+    #[serde(default)]
+    privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     audio_chunk_id: i64,
     transcription: String,
     engine: String,
@@ -61,6 +63,8 @@ struct PendingTranscription {
     diarization_provider: Option<String>,
     #[serde(default)]
     diarization_segments: Vec<TranscriptionDiarizationSegment>,
+    #[serde(default)]
+    secondary_file_paths: Vec<String>,
     secondary_chunk_ids: Vec<i64>,
     file_path: String,
 }
@@ -132,6 +136,9 @@ pub async fn reconcile_untranscribed(
     use_pii_removal: bool,
     metrics: Option<Arc<AudioPipelineMetrics>>,
 ) -> usize {
+    let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+        return 0;
+    };
     // Nothing to reconcile when transcription is disabled — skip entirely
     // to avoid the silent-audio deletion path nuking audio files.
     if *audio_engine == AudioTranscriptionEngine::Disabled {
@@ -157,7 +164,11 @@ pub async fn reconcile_untranscribed(
 
     // Retry any previously failed transcriptions before processing new chunks
     if let Some(dir) = data_dir {
-        retry_pending_transcriptions(db, dir, on_insert, use_pii_removal, metrics.as_ref()).await;
+        if !retry_pending_transcriptions(db, dir, on_insert, use_pii_removal, metrics.as_ref())
+            .await
+        {
+            return 0;
+        }
     }
 
     let now = chrono::Utc::now();
@@ -205,6 +216,10 @@ pub async fn reconcile_untranscribed(
     const MAX_CONSECUTIVE_DB_ERRORS: u32 = 3;
 
     for batch in &batches {
+        if !privacy.is_current() {
+            info!("audio reconciliation stopped after privacy transition");
+            break;
+        }
         // Bail out early if the DB is saturated — don't amplify contention
         if consecutive_db_errors >= MAX_CONSECUTIVE_DB_ERRORS {
             warn!(
@@ -348,6 +363,10 @@ pub async fn reconcile_untranscribed(
                 continue;
             }
         };
+        if !privacy.is_current() {
+            info!("audio reconciliation result discarded after privacy transition");
+            break;
+        }
         let full_text = transcription_output.transcription.clone();
 
         // Silent audio. Two outcomes here, both important:
@@ -419,9 +438,14 @@ pub async fn reconcile_untranscribed(
         let mut diarization_segments = transcription_output.diarization_segments;
         if diarization_segments.is_empty() {
             if let Some(ref seg_mgr) = segmentation_manager {
-                let local_segments =
-                    extract_local_diarization_segments(db, &combined_samples, sample_rate, seg_mgr)
-                        .await;
+                let local_segments = extract_local_diarization_segments(
+                    db,
+                    &combined_samples,
+                    sample_rate,
+                    seg_mgr,
+                    privacy,
+                )
+                .await;
                 if local_segments.len() == 1 {
                     speaker_id = local_segments[0].speaker_id;
                 }
@@ -432,16 +456,27 @@ pub async fn reconcile_untranscribed(
 
         // Store the full batch transcription on the FIRST chunk.
         // Delete the remaining chunks (and their files) to avoid duplicates.
+        if !privacy.is_current() {
+            break;
+        }
         let primary_chunk = valid_chunks[0];
         if valid_chunks.len() > 1 {
             let primary_path = PathBuf::from(&primary_chunk.file_path);
             let samples = combined_samples.clone();
             match tokio::task::spawn_blocking(move || {
-                replace_with_merged_audio(&primary_path, &samples, sample_rate)
+                if !privacy.is_current() {
+                    return Ok(false);
+                }
+                replace_with_merged_audio(&primary_path, &samples, sample_rate)?;
+                Ok::<bool, anyhow::Error>(true)
             })
             .await
             {
-                Ok(Ok(())) => {}
+                Ok(Ok(false)) => {
+                    info!("audio merge skipped after privacy transition");
+                    break;
+                }
+                Ok(Ok(true)) => {}
                 Ok(Err(e)) => {
                     error!(
                         "reconciliation: failed to write merged audio for primary chunk {}: {}",
@@ -463,6 +498,7 @@ pub async fn reconcile_untranscribed(
         let secondary_ids: Vec<i64> = valid_chunks[1..].iter().map(|c| c.id).collect();
 
         let mut pending = PendingTranscription {
+            privacy: Some(privacy),
             audio_chunk_id: primary_chunk.id,
             transcription: full_text,
             engine: engine_name,
@@ -475,6 +511,10 @@ pub async fn reconcile_untranscribed(
                 .diarization_provider
                 .or_else(|| (!diarization_segments.is_empty()).then(|| "local".to_string())),
             diarization_segments,
+            secondary_file_paths: valid_chunks[1..]
+                .iter()
+                .map(|c| c.file_path.clone())
+                .collect(),
             secondary_chunk_ids: secondary_ids,
             file_path: primary_chunk.file_path.clone(),
         };
@@ -525,7 +565,7 @@ pub async fn reconcile_untranscribed(
         tokio::task::yield_now().await;
     }
 
-    if let Some(segmentation_manager) = segmentation_manager {
+    if let Some(segmentation_manager) = segmentation_manager.filter(|_| privacy.is_current()) {
         let backfilled = backfill_missing_speakers(db, segmentation_manager.clone(), 24, 50).await;
         if backfilled > 0 {
             success_count += backfilled;
@@ -570,16 +610,107 @@ fn pending_dir(data_dir: &Path) -> PathBuf {
 
 /// Write a PendingTranscription to a JSON file in the pending directory.
 fn write_pending(data_dir: &Path, pending: &PendingTranscription) -> std::io::Result<()> {
+    if !pending
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        if !pending.secondary_chunk_ids.is_empty() {
+            return write_canceled_merge(data_dir, pending);
+        }
+        return Ok(());
+    }
     let dir = pending_dir(data_dir);
     let filename = format!("chunk-{}.json", pending.audio_chunk_id);
     let path = dir.join(filename);
     let json = serde_json::to_string(pending).map_err(std::io::Error::other)?;
-    std::fs::write(&path, json)?;
+    let written = std::fs::write(&path, json);
+    if !pending
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        if !pending.secondary_chunk_ids.is_empty() {
+            return write_canceled_merge(data_dir, pending);
+        }
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        return Ok(());
+    }
+    written?;
     debug!(
         "reconciliation: wrote pending transcription for chunk {} to {:?}",
         pending.audio_chunk_id, path
     );
     Ok(())
+}
+
+/// A raw merge already replaced the primary file. Keep only cleanup metadata
+/// when its transcript permit expires, so retries cannot duplicate the merged
+/// secondary chunks or revive canceled text.
+fn write_canceled_merge(data_dir: &Path, pending: &PendingTranscription) -> std::io::Result<()> {
+    let mut cleanup = pending.clone();
+    cleanup.privacy = None;
+    cleanup.transcription.clear();
+    cleanup.diarization_segments.clear();
+    cleanup.speaker_id = None;
+    let path = pending_dir(data_dir).join(format!("chunk-{}.json", pending.audio_chunk_id));
+    let json = serde_json::to_string(&cleanup).map_err(std::io::Error::other)?;
+    std::fs::write(path, json)
+}
+
+async fn discard_canceled_transcription(
+    db: &DatabaseManager,
+    pending: &PendingTranscription,
+    data_dir: Option<&Path>,
+    secondary_paths: &[String],
+) -> Result<usize, String> {
+    db.discard_audio_transcription_output(pending.audio_chunk_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !pending.secondary_chunk_ids.is_empty() {
+        if let Some(dir) = data_dir {
+            write_canceled_merge(dir, pending).map_err(|e| e.to_string())?;
+        }
+        cleanup_merged_secondaries(db, pending, secondary_paths).await?;
+    }
+    if let Some(dir) = data_dir {
+        remove_pending(dir, pending.audio_chunk_id);
+    }
+    Ok(0)
+}
+
+async fn cleanup_merged_secondaries(
+    db: &DatabaseManager,
+    pending: &PendingTranscription,
+    secondary_paths: &[String],
+) -> Result<usize, String> {
+    if pending.secondary_chunk_ids.is_empty() {
+        return Ok(0);
+    }
+    let paths: Vec<_> = secondary_paths
+        .iter()
+        .chain(pending.secondary_file_paths.iter())
+        .collect();
+    for path in &paths {
+        // Acquisition creates sibling files. Recovery metadata cannot authorize
+        // deleting the primary or a path outside that exact directory.
+        let primary = Path::new(&pending.file_path);
+        let secondary = Path::new(path);
+        if secondary == primary || secondary.parent() != primary.parent() {
+            return Err("invalid secondary audio cleanup path".to_string());
+        }
+    }
+    db.delete_audio_chunks_batch_queued(pending.secondary_chunk_ids.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    for path in paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("merged audio cleanup failed: {err}")),
+        }
+    }
+    Ok(pending.secondary_chunk_ids.len())
 }
 
 /// Apply the configured Basic PII policy to every transcript payload that can
@@ -598,7 +729,11 @@ fn apply_pii_removal(pending: &mut PendingTranscription, use_pii_removal: bool) 
 /// Remove the pending JSON file for a given chunk id.
 fn remove_pending(data_dir: &Path, audio_chunk_id: i64) {
     let path = pending_dir(data_dir).join(format!("chunk-{}.json", audio_chunk_id));
-    let _ = std::fs::remove_file(&path);
+    if let Err(err) = std::fs::remove_file(&path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            warn!("audio recovery file cleanup failed: {}", err);
+        }
+    }
 }
 
 /// Attempt DB write, callback notification, and secondary chunk cleanup.
@@ -655,6 +790,13 @@ async fn finalize_batch(
     secondary_file_paths: &[String],
     metrics: Option<&Arc<AudioPipelineMetrics>>,
 ) -> Result<usize, String> {
+    if !pending
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        info!("pending audio transcription discarded by privacy policy");
+        return discard_canceled_transcription(db, pending, data_dir, secondary_file_paths).await;
+    }
     let transcript_segments = replacement_transcription_segments(pending);
     db.replace_audio_transcriptions(
         pending.audio_chunk_id,
@@ -667,6 +809,12 @@ async fn finalize_batch(
     .await
     .map_err(|e| e.to_string())?;
 
+    if !pending
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        return discard_canceled_transcription(db, pending, data_dir, secondary_file_paths).await;
+    }
     let provider = pending.diarization_provider.as_deref().unwrap_or("local");
     let segments: Vec<NewDiarizationSegment> = if pending.diarization_segments.is_empty() {
         let source = if pending.speaker_id.is_some() {
@@ -713,6 +861,12 @@ async fn finalize_batch(
             })
             .collect()
     };
+    if !pending
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        return discard_canceled_transcription(db, pending, data_dir, secondary_file_paths).await;
+    }
     if let Err(e) = db
         .insert_diarization_run_with_segments(
             pending.audio_chunk_id,
@@ -739,17 +893,17 @@ async fn finalize_batch(
         m.record_db_insert(word_count);
     }
 
-    // Success — remove the pending file
-    if let Some(dir) = data_dir {
-        remove_pending(dir, pending.audio_chunk_id);
-    }
-
     let mut count = 1usize;
 
     // Notify hot frame cache
-    if let Some(callback) = on_insert {
+    if let Some(callback) = on_insert.filter(|_| {
+        pending
+            .privacy
+            .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    }) {
         let capture_ts = pending.timestamp.timestamp() as u64;
         callback(AudioInsertInfo {
+            privacy: pending.privacy,
             audio_chunk_id: pending.audio_chunk_id,
             transcription: pending.transcription.clone(),
             device_name: pending.device.clone(),
@@ -763,22 +917,10 @@ async fn finalize_batch(
         });
     }
 
-    // Delete secondary chunks — they're merged into the primary
-    if !pending.secondary_chunk_ids.is_empty() {
-        if let Err(e) = db
-            .delete_audio_chunks_batch_queued(pending.secondary_chunk_ids.clone())
-            .await
-        {
-            warn!(
-                "reconciliation: failed to batch-delete {} merged chunks: {}",
-                pending.secondary_chunk_ids.len(),
-                e
-            );
-        }
-        for path in secondary_file_paths {
-            let _ = std::fs::remove_file(path);
-        }
-        count += pending.secondary_chunk_ids.len();
+    // Complete the already-admitted raw merge before retiring its recovery file.
+    count += cleanup_merged_secondaries(db, pending, secondary_file_paths).await?;
+    if let Some(dir) = data_dir {
+        remove_pending(dir, pending.audio_chunk_id);
     }
 
     Ok(count)
@@ -791,15 +933,31 @@ async fn retry_pending_transcriptions(
     on_insert: Option<&AudioInsertCallback>,
     use_pii_removal: bool,
     metrics: Option<&Arc<AudioPipelineMetrics>>,
-) {
+) -> bool {
     let dir = pending_dir(data_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return, // Directory doesn't exist or can't be read — nothing to retry
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(err) => {
+            warn!(
+                "audio recovery directory unavailable; reconciliation deferred: {}",
+                err
+            );
+            return false;
+        }
     };
 
     let mut retried = 0u32;
-    for entry in entries.flatten() {
+    let mut all_recovered = true;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                warn!("audio recovery directory entry unreadable: {}", err);
+                all_recovered = false;
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -812,6 +970,7 @@ async fn retry_pending_transcriptions(
                     "reconciliation: failed to read pending file {:?}: {}",
                     path, e
                 );
+                all_recovered = false;
                 continue;
             }
         };
@@ -823,11 +982,25 @@ async fn retry_pending_transcriptions(
                     "reconciliation: failed to parse pending file {:?}: {}",
                     path, e
                 );
-                // Remove corrupted file
-                let _ = std::fs::remove_file(&path);
+                // Preserve unreadable recovery metadata: deleting it could lose
+                // an already-completed raw merge's duplicate-cleanup record.
+                all_recovered = false;
                 continue;
             }
         };
+        if !pending
+            .privacy
+            .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+        {
+            info!("discarding audio retry invalidated by privacy transition or recorder restart");
+            if let Err(err) =
+                discard_canceled_transcription(db, &pending, Some(data_dir), &[]).await
+            {
+                warn!("canceled audio merge cleanup will retry: {}", err);
+                all_recovered = false;
+            }
+            continue;
+        }
         apply_pii_removal(&mut pending, use_pii_removal);
         if use_pii_removal {
             if let Err(e) = write_pending(data_dir, &pending) {
@@ -856,9 +1029,8 @@ async fn retry_pending_transcriptions(
             continue;
         }
 
-        // We don't have secondary file paths from the pending file, but they
-        // may already have been cleaned up. Pass empty slice — the DB deletion
-        // of secondary chunk IDs still happens.
+        // New recovery files retain secondary paths; older files can still
+        // complete their DB-only cleanup.
         match finalize_batch(db, &pending, on_insert, Some(data_dir), &[], metrics).await {
             Ok(_) => {
                 retried += 1;
@@ -868,6 +1040,7 @@ async fn retry_pending_transcriptions(
                 );
             }
             Err(e) => {
+                all_recovered = false;
                 warn!(
                     "reconciliation: retry still failing for chunk {}: {}",
                     pending.audio_chunk_id, e
@@ -882,6 +1055,7 @@ async fn retry_pending_transcriptions(
             retried
         );
     }
+    all_recovered
 }
 
 async fn extract_local_diarization_segments(
@@ -889,6 +1063,7 @@ async fn extract_local_diarization_segments(
     samples: &[f32],
     sample_rate: u32,
     seg_mgr: &SegmentationManager,
+    privacy: screenpipe_config::AudioPrivacyPermit,
 ) -> Vec<TranscriptionDiarizationSegment> {
     let segmentation_model_path = match seg_mgr.segmentation_model_path.lock().await.clone() {
         Some(path) => path,
@@ -927,8 +1102,11 @@ async fn extract_local_diarization_segments(
                 let speaker_id = if segment.embedding.is_empty() {
                     None
                 } else {
-                    match get_or_create_speaker_from_embedding(db, &segment.embedding).await {
-                        Ok(speaker) => Some(speaker.id),
+                    match get_or_create_speaker_from_embedding(db, &segment.embedding, privacy)
+                        .await
+                    {
+                        Ok(Some(speaker)) => Some(speaker.id),
+                        Ok(None) => return Vec::new(),
                         Err(e) => {
                             debug!("reconciliation: speaker matching failed: {}", e);
                             None
@@ -1019,6 +1197,7 @@ async fn extract_speaker_id(
     samples: &[f32],
     sample_rate: u32,
     seg_mgr: &SegmentationManager,
+    privacy: screenpipe_config::AudioPrivacyPermit,
 ) -> Option<i64> {
     let segmentation_model_path = match seg_mgr.segmentation_model_path.lock().await.clone() {
         Some(path) => path,
@@ -1095,14 +1274,15 @@ async fn extract_speaker_id(
 
     let embedding = best_embedding?;
 
-    match get_or_create_speaker_from_embedding(db, &embedding).await {
-        Ok(speaker) => {
+    match get_or_create_speaker_from_embedding(db, &embedding, privacy).await {
+        Ok(Some(speaker)) => {
             debug!(
                 "reconciliation: matched speaker id={} for batch",
                 speaker.id
             );
             Some(speaker.id)
         }
+        Ok(None) => None,
         Err(e) => {
             debug!("reconciliation: speaker matching failed: {}", e);
             None
@@ -1118,6 +1298,9 @@ pub async fn backfill_missing_speakers(
     lookback_hours: i64,
     limit: i64,
 ) -> usize {
+    let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+        return 0;
+    };
     let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(now) => now.as_millis() as u64,
         Err(_) => return 0,
@@ -1185,6 +1368,9 @@ pub async fn backfill_missing_speakers(
         .min(BACKFILL_MAX_CHUNKS_PER_PASS)
         .min(normalized_limit);
     for chunk in chunks.into_iter().take(chunk_limit) {
+        if !privacy.is_current() {
+            break;
+        }
         let path = Path::new(&chunk.file_path);
         if !path.exists() {
             stale_chunk_ids.push(chunk.id);
@@ -1216,7 +1402,11 @@ pub async fn backfill_missing_speakers(
             }
         };
 
-        let speaker_id = extract_speaker_id(db, &samples, sample_rate, &segmentation_manager).await;
+        let speaker_id =
+            extract_speaker_id(db, &samples, sample_rate, &segmentation_manager, privacy).await;
+        if !privacy.is_current() {
+            break;
+        }
         if let Some(speaker_id) = speaker_id {
             match db.update_transcriptions_speaker(chunk.id, speaker_id).await {
                 Ok(rows_updated) => {
@@ -1342,10 +1532,78 @@ fn extract_device_from_path(file_path: &str) -> (String, bool) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn privacy_denied_recovery_payload_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pending = pending_with_diarization(Vec::new());
+        pending.privacy = None;
+        write_pending(dir.path(), &pending).unwrap();
+        assert!(!dir.path().join("pending-transcriptions").exists());
+    }
+
+    #[tokio::test]
+    async fn privacy_canceled_merge_cleans_duplicates_without_reviving_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary_path = dir.path().join("primary.mp4");
+        let secondary_path = dir.path().join("secondary.mp4");
+        std::fs::write(&primary_path, b"already merged").unwrap();
+        std::fs::write(&secondary_path, b"duplicate").unwrap();
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let primary_id = db
+            .insert_audio_chunk(primary_path.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        let secondary_id = db
+            .insert_audio_chunk(secondary_path.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        db.replace_audio_transcriptions(
+            primary_id,
+            &[ReplacementAudioTranscription {
+                transcription: "must be removed".to_string(),
+                speaker_id: None,
+                start_time: 0.0,
+                end_time: 1.0,
+            }],
+            "local",
+            "Display",
+            false,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.count_audio_transcriptions(primary_id).await.unwrap(), 1);
+        let mut pending = pending_with_diarization(Vec::new());
+        pending.audio_chunk_id = primary_id;
+        pending.file_path = primary_path.to_str().unwrap().to_string();
+        pending.secondary_chunk_ids = vec![secondary_id];
+        pending.secondary_file_paths = vec![secondary_path.to_str().unwrap().to_string()];
+        pending.privacy = None;
+        write_pending(dir.path(), &pending).unwrap();
+        let recovery_path = pending_dir(dir.path()).join(format!("chunk-{primary_id}.json"));
+        let cleanup: PendingTranscription =
+            serde_json::from_str(&std::fs::read_to_string(&recovery_path).unwrap()).unwrap();
+        assert!(cleanup.transcription.is_empty());
+        assert!(cleanup.diarization_segments.is_empty());
+        let result = finalize_batch(&db, &cleanup, None, Some(dir.path()), &[], None)
+            .await
+            .unwrap();
+        assert_eq!(result, 0);
+        assert!(db.audio_chunk_exists(primary_id).await.unwrap());
+        assert!(!db.audio_chunk_exists(secondary_id).await.unwrap());
+        assert_eq!(db.count_audio_transcriptions(primary_id).await.unwrap(), 0);
+        assert!(primary_path.exists());
+        assert!(!secondary_path.exists());
+        assert!(!recovery_path.exists());
+    }
+
     fn pending_with_diarization(
         diarization_segments: Vec<TranscriptionDiarizationSegment>,
     ) -> PendingTranscription {
         PendingTranscription {
+            privacy: screenpipe_config::AudioPrivacyPermit::current(),
             audio_chunk_id: 1,
             transcription: "hello there yes".to_string(),
             engine: "local".to_string(),
@@ -1356,6 +1614,7 @@ mod tests {
             speaker_id: Some(42),
             diarization_provider: Some("local".to_string()),
             diarization_segments,
+            secondary_file_paths: Vec::new(),
             secondary_chunk_ids: Vec::new(),
             file_path: "/tmp/audio.mp4".to_string(),
         }

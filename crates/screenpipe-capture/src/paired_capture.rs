@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Strip gutter-line-number runs from OCR output.
 ///
@@ -316,6 +316,26 @@ pub async fn paired_capture(
     } else {
         ocr_text_json.clone()
     };
+    let sanitize_metadata = |value: Option<&str>| {
+        value.map(|value| {
+            if ctx.use_pii_removal {
+                remove_pii(value)
+            } else {
+                value.to_string()
+            }
+        })
+    };
+    let sanitized_window_name = sanitize_metadata(ctx.window_name);
+    let sanitized_browser_url = sanitize_metadata(ctx.browser_url);
+    let sanitized_document_path = sanitize_metadata(ctx.document_path);
+    let pii_redaction_applied = ctx.use_pii_removal
+        && (sanitized_text.as_deref() != final_text
+            || sanitized_ocr_text != ocr_text
+            || sanitized_ocr_json != ocr_text_json
+            || sanitized_window_name.as_deref() != ctx.window_name
+            || sanitized_browser_url.as_deref() != ctx.browser_url
+            || sanitized_document_path.as_deref() != ctx.document_path
+            || tree_snapshot.is_some_and(accessibility_tree_contains_pii));
 
     // Insert snapshot frame + OCR text positions in a single transaction.
     let ocr_engine_name = if cfg!(target_os = "macos") {
@@ -342,9 +362,9 @@ pub async fn paired_capture(
             ctx.captured_at,
             &snapshot_path_str,
             ctx.app_name,
-            ctx.window_name,
-            ctx.browser_url,
-            ctx.document_path,
+            sanitized_window_name.as_deref(),
+            sanitized_browser_url.as_deref(),
+            sanitized_document_path.as_deref(),
             ctx.focused,
             Some(ctx.capture_trigger),
             sanitized_text.as_deref(),
@@ -356,6 +376,13 @@ pub async fn paired_capture(
             ctx.elements_ref_frame_id,
         )
         .await?;
+
+    if pii_redaction_applied {
+        info!(
+            frame_id,
+            "Basic PII redaction applied to captured frame text or metadata"
+        );
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     debug!(
@@ -372,8 +399,8 @@ pub async fn paired_capture(
         captured_at: ctx.captured_at,
         duration_ms,
         app_name: ctx.app_name.map(String::from),
-        window_name: ctx.window_name.map(String::from),
-        browser_url: ctx.browser_url.map(String::from),
+        window_name: sanitized_window_name,
+        browser_url: sanitized_browser_url,
         content_hash,
     })
 }
@@ -645,6 +672,28 @@ fn sanitize_optional_text(value: &mut Option<String>) {
     }
 }
 
+fn accessibility_tree_contains_pii(snapshot: &TreeSnapshot) -> bool {
+    snapshot.nodes.iter().any(|node| {
+        remove_pii(&node.text) != node.text
+            || node
+                .value
+                .as_deref()
+                .is_some_and(|value| remove_pii(value) != value)
+            || node
+                .help_text
+                .as_deref()
+                .is_some_and(|value| remove_pii(value) != value)
+            || node
+                .url
+                .as_deref()
+                .is_some_and(|value| remove_pii(value) != value)
+            || node
+                .placeholder
+                .as_deref()
+                .is_some_and(|value| remove_pii(value) != value)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,9 +892,9 @@ mod tests {
             monitor_id: 0,
             device_name: "test_monitor",
             app_name: Some("TestApp"),
-            window_name: Some("Account settings"),
-            browser_url: None,
-            document_path: None,
+            window_name: Some("Account for alice@example.com"),
+            browser_url: Some("https://example.test/?email=alice@example.com"),
+            document_path: Some("C:\\Users\\alice@example.com\\account.txt"),
             focused: true,
             capture_trigger: "click",
             use_pii_removal: true,
@@ -894,6 +943,11 @@ mod tests {
         assert!(!result_text.contains(RAW_SECRET));
         assert!(result_text.contains("[EMAIL]"));
         assert!(result_text.contains("[OPENAI_KEY]"));
+        assert_eq!(result.window_name.as_deref(), Some("Account for [EMAIL]"));
+        assert!(result
+            .browser_url
+            .as_deref()
+            .is_some_and(|value| !value.contains(RAW_EMAIL) && value.contains("[EMAIL]")));
 
         let (stored_text, stored_tree_json) = db
             .get_frame_accessibility_data(result.frame_id)

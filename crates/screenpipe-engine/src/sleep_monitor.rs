@@ -582,16 +582,20 @@ async fn check_recording_health() -> (bool, bool) {
 
 /// Start the sleep/screen-lock monitor on Windows.
 ///
-/// Spawns a background thread that polls `OpenInputDesktop` every 5 seconds.
+/// Spawns a background thread that polls `OpenInputDesktop` four times per
+/// second. Windows' process-independent session notifications require a window
+/// or service control handler, neither of which exists in every retained
+/// recorder entry point; the short poll bounds acquisition after a lock while
+/// keeping CLI and desktop behavior identical.
 /// When the interactive desktop is not accessible the screen is locked.
 #[cfg(target_os = "windows")]
 pub fn start_sleep_monitor() {
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, OpenInputDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
     };
-    let poll_interval = std::time::Duration::from_secs(5);
+    let poll_interval = std::time::Duration::from_millis(250);
 
-    info!("Starting Windows screen-lock monitor (OpenInputDesktop polling)");
+    info!("Starting Windows screen-lock monitor (250ms OpenInputDesktop polling)");
 
     std::thread::spawn(move || {
         let mut last_tick = std::time::SystemTime::now();

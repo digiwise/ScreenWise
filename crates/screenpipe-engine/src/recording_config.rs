@@ -322,6 +322,7 @@ impl RecordingConfig {
             capture_keystrokes: true,
             record_keyboard_events: !self.disable_keyboard_capture,
             record_clipboard_events: !self.disable_clipboard_capture,
+            apply_pii_removal: self.use_pii_removal,
             // Event-driven capture relies on same-app title changes reaching
             // the trigger mapper. The lower-level a11y default keeps this off
             // for libraries, but recording sessions need it on.
@@ -480,6 +481,7 @@ mod tests {
         assert!(ui.capture_keystrokes);
         assert!(!ui.record_keyboard_events);
         assert!(!ui.record_clipboard_events);
+        assert!(ui.apply_pii_removal);
         assert!(ui.capture_window_focus);
         assert_eq!(ui.ignored_windows, settings.ignored_windows);
         assert_eq!(ui.excluded_windows, settings.ignored_windows);

@@ -11,8 +11,11 @@
 //!
 //! Destructive-only model: the worker overwrites the source JPG in
 //! place (atomic rename via a tempfile sibling) and stamps
-//! `frames.image_redacted_at`. There's no separate "is processed" flag
-//! and no version-tracking column — the timestamp IS the gate. See
+//! `frames.image_redacted_at`. The timestamp means a frame was rewritten to a
+//! privacy-safe image: either a successful redaction/no-PII evaluation or a
+//! visible fail-closed placeholder. The runtime status distinguishes those
+//! outcomes. Missing files are not stamped. There's no separate "is
+//! processed" flag and no version-tracking column. See
 //! the 20260507 drop-duplicates migration for the schema reduction.
 //!
 //! Why a separate worker (vs. the text path):
@@ -20,6 +23,7 @@
 //! - Failure modes are different (missing file, decode error, partial
 //!   write, mp4 chunk paths) and deserve their own error handling.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,9 +32,11 @@ use sqlx::{Row, SqlitePool};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use super::frame_redactor::{redact_frame, FrameRedactionOutcome};
+use super::frame_redactor::{
+    redact_frame, replace_with_redaction_failure_placeholder, FrameRedactionOutcome,
+};
 use super::{ImageRedactionPolicy, ImageRedactor};
 
 /// Knobs for the image reconciliation worker.
@@ -71,6 +77,13 @@ pub struct ImageWorkerStatus {
     pub paused: bool,
     pub frames_redacted_total: u64,
     pub regions_redacted_total: u64,
+    /// Images replaced with a visible source-free placeholder after inference
+    /// or redaction failed. These are deliberately distinct from successful
+    /// redactions so operators never mistake a fail-closed event for success.
+    pub frames_failed_closed_total: u64,
+    /// Missing or unsupported rows skipped in this worker lifetime. They are
+    /// not stamped as redacted and are retried after a worker restart.
+    pub frames_skipped_total: u64,
     pub last_error: Option<String>,
     pub last_redacted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -82,6 +95,11 @@ pub struct ImageWorker {
     cfg: ImageWorkerConfig,
     status: Arc<Mutex<ImageWorkerStatus>>,
     paused: Arc<AtomicBool>,
+    /// The schema has no durable "missing image" state. Retain an in-process
+    /// skip set so one bad historical row cannot starve later
+    /// frames, while still allowing an operator to restore the file and retry
+    /// after a worker restart.
+    skipped_rows: Arc<Mutex<HashSet<i64>>>,
 }
 
 impl ImageWorker {
@@ -92,6 +110,7 @@ impl ImageWorker {
             cfg,
             status: Arc::new(Mutex::new(ImageWorkerStatus::default())),
             paused: Arc::new(AtomicBool::new(false)),
+            skipped_rows: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -204,20 +223,33 @@ impl ImageWorker {
     /// `Ok(Some(outcome))` if work was done, `Ok(None)` if the queue
     /// was empty.
     async fn process_one(&self) -> Result<Option<FrameRedactionOutcome>, anyhow::Error> {
-        let row = sqlx::query(
+        let rows = sqlx::query(
             r#"
             SELECT id, name
               FROM frames
              WHERE name IS NOT NULL
                AND image_redacted_at IS NULL
+               AND (
+                    lower(name) LIKE '%.jpg'
+                 OR lower(name) LIKE '%.jpeg'
+                 OR lower(name) LIKE '%.png'
+                 OR lower(name) LIKE '%.webp'
+                 OR lower(name) LIKE '%.bmp'
+             )
                AND ( strftime('%s','now') - CAST(strftime('%s', timestamp) AS INTEGER) ) >= ?1
              ORDER BY id ASC
-             LIMIT 1
             "#,
         )
         .bind(self.cfg.min_age_seconds)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
+
+        let skipped_rows = self.skipped_rows.lock().await;
+        let row = rows.into_iter().find(|row| {
+            let id: i64 = row.get("id");
+            !skipped_rows.contains(&id)
+        });
+        drop(skipped_rows);
 
         let Some(row) = row else { return Ok(None) };
         let id: i64 = row.get("id");
@@ -225,21 +257,13 @@ impl ImageWorker {
 
         let path = std::path::Path::new(&name);
         if !path.exists() {
-            debug!(frame = id, path = %path.display(), "frame jpg missing — marking redacted to skip");
-            // Still mark redacted so we don't re-pick this row every poll.
-            self.mark_redacted(id).await?;
+            self.skip_row(id, "source image is missing").await;
             return Ok(Some(FrameRedactionOutcome::default()));
         }
 
-        // `frames.name` can hold either a snapshot JPG path (the
-        // common event-driven path) OR an mp4 chunk path (the legacy
-        // path: db.rs `insert_frame` binds `video_chunks.file_path`
-        // into `frames.name`). Detection + redaction expect a still
-        // image. If the file is an mp4 (or anything else our image
-        // stack can't decode), we'd retry the row forever and spam
-        // logs every poll. Mark it processed to skip — the mp4 itself
-        // is left untouched. Per Louis: not handling mp4 redaction
-        // yet, just making sure the worker doesn't break the product.
+        // `frames.name` can also hold an mp4 chunk path on the legacy path.
+        // The query excludes those without falsely stamping them redacted;
+        // keep this defensive check in case a future query changes.
         let is_image_path = matches!(
             path.extension().and_then(|e| e.to_str()),
             Some(ext) if matches!(
@@ -248,18 +272,19 @@ impl ImageWorker {
             )
         );
         if !is_image_path {
-            debug!(
-                frame = id,
-                path = %path.display(),
-                "frames.name is not a still-image path (likely mp4 chunk) — marking redacted to skip"
-            );
-            self.mark_redacted(id).await?;
+            self.skip_row(id, "source is not a supported still image")
+                .await;
             return Ok(Some(FrameRedactionOutcome::default()));
         }
 
-        let regions = self.redactor.detect(path).await?;
-        let outcome =
-            redact_frame(path, &regions, &self.cfg.policy).map_err(anyhow::Error::from)?;
+        let regions = match self.redactor.detect(path).await {
+            Ok(regions) => regions,
+            Err(_) => return self.fail_closed(id, path, "PII detection failed").await,
+        };
+        let outcome = match redact_frame(path, &regions, &self.cfg.policy) {
+            Ok(outcome) => outcome,
+            Err(_) => return self.fail_closed(id, path, "PII redaction failed").await,
+        };
 
         self.mark_redacted(id).await?;
 
@@ -270,6 +295,50 @@ impl ImageWorker {
         s.last_error = None;
 
         Ok(Some(outcome))
+    }
+
+    async fn skip_row(&self, frame_id: i64, reason: &'static str) {
+        self.skipped_rows.lock().await.insert(frame_id);
+        warn!(frame = frame_id, reason, "image redaction row skipped");
+        let mut status = self.status.lock().await;
+        status.frames_skipped_total += 1;
+        status.last_error = Some(reason.to_owned());
+    }
+
+    /// After inference or normal redaction fails, replace the still image with
+    /// a source-free placeholder. A successful replacement is terminal and
+    /// stamped solely to keep the queue progressing; the runtime status keeps
+    /// it separate from successful redactions. If the replacement itself
+    /// cannot be committed (for example a permissions failure), quarantine
+    /// the row in-memory so it also cannot starve subsequent rows.
+    async fn fail_closed(
+        &self,
+        frame_id: i64,
+        path: &std::path::Path,
+        reason: &'static str,
+    ) -> Result<Option<FrameRedactionOutcome>, anyhow::Error> {
+        match replace_with_redaction_failure_placeholder(path) {
+            Ok(()) => {
+                self.mark_redacted(frame_id).await?;
+                warn!(
+                    frame = frame_id,
+                    reason, "image redaction failed closed; source pixels were replaced"
+                );
+                let mut status = self.status.lock().await;
+                status.frames_failed_closed_total += 1;
+                status.last_error = Some(reason.to_owned());
+                Ok(Some(FrameRedactionOutcome::default()))
+            }
+            Err(_) => {
+                self.skip_row(frame_id, "PII failure placeholder could not be written")
+                    .await;
+                warn!(
+                    frame = frame_id,
+                    "image redaction failed and fail-closed replacement could not be committed"
+                );
+                Ok(Some(FrameRedactionOutcome::default()))
+            }
+        }
     }
 
     async fn mark_redacted(&self, frame_id: i64) -> Result<(), sqlx::Error> {
@@ -337,6 +406,20 @@ mod tests {
         }
     }
 
+    struct FailingRedactor;
+    #[async_trait]
+    impl ImageRedactor for FailingRedactor {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn version(&self) -> u32 {
+            1
+        }
+        async fn detect(&self, _path: &Path) -> Result<Vec<ImageRegion>, RedactError> {
+            Err(RedactError::Runtime("test detection failure".into()))
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn skips_recent_frames() {
         let pool = setup().await;
@@ -356,21 +439,119 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn marks_missing_jpg_redacted_so_it_isnt_re_polled() {
+    async fn missing_jpg_is_skipped_and_does_not_starve_later_frames() {
         let pool = setup().await;
         // older-than-min-age frame, but jpg doesn't exist
         sqlx::query("INSERT INTO frames (timestamp, name) VALUES (datetime('now', '-1 hour'), '/tmp/_definitely_missing.jpg')")
             .execute(&pool).await.unwrap();
         let cfg = ImageWorkerConfig::default();
         let w = ImageWorker::new(pool.clone(), Arc::new(StubRedactor), cfg);
-        let outcome = w.process_one().await.unwrap();
-        assert!(outcome.is_some());
+        assert!(w.process_one().await.unwrap().is_some());
         let row = sqlx::query("SELECT image_redacted_at FROM frames LIMIT 1")
             .fetch_one(&pool)
             .await
             .unwrap();
         let when: Option<i64> = row.get(0);
-        assert!(when.is_some(), "must mark redacted_at to skip");
+        assert!(
+            when.is_none(),
+            "a failed image must never be marked redacted"
+        );
+        assert_eq!(w.status().await.frames_skipped_total, 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let later = dir.path().join("later.png");
+        image::ImageBuffer::from_pixel(20, 20, image::Rgb([200_u8, 180, 160]))
+            .save(&later)
+            .unwrap();
+        sqlx::query("INSERT INTO frames (timestamp, name) VALUES (datetime('now', '-1 hour'), ?1)")
+            .bind(later.to_string_lossy().into_owned())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(w.process_one().await.unwrap().is_some());
+        let later_marked: Option<i64> =
+            sqlx::query_scalar("SELECT image_redacted_at FROM frames WHERE name = ?1")
+                .bind(later.to_string_lossy().into_owned())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(later_marked.is_some(), "later image must not be starved");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detection_failure_replaces_source_with_visible_placeholder() {
+        let pool = setup().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        image::ImageBuffer::from_pixel(20, 20, image::Rgb([20_u8, 180, 160]))
+            .save(&path)
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        sqlx::query("INSERT INTO frames (timestamp, name) VALUES (datetime('now', '-1 hour'), ?1)")
+            .bind(path.to_string_lossy().into_owned())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let worker = ImageWorker::new(
+            pool.clone(),
+            Arc::new(FailingRedactor),
+            ImageWorkerConfig::default(),
+        );
+        assert!(worker.process_one().await.unwrap().is_some());
+
+        let replacement = image::open(&path).unwrap().to_rgb8();
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        let banner = replacement.get_pixel(0, 0);
+        assert!(banner[0] > banner[1]);
+        let marked: Option<i64> =
+            sqlx::query_scalar("SELECT image_redacted_at FROM frames LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            marked.is_some(),
+            "privacy-safe replacement must leave the queue"
+        );
+        let status = worker.status().await;
+        assert_eq!(status.frames_redacted_total, 0);
+        assert_eq!(status.frames_failed_closed_total, 1);
+        assert_eq!(status.last_error.as_deref(), Some("PII detection failed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redaction_failure_replaces_corrupt_source_with_visible_placeholder() {
+        let pool = setup().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.png");
+        std::fs::write(&path, b"not an image").unwrap();
+        sqlx::query("INSERT INTO frames (timestamp, name) VALUES (datetime('now', '-1 hour'), ?1)")
+            .bind(path.to_string_lossy().into_owned())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let worker = ImageWorker::new(
+            pool.clone(),
+            Arc::new(StubRedactor),
+            ImageWorkerConfig::default(),
+        );
+        assert!(worker.process_one().await.unwrap().is_some());
+
+        let replacement = image::open(&path).unwrap().to_rgb8();
+        assert_eq!(replacement.dimensions(), (1280, 720));
+        let banner = replacement.get_pixel(0, 0);
+        assert!(banner[0] > banner[1]);
+        let marked: Option<i64> =
+            sqlx::query_scalar("SELECT image_redacted_at FROM frames LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(marked.is_some());
+        assert_eq!(
+            worker.status().await.last_error.as_deref(),
+            Some("PII redaction failed")
+        );
     }
 
     /// `frames.name` can hold an mp4 chunk path on the legacy capture
@@ -379,7 +560,7 @@ mod tests {
     /// `image::open`. Regression guard for product-stability path —
     /// without this the worker infinite-retries every poll.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn marks_mp4_path_redacted_so_it_isnt_re_polled() {
+    async fn mp4_path_is_excluded_without_being_marked_redacted() {
         let pool = setup().await;
         // Use a temp .mp4 that actually exists on disk so we hit the
         // extension-check path (not the missing-file early-out).
@@ -394,7 +575,7 @@ mod tests {
         let cfg = ImageWorkerConfig::default();
         let w = ImageWorker::new(pool.clone(), Arc::new(StubRedactor), cfg);
         let outcome = w.process_one().await.unwrap();
-        assert!(outcome.is_some(), "mp4 row should be marked, not errored");
+        assert!(outcome.is_none(), "mp4 rows must not enter the image queue");
         // mp4 must NOT have been touched.
         assert!(
             mp4_path.exists(),
@@ -405,7 +586,10 @@ mod tests {
             .await
             .unwrap();
         let when: Option<i64> = row.get(0);
-        assert!(when.is_some(), "must mark redacted_at to skip");
+        assert!(
+            when.is_none(),
+            "an unprocessed mp4 must not be marked redacted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

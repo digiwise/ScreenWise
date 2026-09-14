@@ -3052,3 +3052,141 @@ ORT location: all seven `keyboard_privacy` tests passed and the focused click
 redaction test passed. The source tree passed `cargo fmt --all -- --check` after
 formatting. Audio PII persistence and audio pause-generation work remain
 separate below rather than being implied by these input-capture results.
+
+### Windows UIA password-tree redaction — 2026-09-14
+
+Pre-change boundary: keyboard and click paths use UIA's `IsPassword` property,
+but accessibility-tree extraction suppresses password values only when the
+control type is `Edit` or `ComboBox`. Frameworks can expose password-marked
+controls under other text-bearing roles, allowing their name/value/help text to
+reach the frame's accessibility snapshot.
+
+Tree extraction now treats `IsPassword=true` as role-independent: it writes an
+explicit `[REDACTED: password field]` node, removes help text, does not recurse
+into the protected subtree, and emits a content-free diagnostic. Structural
+role/state/geometry remain available. Basic regex PII sanitization continues to
+cover ordinary UIA text/value/help/URL fields when that setting is enabled. An
+`Edit` or `ComboBox` whose provider cannot supply `IsPassword` also fails closed
+with `[REDACTED: UIA password state unavailable]`; synthetic and custom roles
+that explicitly report `IsPassword=true` are covered regardless of role name.
+
+The final UI-event database boundary now applies the same Basic PII setting to
+typed text, clipboard content, window titles, browser URLs, and captured element
+name/value/description. Application identity, element role/automation ID,
+geometry, buttons, key codes, and pointer coordinates remain structural fields.
+Routing and exclusion matching use the original in-memory event, while only the
+sanitized copy is admitted to SQLite. The recorder drains and reports UI events
+captured during lock, schedule, or DRM pauses instead of persisting them or
+turning them into screen-capture triggers.
+
+Meeting metadata was another persistence edge: auto-detected local calendar
+titles/attendees and manual local-API title/attendee/note fields bypassed Basic
+PII removal. Both insertion and update paths now sanitize those text fields
+before SQLite and event publication when Basic PII removal is enabled. Meeting
+application identifiers and timestamps remain structural metadata.
+
+### Frame API PII-redaction disclosure — 2026-09-14
+
+Pre-change boundary: authenticated `/frames/{id}?redact_pii=true` logs several
+OCR/image/redaction failures but then serves the original unredacted JPEG. It
+also returns ordinary raw image bytes when OCR metadata is absent, and
+successful region blurring is signalled only in response headers rather than
+in the image. This is a reachable fail-open disclosure independent of
+recorder-time Windows capture placeholders.
+
+The redaction request now fails closed. Missing/unreadable source data, missing
+or invalid OCR metadata, database errors, image decode failures, and redaction
+failures return a generated image containing `PII REDACTION FAILED`; source
+pixels are never copied into that response. Successful redaction adds a visible
+`PII REDACTED` banner and returns explicit no-store status/count headers. A
+successful scan with no detected regions returns the source bytes with an
+explicit `clear` status and no-store policy. Runtime failures remain logged
+without OCR or image content.
+
+The asynchronous image worker also no longer stamps missing images or legacy
+video paths as successfully redacted. Its query excludes non-image rows; a
+missing still image is logged content-free and skipped for that worker lifetime
+without starving later rows. If detection or normal redaction fails for an
+existing still image, the worker atomically replaces it with a source-free
+`PII REDACTION FAILED` image, records a distinct fail-closed status counter,
+and only then releases the row. Successfully rewritten frames with one or more
+regions receive the same visible `PII REDACTED` banner above solid,
+irreversible region overlays. If even the atomic replacement cannot be written
+(for example filesystem permission failure), the worker logs the content-free
+failure and skips that row in-memory rather than blocking the queue; the source
+cannot be safely altered in that exceptional filesystem state.
+
+### Audio acquisition privacy generations — 2026-09-14
+
+Pre-change boundary: Windows OS audio callbacks broadcast unstamped samples,
+the collector checks lock only outside its 30-second accumulation loop, and
+schedule/DRM state is inaccessible to the audio crate. Queued chunks, live
+meeting buffers, asynchronous transcripts and retries can outlive a pause and
+be persisted after resume. The desktop schedule monitor starts after acquisition.
+This change introduces one atomic effective lock/preference/schedule/DRM state
+and generation, propagated from acquisition to every audio output boundary;
+power-saving AudioPaused remains separate. No dependency or schema change is
+required.
+
+Implemented one packed atomic state for observed screen lock, the audio-only
+record-while-locked preference, schedule pause, and DRM pause. Every effective
+audio pause/resume increments its generation. Windows CPAL callbacks acquire a
+permit before copying/converting samples; that exact permit follows recorder
+chunks, live meeting frames, transcription results, recovery payloads, and
+asynchronous hot-cache callbacks. The collector checks within the accumulation
+loop, drops queued stale samples, clears source/overlap buffers on transitions,
+and discards invalid final flushes. Normal and live local model sessions restart
+when their generation changes. Schedule state is established synchronously
+before CLI capture and before desktop vision/audio/UI startup. The visual/UI
+policy reads the same atomic flags but never applies the audio lock override.
+
+Raw encoders check permission before execution and after file creation; invalid
+or partially encoded outputs are removed and every cleanup failure is logged.
+STT results, normal and
+previous-transcript writes, speaker-embedding writes, meeting delta/final events,
+detached final retries, reconciliation results, and hot-cache admission each
+recheck their original permit. Cache insertion rechecks after awaiting its write
+lock. Recovery records cannot regain permission after a pause/resume or recorder
+restart. If audio files were already merged before transcript cancellation,
+recovery keeps only scrubbed duplicate-cleanup metadata until secondary rows and
+files are removed, preserving the merged primary without replaying canceled
+text. Unreadable recovery metadata defers reconciliation with a warning. Basic
+PII substitutions in all of these audio text paths emit content-free logs;
+live delta/final text is sanitized before event publication as well as storage.
+If a permit expires while the atomic transcript replacement is already inside
+SQLite, the post-write check transactionally removes that chunk's transcript,
+diarization, and speaker-evidence rows and marks the retained raw chunk terminal
+so reconciliation cannot revive the canceled derived data.
+
+The production event-driven visual loop now evaluates the shared visual policy
+before startup, Warm-monitor comparison, visual-change probes, and persisted
+capture, so a paused state cannot perform a throwaway WGC acquisition before the
+later persistence check. The low-level Windows input hooks likewise retain only
+content-free activity timing while paused: they do not copy key/text, clipboard,
+pointer coordinates, click context, window metadata, or UIA trees into recorder
+buffers. Windows lock polling was shortened from five seconds to 250
+milliseconds. This bounds the observed-lock delay but does not claim an
+instantaneous OS notification.
+
+Scoped locked/offline validation used Developer PowerShell, Ninja Multi-Config,
+the root CRT profile override, OpenBLAS runtime PATH, and pinned ORT location.
+The complete affected library suites passed: accessibility 178 tests (22 live
+tests ignored), capture 23, configuration 31, screen 108, redaction 100, audio
+156 (one model-session test ignored), and engine 524 (two live/export tests
+ignored).
+Every audio integration-test target also compiled without executing
+model/hardware-dependent tests. The desktop `tauri_bindings_are_current` test
+passed under its documented native-linking matrix. Changed files were formatted
+and diff checks passed; all three lockfiles remain unchanged. The finalized
+Developer PowerShell/Ninja `cargo build --release --locked --offline` passed in
+6m32s after the last database, audio, and low-level Windows input-gate fixes.
+
+This is an admission boundary, not retroactive cancellation of an SQLite writer
+transaction: each new async write/retry is checked immediately before invocation,
+but a DB operation already admitted while allowed may finish after a pause.
+Windows lock detection polls every 250 milliseconds, so it is bounded rather
+than instantaneous and cannot retroactively reject acquisition that completed
+before the detector observed the lock. Text PII redaction does not mute or bleep
+spoken PII inside otherwise permitted raw audio recordings. No source outside
+the pinned MIT baseline lineage or Litepipe code was consulted for this
+implementation.

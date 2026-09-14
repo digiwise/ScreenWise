@@ -9,6 +9,7 @@ use axum::{
 };
 use oasgen::{oasgen, OaSchema};
 
+use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_db::{MeetingRecord, MeetingTranscriptSegment, MEETING_END_REASON_EXPLICIT_STOP};
 
@@ -72,6 +73,20 @@ pub struct StopMeetingRequest {
 
 fn default_append_typed_text() -> bool {
     true
+}
+
+fn sanitize_meeting_text(value: Option<&str>, use_pii_removal: bool) -> Option<String> {
+    value.map(|text| {
+        if use_pii_removal {
+            let sanitized = remove_pii(text);
+            if sanitized != text {
+                tracing::info!("Basic PII redaction applied to meeting metadata");
+            }
+            sanitized
+        } else {
+            text.to_string()
+        }
+    })
 }
 
 #[derive(OaSchema, Deserialize, Debug)]
@@ -295,15 +310,18 @@ pub(crate) async fn update_meeting_handler(
     Path(id): Path<i64>,
     axum::Json(body): axum::Json<UpdateMeetingRequest>,
 ) -> Result<JsonResponse<MeetingRecord>, (StatusCode, JsonResponse<Value>)> {
+    let title = sanitize_meeting_text(body.title.as_deref(), state.use_pii_removal);
+    let attendees = sanitize_meeting_text(body.attendees.as_deref(), state.use_pii_removal);
+    let note = sanitize_meeting_text(body.note.as_deref(), state.use_pii_removal);
     state
         .db
         .update_meeting(
             id,
             body.meeting_start.as_deref(),
             body.meeting_end.as_deref(),
-            body.title.as_deref(),
-            body.attendees.as_deref(),
-            body.note.as_deref(),
+            title.as_deref(),
+            attendees.as_deref(),
+            note.as_deref(),
             body.meeting_app.as_deref(),
         )
         .await
@@ -437,6 +455,8 @@ pub(crate) async fn start_meeting_handler(
 ) -> Result<JsonResponse<MeetingRecord>, (StatusCode, JsonResponse<Value>)> {
     let app = body.app.as_deref().unwrap_or("manual");
     let resumed_existing = body.id.is_some();
+    let title = sanitize_meeting_text(body.title.as_deref(), state.use_pii_removal);
+    let attendees = sanitize_meeting_text(body.attendees.as_deref(), state.use_pii_removal);
 
     // Resolve the current active meeting up-front so every branch can reason
     // about it. This is the guard that prevents a second open `meetings` row
@@ -490,8 +510,7 @@ pub(crate) async fn start_meeting_handler(
                     JsonResponse(json!({"error": format!("meeting not found: {}", e)})),
                 )
             })?;
-            let title_update = body
-                .title
+            let title_update = title
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
                 .filter(|_| {
@@ -500,8 +519,7 @@ pub(crate) async fn start_meeting_handler(
                         .as_deref()
                         .is_none_or(|s| s.trim().is_empty())
                 });
-            let attendees_update = body
-                .attendees
+            let attendees_update = attendees
                 .as_deref()
                 .filter(|a| !a.trim().is_empty())
                 .filter(|_| {
@@ -536,8 +554,8 @@ pub(crate) async fn start_meeting_handler(
             // Adopt the auto-detected meeting. Enrich with caller-supplied
             // metadata, treating blank/whitespace as "no value" so an empty
             // body doesn't wipe out detector-stamped fields.
-            let title_update = body.title.as_deref().filter(|t| !t.trim().is_empty());
-            let attendees_update = body.attendees.as_deref().filter(|a| !a.trim().is_empty());
+            let title_update = title.as_deref().filter(|t| !t.trim().is_empty());
+            let attendees_update = attendees.as_deref().filter(|a| !a.trim().is_empty());
             if title_update.is_some() || attendees_update.is_some() {
                 if let Err(e) = state
                     .db
@@ -569,12 +587,7 @@ pub(crate) async fn start_meeting_handler(
     } else {
         state
             .db
-            .insert_meeting(
-                app,
-                "manual",
-                body.title.as_deref(),
-                body.attendees.as_deref(),
-            )
+            .insert_meeting(app, "manual", title.as_deref(), attendees.as_deref())
             .await
             .map_err(|e| {
                 // The unique partial index on open meetings (see migration
@@ -626,6 +639,7 @@ pub(crate) async fn start_meeting_handler(
             JsonResponse(json!({"error": format!("meeting not found: {}", e)})),
         )
     })?;
+    let event_title = sanitize_meeting_text(meeting.title.as_deref(), state.use_pii_removal);
 
     // Notify local meeting audio and capture controllers.
     if let Err(e) = screenpipe_events::send_event(
@@ -633,7 +647,7 @@ pub(crate) async fn start_meeting_handler(
         serde_json::json!({
             "meeting_id": id,
             "app": meeting.meeting_app,
-            "title": meeting.title,
+            "title": event_title,
             "detection_source": if resumed_existing {
                 "manual"
             } else {
@@ -842,6 +856,19 @@ pub(crate) async fn export_handler(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn meeting_metadata_obeys_basic_pii_removal() {
+        assert_eq!(
+            sanitize_meeting_text(Some("alice@example.com 123-45-6789"), true).as_deref(),
+            Some("[EMAIL] [SSN]")
+        );
+        assert_eq!(
+            sanitize_meeting_text(Some("alice@example.com"), false).as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(sanitize_meeting_text(None, true), None);
+    }
 
     #[test]
     fn test_list_meetings_request_relative_dates() {

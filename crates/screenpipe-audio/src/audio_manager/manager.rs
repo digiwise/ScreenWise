@@ -742,7 +742,24 @@ impl AudioManager {
             });
             let mut deferral_started: Option<std::time::Instant> = None;
 
+            let mut session_privacy = None;
             while let Ok(audio) = whisper_receiver.recv() {
+                let Some(privacy) = audio.privacy.filter(|p| p.is_current()) else {
+                    info!("queued audio chunk discarded by privacy policy");
+                    continue;
+                };
+                if session_privacy != Some(privacy) {
+                    match engine.create_session() {
+                        Ok(fresh) => session = fresh,
+                        Err(err) => {
+                            error!("failed to reset transcription session after privacy transition: {}", err);
+                            continue;
+                        }
+                    }
+                    session_privacy = Some(privacy);
+                    had_deferred_segments = false;
+                    deferral_started = None;
+                }
                 metrics.record_chunk_received();
                 debug!("received audio from device: {:?}", audio.device.name);
 
@@ -786,12 +803,46 @@ impl AudioManager {
                     );
                     let path_buf = PathBuf::from(&path);
                     let write_result = tokio::task::spawn_blocking(move || {
-                        write_audio_to_file(&resampled, SAMPLE_RATE, &path_buf, false)
+                        if !privacy.is_current() {
+                            return Ok(false);
+                        }
+                        if let Err(encode_err) =
+                            write_audio_to_file(&resampled, SAMPLE_RATE, &path_buf, false)
+                        {
+                            if path_buf.exists() {
+                                std::fs::remove_file(&path_buf).map_err(|cleanup_err| {
+                                    anyhow::anyhow!(
+                                        "audio encoding failed and partial-file cleanup failed: {cleanup_err}; original error: {encode_err}"
+                                    )
+                                })?;
+                            }
+                            return Err(encode_err);
+                        }
+                        if !privacy.is_current() {
+                            if path_buf.exists() {
+                                std::fs::remove_file(&path_buf)?;
+                            }
+                            return Ok(false);
+                        }
+                        Ok::<bool, anyhow::Error>(true)
                     })
                     .await;
 
                     match write_result {
-                        Ok(Ok(())) => {
+                        Ok(Ok(false)) => {
+                            info!("audio file discarded after privacy transition");
+                            continue;
+                        }
+                        Ok(Ok(true)) => {
+                            if !privacy.is_current() {
+                                if let Err(err) = std::fs::remove_file(&path) {
+                                    error!(
+                                        "failed to remove privacy-invalidated audio file: {}",
+                                        err
+                                    );
+                                }
+                                continue;
+                            }
                             debug!("audio persisted to disk: {}", path);
                             // Insert into DB immediately so retranscribe can find this audio
                             // even if transcription is deferred. No transcription yet — just the chunk.
@@ -802,6 +853,9 @@ impl AudioManager {
                             // causing silent data loss on the timeline.
                             let mut inserted = false;
                             for retry in 0..3u32 {
+                                if !privacy.is_current() {
+                                    break;
+                                }
                                 match db.insert_audio_chunk(&path, capture_dt).await {
                                     Ok(_) => {
                                         inserted = true;
@@ -844,6 +898,11 @@ impl AudioManager {
                 } else {
                     None
                 };
+
+                if !privacy.is_current() {
+                    info!("audio processing stopped after privacy transition");
+                    continue;
+                }
 
                 // Meeting live transcription has its own provider/session path.
                 // While a live session is active, do not also run the same

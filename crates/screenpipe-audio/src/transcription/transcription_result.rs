@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
+use crate::transcription::redact_pii_text as remove_pii;
 use chrono::{DateTime, Utc};
-use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::{DatabaseManager, NewDiarizationSegment, Speaker};
 use tracing::{debug, error, warn};
 
@@ -76,6 +76,14 @@ pub async fn process_transcription_result(
     previous_transcript_id: Option<i64>,
     use_pii_removal: bool,
 ) -> Result<Option<AudioInsertResult>, anyhow::Error> {
+    if !result
+        .input
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        tracing::info!("audio transcript persistence discarded by privacy policy");
+        return Ok(None);
+    }
     if result.error.is_some() || result.transcription.is_none() {
         error!(
             "Error in audio recording: {}. Not inserting audio result",
@@ -88,7 +96,15 @@ pub async fn process_transcription_result(
         debug!("empty speaker embedding; storing transcript without speaker");
         None
     } else {
-        let speaker = get_or_create_speaker_from_embedding(db, &result.speaker_embedding).await?;
+        let Some(speaker) = get_or_create_speaker_from_embedding(
+            db,
+            &result.speaker_embedding,
+            result.input.privacy.unwrap(),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
         debug!("detected speaker id={}", speaker.id);
         Some(speaker.id)
     };
@@ -103,6 +119,13 @@ pub async fn process_transcription_result(
     let transcription_engine = audio_transcription_engine.to_string();
     let mut chunk_id: Option<i64> = None;
 
+    if !result
+        .input
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        return Ok(None);
+    }
     debug!("device {} inserting audio chunk", result.input.device);
     if let Some(id) = previous_transcript_id {
         if let Some(prev_transcript) = previous_transcript {
@@ -112,6 +135,13 @@ pub async fn process_transcription_result(
             } else {
                 prev_transcript
             };
+            if !result
+                .input
+                .privacy
+                .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+            {
+                return Ok(None);
+            }
             match db
                 .update_audio_transcription(id, sanitized_prev.as_str())
                 .await
@@ -134,6 +164,14 @@ pub async fn process_transcription_result(
     // Retry DB insertion with backoff to survive transient pool saturation.
     // Without this, transcribed audio is silently dropped from the timeline.
     for retry in 0..3u32 {
+        if !result
+            .input
+            .privacy
+            .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+        {
+            tracing::info!("audio persistence retry discarded after privacy transition");
+            return Ok(None);
+        }
         match db
             .insert_audio_chunk_and_transcription(
                 &result.path,
@@ -170,6 +208,13 @@ pub async fn process_transcription_result(
                         "local"
                     },
                 );
+                if !result
+                    .input
+                    .privacy
+                    .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+                {
+                    return Ok(None);
+                }
                 if let Err(e) = db
                     .insert_diarization_run_with_segments(
                         audio_chunk_id,
@@ -270,30 +315,39 @@ fn diarization_segments_for_insert(
 pub async fn get_or_create_speaker_from_embedding(
     db: &DatabaseManager,
     embedding: &[f32],
-) -> Result<Speaker, anyhow::Error> {
+    privacy: screenpipe_config::AudioPrivacyPermit,
+) -> Result<Option<Speaker>, anyhow::Error> {
+    if !privacy.is_current() {
+        return Ok(None);
+    }
     let speaker = db.get_speaker_from_embedding(embedding).await?;
+    if !privacy.is_current() {
+        return Ok(None);
+    }
     if let Some(speaker) = speaker {
         debug!(
-            "matched speaker id={} name={:?}",
-            speaker.id,
-            if speaker.name.is_empty() {
-                "unnamed"
-            } else {
-                &speaker.name
-            }
+            speaker_id = speaker.id,
+            has_name = !speaker.name.is_empty(),
+            "matched local speaker"
         );
         // Improve cluster over time: update centroid and store diverse embeddings
         if let Err(e) = db.update_speaker_centroid(speaker.id, embedding).await {
             debug!("failed to update speaker centroid: {}", e);
         }
+        if !privacy.is_current() {
+            return Ok(None);
+        }
         if let Err(e) = db.add_embedding_to_speaker(speaker.id, embedding, 10).await {
             debug!("failed to add embedding to speaker: {}", e);
         }
-        Ok(speaker)
+        Ok(Some(speaker))
     } else {
         // insert_speaker logs the creation at info level
+        if !privacy.is_current() {
+            return Ok(None);
+        }
         let speaker = db.insert_speaker(embedding).await?;
-        Ok(speaker)
+        Ok(Some(speaker))
     }
 }
 
@@ -422,6 +476,7 @@ mod tests {
         let result = TranscriptionResult {
             path: String::new(),
             input: AudioInput {
+                privacy: screenpipe_config::AudioPrivacyPermit::current(),
                 data: Arc::new(Vec::new()),
                 sample_rate: 16_000,
                 channels: 1,
@@ -491,6 +546,7 @@ mod tests {
         let result = TranscriptionResult {
             path: file_path.clone(),
             input: AudioInput {
+                privacy: screenpipe_config::AudioPrivacyPermit::current(),
                 data: Arc::new(vec![]),
                 sample_rate: 16_000,
                 channels: 1,

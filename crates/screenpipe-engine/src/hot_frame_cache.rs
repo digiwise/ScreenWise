@@ -148,6 +148,30 @@ impl HotFrameCache {
         let _ = self.audio_notify.send(audio);
     }
 
+    /// Recorder callbacks can be delayed after their DB insert; reject their
+    /// original permit after acquiring the cache lock as well as before awaiting.
+    pub async fn push_audio_with_privacy(
+        &self,
+        audio: HotAudio,
+        privacy: Option<screenpipe_config::AudioPrivacyPermit>,
+    ) {
+        if !privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) {
+            tracing::info!("audio hot-cache insertion discarded by privacy policy");
+            return;
+        }
+        self.maybe_rollover().await;
+        let mut entries = self.audio.write().await;
+        if !privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) {
+            tracing::info!("audio hot-cache insertion discarded after privacy transition");
+            return;
+        }
+        entries
+            .entry(audio.timestamp)
+            .or_default()
+            .push(audio.clone());
+        let _ = self.audio_notify.send(audio);
+    }
+
     /// Subscribe to live frame updates (for WS handlers).
     pub fn subscribe_frames(&self) -> broadcast::Receiver<HotFrame> {
         self.frame_notify.subscribe()
@@ -500,6 +524,28 @@ mod tests {
             result[0].frame_data[0].audio_entries[0].transcription,
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn privacy_denied_audio_never_enters_cache_or_notifications() {
+        let cache = HotFrameCache::new();
+        let mut rx = cache.subscribe_audio();
+        let audio = HotAudio {
+            audio_chunk_id: 10,
+            timestamp: Utc::now(),
+            transcription: "private sample".into(),
+            device_name: "privacy-test".into(),
+            is_input: true,
+            audio_file_path: "/unused.mp4".into(),
+            duration_secs: 1.0,
+            start_time: None,
+            end_time: None,
+            speaker_id: None,
+            speaker_name: None,
+        };
+        cache.push_audio_with_privacy(audio, None).await;
+        assert!(cache.audio.read().await.is_empty());
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

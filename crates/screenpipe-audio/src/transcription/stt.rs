@@ -14,10 +14,11 @@ use crate::utils::ffmpeg::{get_new_file_path_with_timestamp, write_audio_to_file
 use crate::vad::VadEngine;
 use crate::{AudioInput, TranscriptionResult};
 use anyhow::Result;
+use screenpipe_config::AudioPrivacyPermit;
 use std::path::PathBuf;
 use std::{sync::Arc, sync::Mutex as StdMutex};
 use tokio::sync::Mutex;
-use tracing::error;
+use tracing::{error, info};
 
 use super::TranscriptionOutput;
 
@@ -38,6 +39,10 @@ pub async fn process_audio_input(
     pre_written_path: Option<String>,
     filter_music: bool,
 ) -> Result<()> {
+    let Some(privacy) = audio.privacy.filter(|p| p.is_current()) else {
+        info!("audio transcription discarded by privacy policy");
+        return Ok(());
+    };
     let timestamp = audio.capture_timestamp;
     let audio_data = if audio.sample_rate != SAMPLE_RATE {
         resample(audio.data.as_ref(), audio.sample_rate, SAMPLE_RATE)?
@@ -45,6 +50,7 @@ pub async fn process_audio_input(
         audio.data.as_ref().to_vec()
     };
     let audio = AudioInput {
+        privacy: Some(privacy),
         data: Arc::new(audio_data.clone()),
         sample_rate: SAMPLE_RATE,
         channels: audio.channels,
@@ -67,6 +73,9 @@ pub async fn process_audio_input(
     if !speech_ratio_ok {
         return Ok(());
     }
+    if !privacy.is_current() {
+        return Ok(());
+    }
     let file_path = if let Some(path) = pre_written_path {
         path
     } else {
@@ -81,17 +90,36 @@ pub async fn process_audio_input(
         ) {
             error!("Error writing audio to file: {:?}", e);
         }
+        if !privacy.is_current() {
+            if let Err(err) = std::fs::remove_file(&new_file_path) {
+                error!("failed to remove privacy-invalidated audio file: {}", err);
+            }
+            info!("audio file discarded after privacy transition");
+            return Ok(());
+        }
         new_file_path
     };
     while let Some(segment) = segments.recv().await {
-        let result = run_stt(
+        if !privacy.is_current() {
+            info!("audio transcription invalidated by privacy transition");
+            return Ok(());
+        }
+        let Some(result) = run_stt(
             segment,
             audio.device.clone(),
             file_path.clone(),
             timestamp,
+            privacy,
             session,
         )
-        .await?;
+        .await?
+        else {
+            return Ok(());
+        };
+        if !privacy.is_current() {
+            info!("audio transcription result discarded after privacy transition");
+            return Ok(());
+        }
         if output_sender.send(result).is_err() {
             break;
         }
@@ -104,8 +132,13 @@ pub async fn run_stt(
     device: Arc<AudioDevice>,
     path: String,
     timestamp: u64,
+    privacy: AudioPrivacyPermit,
     session: &mut TranscriptionSession,
-) -> Result<TranscriptionResult> {
+) -> Result<Option<TranscriptionResult>> {
+    if !privacy.is_current() {
+        info!("audio inference discarded after privacy transition");
+        return Ok(None);
+    }
     let audio = segment.samples.clone();
     let sample_rate = segment.sample_rate;
     match session
@@ -113,9 +146,14 @@ pub async fn run_stt(
         .await
     {
         Ok(output) => {
+            if !privacy.is_current() {
+                info!("audio inference output discarded after privacy transition");
+                return Ok(None);
+            }
             let output = offset_diarization_segments(output, segment.start);
-            Ok(TranscriptionResult {
+            Ok(Some(TranscriptionResult {
                 input: AudioInput {
+                    privacy: Some(privacy),
                     data: Arc::new(audio),
                     sample_rate,
                     channels: 1,
@@ -131,12 +169,17 @@ pub async fn run_stt(
                 end_time: segment.end,
                 diarization_provider: output.diarization_provider,
                 diarization_segments: output.diarization_segments,
-            })
+            }))
         }
         Err(e) => {
+            if !privacy.is_current() {
+                info!("audio inference output discarded after privacy transition");
+                return Ok(None);
+            }
             error!("STT error for input {}: {:?}", device, e);
-            Ok(TranscriptionResult {
+            Ok(Some(TranscriptionResult {
                 input: AudioInput {
+                    privacy: Some(privacy),
                     data: Arc::new(segment.samples),
                     sample_rate: segment.sample_rate,
                     channels: 1,
@@ -152,7 +195,7 @@ pub async fn run_stt(
                 end_time: segment.end,
                 diarization_provider: None,
                 diarization_segments: Vec::new(),
-            })
+            }))
         }
     }
 }

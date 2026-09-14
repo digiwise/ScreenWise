@@ -213,19 +213,22 @@ impl ServerCore {
                     .unwrap_or_else(chrono::Utc::now);
                 rt.spawn(async move {
                     cache
-                        .push_audio(screenpipe_engine::hot_frame_cache::HotAudio {
-                            audio_chunk_id: info.audio_chunk_id,
-                            timestamp: ts,
-                            transcription: info.transcription.into(),
-                            device_name: info.device_name.into(),
-                            is_input: info.is_input,
-                            audio_file_path: info.audio_file_path.into(),
-                            duration_secs: info.duration_secs,
-                            start_time: info.start_time,
-                            end_time: info.end_time,
-                            speaker_id: info.speaker_id,
-                            speaker_name: None,
-                        })
+                        .push_audio_with_privacy(
+                            screenpipe_engine::hot_frame_cache::HotAudio {
+                                audio_chunk_id: info.audio_chunk_id,
+                                timestamp: ts,
+                                transcription: info.transcription.into(),
+                                device_name: info.device_name.into(),
+                                is_input: info.is_input,
+                                audio_file_path: info.audio_file_path.into(),
+                                duration_secs: info.duration_secs,
+                                start_time: info.start_time,
+                                end_time: info.end_time,
+                                speaker_id: info.speaker_id,
+                                speaker_name: None,
+                            },
+                            info.privacy,
+                        )
                         .await;
                 });
             }));

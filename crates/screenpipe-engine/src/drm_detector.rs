@@ -30,9 +30,6 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 use tracing::{debug, info};
 
-/// Global flag — when `true`, all monitors skip screen capture.
-static DRM_CONTENT_PAUSED: AtomicBool = AtomicBool::new(false);
-
 /// Global reference to the UI recorder's stop flag.
 /// Set during startup so the DRM detector can stop the UI recorder
 /// (which holds native event taps that keep Screen Recording active).
@@ -57,12 +54,13 @@ pub fn stop_ui_recorder() {
 
 /// Read the current DRM pause state.
 pub fn drm_content_paused() -> bool {
-    DRM_CONTENT_PAUSED.load(Ordering::SeqCst)
+    screenpipe_config::audio_privacy::drm_content_paused()
 }
 
 /// Set the DRM pause state. Logs transitions.
 pub fn set_drm_paused(paused: bool) {
-    let was_paused = DRM_CONTENT_PAUSED.swap(paused, Ordering::SeqCst);
+    let was_paused = drm_content_paused();
+    screenpipe_config::audio_privacy::set_drm_paused(paused);
     if paused && !was_paused {
         info!("DRM content detected — pausing screen capture");
     } else if !paused && was_paused {
@@ -624,7 +622,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Tests that touch the global DRM_CONTENT_PAUSED flag must hold this
+    /// Tests that touch the shared DRM pause state must hold this
     /// mutex to avoid racing with each other (cargo test runs in parallel).
     static DRM_FLAG_LOCK: Mutex<()> = Mutex::new(());
 
@@ -721,7 +719,7 @@ mod tests {
     #[test]
     fn test_global_flag() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         assert!(!drm_content_paused());
         set_drm_paused(true);
         assert!(drm_content_paused());
@@ -732,7 +730,7 @@ mod tests {
     #[test]
     fn test_check_and_update_disabled() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(true);
         let result = check_and_update_drm_state(false, Some("Netflix"), None);
         assert!(!result);
         assert!(!drm_content_paused());
@@ -741,7 +739,7 @@ mod tests {
     #[test]
     fn test_check_and_update_enabled() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = check_and_update_drm_state(true, Some("Netflix"), None);
         assert!(result);
         assert!(drm_content_paused());
@@ -760,7 +758,7 @@ mod tests {
     #[test]
     fn test_pre_capture_drm_check_disabled() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = pre_capture_drm_check(false, Some("Netflix"));
         assert!(!result, "should be no-op when setting is off");
         assert!(!drm_content_paused(), "flag should remain unset");
@@ -770,19 +768,19 @@ mod tests {
     #[test]
     fn test_pre_capture_drm_check_native_app() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = pre_capture_drm_check(true, Some("Netflix"));
         assert!(result, "should detect native DRM app");
         assert!(drm_content_paused(), "flag should be set");
         // cleanup
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn test_pre_capture_drm_check_non_drm_app() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = pre_capture_drm_check(true, Some("Finder"));
         assert!(!result, "should not flag Finder as DRM");
         assert!(!drm_content_paused(), "flag should remain unset");
@@ -792,12 +790,12 @@ mod tests {
     #[test]
     fn test_pre_capture_drm_check_already_paused() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(true);
         let result = pre_capture_drm_check(true, Some("Finder"));
         assert!(result, "should stay paused when already paused");
         assert!(drm_content_paused(), "flag should remain set");
         // cleanup
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 
     // ── live integration tests ──────────────────────────────────────
@@ -809,7 +807,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_poll_drm_clear_live() {
         // Set DRM paused as if we just detected it
-        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(true);
 
         let still_drm = poll_drm_clear();
 
@@ -870,7 +868,7 @@ mod tests {
             println!("Running with direct AX access");
 
             // 2. Test with trigger_app_name (simulates AppSwitch to Comet)
-            DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+            screenpipe_config::audio_privacy::set_drm_paused(false);
             let blocked = pre_capture_drm_check(true, Some("Comet"));
             println!(
                 "pre_capture_drm_check(trigger=Comet): blocked={}, flag={}",
@@ -884,7 +882,7 @@ mod tests {
             assert!(drm_content_paused(), "DRM flag should be set");
 
             // 3. Test without trigger (simulates Idle/Click trigger)
-            DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+            screenpipe_config::audio_privacy::set_drm_paused(false);
             let blocked_no_trigger = pre_capture_drm_check(true, None);
             println!(
                 "pre_capture_drm_check(trigger=None): blocked={}, flag={}",
@@ -897,7 +895,7 @@ mod tests {
             );
 
             // 4. Verify poll_drm_clear agrees
-            DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+            screenpipe_config::audio_privacy::set_drm_paused(true);
             let still_drm = poll_drm_clear();
             println!("poll_drm_clear: still_drm={}", still_drm);
             assert!(still_drm, "poll_drm_clear should also detect DRM");
@@ -946,7 +944,7 @@ mod tests {
         thread::sleep(Duration::from_secs(1));
 
         if has_ax {
-            DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+            screenpipe_config::audio_privacy::set_drm_paused(true);
             let cleared = !poll_drm_clear();
             println!("after closing Comet: cleared={}", cleared);
             assert!(
@@ -955,7 +953,7 @@ mod tests {
             );
         }
 
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 
     // ── check_and_update_drm_state tests ─────────────────────────
@@ -963,38 +961,38 @@ mod tests {
     #[test]
     fn test_check_and_update_drm_state_sets_flag_on_drm_app() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = check_and_update_drm_state(true, Some("Netflix"), None);
         assert!(result, "should return true for DRM app");
         assert!(drm_content_paused(), "global flag should be set");
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 
     #[test]
     fn test_check_and_update_drm_state_sets_flag_on_drm_url() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result =
             check_and_update_drm_state(true, Some("Chrome"), Some("https://netflix.com/watch"));
         assert!(result, "should return true for DRM URL");
         assert!(drm_content_paused(), "global flag should be set");
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 
     #[test]
     fn test_check_and_update_drm_state_clears_flag_on_non_drm() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(true);
         let result = check_and_update_drm_state(true, Some("Finder"), Some("https://google.com"));
         assert!(!result, "should return false for non-DRM content");
         assert!(!drm_content_paused(), "global flag should be cleared");
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 
     #[test]
     fn test_check_and_update_drm_state_noop_when_disabled() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = check_and_update_drm_state(false, Some("Netflix"), None);
         assert!(!result, "should return false when feature is disabled");
         assert!(
@@ -1007,7 +1005,7 @@ mod tests {
     fn test_check_and_update_drm_state_clears_flag_when_disabled() {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
         // If the flag was somehow set and the feature is disabled, it should clear
-        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(true);
         let result = check_and_update_drm_state(false, Some("Netflix"), None);
         assert!(!result);
         assert!(
@@ -1021,7 +1019,7 @@ mod tests {
         let _lock = DRM_FLAG_LOCK.lock().unwrap();
         // When app_name is None (empty string), check_and_update_drm_state
         // preserves the current flag rather than clearing it (unknown = keep state).
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
         let result = check_and_update_drm_state(true, None, None);
         // With flag=false and no DRM info, it returns false (current state)
         assert!(
@@ -1029,13 +1027,13 @@ mod tests {
             "should return false when flag was false and app unknown"
         );
 
-        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(true);
         let result = check_and_update_drm_state(true, None, None);
         // With flag=true and no DRM info, it preserves true (unknown = keep)
         assert!(
             result,
             "should return true when flag was true and app unknown"
         );
-        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
     }
 }

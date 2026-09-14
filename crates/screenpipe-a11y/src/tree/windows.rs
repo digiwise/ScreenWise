@@ -19,7 +19,7 @@ use chrono::Utc;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
 use std::time::Instant;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -79,6 +79,8 @@ const TEXT_TYPES: &[&str] = &[
     "StatusBar",
     "TitleBar",
 ];
+const PASSWORD_FIELD_MARKER: &str = "[REDACTED: password field]";
+const UNVERIFIED_PASSWORD_FIELD_MARKER: &str = "[REDACTED: UIA password state unavailable]";
 
 /// Lazily-initialized COM + UIA state. Wrapped in `UnsafeCell` because
 /// `TreeWalkerPlatform::walk_focused_window` takes `&self` but we need
@@ -544,16 +546,42 @@ fn extract_text_from_tree(
         .as_ref()
         .and_then(|wr| node.bounds.as_ref().map(|b| is_on_screen(b, wr)));
 
+    // UIA's IsPassword property is the privacy boundary, regardless of how a
+    // framework maps the control type. Custom/Electron controls can surface a
+    // password value as Text, Button, Pane, or another role rather than Edit.
+    let privacy_marker = if node.is_password == Some(true) {
+        Some(PASSWORD_FIELD_MARKER)
+    } else if node.is_password.is_none()
+        && (ct.eq_ignore_ascii_case("Edit") || ct.eq_ignore_ascii_case("ComboBox"))
+    {
+        // A text-entry control whose UIA provider cannot answer IsPassword is
+        // not safe to persist. This mirrors the fail-closed keyboard policy
+        // without discarding unrelated structural nodes that do not expose the
+        // property at all.
+        Some(UNVERIFIED_PASSWORD_FIELD_MARKER)
+    } else {
+        None
+    };
+    if let Some(marker) = privacy_marker {
+        append_text(buffer, marker);
+        let mut redacted = make_tree_node(node, ct, marker, depth, norm_bounds, on_screen);
+        redacted.value = Some(marker.to_string());
+        redacted.help_text = None;
+        nodes.push(redacted);
+        if node.is_password == Some(true) {
+            debug!("a11y: redacted password element text from accessibility snapshot");
+        } else {
+            warn!("a11y: redacted text-entry element because UIA password state was unavailable");
+        }
+        return;
+    }
+
     // Extract text from text-bearing elements
     if TEXT_TYPES.iter().any(|&t| ct.eq_ignore_ascii_case(t)) {
         // Prefer value (actual content) for edit/combobox
         // Note: Document is handled separately below — its children are the
         // actual web content tree in Electron/browser apps, so we must recurse.
         if matches!(ct, "Edit" | "ComboBox") {
-            // Never extract the value of password fields
-            if node.is_password == Some(true) {
-                return;
-            }
             if let Some(ref val) = node.value {
                 if !val.trim().is_empty() {
                     append_text(buffer, val);
@@ -800,6 +828,7 @@ mod tests {
                     control_type: "Edit".to_string(),
                     name: Some("Search".to_string()),
                     value: Some("typed text".to_string()),
+                    is_password: Some(false),
                     ..Default::default()
                 },
                 AccessibilityNode {
@@ -846,6 +875,99 @@ mod tests {
             "Image should be skipped, got: {}",
             buf
         );
+    }
+
+    #[test]
+    fn password_property_redacts_every_text_bearing_control_type() {
+        use crate::events::AccessibilityNode;
+
+        let tree = AccessibilityNode {
+            control_type: "Window".to_string(),
+            children: vec![
+                AccessibilityNode {
+                    control_type: "Button".to_string(),
+                    name: Some("secret button label".to_string()),
+                    value: Some("secret button value".to_string()),
+                    help_text: Some("secret help".to_string()),
+                    is_password: Some(true),
+                    ..Default::default()
+                },
+                AccessibilityNode {
+                    control_type: "Text".to_string(),
+                    name: Some("secret text".to_string()),
+                    value: Some("secret value".to_string()),
+                    is_password: Some(true),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut buffer = String::new();
+        let mut nodes = Vec::new();
+        let mut browser_url = None;
+
+        extract_text_from_tree(
+            &tree,
+            0,
+            10,
+            &mut buffer,
+            &mut nodes,
+            &mut browser_url,
+            &None,
+            &None,
+            &[],
+            "",
+            &mut false,
+        );
+
+        assert_eq!(buffer.matches(PASSWORD_FIELD_MARKER).count(), 2);
+        assert!(!buffer.contains("secret"));
+        assert_eq!(nodes.len(), 2);
+        for node in nodes {
+            assert_eq!(node.text, PASSWORD_FIELD_MARKER);
+            assert_eq!(node.value.as_deref(), Some(PASSWORD_FIELD_MARKER));
+            assert!(node.help_text.is_none());
+            assert_eq!(node.is_password, Some(true));
+        }
+    }
+
+    #[test]
+    fn unknown_password_state_redacts_text_entry_controls() {
+        use crate::events::AccessibilityNode;
+
+        let tree = AccessibilityNode {
+            control_type: "Edit".to_string(),
+            name: Some("potentially sensitive label".to_string()),
+            value: Some("potentially sensitive value".to_string()),
+            is_password: None,
+            ..Default::default()
+        };
+        let mut buffer = String::new();
+        let mut nodes = Vec::new();
+        let mut browser_url = None;
+
+        extract_text_from_tree(
+            &tree,
+            0,
+            10,
+            &mut buffer,
+            &mut nodes,
+            &mut browser_url,
+            &None,
+            &None,
+            &[],
+            "",
+            &mut false,
+        );
+
+        assert_eq!(buffer, UNVERIFIED_PASSWORD_FIELD_MARKER);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].text, UNVERIFIED_PASSWORD_FIELD_MARKER);
+        assert_eq!(
+            nodes[0].value.as_deref(),
+            Some(UNVERIFIED_PASSWORD_FIELD_MARKER)
+        );
+        assert!(!buffer.contains("sensitive"));
     }
 
     #[test]
@@ -1012,7 +1134,7 @@ mod tests {
     #[test]
     fn test_incognito_detection() {
         use crate::incognito::is_title_private;
-        assert!(is_title_private("Enter Password - Chrome"));
+        assert!(!is_title_private("Enter Password - Chrome"));
         assert!(is_title_private("Private Browsing - Firefox"));
         assert!(is_title_private("New Tab - Google Chrome (Incognito)"));
         assert!(!is_title_private("Calculator"));

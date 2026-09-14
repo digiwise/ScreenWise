@@ -1306,6 +1306,49 @@ impl DatabaseManager {
         .await
     }
 
+    /// Remove every derived transcript/diarization output for an audio chunk
+    /// whose acquisition permit was invalidated, while retaining the raw chunk
+    /// as an intentionally terminal historical capture.
+    pub async fn discard_audio_transcription_output(
+        &self,
+        audio_chunk_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        let now = Utc::now();
+        let mut tx = self.begin_immediate_with_retry().await?;
+
+        sqlx::query("DELETE FROM speaker_identity_evidence WHERE audio_chunk_id = ?1")
+            .bind(audio_chunk_id)
+            .execute(&mut **tx.conn())
+            .await?;
+        sqlx::query("DELETE FROM diarization_segments WHERE audio_chunk_id = ?1")
+            .bind(audio_chunk_id)
+            .execute(&mut **tx.conn())
+            .await?;
+        sqlx::query("DELETE FROM diarization_runs WHERE audio_chunk_id = ?1")
+            .bind(audio_chunk_id)
+            .execute(&mut **tx.conn())
+            .await?;
+        sqlx::query("DELETE FROM audio_transcriptions WHERE audio_chunk_id = ?1")
+            .bind(audio_chunk_id)
+            .execute(&mut **tx.conn())
+            .await?;
+        sqlx::query(
+            "UPDATE audio_chunks \
+             SET transcription_status = 'silent', \
+                 transcription_attempts = transcription_attempts + 1, \
+                 last_transcription_attempt_at = ?1, \
+                 transcription_failure_reason = NULL \
+             WHERE id = ?2",
+        )
+        .bind(now)
+        .bind(audio_chunk_id)
+        .execute(&mut **tx.conn())
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Atomically record the outcome of processing an audio chunk.
     ///
     /// Every transcription writer funnels through this function (live path on

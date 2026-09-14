@@ -83,6 +83,16 @@ impl CaptureSession {
         #[cfg(not(target_os = "macos"))]
         let screen_recording_permitted = true;
 
+        // --- Schedule monitor (before every acquisition path) ---
+        screenpipe_engine::schedule_monitor::reset_schedule_paused();
+        if config.schedule_enabled {
+            screenpipe_engine::schedule_monitor::start_schedule_monitor(
+                config.schedule_rules.clone(),
+                shutdown_tx.subscribe(),
+            );
+            info!("work-hours schedule monitor started");
+        }
+
         if !config.disable_vision && !screen_recording_permitted {
             warn!("Screen recording permission not yet granted — skipping VisionManager to avoid native TCC dialog; will start on next spawn_screenpipe after onboarding grants access");
             crate::health::set_recording_status(crate::health::RecordingStatus::Starting);
@@ -231,6 +241,7 @@ impl CaptureSession {
                 Some(meeting_detector),
                 close_orphaned_meetings_on_start,
                 config.ignored_meeting_apps.clone(),
+                config.use_pii_removal,
             );
             info!("meeting watcher started (v2 UI scanning)");
         } else {
@@ -242,15 +253,6 @@ impl CaptureSession {
             server.db.clone(),
             config.user_name.clone(),
         );
-
-        // --- Schedule monitor ---
-        if config.schedule_enabled {
-            screenpipe_engine::schedule_monitor::start_schedule_monitor(
-                config.schedule_rules.clone(),
-                shutdown_tx.subscribe(),
-            );
-            info!("work-hours schedule monitor started");
-        }
 
         // --- Snapshot compaction ---
         screenpipe_engine::start_snapshot_compaction(

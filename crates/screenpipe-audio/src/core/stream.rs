@@ -68,11 +68,28 @@ impl From<&cpal::SupportedStreamConfig> for AudioStreamConfig {
     }
 }
 
+/// Samples carry the privacy decision taken before the OS callback copied them.
+#[derive(Clone, Debug)]
+pub struct CapturedAudio {
+    pub samples: Vec<f32>,
+    pub privacy: Option<screenpipe_config::AudioPrivacyPermit>,
+}
+
+impl From<Vec<f32>> for CapturedAudio {
+    fn from(mut samples: Vec<f32>) -> Self {
+        let privacy = screenpipe_config::AudioPrivacyPermit::current();
+        if privacy.is_none() {
+            samples.clear();
+        }
+        Self { samples, privacy }
+    }
+}
+
 #[derive(Clone)]
 pub struct AudioStream {
     pub device: Arc<AudioDevice>,
     pub device_config: AudioStreamConfig,
-    transmitter: Arc<tokio::sync::broadcast::Sender<Vec<f32>>>,
+    transmitter: Arc<tokio::sync::broadcast::Sender<CapturedAudio>>,
     stream_control: mpsc::Sender<StreamControl>,
     stream_thread: Option<Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>>,
     pub is_disconnected: Arc<AtomicBool>,
@@ -139,7 +156,7 @@ impl AudioStream {
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] windows_input_aec: bool,
         #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] macos_input_vpio: bool,
     ) -> Result<Self> {
-        let (tx, _) = broadcast::channel::<Vec<f32>>(1000);
+        let (tx, _) = broadcast::channel::<CapturedAudio>(1000);
         let tx_clone = tx.clone();
         let is_disconnected = Arc::new(AtomicBool::new(false));
         let (stream_control_tx, stream_control_rx) = mpsc::channel();
@@ -239,7 +256,7 @@ impl AudioStream {
     #[cfg(not(all(target_os = "linux", feature = "pulseaudio")))]
     async fn start_cpal_stream(
         device: &Arc<AudioDevice>,
-        tx: broadcast::Sender<Vec<f32>>,
+        tx: broadcast::Sender<CapturedAudio>,
         stream_control_rx: mpsc::Receiver<StreamControl>,
         is_running: &Arc<AtomicBool>,
         is_disconnected: &Arc<AtomicBool>,
@@ -317,7 +334,7 @@ impl AudioStream {
     async fn spawn_audio_thread(
         device: cpal::Device,
         config: cpal::SupportedStreamConfig,
-        tx: broadcast::Sender<Vec<f32>>,
+        tx: broadcast::Sender<CapturedAudio>,
         stream_control_rx: mpsc::Receiver<StreamControl>,
         channels: u16,
         is_running_weak: std::sync::Weak<AtomicBool>,
@@ -527,7 +544,7 @@ impl AudioStream {
         }))
     }
 
-    pub async fn subscribe(&self) -> broadcast::Receiver<Vec<f32>> {
+    pub async fn subscribe(&self) -> broadcast::Receiver<CapturedAudio> {
         self.transmitter.subscribe()
     }
 
@@ -599,8 +616,8 @@ impl AudioStream {
         device: Arc<AudioDevice>,
         sample_rate: u32,
         channels: u16,
-    ) -> (Self, Arc<broadcast::Sender<Vec<f32>>>) {
-        let (tx, _) = broadcast::channel::<Vec<f32>>(1000);
+    ) -> (Self, Arc<broadcast::Sender<CapturedAudio>>) {
+        let (tx, _) = broadcast::channel::<CapturedAudio>(1000);
         let tx_arc = Arc::new(tx);
         let (stream_control_tx, _rx) = mpsc::channel();
         let stream = AudioStream {
@@ -642,7 +659,7 @@ impl AudioStream {
         // 1000-deep buffer matches `from_device`. Keeping the receiver
         // unsubscribed at construction time mirrors cpal: the stream isn't
         // started until subscribe(); use `start_wav_playback` below.
-        let (tx, _) = broadcast::channel::<Vec<f32>>(1000);
+        let (tx, _) = broadcast::channel::<CapturedAudio>(1000);
         let tx_clone = tx.clone();
         let (stream_control_tx, _rx) = mpsc::channel();
         let is_disconnected = Arc::new(AtomicBool::new(false));
@@ -669,7 +686,7 @@ impl AudioStream {
                 if is_disconnected_clone.load(Ordering::Relaxed) {
                     break;
                 }
-                if tx.send(chunk.to_vec()).is_err() {
+                if tx.send(chunk.to_vec().into()).is_err() {
                     break;
                 }
                 if realtime {
@@ -756,7 +773,7 @@ fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     channels: u16,
-    tx: broadcast::Sender<Vec<f32>>,
+    tx: broadcast::Sender<CapturedAudio>,
     error_callback: impl FnMut(CpalError) + Send + 'static,
     windows_input_aec: bool,
     macos_input_vpio: bool,
@@ -767,8 +784,14 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[f32], _: &_| {
+                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                    return;
+                };
                 let mono = audio_to_mono(data, channels);
-                let _ = tx.send(mono);
+                let _ = tx.send(CapturedAudio {
+                    samples: mono,
+                    privacy: Some(privacy),
+                });
             },
             error_callback,
             macos_input_vpio,
@@ -777,9 +800,15 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[i16], _: &_| {
+                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                    return;
+                };
                 let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
                 let mono = audio_to_mono(&f32_data, channels);
-                let _ = tx.send(mono);
+                let _ = tx.send(CapturedAudio {
+                    samples: mono,
+                    privacy: Some(privacy),
+                });
             },
             error_callback,
             macos_input_vpio,
@@ -788,12 +817,18 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[i32], _: &_| {
+                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                    return;
+                };
                 let f32_data: Vec<f32> = data
                     .iter()
                     .map(|&s| (s as f64 / 2147483648.0) as f32)
                     .collect();
                 let mono = audio_to_mono(&f32_data, channels);
-                let _ = tx.send(mono);
+                let _ = tx.send(CapturedAudio {
+                    samples: mono,
+                    privacy: Some(privacy),
+                });
             },
             error_callback,
             macos_input_vpio,
@@ -802,9 +837,15 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[i8], _: &_| {
+                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                    return;
+                };
                 let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 128.0).collect();
                 let mono = audio_to_mono(&f32_data, channels);
-                let _ = tx.send(mono);
+                let _ = tx.send(CapturedAudio {
+                    samples: mono,
+                    privacy: Some(privacy),
+                });
             },
             error_callback,
             macos_input_vpio,
@@ -999,7 +1040,7 @@ mod from_wav_tests {
         let mut received = 0usize;
         loop {
             match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
-                Ok(Ok(chunk)) => received += chunk.len(),
+                Ok(Ok(chunk)) => received += chunk.samples.len(),
                 Ok(Err(_)) => break, // sender dropped — playback finished
                 Err(_) => break,     // timeout — done
             }

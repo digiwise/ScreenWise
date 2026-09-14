@@ -677,8 +677,27 @@ impl EventType {
 #[cfg(feature = "db")]
 impl UiEvent {
     /// Convert to database insert format
-    pub fn to_db_insert(&self, session_id: Option<String>) -> screenpipe_db::InsertUiEvent {
+    pub fn to_db_insert(
+        &self,
+        session_id: Option<String>,
+        apply_pii_removal: bool,
+    ) -> screenpipe_db::InsertUiEvent {
         use screenpipe_db::{InsertUiEvent, UiEventType};
+
+        let redacted_fields = std::cell::Cell::new(0usize);
+        let sanitize = |value: Option<String>| {
+            value.map(|value| {
+                if apply_pii_removal {
+                    let sanitized = screenpipe_core::pii_removal::remove_pii(&value);
+                    if sanitized != value {
+                        redacted_fields.set(redacted_fields.get().saturating_add(1));
+                    }
+                    sanitized
+                } else {
+                    value
+                }
+            })
+        };
 
         let (
             event_type,
@@ -769,7 +788,7 @@ impl UiEvent {
                 None,
                 None,
                 None,
-                Some(content.clone()),
+                sanitize(Some(content.clone())),
                 None,
             ),
             EventData::AppSwitch { name, pid } => (
@@ -795,7 +814,7 @@ impl UiEvent {
                 None,
                 None,
                 None,
-                title.clone().or_else(|| Some(app.clone())), // Use title, fallback to app name
+                sanitize(title.clone().or_else(|| Some(app.clone()))), // Use title, fallback to app name
                 None,
             ),
             EventData::Clipboard { operation, content } => (
@@ -808,7 +827,7 @@ impl UiEvent {
                 None,
                 None,
                 Some(*operation as u8),
-                content.clone(),
+                sanitize(content.clone()),
                 None,
             ),
         };
@@ -823,9 +842,9 @@ impl UiEvent {
         ) = if let Some(ref elem) = self.element {
             (
                 Some(elem.role.clone()),
-                elem.name.clone(),
-                elem.value.clone(),
-                elem.description.clone(),
+                sanitize(elem.name.clone()),
+                sanitize(elem.value.clone()),
+                sanitize(elem.description.clone()),
                 elem.automation_id.clone(),
                 elem.bounds.as_ref().map(|b| {
                     serde_json::json!({
@@ -843,12 +862,14 @@ impl UiEvent {
 
         // Extract app_name and window_title from EventData for certain event types
         let (final_app_name, final_window_title) = match &self.data {
-            EventData::AppSwitch { name, .. } => (Some(name.clone()), self.window_title.clone()),
-            EventData::WindowFocus { app, title } => (Some(app.clone()), title.clone()),
-            _ => (self.app_name.clone(), self.window_title.clone()),
+            EventData::AppSwitch { name, .. } => {
+                (Some(name.clone()), sanitize(self.window_title.clone()))
+            }
+            EventData::WindowFocus { app, title } => (Some(app.clone()), sanitize(title.clone())),
+            _ => (self.app_name.clone(), sanitize(self.window_title.clone())),
         };
 
-        InsertUiEvent {
+        let insert = InsertUiEvent {
             timestamp: self.timestamp,
             session_id,
             relative_ms: self.relative_ms as i64,
@@ -865,7 +886,7 @@ impl UiEvent {
             app_name: final_app_name,
             app_pid,
             window_title: final_window_title,
-            browser_url: self.browser_url.clone(),
+            browser_url: sanitize(self.browser_url.clone()),
             element_role,
             element_name,
             element_value,
@@ -873,7 +894,15 @@ impl UiEvent {
             element_automation_id,
             element_bounds,
             frame_id: self.frame_id,
+        };
+        if redacted_fields.get() > 0 {
+            tracing::info!(
+                event_type = self.event_type(),
+                redacted_fields = redacted_fields.get(),
+                "Basic PII redaction applied before UI-event persistence"
+            );
         }
+        insert
     }
 }
 
@@ -923,5 +952,52 @@ mod tests {
         assert!(json.contains("\"event_type\":\"text\""));
         assert!(json.contains("\"app_name\":\"Cursor\""));
         assert!(json.contains("main.rs"));
+    }
+
+    #[cfg(feature = "db")]
+    #[test]
+    fn database_admission_redacts_every_text_bearing_capture_field() {
+        let secret = "person@example.com";
+        let mut event = UiEvent::text(Utc::now(), 100, secret.to_string());
+        event.window_title = Some(format!("Account for {secret}"));
+        event.browser_url = Some(format!("https://example.test/?email={secret}"));
+        event.element = Some(ElementContext {
+            role: "Edit".to_string(),
+            name: Some(format!("Name {secret}")),
+            value: Some(format!("Value {secret}")),
+            description: Some(format!("Description {secret}")),
+            automation_id: Some("stable-automation-id".to_string()),
+            bounds: None,
+        });
+
+        let insert = event.to_db_insert(None, true);
+        let captured = [
+            insert.text_content.as_deref(),
+            insert.window_title.as_deref(),
+            insert.browser_url.as_deref(),
+            insert.element_name.as_deref(),
+            insert.element_value.as_deref(),
+            insert.element_description.as_deref(),
+        ];
+
+        assert!(captured
+            .into_iter()
+            .flatten()
+            .all(|value| !value.contains(secret)));
+        assert_eq!(
+            insert.element_automation_id.as_deref(),
+            Some("stable-automation-id")
+        );
+    }
+
+    #[cfg(feature = "db")]
+    #[test]
+    fn database_admission_preserves_text_when_pii_removal_is_disabled() {
+        let secret = "person@example.com";
+        let event = UiEvent::text(Utc::now(), 100, secret.to_string());
+
+        let insert = event.to_db_insert(None, false);
+
+        assert_eq!(insert.text_content.as_deref(), Some(secret));
     }
 }

@@ -13,6 +13,7 @@ pub mod whisper;
 
 #[derive(Debug, Clone)]
 pub struct AudioInput {
+    pub privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     pub data: Arc<Vec<f32>>,
     pub sample_rate: u32,
     pub channels: u16,
@@ -41,3 +42,12 @@ pub use transcription_result::process_transcription_result;
 pub use transcription_result::TranscriptionResult;
 mod handle_new_transcript;
 pub use handle_new_transcript::{handle_new_transcript, AudioInsertCallback, AudioInsertInfo};
+
+/// Apply Basic PII without putting original or replacement content in logs.
+pub(crate) fn redact_pii_text(text: &str) -> String {
+    let redacted = screenpipe_core::pii_removal::remove_pii(text);
+    if redacted != text {
+        tracing::info!("audio text redacted by Basic PII policy");
+    }
+    redacted
+}

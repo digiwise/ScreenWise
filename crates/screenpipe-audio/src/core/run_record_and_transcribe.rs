@@ -22,7 +22,9 @@ use crate::{
 };
 
 use super::source_buffer::SourceBuffer;
+use super::stream::CapturedAudio;
 use super::AudioStream;
+use screenpipe_config::AudioPrivacyPermit;
 
 /// Timeout for receiving audio data before considering the stream dead.
 ///
@@ -124,14 +126,17 @@ fn meeting_frame_from_recorder_output(
     samples: Vec<f32>,
     audio_stream: &AudioStream,
     captured_at_unix_ms: u64,
+    privacy: Option<AudioPrivacyPermit>,
 ) -> MeetingAudioFrame {
-    MeetingAudioFrame::new(
+    let mut frame = MeetingAudioFrame::new(
         Arc::new(samples),
         &audio_stream.device,
         audio_stream.device_config.sample_rate().0,
         RECORDER_OUTPUT_CHANNELS,
         captured_at_unix_ms,
-    )
+    );
+    frame.privacy = privacy;
+    frame
 }
 
 /// Recording always uses 30s segments. Both batch and realtime modes record identically.
@@ -180,10 +185,37 @@ pub async fn run_record_and_transcribe(
     let mut segment_count: u64 = 0;
 
     let mut was_paused_for_lock = false;
+    let mut segment_privacy = AudioPrivacyPermit::current();
+    let mut was_privacy_paused = false;
 
     while is_running.load(Ordering::Relaxed)
         && !audio_stream.is_disconnected.load(Ordering::Relaxed)
     {
+        let current_privacy = AudioPrivacyPermit::current();
+        if current_privacy != segment_privacy || current_privacy.is_none() {
+            if current_privacy != segment_privacy {
+                info!("audio privacy generation changed; buffered samples and overlap discarded");
+            }
+            collected_audio.clear();
+            source_buffer = SourceBuffer::new(device_name.as_str(), sample_rate as u32);
+            segment_start_time = now_epoch_secs();
+            segment_privacy = current_privacy;
+            last_non_zero_at = None;
+        }
+        if current_privacy.is_none() {
+            if !was_privacy_paused {
+                info!("audio acquisition suppressed by privacy policy");
+            }
+            was_privacy_paused = true;
+            was_paused_for_lock |= screenpipe_config::should_pause_audio_for_lock();
+            while receiver.try_recv().is_ok() {}
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        if was_privacy_paused {
+            info!("audio acquisition resumed after privacy pause; previous buffers discarded");
+            was_privacy_paused = false;
+        }
         // Skip recording while the screen is locked (unless record_while_locked is enabled).
         // This avoids wasting CPU/disk on audio captured during lock screen.
         if screenpipe_config::should_pause_audio_for_lock() {
@@ -238,6 +270,9 @@ pub async fn run_record_and_transcribe(
         }
 
         while collected_audio.len() < max_samples && is_running.load(Ordering::Relaxed) {
+            if !segment_privacy.is_some_and(AudioPrivacyPermit::is_current) {
+                break;
+            }
             match recv_audio_chunk(
                 &mut receiver,
                 &audio_stream,
@@ -249,9 +284,16 @@ pub async fn run_record_and_transcribe(
             .await?
             {
                 Some(chunk) => {
+                    if chunk.privacy != segment_privacy
+                        || !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current)
+                    {
+                        collected_audio.clear();
+                        source_buffer = SourceBuffer::new(device_name.as_str(), sample_rate as u32);
+                        break;
+                    }
                     // Route through the source buffer so Bluetooth packet-drop gaps
                     // are converted to silence instead of crackle.
-                    source_buffer.push(chunk);
+                    source_buffer.push(chunk.samples);
                     let drained = source_buffer.drain_all();
                     if let Some(tap) = live_audio_tap.as_ref() {
                         if tap.is_active() && !drained.is_empty() {
@@ -259,6 +301,7 @@ pub async fn run_record_and_transcribe(
                                 drained.clone(),
                                 &audio_stream,
                                 now_epoch_millis(),
+                                segment_privacy,
                             );
                             tap.send(frame);
                         }
@@ -283,6 +326,7 @@ pub async fn run_record_and_transcribe(
             &whisper_sender,
             &device_name,
             &metrics,
+            segment_privacy,
         )
         .await?;
         segment_start_time = now_epoch_secs();
@@ -297,6 +341,7 @@ pub async fn run_record_and_transcribe(
         &whisper_sender,
         &device_name,
         &metrics,
+        segment_privacy,
     )
     .await
     {
@@ -328,25 +373,34 @@ pub async fn run_record_and_transcribe(
 /// those wouldn't help, and the tight rebuild loop is itself harmful
 /// (recovery storm hammers the device monitor and CoreAudio).
 async fn recv_audio_chunk(
-    receiver: &mut broadcast::Receiver<Vec<f32>>,
+    receiver: &mut broadcast::Receiver<CapturedAudio>,
     audio_stream: &Arc<AudioStream>,
     device_name: &str,
     metrics: &Arc<AudioPipelineMetrics>,
     stream_start: &Instant,
     last_non_zero_at: &mut Option<Instant>,
-) -> Result<Option<Vec<f32>>> {
-    let recv_result = tokio::time::timeout(
-        Duration::from_secs(AUDIO_RECEIVE_TIMEOUT_SECS),
-        receiver.recv(),
-    )
-    .await;
+) -> Result<Option<CapturedAudio>> {
+    let Some(privacy) = AudioPrivacyPermit::current() else {
+        return Ok(None);
+    };
+    let recv_result = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(AUDIO_RECEIVE_TIMEOUT_SECS), receiver.recv()) => result,
+        _ = async {
+            while privacy.is_current() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        } => return Ok(None),
+    };
 
     match recv_result {
         Ok(Ok(chunk)) => {
-            metrics.update_audio_level(&chunk);
-            metrics.update_audio_level_for_device(device_name, &chunk);
+            if !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
+                return Ok(None);
+            }
+            metrics.update_audio_level(&chunk.samples);
+            metrics.update_audio_level_for_device(device_name, &chunk.samples);
 
-            if !is_silent_buffer(&chunk) {
+            if !is_silent_buffer(&chunk.samples) {
                 *last_non_zero_at = Some(Instant::now());
                 // Only tick "device is delivering data" on real audio so
                 // the UI / health endpoint cannot show green during a
@@ -470,7 +524,16 @@ async fn flush_audio(
     whisper_sender: &Arc<crossbeam::channel::Sender<AudioInput>>,
     device_name: &str,
     metrics: &Arc<AudioPipelineMetrics>,
+    privacy: Option<AudioPrivacyPermit>,
 ) -> Result<()> {
+    if !privacy.is_some_and(AudioPrivacyPermit::is_current) {
+        if !collected_audio.is_empty() {
+            info!("audio segment discarded after privacy transition");
+        }
+        collected_audio.clear();
+        return Ok(());
+    }
+
     if collected_audio.is_empty() {
         return Ok(());
     }
@@ -488,6 +551,7 @@ async fn flush_audio(
 
     match whisper_sender.send_timeout(
         AudioInput {
+            privacy,
             data: Arc::new(send_data),
             device: audio_stream.device.clone(),
             sample_rate: audio_stream.device_config.sample_rate().0,
@@ -522,6 +586,32 @@ mod tests {
     use super::*;
     use crate::core::device::AudioDevice;
 
+    #[tokio::test]
+    async fn privacy_denied_flush_discards_audio_and_overlap() {
+        let device = Arc::new(AudioDevice::new(
+            "privacy-test".to_string(),
+            DeviceType::Input,
+        ));
+        let (stream, _) = AudioStream::from_sender_for_test(device, 16_000, 1);
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        let mut samples = vec![0.5; 32_000];
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+        flush_audio(
+            &mut samples,
+            16_000,
+            1234,
+            &Arc::new(stream),
+            &Arc::new(tx),
+            "privacy-test",
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(samples.is_empty());
+        assert!(rx.is_empty());
+    }
+
     #[test]
     fn live_tap_marks_recorder_mono_output_as_mono() {
         let device = Arc::new(AudioDevice::new(
@@ -531,7 +621,12 @@ mod tests {
         let (audio_stream, _tx) = AudioStream::from_sender_for_test(device, 48_000, 4);
         let samples = vec![0.1, -0.2, 0.3, -0.4];
 
-        let frame = meeting_frame_from_recorder_output(samples.clone(), &audio_stream, 1234);
+        let frame = meeting_frame_from_recorder_output(
+            samples.clone(),
+            &audio_stream,
+            1234,
+            AudioPrivacyPermit::current(),
+        );
 
         assert_eq!(frame.channels, RECORDER_OUTPUT_CHANNELS);
         assert_eq!(frame.channels, 1);
@@ -625,7 +720,8 @@ mod tests {
                     ((n as f32 / sample_rate as f32) * 440.0 * std::f32::consts::TAU).sin() * 0.2
                 })
                 .collect::<Vec<f32>>();
-            tx.send(chunk).expect("send simulated recorder chunk");
+            tx.send(chunk.into())
+                .expect("send simulated recorder chunk");
         }
 
         let live_frame = tokio::time::timeout(Duration::from_secs(2), async {
@@ -656,7 +752,7 @@ mod tests {
         assert!(!audio_input.data.is_empty());
 
         is_running.store(false, Ordering::Relaxed);
-        tx.send(vec![0.1; chunk_samples]).ok();
+        tx.send(vec![0.1; chunk_samples].into()).ok();
         let pipeline_result = tokio::time::timeout(Duration::from_secs(5), pipeline)
             .await
             .expect("pipeline shutdown timeout")
@@ -705,7 +801,7 @@ mod tests {
                     ((n as f32 / sample_rate as f32) * 440.0 * std::f32::consts::TAU).sin() * 0.2
                 })
                 .collect::<Vec<f32>>();
-            tx.send(chunk).expect("send simulated speech chunk");
+            tx.send(chunk.into()).expect("send simulated speech chunk");
         }
 
         let speech_segment = tokio::task::spawn_blocking({
@@ -720,7 +816,7 @@ mod tests {
         assert!(!speech_segment.data.is_empty());
 
         for _ in 0..400 {
-            tx.send(vec![0.0; chunk_samples])
+            tx.send(vec![0.0; chunk_samples].into())
                 .expect("send simulated zero-fill chunk");
         }
 
@@ -748,7 +844,7 @@ mod tests {
         assert_eq!(metrics.stream_timeouts.load(Ordering::Relaxed), 0);
 
         is_running.store(false, Ordering::Relaxed);
-        tx.send(vec![0.1; chunk_samples]).ok();
+        tx.send(vec![0.1; chunk_samples].into()).ok();
         let pipeline_result = tokio::time::timeout(Duration::from_secs(5), pipeline)
             .await
             .expect("pipeline shutdown timeout")

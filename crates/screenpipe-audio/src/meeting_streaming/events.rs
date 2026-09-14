@@ -53,6 +53,12 @@ impl MeetingAudioTap {
     }
 
     pub fn send(&self, frame: MeetingAudioFrame) {
+        if !frame
+            .privacy
+            .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+        {
+            return;
+        }
         let _ = self.tx.send(frame);
     }
 
@@ -65,6 +71,7 @@ impl MeetingAudioTap {
 /// chunker. Providers consume these only while a meeting stream is active.
 #[derive(Clone, Debug)]
 pub struct MeetingAudioFrame {
+    pub privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     pub samples: Arc<Vec<f32>>,
     pub device_name: String,
     pub device_type: DeviceType,
@@ -83,6 +90,7 @@ impl MeetingAudioFrame {
     ) -> Self {
         Self {
             samples,
+            privacy: screenpipe_config::AudioPrivacyPermit::current(),
             device_name: device.name.clone(),
             device_type: device.device_type.clone(),
             sample_rate,
@@ -152,6 +160,8 @@ pub struct MeetingStreamingSessionEnded {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeetingTranscriptDelta {
+    #[serde(default)]
+    pub privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     pub meeting_id: i64,
     pub provider: String,
     pub model: Option<String>,
@@ -165,6 +175,8 @@ pub struct MeetingTranscriptDelta {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeetingTranscriptFinal {
+    #[serde(default)]
+    pub privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     pub meeting_id: i64,
     pub provider: String,
     pub model: Option<String>,

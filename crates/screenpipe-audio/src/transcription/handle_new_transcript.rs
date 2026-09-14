@@ -18,6 +18,7 @@ use super::TranscriptionResult;
 /// frame cache) can react to new audio without a cross-crate dependency.
 #[derive(Debug, Clone)]
 pub struct AudioInsertInfo {
+    pub privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     pub audio_chunk_id: i64,
     pub transcription: String,
     pub device_name: String,
@@ -50,7 +51,20 @@ pub async fn handle_new_transcript(
     // could incorrectly trim device B's content.
     let mut prev_transcript_by_device: HashMap<String, String> = HashMap::new();
     let mut prev_id_by_device: HashMap<String, i64> = HashMap::new();
+    let mut previous_privacy = None;
     while let Ok(mut transcription) = transcription_receiver.recv() {
+        let privacy = transcription.input.privacy;
+        if privacy != previous_privacy {
+            prev_transcript_by_device.clear();
+            prev_id_by_device.clear();
+            previous_privacy = privacy;
+        }
+        if !privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) {
+            prev_transcript_by_device.clear();
+            prev_id_by_device.clear();
+            info!("queued audio transcript discarded by privacy policy");
+            continue;
+        }
         // Heartbeat: record that the consumer is alive and processing, even when
         // VAD filters everything. The health check uses this to distinguish
         // "silence, nothing to write" from "pipeline stalled, writes blocked".
@@ -174,7 +188,11 @@ pub async fn handle_new_transcript(
                 // exact text persisted by process_transcription_result. This
                 // keeps Basic PII removal consistent between SQLite and cache.
                 if let (Some(ref callback), Some(ref result)) = (&on_insert, &result) {
+                    if !privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) {
+                        continue;
+                    }
                     callback(AudioInsertInfo {
+                        privacy,
                         audio_chunk_id: result.audio_chunk_id,
                         transcription: result.transcription.clone(),
                         device_name: device_name.clone(),
@@ -208,6 +226,7 @@ mod tests {
         TranscriptionResult {
             path: "/tmp/pii-audio-test.mp4".to_string(),
             input: AudioInput {
+                privacy: screenpipe_config::AudioPrivacyPermit::current(),
                 data: Arc::new(Vec::new()),
                 sample_rate: 16_000,
                 channels: 1,
@@ -223,6 +242,33 @@ mod tests {
             diarization_provider: None,
             diarization_segments: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn privacy_denied_transcript_never_reaches_database_or_callback() {
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let mut result = transcription_result(Some("private sample"), None);
+        result.input.privacy = None;
+        sender.send(result).unwrap();
+        drop(sender);
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+        let callback: AudioInsertCallback = Arc::new(|_| panic!("privacy denied callback"));
+        handle_new_transcript(
+            db.clone(),
+            Arc::new(receiver),
+            Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
+            "live",
+            false,
+            metrics.clone(),
+            Some(callback),
+        )
+        .await;
+        assert_eq!(metrics.db_inserted.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

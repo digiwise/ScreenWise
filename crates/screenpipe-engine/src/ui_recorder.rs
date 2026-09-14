@@ -24,7 +24,7 @@ const UI_RECORDER_MIN_RECV_TIMEOUT: Duration = Duration::from_millis(1);
 const UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn privacy_persistence_paused() -> bool {
-    crate::schedule_monitor::schedule_paused() || crate::drm_detector::drm_content_paused()
+    !screenpipe_config::audio_privacy::visual_capture_allowed()
 }
 
 /// A batched UI event plus an optional correlation id. Events that
@@ -130,6 +130,9 @@ pub struct UiRecorderConfig {
     /// still wake event-driven capture, but clipboard payloads/operation rows
     /// are not written.
     pub record_clipboard_events: bool,
+    /// Apply deterministic Basic PII redaction to every text-bearing UI-event
+    /// field at the final database-admission boundary.
+    pub apply_pii_removal: bool,
     /// Prioritize input latency over event metadata completeness.
     /// Maps to `UiCaptureConfig.prioritize_input_latency`. See that field for details.
     pub prioritize_input_latency: bool,
@@ -168,6 +171,7 @@ impl Default for UiRecorderConfig {
             record_input_events: true,
             record_keyboard_events: true,
             record_clipboard_events: true,
+            apply_pii_removal: true,
             prioritize_input_latency: false,
             extraction_thread_priority: ExtractionThreadPriority::BelowNormal,
             pause_extraction_on_input_ms: 150,
@@ -195,6 +199,7 @@ impl UiRecorderConfig {
         config.capture_window_focus = true;
         config.capture_scroll = self.capture_scroll;
         config.capture_context = self.capture_context;
+        config.apply_pii_removal = self.apply_pii_removal;
         config.prioritize_input_latency = self.prioritize_input_latency;
         config.extraction_thread_priority = self.extraction_thread_priority;
         config.pause_extraction_on_input_ms = self.pause_extraction_on_input_ms;
@@ -573,6 +578,8 @@ pub async fn start_ui_recording(
         let mut batch = EventBatch::with_capacity(batch_size);
         let mut last_flush = std::time::Instant::now();
         let mut consecutive_failures: u32 = 0;
+        let mut privacy_pause_active = false;
+        let mut privacy_discarded_events: u64 = 0;
         let max_batch_age = Duration::from_secs(30); // Drop events older than 30s during storms
                                                      // Track the tail of an in-progress scroll burst so we can emit a
                                                      // single `ScrollStop` trigger when it settles. 300ms matches the
@@ -589,11 +596,33 @@ pub async fn start_ui_recording(
             // before the pause and keep draining producer events without
             // persisting or turning them into capture triggers.
             if privacy_persistence_paused() {
+                if !privacy_pause_active {
+                    privacy_pause_active = true;
+                    privacy_discarded_events =
+                        privacy_discarded_events.saturating_add(batch.len() as u64);
+                    info!(
+                        "UI acquisition privacy gate active; discarding captured events and triggers"
+                    );
+                }
                 batch.clear();
                 scroll_burst.clear();
-                let _ = handle.recv_timeout(UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT);
+                if handle
+                    .recv_timeout(UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT)
+                    .is_some()
+                {
+                    privacy_discarded_events = privacy_discarded_events.saturating_add(1);
+                }
                 last_flush = std::time::Instant::now();
                 continue;
+            }
+
+            if privacy_pause_active {
+                info!(
+                    discarded_events = privacy_discarded_events,
+                    "UI acquisition privacy gate cleared; fresh capture resumed"
+                );
+                privacy_pause_active = false;
+                privacy_discarded_events = 0;
             }
 
             let recv_timeout =
@@ -602,18 +631,31 @@ pub async fn start_ui_recording(
             match handle.recv_timeout(recv_timeout) {
                 Some(event) => {
                     if privacy_persistence_paused() {
+                        if !privacy_pause_active {
+                            info!(
+                                "UI acquisition privacy gate active; discarding captured events and triggers"
+                            );
+                        }
+                        privacy_pause_active = true;
+                        privacy_discarded_events = privacy_discarded_events
+                            .saturating_add(batch.len() as u64)
+                            .saturating_add(1);
                         batch.clear();
                         scroll_burst.clear();
                         last_flush = std::time::Instant::now();
                         continue;
                     }
-                    let db_event = event.to_db_insert(Some(session_id.clone()));
-                    let app_lower = db_event
+                    // Evaluate local exclusion and trigger rules against the
+                    // original metadata, then sanitize a separate insert at
+                    // the persistence boundary. Redaction must not turn an
+                    // excluded title/URL into a non-match.
+                    let routing_event = event.to_db_insert(Some(session_id.clone()), false);
+                    let app_lower = routing_event
                         .app_name
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase();
-                    let title_lower = db_event
+                    let title_lower = routing_event
                         .window_title
                         .as_deref()
                         .unwrap_or_default()
@@ -623,7 +665,7 @@ pub async fn start_ui_recording(
                     let should_record_event = record_input_events
                         && !is_ignored
                         && should_record_input_event(
-                            &db_event,
+                            &routing_event,
                             record_keyboard_events,
                             record_clipboard_events,
                         );
@@ -639,9 +681,9 @@ pub async fn start_ui_recording(
                     // trigger itself is deferred to the burst-end via
                     // ScrollBurstTracker. See [`capture_trigger_kind`].
                     let is_scroll =
-                        matches!(db_event.event_type, screenpipe_db::UiEventType::Scroll);
+                        matches!(routing_event.event_type, screenpipe_db::UiEventType::Scroll);
                     let trigger_kind =
-                        capture_trigger_kind(&db_event, &ignored_patterns, trigger_gates);
+                        capture_trigger_kind(&routing_event, &ignored_patterns, trigger_gates);
                     // A correlation id is only useful if there's somewhere
                     // for both halves to land: a live capture-loop receiver
                     // to produce the frame AND a linker to pair them. If
@@ -687,6 +729,8 @@ pub async fn start_ui_recording(
                     }
 
                     if should_record_event {
+                        let db_event =
+                            event.to_db_insert(Some(session_id.clone()), config.apply_pii_removal);
                         batch.push(db_event, correlation_id);
                     }
 
@@ -781,6 +825,12 @@ pub async fn start_ui_recording(
         }
 
         // Final flush
+        if privacy_pause_active {
+            info!(
+                discarded_events = privacy_discarded_events,
+                "UI recording ended while privacy-gated; captured events remained discarded"
+            );
+        }
         if !batch.is_empty() {
             flush_batch(
                 &db,
@@ -833,6 +883,10 @@ async fn flush_batch(
         return;
     }
     if privacy_persistence_paused() {
+        info!(
+            discarded_events = batch.len(),
+            "UI privacy state changed before database admission; discarded buffered events"
+        );
         batch.clear();
         return;
     }
@@ -1481,6 +1535,16 @@ mod tests {
 
         assert!(ui_config.capture_clipboard);
         assert!(!ui_config.capture_clipboard_content);
+    }
+
+    #[test]
+    fn pii_setting_reaches_low_level_ui_capture() {
+        let config = UiRecorderConfig {
+            apply_pii_removal: false,
+            ..Default::default()
+        };
+
+        assert!(!config.to_ui_config().apply_pii_removal);
     }
 
     #[test]

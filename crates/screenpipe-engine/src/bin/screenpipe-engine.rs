@@ -726,19 +726,22 @@ async fn main() -> anyhow::Result<()> {
                     rt.spawn(async move {
                         use screenpipe_engine::hot_frame_cache::HotAudio;
                         cache
-                            .push_audio(HotAudio {
-                                audio_chunk_id: info.audio_chunk_id,
-                                timestamp: ts,
-                                transcription: info.transcription.into(),
-                                device_name: info.device_name.into(),
-                                is_input: info.is_input,
-                                audio_file_path: info.audio_file_path.into(),
-                                duration_secs: info.duration_secs,
-                                start_time: info.start_time,
-                                end_time: info.end_time,
-                                speaker_id: info.speaker_id,
-                                speaker_name: None,
-                            })
+                            .push_audio_with_privacy(
+                                HotAudio {
+                                    audio_chunk_id: info.audio_chunk_id,
+                                    timestamp: ts,
+                                    transcription: info.transcription.into(),
+                                    device_name: info.device_name.into(),
+                                    is_input: info.is_input,
+                                    audio_file_path: info.audio_file_path.into(),
+                                    duration_secs: info.duration_secs,
+                                    start_time: info.start_time,
+                                    end_time: info.end_time,
+                                    speaker_id: info.speaker_id,
+                                    speaker_name: None,
+                                },
+                                info.privacy,
+                            )
                             .await;
                     });
                 }));
@@ -1250,6 +1253,7 @@ async fn main() -> anyhow::Result<()> {
             Some(meeting_detector),
             true,
             config.ignored_meeting_apps.clone(),
+            config.use_pii_removal,
         ))
     } else {
         info!("meeting watcher skipped because audio capture is disabled");

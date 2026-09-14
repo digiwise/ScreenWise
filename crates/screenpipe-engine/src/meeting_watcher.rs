@@ -28,6 +28,7 @@ pub fn start_meeting_watcher(
     detector: Option<Arc<MeetingDetector>>,
     close_orphaned_meetings_on_start: bool,
     ignored_meeting_apps: Vec<String>,
+    use_pii_removal: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         meeting_detector::run_meeting_detection_loop(
@@ -39,6 +40,7 @@ pub fn start_meeting_watcher(
             detector,
             close_orphaned_meetings_on_start,
             ignored_meeting_apps,
+            use_pii_removal,
         )
         .await;
     })

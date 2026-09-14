@@ -25,6 +25,66 @@ use image::{DynamicImage, ImageFormat, Rgb};
 use crate::image::{ImageRedactionPolicy, ImageRegion};
 use crate::RedactError;
 
+const REDACTION_LABEL: &str = "PII REDACTED";
+const REDACTION_FAILURE_LABEL: &str = "PII REDACTION FAILED";
+
+fn glyph_rows(character: char) -> [u8; 7] {
+    match character {
+        'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        'C' => [0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e],
+        'D' => [0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e],
+        'E' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f],
+        'F' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10],
+        'I' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1f],
+        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f],
+        'P' => [0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10],
+        'R' => [0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11],
+        'T' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
+        _ => [0; 7],
+    }
+}
+
+fn draw_notice_banner(image: &mut image::RgbImage, label: &str, color: Rgb<u8>) {
+    let scale = (image.width() / 360).clamp(1, 4);
+    let text_height = 7 * scale;
+    let banner_height = (text_height + 2 * scale + 8).min(image.height());
+    for y in 0..banner_height {
+        for x in 0..image.width() {
+            image.put_pixel(x, y, color);
+        }
+    }
+
+    let glyph_width = 5 * scale;
+    let spacing = scale;
+    let text_width = label.chars().count() as u32 * (glyph_width + spacing) - spacing;
+    let start_x = image.width().saturating_sub(text_width) / 2;
+    let start_y = banner_height.saturating_sub(text_height) / 2;
+    for (index, character) in label.chars().enumerate() {
+        let glyph_x = start_x + index as u32 * (glyph_width + spacing);
+        for (row, bits) in glyph_rows(character).into_iter().enumerate() {
+            for column in 0..5 {
+                if bits & (1 << (4 - column)) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = glyph_x + column * scale + dx;
+                        let y = start_y + row as u32 * scale + dy;
+                        if x < image.width() && y < image.height() {
+                            image.put_pixel(x, y, Rgb([255, 255, 255]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_redaction_banner(image: &mut image::RgbImage) {
+    draw_notice_banner(image, REDACTION_LABEL, Rgb([150, 18, 28]));
+}
+
 /// Replace `destination` with `source` without deleting the destination
 /// first. Windows' `std::fs::rename` refuses to replace an existing file,
 /// while removing it first would create an unredacted-data loss window if
@@ -74,6 +134,52 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     {
         std::fs::rename(source, destination)
     }
+}
+
+/// Atomically encode `image` over an existing supported still-image path.
+///
+/// This is shared by normal redaction and fail-closed replacement so a reader
+/// can observe either the old complete file or the new complete file, never a
+/// partially-written image.
+fn write_image_atomically(image_path: &Path, image: &DynamicImage) -> Result<(), RedactError> {
+    let format = ImageFormat::from_path(image_path).map_err(|e| {
+        RedactError::Runtime(format!(
+            "unrecognized image format for {}: {e}",
+            image_path.display()
+        ))
+    })?;
+    let stem = image_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "frame".into());
+    let ext = image_path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "jpg".into());
+    let tmp_path = image_path.with_file_name(format!("{stem}.redact-tmp.{ext}"));
+    let tmp_file = std::fs::File::create(&tmp_path)
+        .map_err(|e| RedactError::Runtime(format!("create {}: {e}", tmp_path.display())))?;
+    let mut tmp_writer = std::io::BufWriter::new(tmp_file);
+    image
+        .write_to(&mut tmp_writer, format)
+        .map_err(|e| RedactError::Runtime(format!("encode {}: {e}", tmp_path.display())))?;
+    use std::io::Write;
+    tmp_writer
+        .flush()
+        .map_err(|e| RedactError::Runtime(format!("flush {}: {e}", tmp_path.display())))?;
+    tmp_writer
+        .into_inner()
+        .map_err(|e| RedactError::Runtime(format!("close {}: {e}", tmp_path.display())))?
+        .sync_all()
+        .map_err(|e| RedactError::Runtime(format!("fsync {}: {e}", tmp_path.display())))?;
+    replace_file(&tmp_path, image_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        RedactError::Runtime(format!(
+            "rename {} → {}: {e}",
+            tmp_path.display(),
+            image_path.display()
+        ))
+    })
 }
 
 /// What the redactor did to one frame.
@@ -139,6 +245,10 @@ pub fn redact_frame(
         redacted_px += u64::from(x2 - x) * u64::from(y2 - y);
     }
 
+    if redacted > 0 {
+        draw_redaction_banner(&mut buf);
+    }
+
     let output_path = image_path.to_path_buf();
     // Atomic write: encode to a sibling tempfile, then rename over
     // the destination. Concurrent readers (mp4 encoder, video API
@@ -150,47 +260,7 @@ pub fn redact_frame(
     // would fail to encode. Instead, use `<stem>.redact-tmp.<ext>`
     // (e.g. `frame.redact-tmp.jpg`) so the format-inference path keeps
     // working, then rename to the final destination.
-    let format = ImageFormat::from_path(&output_path).map_err(|e| {
-        RedactError::Runtime(format!(
-            "unrecognized image format for {}: {e}",
-            output_path.display()
-        ))
-    })?;
-    let stem = output_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "frame".into());
-    let ext = output_path
-        .extension()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "jpg".into());
-    let tmp_path = output_path.with_file_name(format!("{stem}.redact-tmp.{ext}"));
-    let tmp_file = std::fs::File::create(&tmp_path)
-        .map_err(|e| RedactError::Runtime(format!("create {}: {e}", tmp_path.display())))?;
-    let mut tmp_writer = std::io::BufWriter::new(tmp_file);
-    DynamicImage::ImageRgb8(buf)
-        .write_to(&mut tmp_writer, format)
-        .map_err(|e| RedactError::Runtime(format!("encode {}: {e}", tmp_path.display())))?;
-    // Make sure bytes hit disk before rename — otherwise a crash between
-    // rename and fsync could leave a zero-length file.
-    use std::io::Write;
-    tmp_writer
-        .flush()
-        .map_err(|e| RedactError::Runtime(format!("flush {}: {e}", tmp_path.display())))?;
-    tmp_writer
-        .into_inner()
-        .map_err(|e| RedactError::Runtime(format!("close {}: {e}", tmp_path.display())))?
-        .sync_all()
-        .map_err(|e| RedactError::Runtime(format!("fsync {}: {e}", tmp_path.display())))?;
-    replace_file(&tmp_path, &output_path).map_err(|e| {
-        // On rename failure, try to clean up the tempfile — best effort.
-        let _ = std::fs::remove_file(&tmp_path);
-        RedactError::Runtime(format!(
-            "rename {} → {}: {e}",
-            tmp_path.display(),
-            output_path.display()
-        ))
-    })?;
+    write_image_atomically(&output_path, &DynamicImage::ImageRgb8(buf))?;
 
     Ok(FrameRedactionOutcome {
         regions_redacted: redacted,
@@ -198,6 +268,16 @@ pub fn redact_frame(
         redacted_pixels: redacted_px,
         output_path,
     })
+}
+
+/// Atomically replace an image whose PII redaction failed with a visible,
+/// source-free placeholder. The source is inspected only for dimensions; none
+/// of its pixels are copied to the replacement.
+pub fn replace_with_redaction_failure_placeholder(image_path: &Path) -> Result<(), RedactError> {
+    let (width, height) = image::image_dimensions(image_path).unwrap_or((1280, 720));
+    let mut placeholder = image::RgbImage::from_pixel(width, height, Rgb([18, 18, 20]));
+    draw_notice_banner(&mut placeholder, REDACTION_FAILURE_LABEL, Rgb([166, 86, 0]));
+    write_image_atomically(image_path, &DynamicImage::ImageRgb8(placeholder))
 }
 
 #[cfg(test)]
@@ -235,6 +315,22 @@ mod tests {
     }
 
     #[test]
+    fn failure_placeholder_atomically_replaces_source_without_copying_its_pixels() {
+        let d = tempdir().unwrap();
+        let p = make_test_jpg(d.path());
+        let original = std::fs::read(&p).unwrap();
+
+        replace_with_redaction_failure_placeholder(&p).unwrap();
+
+        let replacement = image::open(&p).unwrap().to_rgb8();
+        assert_ne!(std::fs::read(&p).unwrap(), original);
+        assert_eq!(replacement.dimensions(), (100, 80));
+        let banner = replacement.get_pixel(0, 0);
+        assert!(banner[0] > banner[1] && banner[1] > banner[2]);
+        assert!(!d.path().join("frame.redact-tmp.png").exists());
+    }
+
+    #[test]
     fn replaces_existing_source_without_deleting_it_first() {
         let d = tempdir().unwrap();
         let p = make_test_jpg(d.path());
@@ -259,7 +355,7 @@ mod tests {
         let p = make_test_jpg(d.path());
         let regions = [
             ImageRegion {
-                bbox: [10, 10, 30, 20],
+                bbox: [10, 30, 30, 20],
                 label: SpanLabel::Email,
                 score: 0.95,
             },
@@ -284,10 +380,12 @@ mod tests {
         // Confirm the kept region is actually black on the source path.
         let img = image::open(&p).unwrap().to_rgb8();
         for px in 10..40 {
-            for py in 10..30 {
+            for py in 30..50 {
                 assert_eq!(img.get_pixel(px, py), &Rgb([0, 0, 0]));
             }
         }
+        let banner = img.get_pixel(0, 0);
+        assert!(banner[0] > 100 && banner[1] < 100 && banner[2] < 100);
     }
 
     /// Regression guard for the only-source-overwrite contract: there

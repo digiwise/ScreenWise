@@ -735,6 +735,7 @@ impl RecordArgs {
             capture_keystrokes: true,
             record_keyboard_events: !self.disable_keyboard_capture,
             record_clipboard_events: !self.disable_clipboard_capture,
+            apply_pii_removal: self.use_pii_removal,
             // Same-app title changes must reach the event-driven trigger
             // mapper so focus changes can produce linked captures.
             capture_window_focus: true,

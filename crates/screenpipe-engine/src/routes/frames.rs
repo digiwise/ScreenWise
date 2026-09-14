@@ -24,11 +24,11 @@ use std::{
 };
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::{
     server::AppState,
-    video_utils::{extract_frame_from_video, redact_frame_pii},
+    video_utils::{extract_frame_from_video, pii_redaction_failure_frame, redact_frame_pii},
 };
 
 use tokio::time::timeout;
@@ -999,7 +999,7 @@ pub(crate) async fn apply_pii_redaction(
         Ok(data) => data,
         Err(e) => {
             error!("Failed to read frame file for PII redaction: {}", e);
-            return serve_file(frame_path).await; // Fall back to unredacted
+            return pii_redaction_failure_response(None);
         }
     };
 
@@ -1007,12 +1007,15 @@ pub(crate) async fn apply_pii_redaction(
     let text_json_str = match state.db.get_frame_ocr_text_json(frame_id).await {
         Ok(Some(json)) => json,
         Ok(None) => {
-            debug!("No OCR data for frame {}, serving unredacted", frame_id);
-            return serve_file(frame_path).await;
+            warn!(
+                "PII redaction failed for frame {} because OCR data is unavailable",
+                frame_id
+            );
+            return pii_redaction_failure_response(Some(&frame_data));
         }
         Err(e) => {
             error!("Failed to get OCR data for frame {}: {}", frame_id, e);
-            return serve_file(frame_path).await;
+            return pii_redaction_failure_response(Some(&frame_data));
         }
     };
 
@@ -1020,8 +1023,11 @@ pub(crate) async fn apply_pii_redaction(
     let text_json: Vec<HashMap<String, String>> = match serde_json::from_str(&text_json_str) {
         Ok(json) => json,
         Err(e) => {
-            debug!("Failed to parse OCR text_json: {}", e);
-            return serve_file(frame_path).await;
+            error!(
+                "Failed to parse OCR text_json for frame {}: {}",
+                frame_id, e
+            );
+            return pii_redaction_failure_response(Some(&frame_data));
         }
     };
 
@@ -1030,7 +1036,7 @@ pub(crate) async fn apply_pii_redaction(
         Ok(img) => img,
         Err(e) => {
             error!("Failed to load image for PII detection: {}", e);
-            return serve_file(frame_path).await;
+            return pii_redaction_failure_response(Some(&frame_data));
         }
     };
     let (width, height) = img.dimensions();
@@ -1040,7 +1046,7 @@ pub(crate) async fn apply_pii_redaction(
 
     if pii_regions.is_empty() {
         debug!("No PII detected in frame {}", frame_id);
-        return serve_file(frame_path).await;
+        return pii_redaction_response(frame_data, "clear", 0);
     }
 
     debug!(
@@ -1052,26 +1058,47 @@ pub(crate) async fn apply_pii_redaction(
 
     // Apply redaction
     match redact_frame_pii(&frame_data, &pii_regions) {
-        Ok(redacted_data) => {
-            let body = Body::from(redacted_data);
-            Response::builder()
-                .header("content-type", "image/jpeg")
-                .header("cache-control", "no-cache") // Don't cache redacted frames
-                .header("x-pii-redacted", "true")
-                .header("x-pii-regions-count", pii_regions.len().to_string())
-                .body(body)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        JsonResponse(json!({"error": format!("Failed to create response: {}", e)})),
-                    )
-                })
-        }
+        Ok(redacted_data) => pii_redaction_response(redacted_data, "redacted", pii_regions.len()),
         Err(e) => {
             error!("Failed to redact PII from frame {}: {}", frame_id, e);
-            serve_file(frame_path).await // Fall back to unredacted
+            pii_redaction_failure_response(Some(&frame_data))
         }
     }
+}
+
+fn pii_redaction_failure_response(
+    source_data: Option<&[u8]>,
+) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    match pii_redaction_failure_frame(source_data) {
+        Ok(data) => pii_redaction_response(data, "failed", 0),
+        Err(e) => {
+            error!("Failed to render the PII-redaction failure image: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": "PII redaction failed closed"})),
+            ))
+        }
+    }
+}
+
+fn pii_redaction_response(
+    data: Vec<u8>,
+    status: &'static str,
+    region_count: usize,
+) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    Response::builder()
+        .header("content-type", "image/jpeg")
+        .header("cache-control", "no-store")
+        .header("x-pii-redacted", (status == "redacted").to_string())
+        .header("x-pii-redaction-status", status)
+        .header("x-pii-regions-count", region_count.to_string())
+        .body(Body::from(data))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": format!("Failed to create response: {}", e)})),
+            )
+        })
 }
 
 pub(crate) async fn serve_file(path: &str) -> Result<Response, (StatusCode, JsonResponse<Value>)> {
@@ -1112,3 +1139,23 @@ pub use super::content::FrameContent;
 
 /// extract_high_quality_frame re-export for video export
 pub use crate::video_utils::extract_high_quality_frame as extract_hq_frame;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pii_image_responses_disclose_clear_redacted_and_failed_states() {
+        for (status, redacted) in [
+            ("clear", "false"),
+            ("redacted", "true"),
+            ("failed", "false"),
+        ] {
+            let response = pii_redaction_response(vec![1, 2, 3], status, 2).unwrap();
+            assert_eq!(response.headers()["x-pii-redaction-status"], status);
+            assert_eq!(response.headers()["x-pii-redacted"], redacted);
+            assert_eq!(response.headers()["x-pii-regions-count"], "2");
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+    }
+}

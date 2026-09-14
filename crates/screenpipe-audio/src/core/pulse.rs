@@ -368,7 +368,7 @@ fn create_pulse_record_stream(
 pub fn spawn_pulse_capture_thread(
     device: AudioDevice,
     config: AudioStreamConfig,
-    tx: broadcast::Sender<Vec<f32>>,
+    tx: broadcast::Sender<super::stream::CapturedAudio>,
     is_running: Arc<AtomicBool>,
     is_disconnected: Arc<AtomicBool>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -403,7 +403,7 @@ pub fn spawn_pulse_capture_thread(
                     // and the size is a multiple of 4. Use bytemuck for safe casting.
                     let samples: &[f32] = bytemuck::cast_slice(&buf);
                     let mono = audio_to_mono(samples, channels);
-                    if tx.send(mono).is_err() {
+                    if tx.send(mono.into()).is_err() {
                         debug!("PulseAudio: all receivers dropped for {}", device_name);
                         break;
                     }

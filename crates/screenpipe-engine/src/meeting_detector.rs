@@ -26,6 +26,7 @@
 use crate::routes::meetings::{emit_meeting_status_changed, resolve_meeting_status_from};
 use chrono::{DateTime, Utc};
 use futures::{FutureExt, StreamExt};
+use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::{DatabaseManager, MEETING_END_REASON_AUTO_END, MEETING_END_REASON_SHUTDOWN};
 use screenpipe_events::subscribe_to_event;
 use serde::{Deserialize, Serialize};
@@ -2551,6 +2552,7 @@ pub async fn run_meeting_detection_loop(
     detector: Option<Arc<screenpipe_audio::meeting_detector::MeetingDetector>>,
     close_orphaned_meetings_on_start: bool,
     ignored_meeting_apps: Vec<String>,
+    use_pii_removal: bool,
 ) {
     let profiles = load_detection_profiles();
     let scanner = Arc::new(MeetingUiScanner::new());
@@ -2991,7 +2993,10 @@ pub async fn run_meeting_detection_loop(
                     // Calendar enrichment: find overlapping calendar event
                     let (cal_title, cal_attendees) =
                         find_overlapping_calendar_event(&calendar_events);
+                    let cal_title = sanitize_meeting_text(cal_title.as_deref(), use_pii_removal);
                     let attendees_str = cal_attendees.as_ref().map(|a| a.join(", "));
+                    let attendees_str =
+                        sanitize_meeting_text(attendees_str.as_deref(), use_pii_removal);
 
                     // Try to merge with recently-ended meeting. The DB query
                     // already filters out explicit_stop rows; the
@@ -3048,6 +3053,7 @@ pub async fn run_meeting_detection_loop(
                                         &app,
                                         cal_title.as_deref(),
                                         attendees_str.as_deref(),
+                                        use_pii_removal,
                                     )
                                     .await,
                                     "auto_start",
@@ -3060,6 +3066,7 @@ pub async fn run_meeting_detection_loop(
                                 &app,
                                 cal_title.as_deref(),
                                 attendees_str.as_deref(),
+                                use_pii_removal,
                             )
                             .await,
                             "auto_start",
@@ -3072,6 +3079,7 @@ pub async fn run_meeting_detection_loop(
                                     &app,
                                     cal_title.as_deref(),
                                     attendees_str.as_deref(),
+                                    use_pii_removal,
                                 )
                                 .await,
                                 "auto_start",
@@ -3389,8 +3397,14 @@ async fn insert_new_meeting(
     app: &str,
     title: Option<&str>,
     attendees: Option<&str>,
+    use_pii_removal: bool,
 ) -> i64 {
-    match db.insert_meeting(app, "ui_scan", title, attendees).await {
+    let title = sanitize_meeting_text(title, use_pii_removal);
+    let attendees = sanitize_meeting_text(attendees, use_pii_removal);
+    match db
+        .insert_meeting(app, "ui_scan", title.as_deref(), attendees.as_deref())
+        .await
+    {
         Ok(id) => {
             info!("meeting v2: meeting started (id={}, app={})", id, app);
             // Notify local meeting audio and capture controllers.
@@ -3414,6 +3428,20 @@ async fn insert_new_meeting(
     }
 }
 
+fn sanitize_meeting_text(value: Option<&str>, use_pii_removal: bool) -> Option<String> {
+    value.map(|text| {
+        if use_pii_removal {
+            let sanitized = remove_pii(text);
+            if sanitized != text {
+                info!("Basic PII redaction applied to detected meeting metadata");
+            }
+            sanitized
+        } else {
+            text.to_string()
+        }
+    })
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -3421,6 +3449,18 @@ async fn insert_new_meeting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detected_meeting_metadata_obeys_basic_pii_removal() {
+        assert_eq!(
+            sanitize_meeting_text(Some("alice@example.com 123-45-6789"), true).as_deref(),
+            Some("[EMAIL] [SSN]")
+        );
+        assert_eq!(
+            sanitize_meeting_text(Some("alice@example.com"), false).as_deref(),
+            Some("alice@example.com")
+        );
+    }
 
     // ── audio-gated scan cadence tests ─────────────────────────────────
     // These pin the CPU optimisation: with apps open but no recent audio the

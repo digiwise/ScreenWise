@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
+use screenpipe_config::AudioPrivacyPermit;
 use tokio::{
     sync::{mpsc, RwLock},
     task::JoinHandle,
@@ -76,6 +77,7 @@ async fn run_stream(
     let mut buffer = LiveChunkBuffer::default();
     let mut flush_tick = interval(FLUSH_TICK);
     let mut sequence: u64 = 0;
+    let mut session_privacy = None;
 
     loop {
         tokio::select! {
@@ -85,17 +87,28 @@ async fn run_stream(
                     break;
                 };
 
+                if !frame.privacy.is_some_and(AudioPrivacyPermit::is_current) {
+                    buffer.clear();
+                    info!("meeting audio frame discarded by privacy policy");
+                    continue;
+                }
+                if session_privacy != frame.privacy {
+                    session = selected_engine_session(&engine_ref).await?;
+                    session_privacy = frame.privacy;
+                    buffer.clear();
+                }
                 let samples = normalize_frame(&frame)
                     .context("failed to normalize selected-engine live audio")?;
                 if samples.is_empty() {
                     continue;
                 }
-                buffer.push(samples, frame.captured_at_unix_ms);
+                buffer.push_with_privacy(samples, frame.captured_at_unix_ms, frame.privacy);
                 if buffer.duration() >= LIVE_CHUNK_TARGET {
                     flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
                 }
             }
             _ = flush_tick.tick() => {
+                if !buffer.privacy.is_some_and(AudioPrivacyPermit::is_current) { buffer.clear(); }
                 if buffer.duration() >= LIVE_CHUNK_MIN {
                     flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
                 }
@@ -159,6 +172,10 @@ async fn flush_buffer(
         return Ok(());
     };
 
+    if !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
+        info!("meeting audio buffer discarded after privacy transition");
+        return Ok(());
+    }
     if rms(&chunk.samples) < MIN_LIVE_RMS {
         debug!("meeting streaming: selected-engine live chunk was silent; skipping");
         return Ok(());
@@ -169,6 +186,15 @@ async fn flush_buffer(
         .await?
         .trim()
         .to_string();
+    if !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
+        info!("meeting transcript discarded after privacy transition");
+        return Ok(());
+    }
+    let transcript = if config.use_pii_removal {
+        crate::transcription::redact_pii_text(&transcript)
+    } else {
+        transcript
+    };
     if transcript.is_empty() {
         return Ok(());
     }
@@ -186,6 +212,7 @@ async fn flush_buffer(
     };
 
     let delta = MeetingTranscriptDelta {
+        privacy: chunk.privacy,
         meeting_id,
         provider: config.provider.as_str().to_string(),
         model: model.clone(),
@@ -196,9 +223,13 @@ async fn flush_buffer(
         replace: true,
         captured_at,
     };
+    if !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
+        return Ok(());
+    }
     let _ = screenpipe_events::send_event("meeting_transcript_delta", delta);
 
     let final_event = MeetingTranscriptFinal {
+        privacy: chunk.privacy,
         meeting_id,
         provider: config.provider.as_str().to_string(),
         model,
@@ -209,20 +240,48 @@ async fn flush_buffer(
         transcript,
         captured_at,
     };
-    let _ = screenpipe_events::send_event("meeting_transcript_final", final_event);
+    if chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
+        let _ = screenpipe_events::send_event("meeting_transcript_final", final_event);
+    }
 
     Ok(())
 }
 
 #[derive(Default)]
 struct LiveChunkBuffer {
+    privacy: Option<AudioPrivacyPermit>,
     samples: Vec<f32>,
     first_captured_at_unix_ms: Option<u64>,
     last_captured_at_unix_ms: Option<u64>,
 }
 
 impl LiveChunkBuffer {
+    fn clear(&mut self) {
+        self.samples.clear();
+        self.first_captured_at_unix_ms = None;
+        self.last_captured_at_unix_ms = None;
+        self.privacy = None;
+    }
+
+    #[cfg(test)]
     fn push(&mut self, samples: Vec<f32>, captured_at_unix_ms: u64) {
+        self.push_with_privacy(samples, captured_at_unix_ms, AudioPrivacyPermit::current());
+    }
+
+    fn push_with_privacy(
+        &mut self,
+        samples: Vec<f32>,
+        captured_at_unix_ms: u64,
+        privacy: Option<AudioPrivacyPermit>,
+    ) {
+        if self.privacy != privacy {
+            self.clear();
+        }
+        self.privacy = privacy;
+        if !privacy.is_some_and(AudioPrivacyPermit::is_current) {
+            self.clear();
+            return;
+        }
         if self.first_captured_at_unix_ms.is_none() {
             self.first_captured_at_unix_ms = Some(captured_at_unix_ms);
         }
@@ -246,6 +305,7 @@ impl LiveChunkBuffer {
             .unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
         self.last_captured_at_unix_ms = None;
         Some(LiveChunk {
+            privacy: self.privacy.take(),
             samples,
             captured_at_unix_ms,
         })
@@ -253,6 +313,7 @@ impl LiveChunkBuffer {
 }
 
 struct LiveChunk {
+    privacy: Option<AudioPrivacyPermit>,
     samples: Vec<f32>,
     captured_at_unix_ms: u64,
 }
@@ -316,6 +377,18 @@ fn emit_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_denied_live_frame_clears_prior_buffer() {
+        let mut buffer = LiveChunkBuffer::default();
+        buffer.push(vec![0.5; 16_000], 1_000);
+        buffer.push_with_privacy(vec![0.7; 16_000], 2_000, None);
+        assert!(buffer.take().is_none());
+        buffer.push(vec![0.1; 16_000], 3_000);
+        let chunk = buffer.take().unwrap();
+        assert_eq!(chunk.captured_at_unix_ms, 3_000);
+        assert_eq!(chunk.samples, vec![0.1; 16_000]);
+    }
 
     #[test]
     fn live_chunk_buffer_flushes_and_resets() {

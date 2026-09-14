@@ -317,6 +317,9 @@ impl UiRecorder {
                 if stop4.load(Ordering::Relaxed) {
                     break;
                 }
+                if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+                    continue;
+                }
 
                 // Send a supplementary event with the element context for the click
                 let event = UiEvent {
@@ -417,6 +420,9 @@ struct HookState {
 /// as i32 while aggregating and clamped to i16 (the wire type) on emit; real
 /// tick sums stay well within range.
 fn emit_aggregated_scroll(tx: &Sender<UiEvent>, agg: ScrollAggregator) {
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+        return;
+    }
     let event = UiEvent {
         id: None,
         timestamp: agg.start_timestamp,
@@ -556,6 +562,12 @@ fn run_native_hooks(
                         // since we're in the message loop, not a LL hook callback.
                         if !s.pending_clipboard.is_empty() {
                             let pending = std::mem::take(&mut s.pending_clipboard);
+                            if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+                                discard_text_buffer(s);
+                                s.pending_text.clear();
+                                s.scroll_aggregator = None;
+                                return;
+                            }
                             let capture_content = s.config.capture_clipboard_content;
                             let apply_pii = s.config.apply_pii_removal;
                             for p in pending {
@@ -669,7 +681,7 @@ fn take_text_buffer_with_permit(state: &mut HookState, permit: Option<u64>) -> O
 }
 
 fn emit_text(state: &HookState, mut event: UiEvent) {
-    if screenpipe_config::screen_is_locked() {
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
         return;
     }
     if let EventData::Text {
@@ -695,7 +707,7 @@ fn discard_text_buffer(state: &mut HookState) {
 /// provider, expired decision, contended lock, or focus mismatch suppresses
 /// content while ActivityFeed remains available for adaptive capture.
 fn keyboard_capture_permit(state: &HookState) -> Option<u64> {
-    if screenpipe_config::screen_is_locked() {
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
         return None;
     }
     if !state.config.skip_password_fields {
@@ -749,6 +761,16 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
 
                 // Only process key down events for UI events
                 if !is_key_down {
+                    return;
+                }
+
+                // Schedule, DRM, and lock privacy are acquisition boundaries,
+                // not merely persistence filters. Keep only content-free
+                // activity timing while the recorder is paused.
+                if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+                    discard_text_buffer(s);
+                    s.pending_text.clear();
+                    s.pending_clipboard.clear();
                     return;
                 }
 
@@ -928,6 +950,17 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 // is actively driving the UI so it can defer captures.
                 s.last_input_at_ms
                     .store(s.start.elapsed().as_millis() as u64, Ordering::Relaxed);
+
+                // The OS hook still observes that input occurred, but paused
+                // capture must not copy coordinates, titles, click context, or
+                // scroll data into recorder-owned buffers.
+                if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+                    discard_text_buffer(s);
+                    s.pending_text.clear();
+                    s.pending_clipboard.clear();
+                    s.scroll_aggregator = None;
+                    return;
+                }
 
                 // Fast path for WM_MOUSEMOVE — no mutex locks to avoid blocking
                 // the system-wide mouse input pipeline (critical for RDP cursor rendering)
@@ -1469,6 +1502,13 @@ const APP_OBSERVER_TIMER_ID: usize = 1;
 
 /// Process a foreground window change in the app observer.
 fn process_foreground_change(state: &mut AppObserverState) {
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+        *state.current_app.lock() = None;
+        *state.current_window.lock() = None;
+        *state.focused_element.lock() = None;
+        return;
+    }
+
     unsafe {
         let hwnd = GetForegroundWindow();
         let hwnd_val = hwnd.0 as isize;

@@ -191,12 +191,12 @@ struct PendingFocus {
     time: Instant,
 }
 
-fn pause_uia_while_screen_locked(
+fn pause_uia_for_visual_privacy(
     pending_focus: &Arc<Mutex<Option<PendingFocus>>>,
     click_queue: &Arc<Mutex<Vec<ClickElementRequest>>>,
     last_capture_time: &mut Instant,
 ) -> bool {
-    if !screenpipe_config::screen_is_locked() {
+    if screenpipe_config::audio_privacy::visual_capture_allowed() {
         return false;
     }
 
@@ -872,19 +872,22 @@ pub fn run_uia_thread(
         && config.skip_password_fields
         && (config.capture_text || config.capture_keystrokes || config.capture_clipboard_content);
 
-    // Capture initial focused window (no input has happened yet, so input_too_recent is a no-op)
-    let initial_hwnd = unsafe { GetForegroundWindow() };
-    if !initial_hwnd.is_invalid() {
-        capture_and_send(
-            &uia,
-            initial_hwnd,
-            &config,
-            &tree_tx,
-            &focused_element,
-            &mut last_captured_hwnd,
-            &mut last_tree_hash,
-            &mut last_capture_time,
-        );
+    // Capture the initial window only after the same lock/schedule/DRM
+    // admission used by later UIA work.
+    if screenpipe_config::audio_privacy::visual_capture_allowed() {
+        let initial_hwnd = unsafe { GetForegroundWindow() };
+        if !initial_hwnd.is_invalid() {
+            capture_and_send(
+                &uia,
+                initial_hwnd,
+                &config,
+                &tree_tx,
+                &focused_element,
+                &mut last_captured_hwnd,
+                &mut last_tree_hash,
+                &mut last_capture_time,
+            );
+        }
     }
 
     // Compute the cooldown for shortening MsgWaitForMultipleObjects timeout when input is recent.
@@ -906,7 +909,7 @@ pub fn run_uia_thread(
             }
         }
 
-        if pause_uia_while_screen_locked(&pending_focus, &click_queue, &mut last_capture_time) {
+        if pause_uia_for_visual_privacy(&pending_focus, &click_queue, &mut last_capture_time) {
             keyboard_privacy.invalidate();
             was_lock_paused = true;
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
@@ -1000,6 +1003,9 @@ pub fn run_uia_thread(
             std::mem::take(&mut *queue)
         };
         for req in clicks {
+            if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+                break;
+            }
             if let Some(ctx) = uia.element_from_point(req.x, req.y) {
                 match element_tx.try_send((req, ctx)) {
                     Ok(()) => {}
@@ -1579,7 +1585,7 @@ mod tests {
         let original_capture_time = Instant::now() - Duration::from_secs(5);
         let mut last_capture_time = original_capture_time;
 
-        assert!(pause_uia_while_screen_locked(
+        assert!(pause_uia_for_visual_privacy(
             &pending_focus,
             &click_queue,
             &mut last_capture_time
@@ -1589,7 +1595,7 @@ mod tests {
         assert!(last_capture_time > original_capture_time);
 
         screenpipe_config::set_screen_locked(false);
-        assert!(!pause_uia_while_screen_locked(
+        assert!(!pause_uia_for_visual_privacy(
             &pending_focus,
             &click_queue,
             &mut last_capture_time

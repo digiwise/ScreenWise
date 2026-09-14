@@ -4,9 +4,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use crate::transcription::redact_pii_text as remove_pii;
 use chrono::Utc;
 use futures::StreamExt;
-use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use tokio::{
     sync::{broadcast, mpsc, RwLock},
@@ -135,7 +135,22 @@ pub fn start_meeting_streaming_loop(
             }
         }
 
+        let mut observed_privacy = screenpipe_config::AudioPrivacyPermit::current();
         loop {
+            let privacy = screenpipe_config::AudioPrivacyPermit::current();
+            if privacy != observed_privacy {
+                if let Some(session) = active.as_mut() {
+                    session.device_senders.clear();
+                    session.device_retry_after.clear();
+                    session.last_audio_activity_at = Instant::now();
+                    session.started_at = Instant::now();
+                    session.live_transcript_seen = false;
+                    session.last_live_transcript_at = None;
+                }
+                audio_tap.set_background_suppressed(false);
+                observed_privacy = privacy;
+                info!("meeting audio privacy transition cleared buffered live state");
+            }
             tokio::select! {
                 Some(event) = started_sub.next() => {
                     let Some(meeting_id) = event.data.resolved_meeting_id() else {
@@ -194,6 +209,7 @@ pub fn start_meeting_streaming_loop(
                     }
                 }
                 Some(event) = final_sub.next() => {
+                    if !event.data.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { info!("meeting transcript event discarded by privacy policy"); continue; }
                     if let Some(session) = active.as_mut() {
                         note_live_transcript(&audio_tap, session, event.data.meeting_id);
                     }
@@ -207,6 +223,7 @@ pub fn start_meeting_streaming_loop(
                     });
                 }
                 Some(event) = delta_sub.next() => {
+                    if !event.data.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { info!("meeting transcript event discarded by privacy policy"); continue; }
                     if let Some(session) = active.as_mut() {
                         note_live_transcript(&audio_tap, session, event.data.meeting_id);
                     }
@@ -219,6 +236,7 @@ pub fn start_meeting_streaming_loop(
                 frame = audio_rx.recv() => {
                     match frame {
                         Ok(frame) => {
+                            if !frame.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { continue; }
                             if let Some(session) = active.as_mut() {
                                 session.audio_frames_seen += 1;
                                 session.audio_samples_seen += frame.samples.len() as u64;
@@ -246,6 +264,17 @@ pub fn start_meeting_streaming_loop(
                     }
                 }
                 _ = inactivity_tick.tick() => {
+                    if !screenpipe_config::audio_capture_allowed() {
+                        if let Some(session) = active.as_mut() {
+                            session.device_senders.clear();
+                            session.last_audio_activity_at = Instant::now();
+                            session.started_at = Instant::now();
+                            session.live_transcript_seen = false;
+                            session.last_live_transcript_at = None;
+                        }
+                        audio_tap.set_background_suppressed(false);
+                        continue;
+                    }
                     if let Some(session) = active.as_mut() {
                         check_and_emit_stall_notifications(session, Instant::now());
                     }
@@ -422,6 +451,13 @@ async fn persist_live_final_with_retry(
     use_pii_removal: bool,
 ) {
     for attempt in 1..=LIVE_FINAL_PERSIST_ATTEMPTS {
+        if !event
+            .privacy
+            .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+        {
+            info!("meeting final retry discarded after privacy transition");
+            return;
+        }
         match persist_live_final_once(db.clone(), &event, use_pii_removal).await {
             Ok(true) => return,
             Ok(false) if attempt < LIVE_FINAL_PERSIST_ATTEMPTS => {
@@ -455,6 +491,13 @@ async fn persist_live_final_once(
     event: &MeetingTranscriptFinal,
     use_pii_removal: bool,
 ) -> Result<bool, String> {
+    if !event
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        info!("meeting final discarded after privacy transition");
+        return Ok(true);
+    }
     let raw_transcript = event.transcript.trim();
     if raw_transcript.is_empty() {
         return Ok(true);
@@ -465,6 +508,13 @@ async fn persist_live_final_once(
         raw_transcript.to_string()
     };
 
+    if !event
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        info!("meeting final discarded after privacy transition");
+        return Ok(true);
+    }
     let id = db
         .insert_meeting_transcript_segment(
             event.meeting_id,
@@ -530,6 +580,12 @@ fn route_frame_to_provider(
     session: &mut ActiveMeetingStream,
     frame: MeetingAudioFrame,
 ) {
+    if !frame
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        return;
+    }
     let config = &session.config;
     let key = device_stream_key(&frame);
     if let Some(retry_after) = session.device_retry_after.get(&key).copied() {
@@ -839,6 +895,7 @@ mod tests {
             .await
             .unwrap();
         let event = MeetingTranscriptFinal {
+            privacy: screenpipe_config::AudioPrivacyPermit::current(),
             meeting_id,
             provider: "selected-engine".to_string(),
             model: Some("test-model".to_string()),
@@ -864,6 +921,19 @@ mod tests {
         assert!(!transcript.contains(RAW_SECRET));
         assert!(transcript.contains("[EMAIL]"));
         assert!(transcript.contains("[OPENAI_KEY]"));
+        let mut denied = event.clone();
+        denied.privacy = None;
+        denied.item_id = "denied-item".to_string();
+        assert!(persist_live_final_once(db.clone(), &denied, true)
+            .await
+            .unwrap());
+        assert_eq!(
+            db.list_meeting_transcript_segments(meeting_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // `check_and_emit_stall_notifications` calls `screenpipe_events::send_event`,
@@ -938,7 +1008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_ready_session_keeps_background_recording_until_transcript_arrives() {
+    async fn live_loading_session_keeps_background_recording_enabled() {
         let audio_tap = test_audio_tap();
         let transcription_engine = Arc::new(RwLock::new(None));
         let mut active = None;
@@ -956,9 +1026,9 @@ mod tests {
         )
         .await;
 
-        let session = active.expect("active live session");
-        assert!(session.live_transcription_enabled);
-        assert!(audio_tap.is_active());
+        let session = active.expect("active loading session");
+        assert!(!session.live_transcription_enabled);
+        assert!(!audio_tap.is_active());
         assert!(!audio_tap.background_suppressed());
     }
 

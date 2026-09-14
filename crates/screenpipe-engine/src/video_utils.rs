@@ -1019,11 +1019,47 @@ pub fn redact_frame_pii(image_data: &[u8], regions: &[PiiRegion]) -> Result<Vec<
         }
     }
 
+    #[cfg(target_os = "windows")]
+    screenpipe_screen::capture_screenshot_by_window::draw_windows_capture_notice_banner(
+        &mut img_rgba,
+        screenpipe_screen::capture_screenshot_by_window::WindowsCaptureNotice::PiiRedacted,
+    );
+
     // Encode back to JPEG
     let mut output = Cursor::new(Vec::new());
     let mut encoder = JpegEncoder::new_with_quality(&mut output, 85);
     encoder.encode_image(&img_rgba)?;
 
+    Ok(output.into_inner())
+}
+
+/// Produce a fail-closed image for a requested PII-redaction operation. The
+/// source pixels are never copied into the result; source bytes are used only
+/// to preserve the expected dimensions when they are decodable.
+pub fn pii_redaction_failure_frame(image_data: Option<&[u8]>) -> Result<Vec<u8>> {
+    let (width, height) = image_data
+        .and_then(|data| image::load_from_memory(data).ok())
+        .map(|image| image.dimensions())
+        .unwrap_or((1280, 720));
+
+    #[cfg(target_os = "windows")]
+    let placeholder =
+        screenpipe_screen::capture_screenshot_by_window::render_windows_capture_notice(
+            width,
+            height,
+            screenpipe_screen::capture_screenshot_by_window::WindowsCaptureNotice::PiiRedactionFailed,
+        );
+
+    #[cfg(not(target_os = "windows"))]
+    let placeholder = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        width,
+        height,
+        Rgba([166, 86, 0, 255]),
+    ));
+
+    let mut output = Cursor::new(Vec::new());
+    let mut encoder = JpegEncoder::new_with_quality(&mut output, 85);
+    encoder.encode_image(&placeholder)?;
     Ok(output.into_inner())
 }
 
@@ -1112,6 +1148,25 @@ mod pii_redaction_tests {
         assert_ne!(result, image_data);
         // Should still be a valid image
         assert!(image::load_from_memory(&result).is_ok());
+
+        #[cfg(target_os = "windows")]
+        {
+            let marked = image::load_from_memory(&result).unwrap().to_rgb8();
+            let banner = marked.get_pixel(0, 0);
+            assert!(banner[0] > 100 && banner[1] < 100 && banner[2] < 100);
+        }
+    }
+
+    #[test]
+    fn pii_redaction_failure_frame_discards_source_pixels_and_preserves_dimensions() {
+        let source = create_test_jpeg();
+        let result = pii_redaction_failure_frame(Some(&source)).unwrap();
+        let placeholder = image::load_from_memory(&result).unwrap().to_rgb8();
+
+        assert_eq!(placeholder.dimensions(), (100, 100));
+        assert_ne!(result, source);
+        let first = placeholder.get_pixel(0, 0);
+        assert!(first[0] > first[1]);
     }
 
     #[test]

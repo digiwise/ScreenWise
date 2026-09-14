@@ -866,6 +866,8 @@ pub enum WindowsCaptureNotice {
     BackgroundRedacted,
     CaptureRedacted,
     CaptureFailed,
+    PiiRedacted,
+    PiiRedactionFailed,
 }
 
 /// Sanitized stage at which a Windows capture became unavailable.
@@ -936,13 +938,17 @@ impl WindowsCaptureNotice {
             Self::BackgroundRedacted => "BACKGROUND REDACTED",
             Self::CaptureRedacted => "CAPTURE REDACTED",
             Self::CaptureFailed => "CAPTURE FAILED",
+            Self::PiiRedacted => "PII REDACTED",
+            Self::PiiRedactionFailed => "PII REDACTION FAILED",
         }
     }
 
     fn color(self) -> image::Rgba<u8> {
         match self {
-            Self::CaptureFailed => image::Rgba([166, 86, 0, 255]),
-            Self::BackgroundRedacted | Self::CaptureRedacted => image::Rgba([150, 18, 28, 255]),
+            Self::CaptureFailed | Self::PiiRedactionFailed => image::Rgba([166, 86, 0, 255]),
+            Self::BackgroundRedacted | Self::CaptureRedacted | Self::PiiRedacted => {
+                image::Rgba([150, 18, 28, 255])
+            }
         }
     }
 }
@@ -1058,7 +1064,10 @@ fn draw_notice_label(
 }
 
 #[cfg(target_os = "windows")]
-fn draw_notice_banner(image: &mut image::RgbaImage, notice: WindowsCaptureNotice) {
+pub fn draw_windows_capture_notice_banner(
+    image: &mut image::RgbaImage,
+    notice: WindowsCaptureNotice,
+) {
     let scale = (image.width() / 360).clamp(1, 4);
     let text_height = 7 * scale;
     let banner_height = (text_height + 2 * scale + 8).min(image.height());
@@ -1085,7 +1094,7 @@ pub fn render_windows_capture_notice(
     notice: WindowsCaptureNotice,
 ) -> DynamicImage {
     let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([18, 18, 20, 255]));
-    draw_notice_banner(&mut image, notice);
+    draw_windows_capture_notice_banner(&mut image, notice);
 
     let body_scale = (width / 180).clamp(1, 8);
     let body_height = 7 * body_scale;
@@ -1135,7 +1144,10 @@ fn compose_active_window(
         i64::from(window_x - monitor_bounds.x),
         i64::from(window_y - monitor_bounds.y),
     );
-    draw_notice_banner(&mut monitor_image, WindowsCaptureNotice::BackgroundRedacted);
+    draw_windows_capture_notice_banner(
+        &mut monitor_image,
+        WindowsCaptureNotice::BackgroundRedacted,
+    );
     DynamicImage::ImageRgba8(monitor_image)
 }
 

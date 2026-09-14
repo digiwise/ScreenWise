@@ -93,6 +93,7 @@ async fn test_transcription_accuracy() {
                 screenpipe_audio::pcm_decode(&audio_path).expect("Failed to decode audio file");
 
             let audio_input = AudioInput {
+                privacy: screenpipe_config::AudioPrivacyPermit::current(),
                 data: Arc::new(audio_data.0),
                 sample_rate: 44100, // hardcoded based on test data sample rate
                 channels: 1,

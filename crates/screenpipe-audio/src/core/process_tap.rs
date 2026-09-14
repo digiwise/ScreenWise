@@ -302,7 +302,7 @@ mod exclusions {
 // ---------------------------------------------------------------------------
 
 struct TapCallbackCtx {
-    tx: broadcast::Sender<Vec<f32>>,
+    tx: broadcast::Sender<super::stream::CapturedAudio>,
     channels: u16,
     // Deliberately no is_running — it's initialized false by device_manager
     // and only flipped true AFTER AudioStream::from_device returns, which
@@ -413,7 +413,7 @@ extern "C" fn tap_io_proc(
     }
 
     let mono = audio_to_mono(samples, ctx.channels);
-    let _ = ctx.tx.send(mono);
+    let _ = ctx.tx.send(mono.into());
 
     Default::default()
 }
@@ -457,7 +457,7 @@ impl Drop for ProcessTapCapture {
 /// and the exclusion snapshot the tap was built with (so callers can detect
 /// when the exclusion list drifts and a rebuild is needed).
 fn build_capture(
-    tx: broadcast::Sender<Vec<f32>>,
+    tx: broadcast::Sender<super::stream::CapturedAudio>,
     is_disconnected: Arc<AtomicBool>,
 ) -> Result<(
     ProcessTapCapture,
@@ -575,7 +575,7 @@ fn build_capture(
 /// `_is_running` is accepted for signature parity with the cpal path but
 /// deliberately not read — see the TapCallbackCtx comment.
 pub fn spawn_process_tap_capture(
-    tx: broadcast::Sender<Vec<f32>>,
+    tx: broadcast::Sender<super::stream::CapturedAudio>,
     _is_running: Arc<AtomicBool>,
     is_disconnected: Arc<AtomicBool>,
 ) -> Result<(AudioStreamConfig, tokio::task::JoinHandle<()>)> {

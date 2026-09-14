@@ -228,6 +228,7 @@ mod tests {
             .expect("Failed to decode audio file");
 
         let audio_input = AudioInput {
+            privacy: screenpipe_config::AudioPrivacyPermit::current(),
             data: Arc::new(audio_data.0),
             sample_rate: 44100, // hardcoded based on test data sample rate
             channels: 1,
@@ -315,6 +316,7 @@ mod tests {
 
         // Create AudioInput from the audio data
         let audio_input = AudioInput {
+            privacy: screenpipe_config::AudioPrivacyPermit::current(),
             data: Arc::new(audio_data.0),
             sample_rate: 16000, // Adjust this based on your test audio
             channels: 1,

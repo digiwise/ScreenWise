@@ -4,21 +4,17 @@
 
 //! Work-hours schedule monitor — pauses recording outside user-defined time ranges.
 //!
-//! Similar to `drm_detector.rs`: exposes a global `AtomicBool` that capture loops
-//! check to decide whether recording should be active.
+//! Capture loops read the shared privacy state so schedule pauses also invalidate
+//! queued and in-flight audio.
 
 use chrono::Datelike;
 use screenpipe_config::ScheduleRule;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 use tracing::info;
 
-/// Global flag — when `true`, recording should be paused (outside schedule).
-static SCHEDULE_PAUSED: AtomicBool = AtomicBool::new(false);
-
 /// Read the current schedule pause state.
 pub fn schedule_paused() -> bool {
-    SCHEDULE_PAUSED.load(Ordering::SeqCst)
+    screenpipe_config::audio_privacy::schedule_paused()
 }
 
 /// Reset the schedule pause flag to `false`.
@@ -27,7 +23,7 @@ pub fn schedule_paused() -> bool {
 /// from a prior run (same process) does not carry over when the schedule is
 /// disabled or restarted with different rules.
 pub fn reset_schedule_paused() {
-    SCHEDULE_PAUSED.store(false, Ordering::SeqCst);
+    screenpipe_config::audio_privacy::set_schedule_paused(false);
 }
 
 /// Check if the given time falls within any schedule rule for today.
@@ -86,8 +82,13 @@ pub fn current_record_mode(rules: &[ScheduleRule]) -> Option<String> {
 /// Start the schedule monitor background task.
 ///
 /// Checks every 30 seconds whether the current local time falls within the
-/// configured schedule rules. Updates `SCHEDULE_PAUSED` accordingly.
+/// configured schedule rules. Updates the shared privacy state accordingly.
 pub fn start_schedule_monitor(rules: Vec<ScheduleRule>, mut shutdown: broadcast::Receiver<()>) {
+    // Establish the first decision synchronously before callers start capture.
+    screenpipe_config::audio_privacy::set_schedule_paused(!is_within_schedule(
+        &rules,
+        &chrono::Local::now(),
+    ));
     tokio::spawn(async move {
         info!("schedule monitor started with {} rules", rules.len());
 
@@ -96,7 +97,8 @@ pub fn start_schedule_monitor(rules: Vec<ScheduleRule>, mut shutdown: broadcast:
             let within = is_within_schedule(&rules, &now);
             let should_pause = !within;
 
-            let was_paused = SCHEDULE_PAUSED.swap(should_pause, Ordering::SeqCst);
+            let was_paused = schedule_paused();
+            screenpipe_config::audio_privacy::set_schedule_paused(should_pause);
             if should_pause && !was_paused {
                 info!(
                     "schedule monitor: outside work hours — pausing recording (now={})",
@@ -195,7 +197,7 @@ mod tests {
 
     #[test]
     fn global_flag_default_unpaused() {
-        SCHEDULE_PAUSED.store(false, Ordering::SeqCst);
+        reset_schedule_paused();
         assert!(!schedule_paused());
     }
 }

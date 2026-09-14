@@ -28,6 +28,8 @@ pub mod screen_lock;
 pub use defaults::*;
 pub use persistence::*;
 pub use recording::*;
+pub mod audio_privacy;
+pub use audio_privacy::{audio_capture_allowed, AudioPrivacyPermit};
 pub use screen_lock::{
     record_while_locked, screen_is_locked, set_record_while_locked, set_screen_locked,
     should_pause_audio_for_lock,

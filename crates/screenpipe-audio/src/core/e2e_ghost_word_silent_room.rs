@@ -119,7 +119,7 @@ async fn silent_room_no_ghost_words() {
         }
 
         let chunk = vec![0.0_f32; chunk_samples];
-        if tx.send(chunk).is_err() {
+        if tx.send(chunk.into()).is_err() {
             break;
         }
 
@@ -127,7 +127,7 @@ async fn silent_room_no_ghost_words() {
     }
 
     is_running.store(false, Ordering::Relaxed);
-    tx.send(vec![0.0_f32; chunk_samples]).ok();
+    tx.send(vec![0.0_f32; chunk_samples].into()).ok();
 
     let _ = tokio::time::timeout(Duration::from_secs(15), pipeline_handle).await;
 
