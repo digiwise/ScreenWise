@@ -10,14 +10,14 @@
 use crate::config::UiCaptureConfig;
 use crate::events::{AccessibilityNode, ElementBounds, ElementContext, WindowTreeSnapshot};
 use chrono::Utc;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use windows::core::{implement, BSTR, VARIANT};
 use windows::Win32::Foundation::{HWND, POINT};
@@ -44,6 +44,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const LOCKED_SCREEN_UIA_BACKOFF: Duration = Duration::from_millis(1000);
 const KEYBOARD_PRIVACY_POLL_MS: u64 = 50;
 const KEYBOARD_PRIVACY_MAX_AGE: Duration = Duration::from_millis(75);
+const KEYBOARD_PRIVACY_UNKNOWN: u8 = 0;
+const KEYBOARD_PRIVACY_ALLOWED: u8 = 1;
+const KEYBOARD_PRIVACY_PASSWORD: u8 = 2;
+const KEYBOARD_PRIVACY_UNAVAILABLE: u8 = 3;
+const PASSWORD_FIELD_MARKER: &str = "[REDACTED: password field]";
+const UNVERIFIED_FIELD_MARKER: &str = "[REDACTED: UIA password state unavailable]";
 
 /// Native focus identity is cheap to check inside a low-level input hook. UIA
 /// calls must stay on the worker: an unresponsive provider must not block input.
@@ -96,6 +102,7 @@ struct KeyboardPrivacyDecision {
 pub struct KeyboardPrivacy {
     generation: AtomicU64,
     decision: Mutex<Option<KeyboardPrivacyDecision>>,
+    logged_state: AtomicU8,
 }
 
 impl KeyboardPrivacy {
@@ -121,6 +128,28 @@ impl KeyboardPrivacy {
         is_password: Option<bool>,
         checked_at: Instant,
     ) {
+        let state = match (focus, is_password) {
+            (Some(_), Some(false)) => KEYBOARD_PRIVACY_ALLOWED,
+            (Some(_), Some(true)) => KEYBOARD_PRIVACY_PASSWORD,
+            _ => KEYBOARD_PRIVACY_UNAVAILABLE,
+        };
+        let previous = self.logged_state.swap(state, Ordering::SeqCst);
+        if previous != state {
+            match state {
+                KEYBOARD_PRIVACY_ALLOWED => debug!(
+                    "keyboard/clipboard content privacy check is available; non-password capture may resume"
+                ),
+                KEYBOARD_PRIVACY_PASSWORD => info!(
+                    "keyboard/clipboard content is suppressed while a password field is focused"
+                ),
+                KEYBOARD_PRIVACY_UNAVAILABLE => warn!(
+                    "keyboard/clipboard content is suppressed because UIA password state is unavailable"
+                ),
+                KEYBOARD_PRIVACY_UNKNOWN => {}
+                _ => unreachable!(),
+            }
+        }
+
         let decision = match (focus, is_password) {
             (Some(focus), Some(false)) => Some(KeyboardPrivacyDecision {
                 generation,
@@ -617,10 +646,23 @@ impl UiaContext {
     /// Convert a UIA element to ElementContext
     fn element_to_context(&self, element: &IUIAutomationElement) -> ElementContext {
         let role = self.get_control_type_name(element);
-        let name = self.get_cached_string(element, UIA_NamePropertyId);
-        let value = self.get_cached_string(element, UIA_ValueValuePropertyId);
+        let mut name = self.get_cached_string(element, UIA_NamePropertyId);
+        let mut value = self.get_cached_string(element, UIA_ValueValuePropertyId);
         let automation_id = self.get_cached_string(element, UIA_AutomationIdPropertyId);
         let bounds = self.get_cached_bounds(element);
+        match redact_click_element_text(
+            self.get_cached_bool_opt(element, UIA_IsPasswordPropertyId),
+            &mut name,
+            &mut value,
+        ) {
+            ClickElementPrivacy::Clear => {}
+            ClickElementPrivacy::Password => {
+                debug!("click element text redacted because the target is a password field")
+            }
+            ClickElementPrivacy::Unavailable => {
+                warn!("click element text redacted because UIA password state is unavailable")
+            }
+        }
 
         ElementContext {
             role,
@@ -646,6 +688,33 @@ impl UiaContext {
         handler: &IUIAutomationFocusChangedEventHandler,
     ) -> windows::core::Result<()> {
         unsafe { self.automation.RemoveFocusChangedEventHandler(handler) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickElementPrivacy {
+    Clear,
+    Password,
+    Unavailable,
+}
+
+fn redact_click_element_text(
+    is_password: Option<bool>,
+    name: &mut Option<String>,
+    value: &mut Option<String>,
+) -> ClickElementPrivacy {
+    match is_password {
+        Some(false) => ClickElementPrivacy::Clear,
+        Some(true) => {
+            *name = Some(PASSWORD_FIELD_MARKER.to_string());
+            *value = Some(PASSWORD_FIELD_MARKER.to_string());
+            ClickElementPrivacy::Password
+        }
+        None => {
+            *name = Some(UNVERIFIED_FIELD_MARKER.to_string());
+            *value = Some(UNVERIFIED_FIELD_MARKER.to_string());
+            ClickElementPrivacy::Unavailable
+        }
     }
 }
 
@@ -932,7 +1001,15 @@ pub fn run_uia_thread(
         };
         for req in clicks {
             if let Some(ctx) = uia.element_from_point(req.x, req.y) {
-                let _ = element_tx.try_send((req, ctx));
+                match element_tx.try_send((req, ctx)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        warn!("click context acquisition result dropped because the local queue was full")
+                    }
+                    Err(TrySendError::Disconnected(_)) => error!(
+                        "click context acquisition result dropped because the local queue was disconnected"
+                    ),
+                }
             }
         }
 
@@ -1078,7 +1155,15 @@ fn capture_and_send(
         app_name, element_count, capture_ms, tree_hash
     );
 
-    let _ = tree_tx.try_send(snapshot);
+    match tree_tx.try_send(snapshot) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            warn!("accessibility tree snapshot dropped because the local queue was full")
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            error!("accessibility tree snapshot dropped because the local queue was disconnected")
+        }
+    }
 
     // Also update the focused element
     if let Some(ctx) = uia.get_focused_element() {
@@ -1129,14 +1214,26 @@ fn get_window_info(hwnd: HWND) -> (String, Option<String>, u32) {
 // Clipboard Implementation
 // ============================================================================
 
-/// Get text content from the Windows clipboard
-pub fn get_clipboard_text_impl() -> Option<String> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    let text = clipboard.get_text().ok()?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardReadFailure {
+    Initialize,
+    Read,
+}
+
+/// Get text content from the Windows clipboard. A clipboard without text is a
+/// normal outcome; initialization and read failures remain distinguishable so
+/// callers can report degraded acquisition without logging clipboard content.
+pub fn get_clipboard_text_impl() -> Result<Option<String>, ClipboardReadFailure> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|_| ClipboardReadFailure::Initialize)?;
+    let text = match clipboard.get_text() {
+        Ok(text) => text,
+        Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+        Err(_) => return Err(ClipboardReadFailure::Read),
+    };
     if text.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(text)
+        Ok(Some(text))
     }
 }
 
@@ -1205,6 +1302,40 @@ mod tests {
             control: 11,
             pid: 12,
         }
+    }
+
+    #[test]
+    fn click_context_marks_password_and_unverified_text_as_redacted() {
+        for (state, expected, marker) in [
+            (
+                Some(true),
+                ClickElementPrivacy::Password,
+                PASSWORD_FIELD_MARKER,
+            ),
+            (
+                None,
+                ClickElementPrivacy::Unavailable,
+                UNVERIFIED_FIELD_MARKER,
+            ),
+        ] {
+            let mut name = Some("sensitive name".to_string());
+            let mut value = Some("sensitive value".to_string());
+            assert_eq!(
+                redact_click_element_text(state, &mut name, &mut value),
+                expected
+            );
+            assert_eq!(name.as_deref(), Some(marker));
+            assert_eq!(value.as_deref(), Some(marker));
+        }
+
+        let mut name = Some("safe name".to_string());
+        let mut value = Some("safe value".to_string());
+        assert_eq!(
+            redact_click_element_text(Some(false), &mut name, &mut value),
+            ClickElementPrivacy::Clear
+        );
+        assert_eq!(name.as_deref(), Some("safe name"));
+        assert_eq!(value.as_deref(), Some("safe value"));
     }
 
     #[test]
@@ -1758,8 +1889,11 @@ mod tests {
     #[test]
     #[ignore]
     fn test_live_clipboard() {
-        let text = get_clipboard_text_impl();
-        println!("Clipboard: {:?}", text);
+        let result = get_clipboard_text_impl();
+        println!(
+            "Clipboard text available: {}",
+            matches!(result, Ok(Some(_)))
+        );
     }
 
     /// Live test: performance benchmark - capture same window 50 times

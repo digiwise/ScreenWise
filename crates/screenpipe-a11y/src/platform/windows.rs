@@ -11,7 +11,7 @@ use crate::config::{ExtractionThreadPriority, UiCaptureConfig};
 use crate::events::{ElementContext, EventData, UiEvent, WindowTreeSnapshot};
 use anyhow::Result;
 use chrono::Utc;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
 use screenpipe_core::pii_removal::remove_pii;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +20,9 @@ use std::thread;
 use std::time::Instant;
 use tracing::{debug, error, warn};
 
-use super::windows_uia::{self, ClickElementRequest, KeyboardPrivacy, NativeKeyboardFocus};
+use super::windows_uia::{
+    self, ClickElementRequest, ClipboardReadFailure, KeyboardPrivacy, NativeKeyboardFocus,
+};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -42,6 +44,38 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
 };
+
+static UI_EVENT_QUEUE_FULL_DROPS: AtomicU64 = AtomicU64::new(0);
+static UI_EVENT_QUEUE_DISCONNECTED_DROPS: AtomicU64 = AtomicU64::new(0);
+
+fn try_send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            UI_EVENT_QUEUE_FULL_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            UI_EVENT_QUEUE_DISCONNECTED_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn report_ui_event_queue_drops() {
+    let full = UI_EVENT_QUEUE_FULL_DROPS.swap(0, Ordering::Relaxed);
+    let disconnected = UI_EVENT_QUEUE_DISCONNECTED_DROPS.swap(0, Ordering::Relaxed);
+    if full > 0 {
+        warn!(
+            "Windows input acquisition dropped {} event(s) because the local queue was full",
+            full
+        );
+    }
+    if disconnected > 0 {
+        error!(
+            "Windows input acquisition dropped {} event(s) because the local queue was disconnected",
+            disconnected
+        );
+    }
+}
 
 /// Lower the current thread's OS priority so user input threads (mouse/keyboard hook,
 /// foreground app) get scheduled preferentially. Called from a11y extraction threads
@@ -302,7 +336,7 @@ impl UiRecorder {
                     element: Some(ctx),
                     frame_id: None,
                 };
-                let _ = tx4.try_send(event);
+                try_send_ui_event(&tx4, event);
             }
         }));
 
@@ -401,7 +435,7 @@ fn emit_aggregated_scroll(tx: &Sender<UiEvent>, agg: ScrollAggregator) {
         element: None,
         frame_id: None,
     };
-    let _ = tx.try_send(event);
+    try_send_ui_event(tx, event);
 }
 
 // Thread-local storage for hook state
@@ -488,6 +522,7 @@ fn run_native_hooks(
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            report_ui_event_queue_drops();
 
             // Check for text buffer flush (runs on timer tick and after every message)
             HOOK_STATE.with(|state| {
@@ -528,13 +563,23 @@ fn run_native_hooks(
                                     && p.privacy_generation.is_some_and(|generation| {
                                         keyboard_capture_permit(s) == Some(generation)
                                     }) {
-                                    get_clipboard_text().map(|c| {
-                                        if apply_pii {
-                                            remove_pii(&c)
-                                        } else {
-                                            c
+                                    match get_clipboard_text() {
+                                        Ok(content) => content.map(|c| {
+                                            if apply_pii {
+                                                remove_pii(&c)
+                                            } else {
+                                                c
+                                            }
+                                        }),
+                                        Err(ClipboardReadFailure::Initialize) => {
+                                            warn!("clipboard content unavailable: clipboard initialization failed");
+                                            None
                                         }
-                                    })
+                                        Err(ClipboardReadFailure::Read) => {
+                                            warn!("clipboard content unavailable: clipboard text read failed");
+                                            None
+                                        }
+                                    }
                                 } else {
                                     None
                                 };
@@ -552,7 +597,7 @@ fn run_native_hooks(
                                     element: None,
                                     frame_id: None,
                                 };
-                                let _ = s.tx.try_send(event);
+                                try_send_ui_event(&s.tx, event);
                             }
                         }
                     }
@@ -589,6 +634,7 @@ fn run_native_hooks(
     }
 
     debug!("Native Windows hooks stopped");
+    report_ui_event_queue_drops();
 }
 
 fn flush_text_buffer(state: &mut HookState) {
@@ -636,7 +682,7 @@ fn emit_text(state: &HookState, mut event: UiEvent) {
             *char_count = Some(content.chars().count());
         }
     }
-    let _ = state.tx.try_send(event);
+    try_send_ui_event(&state.tx, event);
 }
 
 fn discard_text_buffer(state: &mut HookState) {
@@ -801,7 +847,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                             element: None,
                             frame_id: None,
                         };
-                        let _ = s.tx.try_send(event);
+                        try_send_ui_event(&s.tx, event);
                     }
                 } else if s.config.capture_text {
                     // Aggregate text input
@@ -830,7 +876,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                             element: None,
                             frame_id: None,
                         };
-                        let _ = s.tx.try_send(event);
+                        try_send_ui_event(&s.tx, event);
                     }
                 } else if s.config.capture_keystrokes {
                     let event = UiEvent {
@@ -847,7 +893,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         element: None,
                         frame_id: None,
                     };
-                    let _ = s.tx.try_send(event);
+                    try_send_ui_event(&s.tx, event);
                 }
             }
         });
@@ -925,7 +971,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                                 element: None,
                                 frame_id: None,
                             };
-                            let _ = s.tx.try_send(event);
+                            try_send_ui_event(&s.tx, event);
                         }
                     }
                     return;
@@ -1008,7 +1054,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                         event.app_name = app_name.clone();
                         event.window_title = window_title.clone();
                         event.element = element;
-                        let _ = s.tx.try_send(event);
+                        try_send_ui_event(&s.tx, event);
 
                         // Queue ElementFromPoint request for precise element context
                         if s.config.capture_context {
@@ -1394,7 +1440,7 @@ fn vk_to_char(vk: u16, mods: u8) -> Option<char> {
     Some(c)
 }
 
-fn get_clipboard_text() -> Option<String> {
+fn get_clipboard_text() -> Result<Option<String>, ClipboardReadFailure> {
     windows_uia::get_clipboard_text_impl()
 }
 
@@ -1465,14 +1511,14 @@ fn process_foreground_change(state: &mut AppObserverState) {
             .config
             .should_capture_target(&app_name, title.as_deref())
         {
-            debug!(app = %app_name, pid, title = ?title, "a11y: foreground change excluded");
+            debug!(app = %app_name, pid, "a11y: foreground change excluded");
             *state.focused_element.lock() = None;
             state.last_hwnd = hwnd_val;
             state.last_title = title;
             return;
         }
 
-        debug!(app = %app_name, pid, title = ?title, "a11y: foreground change captured");
+        debug!(app = %app_name, pid, "a11y: foreground change captured");
 
         // Get focused element context from UIA thread
         let element = if state.config.capture_context {
@@ -1490,7 +1536,7 @@ fn process_foreground_change(state: &mut AppObserverState) {
                 pid as i32,
             );
             event.element = element.clone();
-            let _ = state.tx.try_send(event);
+            try_send_ui_event(&state.tx, event);
         }
 
         // Send window focus event
@@ -1509,7 +1555,7 @@ fn process_foreground_change(state: &mut AppObserverState) {
                 element,
                 frame_id: None,
             };
-            let _ = state.tx.try_send(event);
+            try_send_ui_event(&state.tx, event);
         }
 
         state.last_hwnd = hwnd_val;

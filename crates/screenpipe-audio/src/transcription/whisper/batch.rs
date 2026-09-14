@@ -84,7 +84,10 @@ pub async fn process_with_whisper(
         } else {
             &prompt
         };
-        debug!("whisper initial_prompt: {}", prompt);
+        debug!(
+            prompt_len = prompt.len(),
+            "whisper initial prompt configured"
+        );
         params.set_initial_prompt(prompt);
     }
 

@@ -63,6 +63,8 @@ impl TranscriptionResult {
 pub struct AudioInsertResult {
     pub audio_chunk_id: i64,
     pub speaker_id: Option<i64>,
+    /// The exact transcription text persisted for this audio chunk.
+    pub transcription: String,
 }
 
 pub async fn process_transcription_result(
@@ -159,7 +161,8 @@ pub async fn process_transcription_result(
                     "Inserted audio chunk+transcription for device {} using {}",
                     result.input.device, transcription_engine
                 );
-                let segments = diarization_segments_for_insert(&result, speaker_id);
+                let segments =
+                    diarization_segments_for_insert(&result, speaker_id, use_pii_removal);
                 let provider = result.diarization_provider.as_deref().unwrap_or(
                     if result.speaker_embedding.is_empty() {
                         "none"
@@ -208,31 +211,40 @@ pub async fn process_transcription_result(
     Ok(chunk_id.map(|id| AudioInsertResult {
         audio_chunk_id: id,
         speaker_id,
+        transcription,
     }))
 }
 
 fn diarization_segments_for_insert(
     result: &TranscriptionResult,
     speaker_id: Option<i64>,
+    use_pii_removal: bool,
 ) -> Vec<NewDiarizationSegment> {
     if !result.diarization_segments.is_empty() {
         return result
             .diarization_segments
             .iter()
-            .map(|segment| NewDiarizationSegment {
-                provider_speaker_label: segment.provider_speaker_label.clone(),
-                speaker_id: None,
-                source: "provider".to_string(),
-                start_time: segment.start_time,
-                end_time: segment.end_time,
-                confidence: segment.confidence,
-                overlap: segment.overlap,
-                metadata: Some(
-                    serde_json::json!({
-                        "text": segment.transcription,
-                    })
-                    .to_string(),
-                ),
+            .map(|segment| {
+                let transcription = if use_pii_removal {
+                    remove_pii(&segment.transcription)
+                } else {
+                    segment.transcription.clone()
+                };
+                NewDiarizationSegment {
+                    provider_speaker_label: segment.provider_speaker_label.clone(),
+                    speaker_id: None,
+                    source: "provider".to_string(),
+                    start_time: segment.start_time,
+                    end_time: segment.end_time,
+                    confidence: segment.confidence,
+                    overlap: segment.overlap,
+                    metadata: Some(
+                        serde_json::json!({
+                            "text": transcription,
+                        })
+                        .to_string(),
+                    ),
+                }
             })
             .collect();
     }
@@ -403,6 +415,44 @@ mod tests {
         let result = remove_pii(input);
         assert!(result.contains("[SSN]"));
         assert!(!result.contains("987-65-4321"));
+    }
+
+    #[test]
+    fn diarization_metadata_obeys_basic_pii_removal() {
+        let result = TranscriptionResult {
+            path: String::new(),
+            input: AudioInput {
+                data: Arc::new(Vec::new()),
+                sample_rate: 16_000,
+                channels: 1,
+                device: Arc::new(crate::core::device::AudioDevice::new(
+                    "test-mic".to_string(),
+                    crate::core::device::DeviceType::Input,
+                )),
+                capture_timestamp: 0,
+            },
+            speaker_embedding: Vec::new(),
+            transcription: Some("contact alice@example.com".to_string()),
+            timestamp: 0,
+            error: None,
+            start_time: 0.0,
+            end_time: 1.0,
+            diarization_provider: Some("local".to_string()),
+            diarization_segments: vec![TranscriptionDiarizationSegment {
+                provider_speaker_label: "speaker".to_string(),
+                speaker_id: None,
+                transcription: "email alice@example.com".to_string(),
+                start_time: 0.0,
+                end_time: 1.0,
+                confidence: Some(0.9),
+                overlap: false,
+            }],
+        };
+
+        let segments = diarization_segments_for_insert(&result, None, true);
+        let metadata = segments[0].metadata.as_deref().unwrap();
+        assert!(metadata.contains("[EMAIL]"));
+        assert!(!metadata.contains("alice@example.com"));
     }
 
     /// Benchmark-style test to ensure PII removal is fast

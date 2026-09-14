@@ -225,14 +225,13 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         debug!(
             app = %app_name,
             pid,
-            title = %window_name,
             "a11y: walk_focused_window — evaluating window"
         );
 
         // Skip incognito / private browsing windows (localized title check)
         if self.config.ignore_incognito_windows && crate::incognito::is_title_private(&window_name)
         {
-            debug!(app = %app_name, title = %window_name, "a11y: skipped — incognito/private window");
+            debug!(app = %app_name, "a11y: skipped — incognito/private window");
             return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
         }
 
@@ -244,8 +243,6 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         if window_pattern::matches_any(&ignored_patterns, &app_lower, &window_lower) {
             debug!(
                 app = %app_name,
-                title = %window_name,
-                ignored_patterns = ?self.config.ignored_windows,
                 "a11y: skipped — matched user ignored pattern"
             );
             return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
@@ -256,14 +253,12 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         if !window_pattern::passes_includes(&included_patterns, &app_lower, &window_lower) {
             debug!(
                 app = %app_name,
-                title = %window_name,
-                included_patterns = ?self.config.included_windows,
                 "a11y: skipped — not in include list"
             );
             return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
         }
 
-        debug!(app = %app_name, pid, title = %window_name, "a11y: capturing window tree");
+        debug!(app = %app_name, pid, "a11y: capturing window tree");
 
         // Use adaptive budget overrides when set
         let effective_timeout = self.config.effective_walk_timeout();
@@ -333,9 +328,8 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let walk_duration = start.elapsed();
 
         debug!(
-            "tree walk: app={}, window={}, nodes={}, text_len={}, duration={:?}",
+            "tree walk: app={}, nodes={}, text_len={}, duration={:?}",
             app_name,
-            window_name,
             node_count,
             text_buffer.len(),
             walk_duration

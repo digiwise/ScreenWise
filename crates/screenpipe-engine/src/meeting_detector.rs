@@ -741,8 +741,8 @@ impl MeetingUiScanner {
         let is_in_call = signals_found >= profile.min_signals_required;
 
         debug!(
-            "meeting scanner: pid={} app={} signals={} in_call={} matched={:?}",
-            pid, app_name, signals_found, is_in_call, matched_signals,
+            "meeting scanner: pid={} app={} signals={} in_call={}",
+            pid, app_name, signals_found, is_in_call,
         );
 
         ScanResult {
@@ -789,8 +789,8 @@ impl MeetingUiScanner {
         let is_in_call = signals_found >= profile.min_signals_required;
 
         info!(
-            "meeting scanner: pid={} app={} signals={} in_call={} matched={:?}",
-            pid, app_name, signals_found, is_in_call, matched_signals,
+            "meeting scanner: pid={} app={} signals={} in_call={}",
+            pid, app_name, signals_found, is_in_call,
         );
 
         ScanResult {
@@ -1169,29 +1169,25 @@ fn check_signal_match_precomputed(
 fn format_signal_match(
     signal: &CallSignal,
     role: &str,
-    title: Option<&str>,
-    desc: Option<&str>,
+    _title: Option<&str>,
+    _desc: Option<&str>,
 ) -> String {
     match signal {
         CallSignal::AutomationId(id) => format!("automation_id={}", id),
         CallSignal::AutomationIdContains(s) => format!("automation_id_contains={}", s),
         CallSignal::KeyboardShortcut(s) => format!("shortcut={}", s),
         CallSignal::RoleWithName { name_contains, .. } => {
-            let label = title.or(desc).unwrap_or("?");
-            format!("role_match={}:{} ({})", role, name_contains, label)
+            format!("role_match={}:{}", role, name_contains)
         }
         CallSignal::MenuBarItem { title_contains } => {
-            let label = title.unwrap_or("?");
-            format!("menu_bar_item={} ({})", title_contains, label)
+            format!("menu_bar_item={}", title_contains)
         }
         CallSignal::MenuItemId(id) => format!("menu_item_id={}", id),
         CallSignal::NameContains(name) => {
-            let label = title.or(desc).unwrap_or("?");
-            format!("name_contains={} ({})", name, label)
+            format!("name_contains={}", name)
         }
         CallSignal::WindowTitle { title_contains } => {
-            let label = title.unwrap_or("?");
-            format!("window_title={} ({})", title_contains, label)
+            format!("window_title={}", title_contains)
         }
     }
 }
@@ -1484,13 +1480,9 @@ fn windows_scan_process_uia(
                             .to_lowercase()
                             .contains(&title_contains.to_lowercase())
                         {
-                            let label =
-                                format!("window_title={} ({})", title_contains, window_name_str);
+                            let label = format!("window_title={}", title_contains);
                             if !found.contains(&label) {
-                                info!(
-                                    "meeting scanner: matched window title '{}' on '{}'",
-                                    title_contains, window_name_str
-                                );
+                                info!("meeting scanner: matched window-title signal");
                                 found.push(label);
                             }
                         }
@@ -1556,8 +1548,8 @@ fn windows_scan_process_uia(
                                 .map(|s| s.to_string())
                                 .unwrap_or_default();
                             debug!(
-                                "meeting scanner: UIA candidate pid={} role={:?} name={:?} auto_id={:?}",
-                                pid, role, name, auto_id
+                                "meeting scanner: UIA candidate pid={} role_present={} name_present={} automation_id_present={}",
+                                pid, !role.is_empty(), name.is_some(), auto_id.is_some()
                             );
 
                             // Single pass — check_signal_match (via role_matches)
@@ -2285,22 +2277,17 @@ pub fn find_running_meeting_apps(
 
         // (b) meet-shaped titles, unfiltered by browser — surfaces broken
         // exe lookups.
-        let meet_shaped: Vec<_> = window_titles
+        let meet_shaped_count = window_titles
             .iter()
             .filter(|(_, t)| {
                 let lt = t.to_lowercase();
                 lt.starts_with("meet") || lt.contains(" - meet ") || lt.contains("meet.google.com")
             })
-            .map(|(pid, t)| {
-                let exe = proc_name_of(*pid).unwrap_or_else(|| "<pid not in snapshot>".into());
-                format!("pid={} exe={:?} title={:?}", pid, exe, t)
-            })
-            .collect();
-        if !meet_shaped.is_empty() {
+            .count();
+        if meet_shaped_count > 0 {
             info!(
-                "meeting detector (windows): {} meet-shaped window(s) currently visible: {:?}",
-                meet_shaped.len(),
-                meet_shaped
+                "meeting detector (windows): {} meet-shaped window(s) currently visible",
+                meet_shaped_count
             );
         }
 
@@ -2314,16 +2301,9 @@ pub fn find_running_meeting_apps(
             })
             .collect();
         debug!(
-            "meeting detector (windows): EnumWindows saw {} top-level visible window(s); {} classified as browser windows: {:?}",
+            "meeting detector (windows): EnumWindows saw {} top-level visible window(s); {} classified as browser windows",
             total,
-            browser_windows.len(),
-            browser_windows
-                .iter()
-                .map(|(pid, t)| {
-                    let exe = proc_name_of(*pid).unwrap_or_else(|| "<unknown>".into());
-                    format!("pid={} exe={:?} title={:?}", pid, exe, t)
-                })
-                .collect::<Vec<_>>()
+            browser_windows.len()
         );
     }
 
@@ -2369,11 +2349,10 @@ pub fn find_running_meeting_apps(
                 // INFO: titles can contain sensitive context (URLs, attendee
                 // names) and users routinely share logs for support.
                 debug!(
-                    "meeting detector (windows): profile_idx={} MATCHED browser window pid={} proc={:?} title={:?} (url_match={} title_match={})",
+                    "meeting detector (windows): profile_idx={} matched browser window pid={} proc={:?} (url_match={} title_match={})",
                     idx,
                     pid,
                     proc_name.as_deref().unwrap_or("?"),
-                    title,
                     url_match,
                     title_match
                 );
@@ -2391,13 +2370,10 @@ pub fn find_running_meeting_apps(
                 // Per (profile × window) miss. Cardinality is high — keep at
                 // TRACE. Useful for diagnosing localized title formats.
                 tracing::trace!(
-                    "meeting detector (windows): profile_idx={} no match pid={} proc={:?} title={:?} (url_patterns={:?} title_patterns={:?})",
+                    "meeting detector (windows): profile_idx={} no match pid={} proc={:?} (url_match=false title_match=false)",
                     idx,
                     pid,
                     proc_name.as_deref().unwrap_or("?"),
-                    title,
-                    profile.app_identifiers.browser_url_patterns,
-                    profile.app_identifiers.browser_title_patterns,
                 );
             }
         }
@@ -2412,15 +2388,8 @@ pub fn find_running_meeting_apps(
         // DEBUG, not INFO: `browser_url` carries the window title which can
         // include URLs / attendee names. Users share logs for support.
         debug!(
-            "meeting detector (windows): find_running_meeting_apps returning {} match(es): {:?}",
+            "meeting detector (windows): find_running_meeting_apps returning {} match(es)",
             results.len(),
-            results
-                .iter()
-                .map(|r| format!(
-                    "pid={} app={} profile_idx={} url={:?}",
-                    r.pid, r.app_name, r.profile_index, r.browser_url
-                ))
-                .collect::<Vec<_>>()
         );
     }
 
@@ -3423,10 +3392,7 @@ async fn insert_new_meeting(
 ) -> i64 {
     match db.insert_meeting(app, "ui_scan", title, attendees).await {
         Ok(id) => {
-            info!(
-                "meeting v2: meeting started (id={}, app={}, title={:?})",
-                id, app, title
-            );
+            info!("meeting v2: meeting started (id={}, app={})", id, app);
             // Notify local meeting audio and capture controllers.
             if let Err(e) = screenpipe_events::send_event(
                 "meeting_started",
@@ -4881,7 +4847,8 @@ mod tests {
             Some("Leave Meeting"),
             None,
         );
-        assert!(s.contains("Leave Meeting"));
+        assert_eq!(s, "role_match=AXButton:leave");
+        assert!(!s.contains("Leave Meeting"));
     }
 
     // ── Multiple results tests ─────────────────────────────────────────
@@ -5105,7 +5072,7 @@ mod tests {
             title_contains: "Zoom Meeting",
         };
         let label = format_signal_match(&signal, "window", Some("Zoom Meeting"), None);
-        assert_eq!(label, "window_title=Zoom Meeting (Zoom Meeting)");
+        assert_eq!(label, "window_title=Zoom Meeting");
     }
 
     #[test]

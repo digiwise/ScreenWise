@@ -388,9 +388,8 @@ pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tr
     match walker.walk_focused_window() {
         Ok(TreeWalkResult::Found(snapshot)) => {
             debug!(
-                "tree walk: app={}, window={}, text_len={}, nodes={}, structured_nodes={}, dur={:?}",
+                "tree walk: app={}, text_len={}, nodes={}, structured_nodes={}, dur={:?}",
                 snapshot.app_name,
-                snapshot.window_name,
                 snapshot.text_content.len(),
                 snapshot.node_count,
                 snapshot.nodes.len(),
@@ -506,7 +505,7 @@ fn a11y_content_is_thin(
             .iter()
             .any(|pat| win_lower.contains(pat))
         {
-            debug!("a11y_content_is_thin: known canvas app '{}'", win);
+            debug!("a11y_content_is_thin: known canvas app matched");
             return true;
         }
     }
@@ -519,7 +518,7 @@ fn a11y_content_is_thin(
             .iter()
             .any(|pat| url_lower.contains(pat))
         {
-            debug!("a11y_content_is_thin: known canvas URL '{}'", url);
+            debug!("a11y_content_is_thin: known canvas URL matched");
             return true;
         }
 
@@ -527,7 +526,7 @@ fn a11y_content_is_thin(
             .iter()
             .any(|pat| url_lower.contains(pat))
         {
-            debug!("a11y_content_is_thin: meeting URL '{}'", url);
+            debug!("a11y_content_is_thin: meeting URL matched");
             return true;
         }
     }
@@ -540,7 +539,7 @@ fn a11y_content_is_thin(
             .iter()
             .any(|pat| app_lower.contains(pat))
         {
-            debug!("a11y_content_is_thin: meeting app '{}'", app);
+            debug!("a11y_content_is_thin: meeting app matched");
             return true;
         }
     }

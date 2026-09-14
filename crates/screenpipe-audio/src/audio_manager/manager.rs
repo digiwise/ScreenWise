@@ -337,6 +337,7 @@ impl AudioManager {
                             let opts = options_ref.read().await;
                             let audio_engine = opts.transcription_engine.clone();
                             let batch_max_dur = opts.batch_max_duration_secs;
+                            let use_pii_removal = opts.use_pii_removal;
                             drop(opts);
 
                             let count = super::reconciliation::reconcile_untranscribed(
@@ -347,6 +348,7 @@ impl AudioManager {
                                 Some(seg_mgr.clone()),
                                 output_path_bg.as_deref(),
                                 batch_max_dur,
+                                use_pii_removal,
                                 Some(metrics_bg.clone()),
                             )
                             .await;
@@ -702,6 +704,7 @@ impl AudioManager {
         let vocabulary = options.vocabulary.clone();
         let is_batch_mode = options.transcription_mode == TranscriptionMode::Batch;
         let batch_max_duration_secs = options.batch_max_duration_secs;
+        let use_pii_removal = options.use_pii_removal;
         let filter_music = options.filter_music;
         let vad_engine = self.vad_engine.clone();
         let whisper_receiver = self.recording_receiver.clone();
@@ -895,6 +898,7 @@ impl AudioManager {
                                 Some(segmentation_manager.clone()),
                                 data_dir,
                                 batch_max_duration_secs,
+                                use_pii_removal,
                                 Some(metrics.clone()),
                             )
                             .await;

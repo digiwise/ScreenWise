@@ -139,7 +139,6 @@ pub async fn handle_new_transcript(
         let start_time = Some(transcription.start_time);
         let end_time = Some(transcription.end_time);
         let duration_secs = transcription.end_time - transcription.start_time;
-        let insert_transcription = current_transcript.clone().unwrap_or_default();
         let capture_timestamp = transcription.input.capture_timestamp;
 
         // Process the transcription result
@@ -156,12 +155,13 @@ pub async fn handle_new_transcript(
         {
             Err(e) => error!("Error processing audio result: {}", e),
             Ok(result) => {
-                if let Some(ref result) = result {
-                    prev_id_by_device.insert(device_key.clone(), result.audio_chunk_id);
+                if let Some(ref inserted) = result {
+                    prev_id_by_device.insert(device_key.clone(), inserted.audio_chunk_id);
+                    metrics
+                        .record_db_insert(inserted.transcription.split_whitespace().count() as u64);
                 } else {
                     prev_id_by_device.remove(&device_key);
                 }
-                metrics.record_db_insert(word_count as u64);
 
                 if was_trimmed {
                     debug!(
@@ -170,11 +170,13 @@ pub async fn handle_new_transcript(
                     );
                 }
 
-                // Notify the hot frame cache (or other listeners)
+                // Notify the hot frame cache (or other listeners) with the
+                // exact text persisted by process_transcription_result. This
+                // keeps Basic PII removal consistent between SQLite and cache.
                 if let (Some(ref callback), Some(ref result)) = (&on_insert, &result) {
                     callback(AudioInsertInfo {
                         audio_chunk_id: result.audio_chunk_id,
-                        transcription: insert_transcription.clone(),
+                        transcription: result.transcription.clone(),
                         device_name: device_name.clone(),
                         is_input,
                         audio_file_path: audio_file_path.clone(),
@@ -187,5 +189,86 @@ pub async fn handle_new_transcript(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::core::device::{AudioDevice, DeviceType};
+    use crate::transcription::AudioInput;
+
+    fn transcription_result(
+        transcription: Option<&str>,
+        error: Option<&str>,
+    ) -> TranscriptionResult {
+        TranscriptionResult {
+            path: "/tmp/pii-audio-test.mp4".to_string(),
+            input: AudioInput {
+                data: Arc::new(Vec::new()),
+                sample_rate: 16_000,
+                channels: 1,
+                device: Arc::new(AudioDevice::new("test-mic".to_string(), DeviceType::Input)),
+                capture_timestamp: 1_700_000_000,
+            },
+            speaker_embedding: Vec::new(),
+            transcription: transcription.map(str::to_string),
+            timestamp: 1_700_000_000,
+            error: error.map(str::to_string),
+            start_time: 0.0,
+            end_time: 1.0,
+            diarization_provider: None,
+            diarization_segments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_uses_persisted_pii_redacted_text_and_metrics_only_count_insertions() {
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        sender
+            .send(transcription_result(
+                Some("contact alice@example.com"),
+                None,
+            ))
+            .unwrap();
+        sender
+            .send(transcription_result(
+                Some("failed transcript"),
+                Some("engine failed"),
+            ))
+            .unwrap();
+        drop(sender);
+
+        let inserted = Arc::new(Mutex::new(Vec::new()));
+        let inserted_for_callback = inserted.clone();
+        let callback: AudioInsertCallback = Arc::new(move |info| {
+            inserted_for_callback.lock().unwrap().push(info);
+        });
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+
+        handle_new_transcript(
+            db,
+            Arc::new(receiver),
+            Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
+            "live",
+            true,
+            metrics.clone(),
+            Some(callback),
+        )
+        .await;
+
+        let inserted = inserted.lock().unwrap();
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].transcription, "contact [EMAIL]");
+        assert_eq!(metrics.db_inserted.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.total_words.load(Ordering::Relaxed), 2);
     }
 }

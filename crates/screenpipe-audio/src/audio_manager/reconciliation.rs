@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
+use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::{
     ChunkOutcome, DatabaseManager, NewDiarizationSegment, ReplacementAudioTranscription,
     UntranscribedChunk,
@@ -128,6 +129,7 @@ pub async fn reconcile_untranscribed(
     segmentation_manager: Option<Arc<SegmentationManager>>,
     data_dir: Option<&Path>,
     batch_max_duration_secs: Option<u64>,
+    use_pii_removal: bool,
     metrics: Option<Arc<AudioPipelineMetrics>>,
 ) -> usize {
     // Nothing to reconcile when transcription is disabled — skip entirely
@@ -155,7 +157,7 @@ pub async fn reconcile_untranscribed(
 
     // Retry any previously failed transcriptions before processing new chunks
     if let Some(dir) = data_dir {
-        retry_pending_transcriptions(db, dir, on_insert, metrics.as_ref()).await;
+        retry_pending_transcriptions(db, dir, on_insert, use_pii_removal, metrics.as_ref()).await;
     }
 
     let now = chrono::Utc::now();
@@ -460,7 +462,7 @@ pub async fn reconcile_untranscribed(
         let engine_name = engine_config.to_string();
         let secondary_ids: Vec<i64> = valid_chunks[1..].iter().map(|c| c.id).collect();
 
-        let pending = PendingTranscription {
+        let mut pending = PendingTranscription {
             audio_chunk_id: primary_chunk.id,
             transcription: full_text,
             engine: engine_name,
@@ -476,6 +478,7 @@ pub async fn reconcile_untranscribed(
             secondary_chunk_ids: secondary_ids,
             file_path: primary_chunk.file_path.clone(),
         };
+        apply_pii_removal(&mut pending, use_pii_removal);
 
         // Write to disk first — this is the safety net
         if let Some(dir) = data_dir {
@@ -577,6 +580,19 @@ fn write_pending(data_dir: &Path, pending: &PendingTranscription) -> std::io::Re
         pending.audio_chunk_id, path
     );
     Ok(())
+}
+
+/// Apply the configured Basic PII policy to every transcript payload that can
+/// be persisted or observed outside the reconciliation worker.
+fn apply_pii_removal(pending: &mut PendingTranscription, use_pii_removal: bool) {
+    if !use_pii_removal {
+        return;
+    }
+
+    pending.transcription = remove_pii(&pending.transcription);
+    for segment in &mut pending.diarization_segments {
+        segment.transcription = remove_pii(&segment.transcription);
+    }
 }
 
 /// Remove the pending JSON file for a given chunk id.
@@ -773,6 +789,7 @@ async fn retry_pending_transcriptions(
     db: &DatabaseManager,
     data_dir: &Path,
     on_insert: Option<&AudioInsertCallback>,
+    use_pii_removal: bool,
     metrics: Option<&Arc<AudioPipelineMetrics>>,
 ) {
     let dir = pending_dir(data_dir);
@@ -799,7 +816,7 @@ async fn retry_pending_transcriptions(
             }
         };
 
-        let pending: PendingTranscription = match serde_json::from_str(&content) {
+        let mut pending: PendingTranscription = match serde_json::from_str(&content) {
             Ok(p) => p,
             Err(e) => {
                 warn!(
@@ -811,6 +828,15 @@ async fn retry_pending_transcriptions(
                 continue;
             }
         };
+        apply_pii_removal(&mut pending, use_pii_removal);
+        if use_pii_removal {
+            if let Err(e) = write_pending(data_dir, &pending) {
+                warn!(
+                    "reconciliation: failed to rewrite pending file with Basic PII removal for chunk {}: {}",
+                    pending.audio_chunk_id, e
+                );
+            }
+        }
 
         // Check if the parent audio_chunks row still exists. If it was deleted
         // (e.g. by archive cleanup), the INSERT will always fail with a FK
@@ -1333,6 +1359,30 @@ mod tests {
             secondary_chunk_ids: Vec::new(),
             file_path: "/tmp/audio.mp4".to_string(),
         }
+    }
+
+    #[test]
+    fn basic_pii_removal_sanitizes_pending_json_db_rows_and_hot_cache_payload() {
+        let mut pending = pending_with_diarization(vec![TranscriptionDiarizationSegment {
+            provider_speaker_label: "SPEAKER_00".to_string(),
+            speaker_id: None,
+            transcription: "email alice@example.com".to_string(),
+            start_time: 0.0,
+            end_time: 1.0,
+            confidence: Some(0.9),
+            overlap: false,
+        }]);
+        pending.transcription = "call alice@example.com now".to_string();
+
+        apply_pii_removal(&mut pending, true);
+
+        let pending_json = serde_json::to_string(&pending).unwrap();
+        assert!(!pending_json.contains("alice@example.com"));
+        assert!(pending_json.contains("[EMAIL]"));
+
+        let db_rows = replacement_transcription_segments(&pending);
+        assert_eq!(db_rows[0].transcription, "email [EMAIL]");
+        assert_eq!(pending.transcription, "call [EMAIL] now");
     }
 
     #[test]

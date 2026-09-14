@@ -2990,3 +2990,65 @@ unauthenticated search/frame 403, and authenticated search 200. No excluded
 content was intentionally displayed during those automated runs, so a human
 visual exercise of each disclosure state remains useful and the narrow
 non-atomic Windows enumeration/WGC race documented above still applies.
+
+### Cross-channel acquisition privacy and observability — 2026-09-14
+
+Pre-change boundary: the visible capture-frame work above covers Windows screen
+pixels and the paired OCR/UIA snapshot, not every recorder input. The existing
+keyboard gate suppresses key/text and clipboard content unless fresh UIA state
+explicitly proves a non-password control, but expected privacy suppression and
+UIA/clipboard acquisition failures are collapsed into silent `None` results.
+Click element context can still copy a password control's name/value outside
+that keyboard gate. Several UIA, meeting, browser, and Whisper diagnostics log
+raw titles, URLs, filter patterns, or prompt text. Local audio's normal insert
+path sanitizes DB text but forwards a pre-sanitized copy to the hot cache;
+reconciliation bypasses Basic PII removal entirely before recovery JSON, DB,
+and cache output. Finally, lock/schedule/DRM checks do not uniformly guard the
+inner audio accumulation, live meeting flush, and final meeting persistence
+boundaries. These are distinct from ordinary silence, deduplication, disabled
+capture, and intentional schedule/DRM/lock suppression, which must remain
+content-free observable outcomes rather than being misreported as failures.
+
+Implemented the independently safe input, diagnostic, and transcript-redaction
+part of that boundary. Windows keyboard/clipboard privacy decisions now log
+content-free state transitions; clipboard acquisition failures and bounded
+input/UIA queue drops are reported without payloads. Click context fails closed
+for password fields and unavailable UIA password state by replacing its
+name/value with an explicit redaction marker. Runtime Windows UIA, paired
+capture, meeting detection, and Whisper diagnostics no longer emit captured
+titles, URLs, filter values, UIA names, signal payloads, or prompt text.
+
+Basic PII removal now applies the exact persisted text to realtime hot-cache
+callbacks and applies to reconciliation recovery JSON, primary and diarization
+rows, retries, and callbacks. Live diarization metadata is also sanitized.
+Insert metrics advance only for actual database inserts. The first meeting test
+build exposed two compile errors in the new presence-only diagnostic and two
+tests coupled to captured labels; those were corrected before the successful
+rerun. Locked/offline Ninja Multi-Config tests passed for seven keyboard privacy
+cases, the click-context redaction case, eleven audio PII cases, and 102 meeting
+detector cases (one live test ignored). `cargo fmt --all -- --check`,
+`git diff --check`, and the normal Developer PowerShell/Ninja
+`cargo build --release --locked --offline` passed; dependency manifests and
+lockfiles did not change. Audio privacy-generation enforcement remains the
+separate unfinished boundary described above.
+
+Windows input/privacy observability change: keyboard and clipboard content
+suppression now emits content-free state-transition diagnostics when UIA proves
+a password field or cannot establish a fresh password-state decision. Click
+context now applies the same fail-closed policy to UIA name/value fields and
+stores an explicit redaction marker instead of sensitive or unverified text.
+Clipboard initialization/read failures and bounded input/UIA queue drops are
+reported without payload content; queue drops are aggregated outside the
+low-level hook callback. Runtime accessibility, foreground-window, paired
+capture, meeting detection, and Whisper prompt diagnostics no longer emit raw
+window titles, URLs, configured window patterns, UIA text, meeting titles, or
+prompt contents. This does not turn expected privacy suppression into an
+acquisition failure, and it does not claim the UIA provider can correctly label
+every custom password widget.
+
+Scoped Windows validation used the documented Developer PowerShell, Ninja
+Multi-Config, transient `knf-rs-sys` CRT override, OpenBLAS runtime path, and
+ORT location: all seven `keyboard_privacy` tests passed and the focused click
+redaction test passed. The source tree passed `cargo fmt --all -- --check` after
+formatting. Audio PII persistence and audio pause-generation work remain
+separate below rather than being implied by these input-capture results.
