@@ -15,7 +15,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use screenpipe_db::{DatabaseManager, InsertUiEvent, UiEventType};
-use screenpipe_events::{AudioShutdownStatusEvent, AUDIO_SHUTDOWN_STATUS_EVENT};
+use screenpipe_events::{
+    AudioDeliveryCondition, AudioDeliveryStatusEvent, AudioShutdownStatusEvent,
+    AUDIO_DELIVERY_STATUS_EVENT, AUDIO_SHUTDOWN_STATUS_EVENT,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -31,7 +34,8 @@ static PERSISTENCE_DEGRADED: once_cell::sync::Lazy<Arc<AtomicBool>> =
 #[serde(untagged)]
 enum SafeNoticeEvent {
     Lock(WindowsLockStatusEvent),
-    Audio(AudioShutdownStatusEvent),
+    AudioShutdown(AudioShutdownStatusEvent),
+    AudioDelivery(AudioDeliveryStatusEvent),
 }
 
 impl From<WindowsLockStatusEvent> for SafeNoticeEvent {
@@ -41,20 +45,27 @@ impl From<WindowsLockStatusEvent> for SafeNoticeEvent {
 }
 impl From<AudioShutdownStatusEvent> for SafeNoticeEvent {
     fn from(event: AudioShutdownStatusEvent) -> Self {
-        Self::Audio(event)
+        Self::AudioShutdown(event)
+    }
+}
+impl From<AudioDeliveryStatusEvent> for SafeNoticeEvent {
+    fn from(event: AudioDeliveryStatusEvent) -> Self {
+        Self::AudioDelivery(event)
     }
 }
 impl SafeNoticeEvent {
     fn code(self) -> &'static str {
         match self {
             Self::Lock(event) => event.reason.code(),
-            Self::Audio(event) => event.issue.code(),
+            Self::AudioShutdown(event) => event.issue.code(),
+            Self::AudioDelivery(event) => event.code(),
         }
     }
-    fn message(self) -> &'static str {
+    fn message(self) -> String {
         match self {
-            Self::Lock(event) => event.reason.message(),
-            Self::Audio(event) => event.issue.message(),
+            Self::Lock(event) => event.reason.message().to_string(),
+            Self::AudioShutdown(event) => event.issue.message().to_string(),
+            Self::AudioDelivery(event) => event.message(),
         }
     }
     fn state(self) -> &'static str {
@@ -64,7 +75,13 @@ impl SafeNoticeEvent {
                 WindowsLockNoticeState::Unlocked => "unlocked",
                 WindowsLockNoticeState::DetectionFailed => "detection_failed",
             },
-            Self::Audio(_) => "recording_degraded",
+            Self::AudioShutdown(_) => "recording_degraded",
+            Self::AudioDelivery(event) => match event.condition {
+                AudioDeliveryCondition::NearCapacity => "recording_at_risk",
+                AudioDeliveryCondition::Recovered => "recording_recovered",
+                AudioDeliveryCondition::PossibleLoss => "recording_at_risk",
+                AudioDeliveryCondition::ConfirmedLoss => "recording_degraded",
+            },
         }
     }
 }
@@ -157,7 +174,11 @@ fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> Pri
                 }
                 AUDIO_SHUTDOWN_STATUS_EVENT => {
                     serde_json::from_value::<AudioShutdownStatusEvent>(event.data)
-                        .map(SafeNoticeEvent::Audio)
+                        .map(SafeNoticeEvent::AudioShutdown)
+                }
+                AUDIO_DELIVERY_STATUS_EVENT => {
+                    serde_json::from_value::<AudioDeliveryStatusEvent>(event.data)
+                        .map(SafeNoticeEvent::AudioDelivery)
                 }
                 _ => continue,
             };
@@ -207,7 +228,7 @@ pub struct TimelineNotice {
     timestamp: DateTime<Utc>,
     state: &'static str,
     reason_code: &'static str,
-    message: &'static str,
+    message: String,
 }
 #[derive(Serialize)]
 pub struct NoticeResponse {
@@ -215,6 +236,7 @@ pub struct NoticeResponse {
     has_more: bool,
     persistence_degraded: bool,
     event_delivery: screenpipe_events::EventDeliveryStatus,
+    audio_delivery: screenpipe_events::AudioDeliveryStatus,
     audio_shutdown_degraded: bool,
     audio_shutdown_issues: Vec<screenpipe_events::AudioShutdownIssue>,
 }
@@ -254,6 +276,7 @@ async fn query_notices(db: &DatabaseManager, range: &NoticeRange) -> Result<Noti
         has_more,
         persistence_degraded: invalid_rows || PERSISTENCE_DEGRADED.load(Ordering::Relaxed),
         event_delivery: screenpipe_events::event_delivery_status(),
+        audio_delivery: screenpipe_events::audio_delivery_status(),
         audio_shutdown_degraded: !audio_shutdown_issues.is_empty(),
         audio_shutdown_issues,
     })
@@ -388,6 +411,55 @@ mod tests {
                 && row.element_value.is_none()
                 && row.key_code.is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn audio_delivery_notice_uses_only_fixed_queue_text_and_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = DatabaseManager::new(
+            temp.path().join("db.sqlite").to_str().unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        let event = AudioDeliveryStatusEvent {
+            queue: screenpipe_events::AudioQueueKind::Recording,
+            condition: AudioDeliveryCondition::ConfirmedLoss,
+            count: 2,
+            total_dropped: 3,
+            total_possible_loss: 0,
+        };
+        let row = notice_row(event, now);
+        assert_eq!(
+            row.text_content.as_deref(),
+            Some(
+                "{\"queue\":\"recording\",\"condition\":\"confirmed_loss\",\"count\":2,\"total_dropped\":3,\"total_possible_loss\":0}"
+            )
+        );
+        assert!(
+            row.app_name.is_none()
+                && row.window_title.is_none()
+                && row.browser_url.is_none()
+                && row.frame_id.is_none()
+                && row.element_value.is_none()
+                && row.key_code.is_none()
+        );
+        db.insert_ui_event(&row).await.unwrap();
+        let result = query_notices(
+            &db,
+            &NoticeRange {
+                start_time: now - chrono::Duration::seconds(1),
+                end_time: now + chrono::Duration::seconds(1),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.data.len(), 1);
+        assert_eq!(result.data[0].state, "recording_degraded");
+        assert_eq!(result.data[0].reason_code, "audio_recording_delivery_lost");
+        assert_eq!(result.data[0].message, event.message());
     }
 
     #[tokio::test]

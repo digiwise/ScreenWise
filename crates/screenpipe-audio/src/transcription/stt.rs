@@ -15,6 +15,7 @@ use crate::vad::VadEngine;
 use crate::{AudioInput, TranscriptionResult};
 use anyhow::{anyhow, Result};
 use screenpipe_config::AudioPrivacyPermit;
+use screenpipe_events::{AudioDeliveryReporter, AudioQueueKind};
 use std::path::PathBuf;
 use std::{sync::Arc, sync::Mutex as StdMutex};
 use tokio::sync::Mutex;
@@ -27,22 +28,41 @@ use super::TranscriptionOutput;
 pub const SAMPLE_RATE: u32 = 16_000;
 const RESULT_SEND_POLL: Duration = Duration::from_millis(25);
 
+fn sample_transcription_sender<T>(
+    delivery: &AudioDeliveryReporter,
+    sender: &crossbeam::channel::Sender<T>,
+) {
+    if let Some(capacity) = sender.capacity() {
+        delivery.sample_queue(AudioQueueKind::TranscriptionResult, sender.len(), capacity);
+    }
+}
+
+fn record_transcription_delivery_loss(delivery: &AudioDeliveryReporter) {
+    delivery.record_confirmed_loss(AudioQueueKind::TranscriptionResult, 1);
+}
+
 async fn send_with_async_backpressure<T>(
     sender: &crossbeam::channel::Sender<T>,
     mut value: T,
     is_current: impl Fn() -> bool,
 ) -> Result<bool> {
+    let delivery = screenpipe_events::audio_delivery_reporter();
     loop {
         if !is_current() {
             return Ok(false);
         }
+        sample_transcription_sender(delivery, sender);
         match sender.try_send(value) {
-            Ok(()) => return Ok(true),
+            Ok(()) => {
+                sample_transcription_sender(delivery, sender);
+                return Ok(true);
+            }
             Err(crossbeam::channel::TrySendError::Full(returned)) => {
                 value = returned;
                 tokio::time::sleep(RESULT_SEND_POLL).await;
             }
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                record_transcription_delivery_loss(delivery);
                 return Err(anyhow!("transcription result channel disconnected"));
             }
         }
@@ -242,6 +262,37 @@ fn offset_diarization_segments(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn transcription_queue_pressure_recovers_without_loss() {
+        let delivery = AudioDeliveryReporter::isolated();
+        let (sender, receiver) = crossbeam::channel::bounded::<u8>(10);
+        for value in 0..8 {
+            sender.send(value).unwrap();
+        }
+        sample_transcription_sender(&delivery, &sender);
+        assert!(delivery.status().near_capacity());
+        for _ in 0..3 {
+            receiver.recv().unwrap();
+        }
+        sample_transcription_sender(&delivery, &sender);
+        let status = delivery.status();
+        assert!(!status.near_capacity());
+        assert_eq!(status.dropped_deliveries(), 0);
+    }
+
+    #[test]
+    fn transcription_delivery_failure_counts_exactly_one() {
+        let delivery = AudioDeliveryReporter::isolated();
+        record_transcription_delivery_loss(&delivery);
+        let status = delivery.status();
+        let transcription = status
+            .queues
+            .iter()
+            .find(|queue| queue.queue == AudioQueueKind::TranscriptionResult)
+            .unwrap();
+        assert_eq!(transcription.dropped_deliveries, 1);
+    }
 
     #[tokio::test]
     async fn full_result_queue_wait_is_cancellation_safe() {

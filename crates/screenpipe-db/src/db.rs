@@ -18,6 +18,8 @@ use sqlx::Row;
 use sqlx::Sqlite;
 use sqlx::TypeInfo;
 use sqlx::ValueRef;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -48,6 +50,8 @@ const DEDUP_TIME_WINDOW_SECS: i64 = 45;
 /// Higher = stricter matching, lower = more aggressive deduplication.
 const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.85;
 const FRAMES_FTS_EXTERNAL_CONTENT_MIGRATION_VERSION: i64 = 20260415000000;
+#[cfg(test)]
+static FORCE_DIARIZATION_POST_COMMIT_STALE: AtomicBool = AtomicBool::new(false);
 
 /// User explicitly stopped a meeting (stop button in UI / stop API).
 /// Auto-merge MUST NOT reopen these — a new detected meeting in the same
@@ -132,6 +136,24 @@ impl ImmediateTx {
         }
         self.committed = true;
         Ok(())
+    }
+
+    /// Commit while retaining the connection and write semaphore permit.
+    /// Privacy-sensitive callers use this to re-check admission and, if
+    /// necessary, compensate before another writer can interleave.
+    async fn commit_retaining_write_guard(
+        mut self,
+    ) -> Result<(PoolConnection<Sqlite>, OwnedSemaphorePermit), sqlx::Error> {
+        if let Some(ref mut conn) = self.conn {
+            sqlx::query("COMMIT").execute(&mut **conn).await?;
+        }
+        self.committed = true;
+        Ok((
+            self.conn.take().expect("connection already taken"),
+            self._write_permit
+                .take()
+                .expect("write permit already taken"),
+        ))
     }
 
     /// Explicitly rollback the transaction.
@@ -749,16 +771,39 @@ impl DatabaseManager {
         file_path: &str,
         timestamp: Option<DateTime<Utc>>,
     ) -> Result<i64, sqlx::Error> {
+        self.insert_audio_chunk_with_optional_privacy(file_path, timestamp, None)
+            .await?
+            .ok_or(sqlx::Error::WorkerCrashed)
+    }
+
+    pub async fn insert_audio_chunk_with_privacy(
+        &self,
+        file_path: &str,
+        timestamp: Option<DateTime<Utc>>,
+        privacy: screenpipe_config::AudioPrivacyPermit,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        self.insert_audio_chunk_with_optional_privacy(file_path, timestamp, Some(privacy))
+            .await
+    }
+
+    async fn insert_audio_chunk_with_optional_privacy(
+        &self,
+        file_path: &str,
+        timestamp: Option<DateTime<Utc>>,
+        privacy: Option<screenpipe_config::AudioPrivacyPermit>,
+    ) -> Result<Option<i64>, sqlx::Error> {
         use crate::write_queue::{WriteOp, WriteResult};
         let result = self
             .write_queue
             .submit(WriteOp::InsertAudioChunk {
                 file_path: file_path.to_string(),
                 timestamp,
+                privacy,
             })
             .await?;
         match result {
-            WriteResult::Id(id) => Ok(id),
+            WriteResult::Id(id) => Ok(Some(id)),
+            WriteResult::PrivacyInvalidated => Ok(None),
             _ => unreachable!(),
         }
     }
@@ -1031,6 +1076,15 @@ impl DatabaseManager {
         Ok(count)
     }
 
+    pub async fn count_diarization_runs(&self, audio_chunk_id: i64) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM diarization_runs WHERE audio_chunk_id = ?1",
+        )
+        .bind(audio_chunk_id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_audio_transcription(
         &self,
@@ -1115,7 +1169,10 @@ impl DatabaseManager {
         start_time: Option<f64>,
         end_time: Option<f64>,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<i64, sqlx::Error> {
+        privacy: screenpipe_config::AudioPrivacyPermit,
+        previous_chunk_id: Option<i64>,
+        previous_transcription: Option<String>,
+    ) -> Result<Option<i64>, sqlx::Error> {
         use crate::write_queue::{WriteOp, WriteResult};
 
         let trimmed = transcription.trim();
@@ -1151,11 +1208,15 @@ impl DatabaseManager {
                 timestamp,
                 existing_chunk_id,
                 is_duplicate,
+                privacy: Some(privacy),
+                previous_chunk_id,
+                previous_transcription,
             })
             .await?;
 
         match result {
-            WriteResult::Id(id) => Ok(id),
+            WriteResult::AudioChunkAndTranscription(result) => Ok(Some(result.audio_chunk_id)),
+            WriteResult::PrivacyInvalidated => Ok(None),
             _ => unreachable!(),
         }
     }
@@ -1545,7 +1606,56 @@ impl DatabaseManager {
         metadata: Option<&str>,
         segments: &[NewDiarizationSegment],
     ) -> Result<Option<i64>, sqlx::Error> {
+        self.insert_diarization_run_with_segments_inner(
+            audio_chunk_id,
+            mode,
+            provider,
+            model,
+            metadata,
+            segments,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_diarization_run_with_segments_if_current(
+        &self,
+        audio_chunk_id: i64,
+        mode: &str,
+        provider: &str,
+        model: Option<&str>,
+        metadata: Option<&str>,
+        segments: &[NewDiarizationSegment],
+        privacy: screenpipe_config::AudioPrivacyPermit,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        self.insert_diarization_run_with_segments_inner(
+            audio_chunk_id,
+            mode,
+            provider,
+            model,
+            metadata,
+            segments,
+            Some(privacy),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_diarization_run_with_segments_inner(
+        &self,
+        audio_chunk_id: i64,
+        mode: &str,
+        provider: &str,
+        model: Option<&str>,
+        metadata: Option<&str>,
+        segments: &[NewDiarizationSegment],
+        privacy: Option<screenpipe_config::AudioPrivacyPermit>,
+    ) -> Result<Option<i64>, sqlx::Error> {
         if segments.is_empty() {
+            return Ok(None);
+        }
+        if privacy.is_some_and(|permit| !permit.is_current()) {
             return Ok(None);
         }
 
@@ -1613,8 +1723,51 @@ impl DatabaseManager {
             }
         }
 
-        tx.commit().await?;
-        Ok(Some(diarization_run_id))
+        if privacy.is_some_and(|permit| !permit.is_current()) {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let Some(privacy) = privacy else {
+            tx.commit().await?;
+            return Ok(Some(diarization_run_id));
+        };
+
+        let (mut conn, _write_guard) = tx.commit_retaining_write_guard().await?;
+        let post_commit_current = privacy.is_current();
+        #[cfg(test)]
+        let post_commit_current =
+            post_commit_current && !FORCE_DIARIZATION_POST_COMMIT_STALE.load(Ordering::SeqCst);
+        if post_commit_current {
+            return Ok(Some(diarization_run_id));
+        }
+
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let cleanup = async {
+            sqlx::query(
+                "DELETE FROM diarization_segments WHERE diarization_run_id = ?1 AND audio_chunk_id = ?2",
+            )
+            .bind(diarization_run_id)
+            .bind(audio_chunk_id)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("DELETE FROM diarization_runs WHERE id = ?1 AND audio_chunk_id = ?2")
+                .bind(diarization_run_id)
+                .bind(audio_chunk_id)
+                .execute(&mut *conn)
+                .await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        match cleanup {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(error)
+            }
+        }
     }
 
     /// Get audio chunks and their transcriptions within a time range.
@@ -8908,6 +9061,24 @@ LIMIT ? OFFSET ?
         Ok(rows)
     }
 
+    pub async fn delete_meeting_transcript_segment(
+        &self,
+        meeting_id: i64,
+        segment_id: i64,
+    ) -> Result<u64, SqlxError> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+        let deleted = sqlx::query(
+            "DELETE FROM meeting_transcript_segments WHERE id = ?1 AND meeting_id = ?2",
+        )
+        .bind(segment_id)
+        .bind(meeting_id)
+        .execute(&mut **tx.conn())
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
     pub async fn replace_meeting_transcript_segments(
         &self,
         meeting_id: i64,
@@ -10284,6 +10455,46 @@ pub fn parse_all_text_positions(blocks: &[OcrTextBlock]) -> Vec<TextPosition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn privacy_transition_after_diarization_commit_removes_exact_run() {
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let chunk_id = db
+            .insert_audio_chunk("synthetic-diarization.wav", None)
+            .await
+            .unwrap();
+        let permit = screenpipe_config::AudioPrivacyPermit::current().unwrap();
+        let segments = [NewDiarizationSegment {
+            provider_speaker_label: "speaker:synthetic".to_string(),
+            speaker_id: None,
+            source: "test".to_string(),
+            start_time: 0.0,
+            end_time: 1.0,
+            confidence: Some(1.0),
+            overlap: false,
+            metadata: None,
+        }];
+
+        FORCE_DIARIZATION_POST_COMMIT_STALE.store(true, Ordering::SeqCst);
+        let result = db
+            .insert_diarization_run_with_segments_if_current(
+                chunk_id,
+                "background",
+                "test",
+                None,
+                None,
+                &segments,
+                permit,
+            )
+            .await;
+        FORCE_DIARIZATION_POST_COMMIT_STALE.store(false, Ordering::SeqCst);
+
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(db.count_diarization_runs(chunk_id).await.unwrap(), 0);
+        assert!(db.audio_chunk_exists(chunk_id).await.unwrap());
+    }
 
     async fn test_database() -> DatabaseManager {
         DatabaseManager::new("sqlite::memory:", Default::default())

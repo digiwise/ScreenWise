@@ -8,7 +8,8 @@ import { localFetch } from "@/lib/api";
 export type PrivacyNotice = {
 	id: number;
 	timestamp: string;
-	state: "locked" | "unlocked" | "detection_failed" | "recording_degraded";
+	state: "locked" | "unlocked" | "detection_failed" | "recording_degraded"
+		| "recording_at_risk" | "recording_recovered";
 	reason_code: string;
 	message: string;
 };
@@ -26,6 +27,7 @@ type CaptureEventsResponse = {
 	has_more?: unknown;
 	persistence_degraded?: unknown;
 	event_delivery?: { near_capacity?: unknown; dropped_events?: unknown };
+	audio_delivery?: { queues?: unknown };
 	audio_shutdown_degraded?: unknown;
 	audio_shutdown_issues?: unknown;
 };
@@ -35,6 +37,28 @@ const DEGRADED_NOTICE = "Some recording status notices are unavailable. Check th
 const NEAR_CAPACITY_NOTICE = "Activity event buffer nearly full; some events may be lost.";
 const DROPPED_EVENTS_NOTICE = "Activity event subscriber deliveries were dropped; some activity may be missing. Check the local diagnostic log.";
 const AUDIO_SHUTDOWN_NOTICE = "Audio shutdown was incomplete; some activity data may be missing. Check the local diagnostic log.";
+const AUDIO_QUEUE_NEAR_CAPACITY_NOTICE = "An audio buffer is nearly full; some audio may be lost if pressure continues.";
+const AUDIO_QUEUE_LOSS_NOTICE = "Audio buffer deliveries were dropped; some activity may be missing. Check the local diagnostic log.";
+const AUDIO_QUEUE_POSSIBLE_LOSS_NOTICE = "Some audio buffer deliveries could not be verified; activity data may be missing. Check the local diagnostic log.";
+
+type AudioQueueKind = "device_capture" | "recording" | "transcription_result"
+	| "meeting_tap" | "meeting_provider" | "meeting_final" | "meeting_final_persistence";
+type AudioQueueStatus = {
+	queue: AudioQueueKind;
+	near_capacity: boolean;
+	dropped_deliveries: number;
+	possible_lost_deliveries: number;
+};
+
+const AUDIO_QUEUE_KINDS: ReadonlySet<AudioQueueKind> = new Set([
+	"device_capture",
+	"recording",
+	"transcription_result",
+	"meeting_tap",
+	"meeting_provider",
+	"meeting_final",
+	"meeting_final_persistence",
+]);
 
 const AUDIO_SHUTDOWN_ISSUES: ReadonlySet<AudioShutdownIssue> = new Set([
 	"producer_stop_timeout",
@@ -52,9 +76,24 @@ function isPrivacyNotice(value: unknown): value is PrivacyNotice {
 		&& typeof notice.timestamp === "string"
 		&& Number.isFinite(Date.parse(notice.timestamp))
 		&& (notice.state === "locked" || notice.state === "unlocked" || notice.state === "detection_failed"
-			|| notice.state === "recording_degraded")
+			|| notice.state === "recording_degraded" || notice.state === "recording_at_risk"
+			|| notice.state === "recording_recovered")
 		&& typeof notice.reason_code === "string"
 		&& typeof notice.message === "string";
+}
+
+function isAudioQueueStatus(value: unknown): value is AudioQueueStatus {
+	if (!value || typeof value !== "object") return false;
+	const status = value as Partial<AudioQueueStatus>;
+	return typeof status.queue === "string"
+		&& AUDIO_QUEUE_KINDS.has(status.queue as AudioQueueKind)
+		&& typeof status.near_capacity === "boolean"
+		&& typeof status.dropped_deliveries === "number"
+		&& Number.isSafeInteger(status.dropped_deliveries)
+		&& status.dropped_deliveries >= 0
+		&& typeof status.possible_lost_deliveries === "number"
+		&& Number.isSafeInteger(status.possible_lost_deliveries)
+		&& status.possible_lost_deliveries >= 0;
 }
 
 function isAudioShutdownIssue(value: unknown): value is AudioShutdownIssue {
@@ -76,6 +115,9 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 	const [nearCapacity, setNearCapacity] = useState(false);
 	const [droppedEvents, setDroppedEvents] = useState(0);
 	const [audioShutdownDegraded, setAudioShutdownDegraded] = useState(false);
+	const [audioQueueNearCapacity, setAudioQueueNearCapacity] = useState(false);
+	const [audioDroppedDeliveries, setAudioDroppedDeliveries] = useState(0);
+	const [audioPossibleLostDeliveries, setAudioPossibleLostDeliveries] = useState(0);
 	const [error, setError] = useState<string | null>(null);
 	const [expanded, setExpanded] = useState(false);
 	const dayKey = useMemo(() => `${currentDate.getFullYear()}-${currentDate.getMonth()}-${currentDate.getDate()}`, [currentDate]);
@@ -112,6 +154,12 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 					|| !Number.isSafeInteger(delivery.dropped_events) || delivery.dropped_events < 0)) {
 					throw new Error("Invalid delivery status");
 				}
+				const audioDelivery = body.audio_delivery;
+				if (audioDelivery !== undefined && (!audioDelivery || typeof audioDelivery !== "object"
+					|| !Array.isArray(audioDelivery.queues)
+					|| !audioDelivery.queues.every(isAudioQueueStatus))) {
+					throw new Error("Invalid audio delivery status");
+				}
 				setNotices(body.data);
 				setHasMore(body.has_more === true);
 				setPersistenceDegraded(body.persistence_degraded === true);
@@ -121,6 +169,16 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 				setDroppedEvents(dropped);
 				setNearCapacity(delivery?.near_capacity === true);
 				setAudioShutdownDegraded(body.audio_shutdown_degraded === true);
+				const audioQueues = audioDelivery?.queues as AudioQueueStatus[] | undefined;
+				setAudioQueueNearCapacity(audioQueues?.some((queue) => queue.near_capacity) === true);
+				setAudioDroppedDeliveries(audioQueues?.reduce(
+					(total, queue) => total + queue.dropped_deliveries,
+					0,
+				) ?? 0);
+				setAudioPossibleLostDeliveries(audioQueues?.reduce(
+					(total, queue) => total + queue.possible_lost_deliveries,
+					0,
+				) ?? 0);
 				setError(null);
 			} catch {
 				if (cancelled || controller.signal.aborted || request !== controller) return;
@@ -133,13 +191,18 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 		setNearCapacity(false);
 		setDroppedEvents(0);
 		setAudioShutdownDegraded(false);
+		setAudioQueueNearCapacity(false);
+		setAudioDroppedDeliveries(0);
+		setAudioPossibleLostDeliveries(0);
 		setError(null);
 		void load();
 		timer = setInterval(() => void load(), 10_000);
 		return () => { cancelled = true; request?.abort(); if (timer) clearInterval(timer); };
 	}, [dayKey]); // currentDate's calendar day is the query scope
 
-	if (!notices.length && !error && !persistenceDegraded && !nearCapacity && droppedEvents === 0 && !audioShutdownDegraded) return null;
+	if (!notices.length && !error && !persistenceDegraded && !nearCapacity && droppedEvents === 0
+		&& !audioShutdownDegraded && !audioQueueNearCapacity && audioDroppedDeliveries === 0
+		&& audioPossibleLostDeliveries === 0) return null;
 	return (
 		<section className="mx-3 mb-2 rounded-md border border-border/60 bg-background/90 px-3 py-2 text-xs" aria-label="Recording status">
 			<button type="button" className="flex w-full items-center justify-between text-left font-medium" onClick={() => setExpanded((value) => !value)}>
@@ -151,6 +214,9 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 			{nearCapacity && <div className="mt-2 text-amber-700 dark:text-amber-300">{NEAR_CAPACITY_NOTICE}</div>}
 			{droppedEvents > 0 && <div className="mt-2 text-destructive">{DROPPED_EVENTS_NOTICE}</div>}
 			{audioShutdownDegraded && <div className="mt-2 text-destructive">{AUDIO_SHUTDOWN_NOTICE}</div>}
+			{audioQueueNearCapacity && <div className="mt-2 text-amber-700 dark:text-amber-300">{AUDIO_QUEUE_NEAR_CAPACITY_NOTICE}</div>}
+			{audioDroppedDeliveries > 0 && <div className="mt-2 text-destructive">{AUDIO_QUEUE_LOSS_NOTICE}</div>}
+			{audioPossibleLostDeliveries > 0 && <div className="mt-2 text-amber-700 dark:text-amber-300">{AUDIO_QUEUE_POSSIBLE_LOSS_NOTICE}</div>}
 			{expanded && (
 				<div className="mt-2 max-h-48 space-y-1 overflow-y-auto text-muted-foreground">
 					{notices.map((notice) => (

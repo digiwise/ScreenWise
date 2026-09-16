@@ -55,8 +55,9 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | SW-V15 | Harness capture-worker readiness race repaired; selected-output live retest passed. |
 | SW-V16 | Duplicate lock monitors prevented with one process worker and serialized probes; synthetic tests passed. Repeated live desktop server lifecycle remains open. |
 | SW-V17 | Partial audio buffer splitting/swallowed final-delivery failure repaired; synthetic tests and one complete live partial chunk passed. |
-| SW-V18 | **Open:** internal audio queues lack complete near-capacity/loss timeline reporting. General event-bus diagnostics do not cover meeting-tap lag/per-device drops or count all potentially discarded finals. |
-| SW-V19 | **Open, source-review finding:** audio privacy permits are checked around asynchronous persistence, but a lock/DRM/schedule transition during a database write can leave an already admitted audio chunk, transcript or meeting segment stored. A later stale-permit check does not roll back the write. Atomic admission/persistence or verified compensating cleanup and deterministic transition-race tests are needed; no claim that queued audio is completely discarded on a privacy transition. |
+| SW-V18 | Typed near-capacity, recovery, confirmed-loss and possible-loss reporting now covers device capture, recording, transcription-result, meeting-tap, meeting-provider, meeting-final and meeting-persistence queues. Fixed content-free notices reach local logs, the general activity timeline and `/capture-events`; deterministic event/audio/engine tests passed. Real overload/soak and the packaged visual timeline remain open. Counts describe queue deliveries, not unique lost database rows. |
+| SW-V19 | Audio privacy-transition compensation now covers raw chunk rows/files, combined chunk/transcript/overlap writes, live and reconciled diarization runs/segments, and meeting transcript segments while retaining the database write guard through the stale-generation check and exact cleanup. Deterministic durable-state tests and the full database/audio suites passed. This does not cover the separate speaker-identity mutation in SW-V20 or establish universal transition safety. |
+| SW-V20 | **Open, source-review finding:** speaker matching can create a speaker, add an embedding or update a shared speaker centroid while a privacy generation changes. Safely reversing a shared identity requires transactional before-images and ownership-aware compensation; deleting a pre-existing/shared speaker would be unsafe. |
 
 ## Outstanding test plan
 
@@ -73,7 +74,7 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | SW-T09 | Desktop/WebView/MCP/optional executable scope: inventory relevant child processes before extending firewall claims. |
 | SW-T10 | Owner-confirmed disposition/restoration of exact test rules, independent read-only final inspection and original milestone closeout. |
 | SW-T11 | Visual desktop status and broader safe-notice audit across acquisition/audio/input failures and independent queues. |
-| SW-T12 | Deterministic privacy-generation changes during audio file/chunk, transcript and meeting-segment persistence; verify durable data as well as returned results. Address SW-V19 before claiming stale-generation suppression. |
+| SW-T12 | Extend the passing deterministic privacy-generation tests with live transition timing and the SW-V20 speaker-identity path. Inspect durable state as well as returned results; do not generalize the fixed persistence paths to universal stale-generation suppression. |
 
 ## Reuse and conduct
 

@@ -127,33 +127,13 @@ pub async fn process_transcription_result(
         return Ok(None);
     }
     debug!("device {} inserting audio chunk", result.input.device);
-    if let Some(id) = previous_transcript_id {
-        if let Some(prev_transcript) = previous_transcript {
-            // Apply PII removal to previous transcript update as well
-            let sanitized_prev = if use_pii_removal {
-                remove_pii(&prev_transcript)
-            } else {
-                prev_transcript
-            };
-            if !result
-                .input
-                .privacy
-                .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
-            {
-                return Ok(None);
-            }
-            match db
-                .update_audio_transcription(id, sanitized_prev.as_str())
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => debug!(
-                    "Failed to update transcription for {}: audio_chunk_id {} (likely benign UNIQUE constraint)",
-                    result.input.device, e
-                ),
-            }
+    let previous_transcription = previous_transcript.map(|previous| {
+        if use_pii_removal {
+            remove_pii(&previous)
+        } else {
+            previous
         }
-    }
+    });
     // Use the original capture timestamp so audio appears at the correct
     // position on the timeline. Previously this was None (falling back to
     // Utc::now() at processing time), which placed deferred audio at the
@@ -191,14 +171,24 @@ pub async fn process_transcription_result(
                 Some(result.start_time),
                 Some(result.end_time),
                 capture_ts,
+                result.input.privacy.unwrap(),
+                previous_transcript_id,
+                previous_transcription.clone(),
             )
             .await
         {
-            Ok(audio_chunk_id) => {
+            Ok(Some(audio_chunk_id)) => {
                 debug!(
                     "Inserted audio chunk+transcription for device {} using {}",
                     result.input.device, transcription_engine
                 );
+                if !result
+                    .input
+                    .privacy
+                    .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+                {
+                    return Ok(None);
+                }
                 let segments =
                     diarization_segments_for_insert(&result, speaker_id, use_pii_removal);
                 let provider = result.diarization_provider.as_deref().unwrap_or(
@@ -208,21 +198,15 @@ pub async fn process_transcription_result(
                         "local"
                     },
                 );
-                if !result
-                    .input
-                    .privacy
-                    .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
-                {
-                    return Ok(None);
-                }
                 if let Err(e) = db
-                    .insert_diarization_run_with_segments(
+                    .insert_diarization_run_with_segments_if_current(
                         audio_chunk_id,
                         diarization_mode,
                         provider,
                         Some(&transcription_engine),
                         None,
                         &segments,
+                        result.input.privacy.unwrap(),
                     )
                     .await
                 {
@@ -234,6 +218,7 @@ pub async fn process_transcription_result(
                 chunk_id = Some(audio_chunk_id);
                 break;
             }
+            Ok(None) => return Ok(None),
             Err(e) => {
                 if retry < 2 {
                     warn!(

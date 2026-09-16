@@ -179,3 +179,32 @@ maintainer private-email match in the 520 changed text files checked. A separate
 bounded credential-pattern scan found no high-confidence real credentials;
 neither scan is an exhaustive security audit. All 43 local links in the nine
 primary guides and the three edited Tauri JSON files validated.
+
+## Audio privacy and queue diagnostics (2026-09-16)
+
+The audio persistence path now retains its database write exclusion through the
+post-commit privacy-generation check and performs exact compensating cleanup
+before returning a stale result. Covered writes are raw chunk rows and their
+files, combined chunk/transcript writes and overlap edits, live and reconciled
+diarization runs and segments, and live meeting transcript segments. The tests
+force generation invalidation after commit and inspect durable state, including
+restoring pre-existing chunk state and overlap transcript text. Speaker identity
+matching remains a separate open boundary: it can add an embedding, update a
+shared centroid or create a speaker, and safe reversal needs transactional
+before-images plus ownership-aware compensation.
+
+Audio delivery diagnostics now use fixed queue enums and numeric counters only.
+The device-capture, recording, transcription-result, meeting-tap,
+meeting-provider, meeting-final and meeting-persistence queues report an 80%
+near-capacity transition, 50% recovery, exact confirmed drops where known, and
+separate possible-loss counts when shutdown or task failure prevents completion
+from being verified. Fixed allowlisted messages are written to local logs and
+the existing general activity timeline; current latched state is exposed by
+`/capture-events`. The deterministic suites passed 35 event tests, 93 database
+tests, 179 audio tests with one ignored test, and six scoped engine notice tests.
+The documented Developer PowerShell environment also completed a locked offline
+release build in 7m17s.
+The desktop component source and fixtures were updated, but its Vitest command
+was not run because JavaScript dependencies are not installed and this work did
+not download them. Real overload/soak and visual packaged-timeline checks remain
+outstanding.

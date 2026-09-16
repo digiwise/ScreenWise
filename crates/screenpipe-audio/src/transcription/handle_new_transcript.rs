@@ -84,6 +84,13 @@ pub(crate) async fn handle_new_transcript_until_shutdown(
     let mut previous_privacy = None;
     loop {
         let mut transcription = loop {
+            if let Some(capacity) = transcription_receiver.capacity() {
+                screenpipe_events::audio_delivery_reporter().sample_queue(
+                    screenpipe_events::AudioQueueKind::TranscriptionResult,
+                    transcription_receiver.len(),
+                    capacity,
+                );
+            }
             match transcription_receiver.try_recv() {
                 Ok(transcription) => break transcription,
                 Err(crossbeam::channel::TryRecvError::Empty)

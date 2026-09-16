@@ -19,6 +19,10 @@ use tokio::sync::{broadcast, oneshot};
 #[cfg(not(all(target_os = "linux", feature = "pulseaudio")))]
 use tracing::{error, info, warn};
 
+// Tokio rounds broadcast capacities up to a power of two. Use the effective
+// value explicitly so queue-pressure diagnostics report the real boundary.
+pub(crate) const AUDIO_STREAM_BUFFER_CAPACITY: usize = 1024;
+
 #[cfg(not(all(target_os = "linux", feature = "pulseaudio")))]
 use crate::utils::audio::audio_to_mono;
 
@@ -156,7 +160,7 @@ impl AudioStream {
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] windows_input_aec: bool,
         #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] macos_input_vpio: bool,
     ) -> Result<Self> {
-        let (tx, _) = broadcast::channel::<CapturedAudio>(1000);
+        let (tx, _) = broadcast::channel::<CapturedAudio>(AUDIO_STREAM_BUFFER_CAPACITY);
         let tx_clone = tx.clone();
         let is_disconnected = Arc::new(AtomicBool::new(false));
         let (stream_control_tx, stream_control_rx) = mpsc::channel();
@@ -625,7 +629,7 @@ impl AudioStream {
         sample_rate: u32,
         channels: u16,
     ) -> (Self, Arc<broadcast::Sender<CapturedAudio>>) {
-        let (tx, _) = broadcast::channel::<CapturedAudio>(1000);
+        let (tx, _) = broadcast::channel::<CapturedAudio>(AUDIO_STREAM_BUFFER_CAPACITY);
         let tx_arc = Arc::new(tx);
         let (stream_control_tx, _rx) = mpsc::channel();
         let stream = AudioStream {
@@ -667,7 +671,7 @@ impl AudioStream {
         // 1000-deep buffer matches `from_device`. Keeping the receiver
         // unsubscribed at construction time mirrors cpal: the stream isn't
         // started until subscribe(); use `start_wav_playback` below.
-        let (tx, _) = broadcast::channel::<CapturedAudio>(1000);
+        let (tx, _) = broadcast::channel::<CapturedAudio>(AUDIO_STREAM_BUFFER_CAPACITY);
         let tx_clone = tx.clone();
         let (stream_control_tx, _rx) = mpsc::channel();
         let is_disconnected = Arc::new(AtomicBool::new(false));

@@ -11,6 +11,7 @@ pub use config::{MeetingStreamingConfig, MeetingStreamingProvider};
 pub use controller::{
     start_meeting_streaming_loop, MeetingStreamingHandle, MeetingStreamingStopOutcome,
 };
+pub(crate) use events::MEETING_AUDIO_FRAME_BUFFER;
 pub use events::{
     MeetingAudioFrame, MeetingAudioTap, MeetingLifecycleEvent, MeetingStreamingSessionEnded,
     MeetingStreamingSessionStarted, MeetingStreamingStatusChanged,

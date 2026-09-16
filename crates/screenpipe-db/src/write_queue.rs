@@ -69,6 +69,7 @@ pub(crate) enum WriteOp {
     InsertAudioChunk {
         file_path: String,
         timestamp: Option<DateTime<Utc>>,
+        privacy: Option<screenpipe_config::AudioPrivacyPermit>,
     },
     InsertAudioTranscription {
         audio_chunk_id: i64,
@@ -97,6 +98,9 @@ pub(crate) enum WriteOp {
         existing_chunk_id: i64,
         /// Pre-computed during read phase: whether a similar transcription exists
         is_duplicate: bool,
+        privacy: Option<screenpipe_config::AudioPrivacyPermit>,
+        previous_chunk_id: Option<i64>,
+        previous_transcription: Option<String>,
     },
     InsertSnapshotFrameWithOcr {
         device_name: String,
@@ -234,6 +238,20 @@ pub(crate) enum WriteResult {
     /// Callers need this so frame-linker correlation ids can be paired with
     /// the actual `ui_events.id` after batch flush.
     Ids(Vec<i64>),
+    AudioChunkAndTranscription(AudioChunkAndTranscriptionWriteResult),
+    PrivacyInvalidated,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AudioChunkAndTranscriptionWriteResult {
+    pub audio_chunk_id: i64,
+    pub created_chunk: bool,
+    pub transcription_id: Option<i64>,
+    pub previous_status: Option<String>,
+    pub previous_attempts: Option<i64>,
+    pub previous_attempt_at: Option<DateTime<Utc>>,
+    pub previous_failure_reason: Option<String>,
+    pub previous_transcriptions: Vec<(i64, String, i64)>,
 }
 
 /// A pending write: the operation plus a channel to send the result back.
@@ -323,7 +341,7 @@ async fn drain_loop(
         }
 
         debug!("write_queue: draining batch of {} writes", batch.len());
-        execute_batch(&write_pool, &write_semaphore, &mut batch, &db_path).await;
+        execute_collected_writes(&write_pool, &write_semaphore, &mut batch, &db_path).await;
         batch.clear();
     }
 
@@ -335,10 +353,49 @@ async fn drain_loop(
             "write_queue: shutdown — flushing {} remaining writes",
             tail_batch.len()
         );
-        execute_batch(&write_pool, &write_semaphore, &mut tail_batch, &db_path).await;
+        execute_collected_writes(&write_pool, &write_semaphore, &mut tail_batch, &db_path).await;
         tail_batch.clear();
     }
     debug!("write_queue: drain loop exited");
+}
+
+fn is_privacy_sensitive_audio_write(op: &WriteOp) -> bool {
+    matches!(
+        op,
+        WriteOp::InsertAudioChunk {
+            privacy: Some(_),
+            ..
+        } | WriteOp::InsertAudioChunkAndTranscription {
+            privacy: Some(_),
+            ..
+        }
+    )
+}
+
+/// Keep each permitted audio write in its own transaction. Its post-commit
+/// privacy check and compensation therefore finish under the write semaphore
+/// before any later queued writer can touch the same rows.
+async fn execute_collected_writes(
+    write_pool: &Pool<Sqlite>,
+    write_semaphore: &Arc<Semaphore>,
+    collected: &mut Vec<PendingWrite>,
+    db_path: &str,
+) {
+    let mut ordinary = Vec::with_capacity(collected.len());
+    for pending in std::mem::take(collected) {
+        if is_privacy_sensitive_audio_write(&pending.op) {
+            if !ordinary.is_empty() {
+                execute_batch(write_pool, write_semaphore, &mut ordinary, db_path).await;
+            }
+            let mut private_audio = vec![pending];
+            execute_batch(write_pool, write_semaphore, &mut private_audio, db_path).await;
+        } else {
+            ordinary.push(pending);
+        }
+    }
+    if !ordinary.is_empty() {
+        execute_batch(write_pool, write_semaphore, &mut ordinary, db_path).await;
+    }
 }
 
 async fn execute_batch(
@@ -512,32 +569,160 @@ async fn execute_batch(
                 *result = Err(sqlx::Error::WorkerCrashed);
             }
         }
-    } else if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
-        warn!("write_queue: COMMIT failed: {}", e);
-        // Always detach. The previous code skipped detaching when the
-        // error was "cannot commit - no transaction is active" on the
-        // theory that a connection without an active txn is fine to
-        // reuse. It isn't: that error means SQLite already implicit-
-        // rolled-back a prior write inside the batch, leaving the
-        // connection's page cache stale. Returning it to the pool is
-        // exactly how the next batch borrowed it and got "(code: 11)
-        // database disk image is malformed" (incident 2026-04-26
-        // 17:25-17:39 — 11 audio chunks lost). A fresh connection
-        // costs ~ms; a poisoned one corrupts every subsequent batch
-        // until its lifetime ends.
-        warn!("write_queue: detaching connection due to commit failure");
-        let _raw = conn.detach();
-        // All results become the commit error
-        for pw in batch.drain(..) {
-            let _ = pw.respond.send(Err(sqlx::Error::WorkerCrashed));
+    } else {
+        if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
+            warn!("write_queue: COMMIT failed: {}", e);
+            // Always detach. The previous code skipped detaching when the
+            // error was "cannot commit - no transaction is active" on the
+            // theory that a connection without an active txn is fine to
+            // reuse. It isn't: that error means SQLite already implicit-
+            // rolled-back a prior write inside the batch, leaving the
+            // connection's page cache stale. Returning it to the pool is
+            // exactly how the next batch borrowed it and got "(code: 11)
+            // database disk image is malformed" (incident 2026-04-26
+            // 17:25-17:39 — 11 audio chunks lost). A fresh connection
+            // costs ~ms; a poisoned one corrupts every subsequent batch
+            // until its lifetime ends.
+            warn!("write_queue: detaching connection due to commit failure");
+            let _raw = conn.detach();
+            // All results become the commit error
+            for pw in batch.drain(..) {
+                let _ = pw.respond.send(Err(sqlx::Error::WorkerCrashed));
+            }
+            return;
         }
-        return;
+        if compensate_stale_audio_writes(batch, &mut results, &mut conn)
+            .await
+            .is_err()
+        {
+            error!(
+                reason_code = "audio_privacy_compensation_failed",
+                "Failed to remove privacy-invalidated audio persistence."
+            );
+            for result in results.iter_mut() {
+                if result.is_ok() {
+                    *result = Err(sqlx::Error::WorkerCrashed);
+                }
+            }
+        }
     }
 
     // Send results to callers
     for (pw, result) in batch.drain(..).zip(results.into_iter()) {
         let _ = pw.respond.send(result);
     }
+}
+
+async fn compensate_stale_audio_writes(
+    batch: &[PendingWrite],
+    results: &mut [Result<WriteResult, sqlx::Error>],
+    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let stale_indices: Vec<usize> = batch
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pending)| {
+            let privacy = match &pending.op {
+                WriteOp::InsertAudioChunk { privacy, .. }
+                | WriteOp::InsertAudioChunkAndTranscription { privacy, .. } => *privacy,
+                _ => None,
+            };
+            privacy
+                .is_some_and(|permit| !permit.is_current())
+                .then_some(index)
+        })
+        .collect();
+    if stale_indices.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut **conn).await?;
+    for &index in &stale_indices {
+        let cleanup = match (&batch[index].op, &results[index]) {
+            (WriteOp::InsertAudioChunk { .. }, Ok(WriteResult::Id(chunk_id))) => {
+                delete_audio_chunk_on_connection(conn, *chunk_id).await
+            }
+            (
+                WriteOp::InsertAudioChunkAndTranscription { .. },
+                Ok(WriteResult::AudioChunkAndTranscription(inserted)),
+            ) => compensate_audio_insert_on_connection(conn, inserted).await,
+            (_, Ok(WriteResult::PrivacyInvalidated)) | (_, Err(_)) => Ok(()),
+            _ => Ok(()),
+        };
+        if let Err(error) = cleanup {
+            let _ = sqlx::query("ROLLBACK").execute(&mut **conn).await;
+            return Err(error);
+        }
+    }
+    if let Err(error) = sqlx::query("COMMIT").execute(&mut **conn).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut **conn).await;
+        return Err(error);
+    }
+    for index in stale_indices {
+        if results[index].is_ok() {
+            results[index] = Ok(WriteResult::PrivacyInvalidated);
+        }
+    }
+    Ok(())
+}
+
+async fn delete_audio_chunk_on_connection(
+    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    chunk_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM audio_transcriptions WHERE audio_chunk_id = ?1")
+        .bind(chunk_id)
+        .execute(&mut **conn)
+        .await?;
+    sqlx::query("DELETE FROM audio_chunks WHERE id = ?1")
+        .bind(chunk_id)
+        .execute(&mut **conn)
+        .await?;
+    Ok(())
+}
+
+async fn compensate_audio_insert_on_connection(
+    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    inserted: &AudioChunkAndTranscriptionWriteResult,
+) -> Result<(), sqlx::Error> {
+    if inserted.created_chunk {
+        delete_audio_chunk_on_connection(conn, inserted.audio_chunk_id).await?;
+    } else if let Some(transcription_id) = inserted.transcription_id {
+        sqlx::query("DELETE FROM audio_transcriptions WHERE id = ?1 AND audio_chunk_id = ?2")
+            .bind(transcription_id)
+            .bind(inserted.audio_chunk_id)
+            .execute(&mut **conn)
+            .await?;
+    }
+    for (id, transcription, text_length) in &inserted.previous_transcriptions {
+        sqlx::query(
+            "UPDATE audio_transcriptions SET transcription = ?1, text_length = ?2 WHERE id = ?3",
+        )
+        .bind(transcription)
+        .bind(text_length)
+        .bind(id)
+        .execute(&mut **conn)
+        .await?;
+    }
+    if !inserted.created_chunk {
+        if let (Some(status), Some(attempts)) =
+            (&inserted.previous_status, inserted.previous_attempts)
+        {
+            sqlx::query(
+                "UPDATE audio_chunks SET transcription_status = ?1, \
+                     transcription_attempts = ?2, last_transcription_attempt_at = ?3, \
+                     transcription_failure_reason = ?4 WHERE id = ?5",
+            )
+            .bind(status)
+            .bind(attempts)
+            .bind(inserted.previous_attempt_at)
+            .bind(&inserted.previous_failure_reason)
+            .bind(inserted.audio_chunk_id)
+            .execute(&mut **conn)
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn execute_single_write(
@@ -548,7 +733,11 @@ async fn execute_single_write(
         WriteOp::InsertAudioChunk {
             file_path,
             timestamp,
+            privacy,
         } => {
+            if privacy.is_some_and(|permit| !permit.is_current()) {
+                return Ok(WriteResult::PrivacyInvalidated);
+            }
             let ts = timestamp.unwrap_or_else(Utc::now);
             let id = sqlx::query("INSERT INTO audio_chunks (file_path, timestamp) VALUES (?1, ?2)")
                 .bind(file_path.as_str())
@@ -629,8 +818,51 @@ async fn execute_single_write(
             timestamp,
             existing_chunk_id,
             is_duplicate,
+            privacy,
+            previous_chunk_id,
+            previous_transcription,
         } => {
+            if privacy.is_some_and(|permit| !permit.is_current()) {
+                return Ok(WriteResult::PrivacyInvalidated);
+            }
             let ts = timestamp.unwrap_or_else(Utc::now);
+            let previous_state = if *existing_chunk_id != 0 {
+                sqlx::query_as::<_, (String, i64, Option<DateTime<Utc>>, Option<String>)>(
+                    "SELECT transcription_status, transcription_attempts, \
+                            last_transcription_attempt_at, transcription_failure_reason \
+                     FROM audio_chunks WHERE id = ?1",
+                )
+                .bind(existing_chunk_id)
+                .fetch_optional(&mut **conn)
+                .await?
+            } else {
+                None
+            };
+            let previous_transcriptions = if let Some(previous_chunk_id) = previous_chunk_id {
+                sqlx::query_as::<_, (i64, String, i64)>(
+                    "SELECT id, transcription, text_length FROM audio_transcriptions WHERE audio_chunk_id = ?1",
+                )
+                .bind(previous_chunk_id)
+                .fetch_all(&mut **conn)
+                .await?
+            } else {
+                Vec::new()
+            };
+            if let (Some(previous_chunk_id), Some(previous_transcription)) =
+                (previous_chunk_id, previous_transcription)
+            {
+                let trimmed = previous_transcription.trim();
+                if !trimmed.is_empty() {
+                    sqlx::query(
+                        "UPDATE OR IGNORE audio_transcriptions SET transcription = ?1, text_length = ?2 WHERE audio_chunk_id = ?3",
+                    )
+                    .bind(trimmed)
+                    .bind(trimmed.len() as i64)
+                    .bind(previous_chunk_id)
+                    .execute(&mut **conn)
+                    .await?;
+                }
+            }
 
             // Cross-device duplicate detected by the read-side dedup check.
             // The chunk row still needs to exist (so the audio file is
@@ -662,7 +894,20 @@ async fn execute_single_write(
                 .bind(audio_chunk_id)
                 .execute(&mut **conn)
                 .await?;
-                return Ok(WriteResult::Id(audio_chunk_id));
+                return Ok(WriteResult::AudioChunkAndTranscription(
+                    AudioChunkAndTranscriptionWriteResult {
+                        audio_chunk_id,
+                        created_chunk: *existing_chunk_id == 0,
+                        transcription_id: None,
+                        previous_status: previous_state.as_ref().map(|state| state.0.clone()),
+                        previous_attempts: previous_state.as_ref().map(|state| state.1),
+                        previous_attempt_at: previous_state.as_ref().and_then(|state| state.2),
+                        previous_failure_reason: previous_state
+                            .as_ref()
+                            .and_then(|state| state.3.clone()),
+                        previous_transcriptions,
+                    },
+                ));
             }
 
             // Empty STT result — same story as Duplicate but marked 'silent'
@@ -690,7 +935,20 @@ async fn execute_single_write(
                 .bind(audio_chunk_id)
                 .execute(&mut **conn)
                 .await?;
-                return Ok(WriteResult::Id(audio_chunk_id));
+                return Ok(WriteResult::AudioChunkAndTranscription(
+                    AudioChunkAndTranscriptionWriteResult {
+                        audio_chunk_id,
+                        created_chunk: *existing_chunk_id == 0,
+                        transcription_id: None,
+                        previous_status: previous_state.as_ref().map(|state| state.0.clone()),
+                        previous_attempts: previous_state.as_ref().map(|state| state.1),
+                        previous_attempt_at: previous_state.as_ref().and_then(|state| state.2),
+                        previous_failure_reason: previous_state
+                            .as_ref()
+                            .and_then(|state| state.3.clone()),
+                        previous_transcriptions,
+                    },
+                ));
             }
 
             // Insert chunk if needed
@@ -707,7 +965,7 @@ async fn execute_single_write(
 
             // Insert transcription + flip status atomically.
             let text_length = transcription.len() as i64;
-            sqlx::query(
+            let transcription_insert = sqlx::query(
                 "INSERT OR IGNORE INTO audio_transcriptions (audio_chunk_id, transcription, offset_index, timestamp, transcription_engine, device, is_input_device, speaker_id, start_time, end_time, text_length) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(audio_chunk_id)
@@ -737,7 +995,21 @@ async fn execute_single_write(
             .execute(&mut **conn)
             .await?;
 
-            Ok(WriteResult::Id(audio_chunk_id))
+            Ok(WriteResult::AudioChunkAndTranscription(
+                AudioChunkAndTranscriptionWriteResult {
+                    audio_chunk_id,
+                    created_chunk: *existing_chunk_id == 0,
+                    transcription_id: (transcription_insert.rows_affected() > 0)
+                        .then(|| transcription_insert.last_insert_rowid()),
+                    previous_status: previous_state.as_ref().map(|state| state.0.clone()),
+                    previous_attempts: previous_state.as_ref().map(|state| state.1),
+                    previous_attempt_at: previous_state.as_ref().and_then(|state| state.2),
+                    previous_failure_reason: previous_state
+                        .as_ref()
+                        .and_then(|state| state.3.clone()),
+                    previous_transcriptions,
+                },
+            ))
         }
 
         WriteOp::InsertSnapshotFrameWithOcr {
@@ -1222,6 +1494,14 @@ async fn ensure_db_openable(db_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stale_audio_privacy_permit() -> screenpipe_config::AudioPrivacyPermit {
+        let permit = screenpipe_config::AudioPrivacyPermit::current().unwrap();
+        let mut encoded = serde_json::to_value(permit).unwrap();
+        let generation = encoded["generation"].as_u64().unwrap();
+        encoded["generation"] = serde_json::json!(generation.wrapping_add(1));
+        serde_json::from_value(encoded).unwrap()
+    }
     use sqlx::sqlite::SqlitePoolOptions;
 
     #[test]
@@ -1407,6 +1687,7 @@ mod tests {
             .submit(WriteOp::InsertAudioChunk {
                 file_path: "/tmp/test.wav".to_string(),
                 timestamp: None,
+                privacy: None,
             })
             .await
             .unwrap();
@@ -1425,6 +1706,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_post_commit_audio_writes_are_compensated_before_results() {
+        let (pool, _sem) = setup_test_db().await;
+        let previous_chunk_id = sqlx::query(
+            "INSERT INTO audio_chunks (file_path, transcription_status) VALUES ('previous.wav', 'transcribed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let previous_transcription_id = sqlx::query(
+            "INSERT INTO audio_transcriptions (audio_chunk_id, transcription, text_length) VALUES (?1, 'original previous', 17)",
+        )
+        .bind(previous_chunk_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query(
+            "UPDATE audio_transcriptions SET transcription = 'trimmed previous', text_length = 16 WHERE id = ?1",
+        )
+        .bind(previous_transcription_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let current_chunk_id = sqlx::query(
+            "INSERT INTO audio_chunks (file_path, transcription_status, transcription_attempts) VALUES ('current.wav', 'transcribed', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let current_transcription_id = sqlx::query(
+            "INSERT INTO audio_transcriptions (audio_chunk_id, transcription, text_length) VALUES (?1, 'new private text', 16)",
+        )
+        .bind(current_chunk_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let raw_chunk_id = sqlx::query("INSERT INTO audio_chunks (file_path) VALUES ('raw.wav')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+
+        let stale = stale_audio_privacy_permit();
+        let (raw_tx, _raw_rx) = oneshot::channel();
+        let (combined_tx, _combined_rx) = oneshot::channel();
+        let batch = vec![
+            PendingWrite {
+                op: WriteOp::InsertAudioChunk {
+                    file_path: "raw.wav".to_string(),
+                    timestamp: None,
+                    privacy: Some(stale),
+                },
+                respond: raw_tx,
+            },
+            PendingWrite {
+                op: WriteOp::InsertAudioChunkAndTranscription {
+                    file_path: "current.wav".to_string(),
+                    transcription: "new private text".to_string(),
+                    offset_index: 0,
+                    transcription_engine: "test".to_string(),
+                    device_name: "test".to_string(),
+                    is_input_device: true,
+                    speaker_id: None,
+                    start_time: None,
+                    end_time: None,
+                    timestamp: None,
+                    existing_chunk_id: current_chunk_id,
+                    is_duplicate: false,
+                    privacy: Some(stale),
+                    previous_chunk_id: Some(previous_chunk_id),
+                    previous_transcription: Some("trimmed previous".to_string()),
+                },
+                respond: combined_tx,
+            },
+        ];
+        let mut results = vec![
+            Ok(WriteResult::Id(raw_chunk_id)),
+            Ok(WriteResult::AudioChunkAndTranscription(
+                AudioChunkAndTranscriptionWriteResult {
+                    audio_chunk_id: current_chunk_id,
+                    created_chunk: false,
+                    transcription_id: Some(current_transcription_id),
+                    previous_status: Some("pending".to_string()),
+                    previous_attempts: Some(0),
+                    previous_attempt_at: None,
+                    previous_failure_reason: None,
+                    previous_transcriptions: vec![(
+                        previous_transcription_id,
+                        "original previous".to_string(),
+                        17,
+                    )],
+                },
+            )),
+        ];
+        let mut conn = pool.acquire().await.unwrap();
+        compensate_stale_audio_writes(&batch, &mut results, &mut conn)
+            .await
+            .unwrap();
+
+        assert!(results
+            .iter()
+            .all(|result| matches!(result, Ok(WriteResult::PrivacyInvalidated))));
+        let raw_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audio_chunks WHERE id = ?1)")
+                .bind(raw_chunk_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!raw_exists);
+        let current_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audio_transcriptions WHERE audio_chunk_id = ?1",
+        )
+        .bind(current_chunk_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(current_count, 0);
+        let current_state: (String, i64) = sqlx::query_as(
+            "SELECT transcription_status, transcription_attempts FROM audio_chunks WHERE id = ?1",
+        )
+        .bind(current_chunk_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(current_state, ("pending".to_string(), 0));
+        let previous: (String, i64) = sqlx::query_as(
+            "SELECT transcription, text_length FROM audio_transcriptions WHERE id = ?1",
+        )
+        .bind(previous_transcription_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(previous, ("original previous".to_string(), 17));
+    }
+
+    #[tokio::test]
+    async fn created_chunk_compensation_also_restores_previous_transcript() {
+        let (pool, _sem) = setup_test_db().await;
+        let previous_chunk_id =
+            sqlx::query("INSERT INTO audio_chunks (file_path) VALUES ('previous.wav')")
+                .execute(&pool)
+                .await
+                .unwrap()
+                .last_insert_rowid();
+        let previous_transcription_id = sqlx::query(
+            "INSERT INTO audio_transcriptions (audio_chunk_id, transcription, text_length) VALUES (?1, 'before', 6)",
+        )
+        .bind(previous_chunk_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query("UPDATE audio_transcriptions SET transcription = 'after', text_length = 5 WHERE id = ?1")
+            .bind(previous_transcription_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let created_chunk_id =
+            sqlx::query("INSERT INTO audio_chunks (file_path) VALUES ('created.wav')")
+                .execute(&pool)
+                .await
+                .unwrap()
+                .last_insert_rowid();
+        let inserted = AudioChunkAndTranscriptionWriteResult {
+            audio_chunk_id: created_chunk_id,
+            created_chunk: true,
+            transcription_id: None,
+            previous_status: None,
+            previous_attempts: None,
+            previous_attempt_at: None,
+            previous_failure_reason: None,
+            previous_transcriptions: vec![(previous_transcription_id, "before".to_string(), 6)],
+        };
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        compensate_audio_insert_on_connection(&mut conn, &inserted)
+            .await
+            .unwrap();
+        sqlx::query("COMMIT").execute(&mut *conn).await.unwrap();
+
+        let created_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audio_chunks WHERE id = ?1)")
+                .bind(created_chunk_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!created_exists);
+        let previous: (String, i64) = sqlx::query_as(
+            "SELECT transcription, text_length FROM audio_transcriptions WHERE id = ?1",
+        )
+        .bind(previous_transcription_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(previous, ("before".to_string(), 6));
+    }
+
+    #[tokio::test]
     async fn test_batch_coalescing() {
         let (pool, sem) = setup_test_db().await;
         let queue = spawn_write_drain(pool.clone(), sem, std::sync::Arc::from("sqlite::memory:"));
@@ -1437,6 +1923,7 @@ mod tests {
                 q.submit(WriteOp::InsertAudioChunk {
                     file_path: format!("/tmp/test_{}.wav", i),
                     timestamp: None,
+                    privacy: None,
                 })
                 .await
             }));
@@ -1468,6 +1955,7 @@ mod tests {
             .submit(WriteOp::InsertAudioChunk {
                 file_path: "/tmp/ordered.wav".to_string(),
                 timestamp: None,
+                privacy: None,
             })
             .await
             .unwrap();
@@ -1526,12 +2014,16 @@ mod tests {
                 timestamp: None,
                 existing_chunk_id: 0,
                 is_duplicate: false,
+                privacy: None,
+                previous_chunk_id: None,
+                previous_transcription: None,
             })
             .await
             .unwrap();
 
         let chunk_id = match result {
-            WriteResult::Id(id) => {
+            WriteResult::AudioChunkAndTranscription(result) => {
+                let id = result.audio_chunk_id;
                 assert!(id > 0);
                 id
             }
@@ -1579,13 +2071,18 @@ mod tests {
                 timestamp: None,
                 existing_chunk_id: 0,
                 is_duplicate: true, // pre-computed as duplicate
+                privacy: None,
+                previous_chunk_id: None,
+                previous_transcription: None,
             })
             .await
             .unwrap();
 
         // Chunk should still be inserted, but no transcription
         match result {
-            WriteResult::Id(id) => assert!(id > 0),
+            WriteResult::AudioChunkAndTranscription(result) => {
+                assert!(result.audio_chunk_id > 0)
+            }
             _ => panic!("expected Id"),
         }
 
@@ -1678,6 +2175,7 @@ mod tests {
                 q.submit(WriteOp::InsertAudioChunk {
                     file_path: format!("/tmp/audio_{}.wav", i),
                     timestamp: None,
+                    privacy: None,
                 })
                 .await
             }));
@@ -1730,6 +2228,7 @@ mod tests {
             .submit(WriteOp::InsertAudioChunk {
                 file_path: "/tmp/shutdown_test.wav".to_string(),
                 timestamp: None,
+                privacy: None,
             })
             .await
             .unwrap();
@@ -1772,13 +2271,18 @@ mod tests {
                 timestamp: None,
                 existing_chunk_id: 0,
                 is_duplicate: false,
+                privacy: None,
+                previous_chunk_id: None,
+                previous_transcription: None,
             })
             .await
             .unwrap();
 
         // Chunk should exist but no transcription
         match result {
-            WriteResult::Id(id) => assert!(id > 0),
+            WriteResult::AudioChunkAndTranscription(result) => {
+                assert!(result.audio_chunk_id > 0)
+            }
             _ => panic!("expected Id"),
         }
 
@@ -1874,6 +2378,7 @@ mod tests {
             op: WriteOp::InsertAudioChunk {
                 file_path: "/tmp/test".into(),
                 timestamp: None,
+                privacy: None,
             },
             respond: tx,
         };

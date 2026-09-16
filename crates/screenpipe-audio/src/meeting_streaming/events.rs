@@ -13,6 +13,10 @@ use tokio::sync::broadcast;
 
 use crate::core::device::{AudioDevice, DeviceType};
 
+/// Tokio broadcast capacity for the live meeting tap. The value is a power of
+/// two, so it is also the effective capacity used by Tokio.
+pub(crate) const MEETING_AUDIO_FRAME_BUFFER: usize = 512;
+
 /// Shared live-audio tap for meeting streaming.
 ///
 /// The `active` gate is deliberately separate from subscriber count. The
@@ -59,7 +63,20 @@ impl MeetingAudioTap {
         {
             return;
         }
-        let _ = self.tx.send(frame);
+        let delivery = screenpipe_events::audio_delivery_reporter();
+        delivery.sample_queue(
+            screenpipe_events::AudioQueueKind::MeetingTap,
+            self.tx.len(),
+            MEETING_AUDIO_FRAME_BUFFER,
+        );
+        if self.tx.send(frame).is_err() {
+            delivery.record_confirmed_loss(screenpipe_events::AudioQueueKind::MeetingTap, 1);
+        }
+        delivery.sample_queue(
+            screenpipe_events::AudioQueueKind::MeetingTap,
+            self.tx.len(),
+            MEETING_AUDIO_FRAME_BUFFER,
+        );
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<MeetingAudioFrame> {

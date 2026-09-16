@@ -8,12 +8,13 @@ use crate::transcription::redact_pii_text as remove_pii;
 use chrono::Utc;
 use futures::StreamExt;
 use screenpipe_db::DatabaseManager;
+use screenpipe_events::AudioQueueKind;
 use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::{JoinHandle, JoinSet},
     time::{sleep, Duration, Instant},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{core::engine::AudioTranscriptionEngine, transcription::engine::TranscriptionEngine};
 
@@ -30,6 +31,7 @@ const LIVE_FINAL_PERSIST_ATTEMPTS: usize = 18;
 const LIVE_FINAL_PERSIST_RETRY_DELAY: Duration = Duration::from_secs(5);
 const OWNED_FINAL_BUFFER: usize = 128;
 const MAX_IN_FLIGHT_FINAL_PERSISTENCE: usize = 128;
+const PROVIDER_FRAME_BUFFER: usize = 128;
 const PROVIDER_STREAM_RESTART_BACKOFF: Duration = Duration::from_secs(5);
 const LIVE_INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const LIVE_NO_AUDIO_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -114,9 +116,11 @@ impl MeetingStreamingHandle {
             Err(_) => {
                 // Aborting the async owner cannot forcibly stop native inference already
                 // running on a blocking thread. Keep this outcome explicitly unconfirmed.
-                if let Some(task) = self.task.as_ref() {
+                if let Some(task) = self.task.take() {
                     task.abort();
                 }
+                screenpipe_events::audio_delivery_reporter()
+                    .record_possible_loss(AudioQueueKind::MeetingFinalPersistence, 1);
                 MeetingStreamingStopOutcome::Unconfirmed
             }
         }
@@ -126,6 +130,8 @@ impl MeetingStreamingHandle {
         self.request_stop();
         if let Some(task) = self.task.take() {
             task.abort();
+            screenpipe_events::audio_delivery_reporter()
+                .record_possible_loss(AudioQueueKind::MeetingFinalPersistence, 1);
         }
     }
 }
@@ -134,6 +140,8 @@ impl Drop for MeetingStreamingHandle {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
+            screenpipe_events::audio_delivery_reporter()
+                .record_possible_loss(AudioQueueKind::MeetingFinalPersistence, 1);
         }
     }
 }
@@ -226,6 +234,16 @@ pub fn start_meeting_streaming_loop(
                 &mut persistence_workers,
                 &mut persistence_workers_clean,
             );
+            sample_final_receiver(&owned_final_rx);
+            sample_persistence_workers(&persistence_workers);
+            if let Some(session) = active.as_ref() {
+                sample_provider_queues(session);
+            }
+            screenpipe_events::audio_delivery_reporter().sample_queue(
+                AudioQueueKind::MeetingTap,
+                audio_rx.len(),
+                super::MEETING_AUDIO_FRAME_BUFFER,
+            );
             let privacy = screenpipe_config::AudioPrivacyPermit::current();
             if privacy != observed_privacy {
                 if let Some(session) = active.as_mut() {
@@ -281,6 +299,17 @@ pub fn start_meeting_streaming_loop(
                             emit_session_ended(session);
                             audio_tap.set_active(false);
                             audio_tap.set_background_suppressed(false);
+                            stream_workers_clean &= finish_stream_workers_and_drain_finals(
+                                &mut stream_workers,
+                                &mut owned_final_rx,
+                                &mut persistence_workers,
+                                &config,
+                                &db,
+                                &mut persistence_workers_clean,
+                            )
+                            .await;
+                            persistence_workers_clean &=
+                                finish_persistence_workers(&mut persistence_workers).await;
                             if live_covered {
                                 mark_live_covered_chunks(&db, meeting_id).await;
                             }
@@ -302,6 +331,7 @@ pub fn start_meeting_streaming_loop(
                     }
                 }
                 Some(final_event) = owned_final_rx.recv() => {
+                    sample_final_receiver(&owned_final_rx);
                     if !final_event.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { info!("meeting transcript event discarded by privacy policy"); continue; }
                     if let Some(session) = active.as_mut() {
                         note_live_transcript(&audio_tap, session, final_event.meeting_id);
@@ -327,6 +357,11 @@ pub fn start_meeting_streaming_loop(
                     }
                 }
                 frame = audio_rx.recv() => {
+                    screenpipe_events::audio_delivery_reporter().sample_queue(
+                        AudioQueueKind::MeetingTap,
+                        audio_rx.len(),
+                        super::MEETING_AUDIO_FRAME_BUFFER,
+                    );
                     match frame {
                         Ok(frame) => {
                             if !frame.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { continue; }
@@ -350,6 +385,8 @@ pub fn start_meeting_streaming_loop(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
+                            screenpipe_events::audio_delivery_reporter()
+                                .record_confirmed_loss(AudioQueueKind::MeetingTap, n);
                             debug!("meeting streaming: live audio tap lagged by {} frames", n);
                         }
                         Err(broadcast::error::RecvError::Closed) => {
@@ -398,6 +435,17 @@ pub fn start_meeting_streaming_loop(
                         emit_session_ended(session);
                         audio_tap.set_active(false);
                         audio_tap.set_background_suppressed(false);
+                        stream_workers_clean &= finish_stream_workers_and_drain_finals(
+                            &mut stream_workers,
+                            &mut owned_final_rx,
+                            &mut persistence_workers,
+                            &config,
+                            &db,
+                            &mut persistence_workers_clean,
+                        )
+                        .await;
+                        persistence_workers_clean &=
+                            finish_persistence_workers(&mut persistence_workers).await;
                         if live_covered {
                             mark_live_covered_chunks(&db, meeting_id).await;
                         }
@@ -569,6 +617,36 @@ async fn mark_live_covered_chunks(db: &Arc<DatabaseManager>, meeting_id: i64) {
     }
 }
 
+fn sample_final_receiver(receiver: &mpsc::Receiver<MeetingTranscriptFinal>) {
+    screenpipe_events::audio_delivery_reporter().sample_queue(
+        AudioQueueKind::MeetingFinal,
+        receiver.len(),
+        receiver.max_capacity(),
+    );
+}
+
+fn sample_provider_queues(session: &ActiveMeetingStream) {
+    let pending = session
+        .device_senders
+        .values()
+        .map(|sender| sender.max_capacity().saturating_sub(sender.capacity()))
+        .max()
+        .unwrap_or(0);
+    screenpipe_events::audio_delivery_reporter().sample_queue(
+        AudioQueueKind::MeetingProvider,
+        pending,
+        PROVIDER_FRAME_BUFFER,
+    );
+}
+
+fn sample_persistence_workers(workers: &JoinSet<bool>) {
+    screenpipe_events::audio_delivery_reporter().sample_queue(
+        AudioQueueKind::MeetingFinalPersistence,
+        workers.len(),
+        MAX_IN_FLIGHT_FINAL_PERSISTENCE,
+    );
+}
+
 fn reap_ready_stream_workers(workers: &mut JoinSet<bool>, completed_cleanly: &mut bool) {
     while let Some(result) = workers.try_join_next() {
         record_stream_worker_result(result, completed_cleanly);
@@ -579,6 +657,7 @@ fn reap_ready_persistence_workers(workers: &mut JoinSet<bool>, completed_cleanly
     while let Some(result) = workers.try_join_next() {
         record_persistence_worker_result(result, completed_cleanly);
     }
+    sample_persistence_workers(workers);
 }
 
 fn record_stream_worker_result(
@@ -587,6 +666,8 @@ fn record_stream_worker_result(
 ) {
     if !matches!(result, Ok(true)) {
         *completed_cleanly = false;
+        screenpipe_events::audio_delivery_reporter()
+            .record_possible_loss(AudioQueueKind::MeetingProvider, 1);
         warn!(
             reason_code = "meeting_selected_engine_worker_failed",
             "Meeting streaming worker stopped unexpectedly."
@@ -601,16 +682,21 @@ fn record_persistence_worker_result(
     result: Result<bool, tokio::task::JoinError>,
     completed_cleanly: &mut bool,
 ) {
-    if !matches!(result, Ok(true)) {
-        *completed_cleanly = false;
-        warn!(
-            reason_code = "meeting_final_persistence_failed",
-            "Meeting transcript persistence did not complete successfully."
-        );
-        screenpipe_events::report_audio_shutdown_issue(
-            screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
-        );
+    match result {
+        Ok(true) => return,
+        Ok(false) => screenpipe_events::audio_delivery_reporter()
+            .record_confirmed_loss(AudioQueueKind::MeetingFinalPersistence, 1),
+        Err(_) => screenpipe_events::audio_delivery_reporter()
+            .record_possible_loss(AudioQueueKind::MeetingFinalPersistence, 1),
     }
+    *completed_cleanly = false;
+    warn!(
+        reason_code = "meeting_final_persistence_failed",
+        "Meeting transcript persistence did not complete successfully."
+    );
+    screenpipe_events::report_audio_shutdown_issue(
+        screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+    );
 }
 
 async fn queue_live_final_persistence(
@@ -630,15 +716,18 @@ async fn queue_live_final_persistence(
     if !config.persist_finals {
         return;
     }
+    sample_persistence_workers(persistence_workers);
     if persistence_workers.len() >= MAX_IN_FLIGHT_FINAL_PERSISTENCE {
         if let Some(result) = persistence_workers.join_next().await {
             record_persistence_worker_result(result, completed_cleanly);
         }
+        sample_persistence_workers(persistence_workers);
     }
     let db = db.clone();
     let use_pii_removal = config.use_pii_removal;
     persistence_workers
         .spawn(async move { persist_live_final_with_retry(db, event, use_pii_removal).await });
+    sample_persistence_workers(persistence_workers);
 }
 
 async fn finish_stream_workers_and_drain_finals(
@@ -652,7 +741,10 @@ async fn finish_stream_workers_and_drain_finals(
     let mut stream_completed_cleanly = true;
     loop {
         let streams_pending = !stream_workers.is_empty();
-        let finals_pending = !(final_rx.is_closed() && final_rx.is_empty());
+        // Once every stream worker has joined, no further final can be sent by
+        // that session. Drain the buffered finals and return even though the
+        // coordinator retains its sender for a future session.
+        let finals_pending = streams_pending || !final_rx.is_empty();
         if !streams_pending && !finals_pending {
             break;
         }
@@ -664,6 +756,7 @@ async fn finish_stream_workers_and_drain_finals(
                 }
             }
             event = final_rx.recv(), if finals_pending => {
+                sample_final_receiver(final_rx);
                 if let Some(event) = event {
                     queue_live_final_persistence(
                         event,
@@ -684,6 +777,7 @@ async fn finish_persistence_workers(workers: &mut JoinSet<bool>) -> bool {
     let mut completed_cleanly = true;
     while let Some(result) = workers.join_next().await {
         record_persistence_worker_result(result, &mut completed_cleanly);
+        sample_persistence_workers(workers);
     }
     completed_cleanly
 }
@@ -770,6 +864,26 @@ async fn persist_live_final_once(
         .await
         .map_err(|e| e.to_string())?;
 
+    if !event
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        if id > 0
+            && db
+                .delete_meeting_transcript_segment(event.meeting_id, id)
+                .await
+                .is_err()
+        {
+            error!(
+                reason_code = "meeting_privacy_compensation_failed",
+                "Failed to remove privacy-invalidated meeting transcript persistence."
+            );
+            return Err("privacy-invalidated meeting transcript cleanup failed".to_string());
+        }
+        info!("meeting final persistence discarded after privacy transition");
+        return Ok(true);
+    }
+
     if id > 0 {
         info!(
             "meeting streaming: persisted live final (meeting_id={}, item_id={}, segment_id={})",
@@ -838,7 +952,7 @@ fn route_frame_to_provider(
     }
 
     if !session.device_senders.contains_key(&key) {
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(PROVIDER_FRAME_BUFFER);
         match config.provider {
             MeetingStreamingProvider::SelectedEngine => {
                 stream_workers.spawn(selected_engine::run_selected_engine_stream(
@@ -862,11 +976,15 @@ fn route_frame_to_provider(
         return;
     };
 
+    sample_provider_queues(session);
     match sender.try_send(frame) {
         Ok(()) => {
             audio_tap.set_background_suppressed(session.live_transcript_seen);
+            sample_provider_queues(session);
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
+            screenpipe_events::audio_delivery_reporter()
+                .record_confirmed_loss(AudioQueueKind::MeetingProvider, 1);
             audio_tap.set_background_suppressed(session.live_transcript_seen);
             debug!(
                 "meeting streaming: provider queue full; dropping live audio frame for {}",
@@ -874,6 +992,8 @@ fn route_frame_to_provider(
             );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
+            screenpipe_events::audio_delivery_reporter()
+                .record_confirmed_loss(AudioQueueKind::MeetingProvider, 1);
             session.device_senders.remove(&key);
             session.live_transcript_seen = false;
             session.last_live_transcript_at = None;
@@ -887,6 +1007,7 @@ fn route_frame_to_provider(
                 key,
                 PROVIDER_STREAM_RESTART_BACKOFF.as_secs()
             );
+            sample_provider_queues(session);
         }
     }
 }
@@ -1185,6 +1306,61 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn privacy_compensation_removes_only_the_inserted_meeting_segment() {
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let meeting_id = db
+            .insert_meeting("TestApp", "test", Some("Test meeting"), None)
+            .await
+            .unwrap();
+        let kept_id = db
+            .insert_meeting_transcript_segment(
+                meeting_id,
+                "test",
+                None,
+                "kept",
+                "Test microphone",
+                "input",
+                None,
+                "kept synthetic text",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let stale_id = db
+            .insert_meeting_transcript_segment(
+                meeting_id,
+                "test",
+                None,
+                "stale",
+                "Test microphone",
+                "input",
+                None,
+                "stale synthetic text",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.delete_meeting_transcript_segment(meeting_id, stale_id)
+                .await
+                .unwrap(),
+            1
+        );
+        let segments = db
+            .list_meeting_transcript_segments(meeting_id)
+            .await
+            .unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].id, kept_id);
+        assert_eq!(segments[0].transcript, "kept synthetic text");
     }
 
     // `check_and_emit_stall_notifications` calls `screenpipe_events::send_event`,

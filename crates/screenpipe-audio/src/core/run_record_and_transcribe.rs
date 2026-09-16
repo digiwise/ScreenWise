@@ -22,9 +22,10 @@ use crate::{
 };
 
 use super::source_buffer::SourceBuffer;
-use super::stream::CapturedAudio;
+use super::stream::{CapturedAudio, AUDIO_STREAM_BUFFER_CAPACITY};
 use super::AudioStream;
 use screenpipe_config::AudioPrivacyPermit;
+use screenpipe_events::{AudioDeliveryReporter, AudioQueueKind};
 
 /// Timeout for receiving audio data before considering the stream dead.
 ///
@@ -399,6 +400,12 @@ async fn recv_audio_chunk(
     stream_start: &Instant,
     last_non_zero_at: &mut Option<Instant>,
 ) -> Result<Option<CapturedAudio>> {
+    let delivery = screenpipe_events::audio_delivery_reporter();
+    delivery.sample_queue(
+        AudioQueueKind::DeviceCapture,
+        receiver.len(),
+        AUDIO_STREAM_BUFFER_CAPACITY,
+    );
     let Some(privacy) = AudioPrivacyPermit::current() else {
         return Ok(None);
     };
@@ -413,6 +420,11 @@ async fn recv_audio_chunk(
 
     match recv_result {
         Ok(Ok(chunk)) => {
+            delivery.sample_queue(
+                AudioQueueKind::DeviceCapture,
+                receiver.len(),
+                AUDIO_STREAM_BUFFER_CAPACITY,
+            );
             if !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
                 return Ok(None);
             }
@@ -460,6 +472,12 @@ async fn recv_audio_chunk(
             Ok(Some(chunk))
         }
         Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+            record_device_capture_lag(delivery, n);
+            delivery.sample_queue(
+                AudioQueueKind::DeviceCapture,
+                receiver.len(),
+                AUDIO_STREAM_BUFFER_CAPACITY,
+            );
             debug!(
                 "audio channel lagged by {} messages for {}, continuing",
                 n, device_name
@@ -516,6 +534,19 @@ async fn recv_audio_chunk(
                 AUDIO_RECEIVE_TIMEOUT_SECS
             ))
         }
+    }
+}
+
+fn record_device_capture_lag(delivery: &AudioDeliveryReporter, count: u64) {
+    delivery.record_confirmed_loss(AudioQueueKind::DeviceCapture, count);
+}
+
+fn sample_recording_sender<T>(
+    delivery: &AudioDeliveryReporter,
+    sender: &crossbeam::channel::Sender<T>,
+) {
+    if let Some(capacity) = sender.capacity() {
+        delivery.sample_queue(AudioQueueKind::Recording, sender.len(), capacity);
     }
 }
 
@@ -582,19 +613,23 @@ async fn flush_audio(
         channels: RECORDER_OUTPUT_CHANNELS,
         capture_timestamp,
     };
+    let delivery = screenpipe_events::audio_delivery_reporter();
     let send_started = Instant::now();
     loop {
         if !privacy.is_some_and(AudioPrivacyPermit::is_current) {
             info!("audio segment discarded after privacy transition");
             break;
         }
+        sample_recording_sender(delivery, whisper_sender);
         match whisper_sender.try_send(input) {
             Ok(()) => {
+                sample_recording_sender(delivery, whisper_sender);
                 debug!("sent audio segment to audio model");
                 metrics.record_chunk_sent();
                 break;
             }
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                delivery.record_confirmed_loss(AudioQueueKind::Recording, 1);
                 error!("whisper channel disconnected, restarting recording process");
                 return Err(anyhow!("Whisper channel disconnected"));
             }
@@ -602,6 +637,7 @@ async fn flush_audio(
                 input = returned;
                 if send_started.elapsed() >= Duration::from_secs(30) {
                     metrics.record_channel_full();
+                    delivery.record_confirmed_loss(AudioQueueKind::Recording, 1);
                     screenpipe_events::report_audio_shutdown_issue(
                         screenpipe_events::AudioShutdownIssue::QueuedWorkDiscarded,
                     );
@@ -619,6 +655,37 @@ async fn flush_audio(
 mod tests {
     use super::*;
     use crate::core::device::AudioDevice;
+
+    #[test]
+    fn device_capture_lag_records_exact_confirmed_loss() {
+        let delivery = AudioDeliveryReporter::isolated();
+        record_device_capture_lag(&delivery, 7);
+        let status = delivery.status();
+        let capture = status
+            .queues
+            .iter()
+            .find(|queue| queue.queue == AudioQueueKind::DeviceCapture)
+            .unwrap();
+        assert_eq!(capture.dropped_deliveries, 7);
+    }
+
+    #[test]
+    fn recording_queue_warns_and_recovers_without_counting_loss() {
+        let delivery = AudioDeliveryReporter::isolated();
+        let (sender, receiver) = crossbeam::channel::bounded::<u8>(10);
+        for value in 0..8 {
+            sender.send(value).unwrap();
+        }
+        sample_recording_sender(&delivery, &sender);
+        assert!(delivery.status().near_capacity());
+        for _ in 0..3 {
+            receiver.recv().unwrap();
+        }
+        sample_recording_sender(&delivery, &sender);
+        let status = delivery.status();
+        assert!(!status.near_capacity());
+        assert_eq!(status.dropped_deliveries(), 0);
+    }
 
     async fn synthetic_partial_stop(
         sample_count: usize,

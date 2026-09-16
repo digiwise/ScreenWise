@@ -35,7 +35,7 @@ use crate::{
     meeting_detector::MeetingDetector,
     meeting_streaming::{
         start_meeting_streaming_loop, MeetingAudioTap, MeetingStreamingHandle,
-        MeetingStreamingStopOutcome,
+        MeetingStreamingStopOutcome, MEETING_AUDIO_FRAME_BUFFER,
     },
     metrics::AudioPipelineMetrics,
     segmentation::segmentation_manager::SegmentationManager,
@@ -83,6 +83,30 @@ fn log_audio_process_error(e: &anyhow::Error) {
     }
 }
 
+async fn compensate_privacy_invalidated_audio_file(
+    db: &DatabaseManager,
+    chunk_id: Option<i64>,
+    path: &str,
+) -> bool {
+    let row_cleanup = match chunk_id {
+        Some(id) => db.delete_audio_chunk(id).await,
+        None => Ok(()),
+    };
+    let file_cleanup = match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    };
+    let cleaned = row_cleanup.is_ok() && file_cleanup.is_ok();
+    if !cleaned {
+        error!(
+            reason_code = "audio_privacy_compensation_failed",
+            "Failed to remove privacy-invalidated audio persistence."
+        );
+    }
+    cleaned
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum AudioManagerStatus {
     Running,
@@ -103,7 +127,6 @@ struct MeetingEventData {
 }
 
 type RecordingHandlesMap = DashMap<AudioDevice, Arc<Mutex<JoinHandle<Result<()>>>>>;
-const MEETING_AUDIO_FRAME_BUFFER: usize = 512;
 const MANAGER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(12);
 const PRODUCER_STOP_TIMEOUT: Duration = Duration::from_secs(4);
 const RECORDING_CONSUMER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -211,24 +234,38 @@ fn remaining_phase_budget(started: std::time::Instant, phase_limit: Duration) ->
         .min(phase_limit)
 }
 
-async fn finish_consumer(handle_slot: &RwLock<Option<JoinHandle<()>>>, timeout: Duration) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConsumerFinishOutcome {
+    Completed,
+    Missing,
+    Failed,
+    TimedOut,
+}
+
+async fn finish_consumer(
+    handle_slot: &RwLock<Option<JoinHandle<()>>>,
+    timeout: Duration,
+) -> ConsumerFinishOutcome {
     let phase_started = std::time::Instant::now();
     let Ok(mut slot) = tokio::time::timeout(timeout, handle_slot.write()).await else {
         screenpipe_events::report_audio_shutdown_issue(
             screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
         );
-        return;
+        return ConsumerFinishOutcome::TimedOut;
     };
     let Some(mut handle) = slot.take() else {
-        return;
+        return ConsumerFinishOutcome::Missing;
     };
     drop(slot);
 
     match tokio::time::timeout(timeout.saturating_sub(phase_started.elapsed()), &mut handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => screenpipe_events::report_audio_shutdown_issue(
-            screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
-        ),
+        Ok(Ok(())) => ConsumerFinishOutcome::Completed,
+        Ok(Err(_)) => {
+            screenpipe_events::report_audio_shutdown_issue(
+                screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+            );
+            ConsumerFinishOutcome::Failed
+        }
         Err(_) => {
             // A Tokio abort cannot cancel blocking persistence/inference already running on
             // the blocking pool. The latched event therefore reports possible delayed work
@@ -237,7 +274,26 @@ async fn finish_consumer(handle_slot: &RwLock<Option<JoinHandle<()>>>, timeout: 
             screenpipe_events::report_audio_shutdown_issue(
                 screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
             );
+            ConsumerFinishOutcome::TimedOut
         }
+    }
+}
+
+fn report_unconfirmed_queue_work<T>(
+    delivery: &screenpipe_events::AudioDeliveryReporter,
+    outcome: ConsumerFinishOutcome,
+    queue: screenpipe_events::AudioQueueKind,
+    receiver: &crossbeam::channel::Receiver<T>,
+) {
+    if matches!(
+        outcome,
+        ConsumerFinishOutcome::Failed | ConsumerFinishOutcome::TimedOut
+    ) {
+        // Include one possible in-flight delivery when the visible queue is
+        // empty: task failure/timeout means completion of current work was not
+        // established even though it may already have been dequeued.
+        let possible = (receiver.len() as u64).saturating_add(1);
+        delivery.record_possible_loss(queue, possible);
     }
 }
 
@@ -549,7 +605,7 @@ impl AudioManager {
         // can install another reconciliation worker.
         self.reconciliation_stop_requested
             .store(true, Ordering::Release);
-        finish_consumer(
+        let _ = finish_consumer(
             &self.reconciliation_handle,
             MANAGER_SHUTDOWN_TIMEOUT
                 .saturating_sub(shutdown_started.elapsed())
@@ -601,19 +657,31 @@ impl AudioManager {
         // persistence/transcript operation on the successful path.
         self.recording_receiver_stop_requested
             .store(true, Ordering::Release);
-        finish_consumer(
+        let recording_finish = finish_consumer(
             &self.recording_receiver_handle,
             remaining_phase_budget(shutdown_started, RECORDING_CONSUMER_DRAIN_TIMEOUT),
         )
         .await;
+        report_unconfirmed_queue_work(
+            screenpipe_events::audio_delivery_reporter(),
+            recording_finish,
+            screenpipe_events::AudioQueueKind::Recording,
+            &self.recording_receiver,
+        );
 
         self.transcription_receiver_stop_requested
             .store(true, Ordering::Release);
-        finish_consumer(
+        let transcription_finish = finish_consumer(
             &self.transcription_receiver_handle,
             remaining_phase_budget(shutdown_started, TRANSCRIPTION_CONSUMER_DRAIN_TIMEOUT),
         )
         .await;
+        report_unconfirmed_queue_work(
+            screenpipe_events::audio_delivery_reporter(),
+            transcription_finish,
+            screenpipe_events::AudioQueueKind::TranscriptionResult,
+            &self.transcription_receiver,
+        );
 
         if let Some(handle) = meeting_streaming {
             match handle
@@ -1059,6 +1127,13 @@ impl AudioManager {
             let mut session_privacy = None;
             while let Some(audio) = receive_until_stopped(&whisper_receiver, &stop_requested).await
             {
+                if let Some(capacity) = whisper_receiver.capacity() {
+                    screenpipe_events::audio_delivery_reporter().sample_queue(
+                        screenpipe_events::AudioQueueKind::Recording,
+                        whisper_receiver.len(),
+                        capacity,
+                    );
+                }
                 let Some(privacy) = audio.privacy.filter(|p| p.is_current()) else {
                     info!("queued audio chunk discarded by privacy policy");
                     continue;
@@ -1166,16 +1241,20 @@ impl AudioManager {
                             // Retry DB insertion with backoff to survive transient pool saturation.
                             // Without this, audio files are written to disk but orphaned from the DB,
                             // causing silent data loss on the timeline.
-                            let mut inserted = false;
+                            let mut inserted_chunk_id = None;
                             for retry in 0..3u32 {
                                 if !privacy.is_current() {
                                     break;
                                 }
-                                match db.insert_audio_chunk(&path, capture_dt).await {
-                                    Ok(_) => {
-                                        inserted = true;
+                                match db
+                                    .insert_audio_chunk_with_privacy(&path, capture_dt, privacy)
+                                    .await
+                                {
+                                    Ok(Some(id)) => {
+                                        inserted_chunk_id = Some(id);
                                         break;
                                     }
+                                    Ok(None) => break,
                                     Err(e) => {
                                         warn!(
                                             "failed to insert audio chunk into db (attempt {}/3): {:?}",
@@ -1191,7 +1270,17 @@ impl AudioManager {
                                     }
                                 }
                             }
-                            if !inserted {
+                            if !privacy.is_current() {
+                                compensate_privacy_invalidated_audio_file(
+                                    &db,
+                                    inserted_chunk_id,
+                                    &path,
+                                )
+                                .await;
+                                info!("audio chunk persistence discarded after privacy transition");
+                                continue;
+                            }
+                            if inserted_chunk_id.is_none() {
                                 // Keep the path as a structured field so local log
                                 // consumers can group the error across devices.
                                 error!(
@@ -1355,6 +1444,13 @@ impl AudioManager {
                         log_audio_process_error(&e);
                     }
                 }
+            }
+            if let Some(capacity) = whisper_receiver.capacity() {
+                screenpipe_events::audio_delivery_reporter().sample_queue(
+                    screenpipe_events::AudioQueueKind::Recording,
+                    whisper_receiver.len(),
+                    capacity,
+                );
             }
         }))
     }
@@ -1933,6 +2029,27 @@ mod tests {
     use super::*;
     use crate::core::device::{AudioDevice, DeviceType};
 
+    #[tokio::test]
+    async fn privacy_compensation_removes_raw_chunk_row_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-audio.mp4");
+        std::fs::write(&path, b"synthetic audio bytes").unwrap();
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let chunk_id = db
+            .insert_audio_chunk(path.to_str().unwrap(), None)
+            .await
+            .unwrap();
+
+        assert!(
+            compensate_privacy_invalidated_audio_file(&db, Some(chunk_id), path.to_str().unwrap())
+                .await
+        );
+        assert!(!path.exists());
+        assert!(!db.audio_chunk_exists(chunk_id).await.unwrap());
+    }
+
     #[test]
     fn cloned_manager_cleanup_token_is_non_owning() {
         let owner = DropCleanupOwner(true);
@@ -1982,6 +2099,23 @@ mod tests {
             .expect("consumer did not finish after in-flight work")
             .expect("consumer task failed");
         assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unconfirmed_consumer_work_is_possible_loss_not_confirmed_drop() {
+        let delivery = screenpipe_events::AudioDeliveryReporter::isolated();
+        let (sender, receiver) = crossbeam::channel::bounded(4);
+        sender.send(1_u8).unwrap();
+        sender.send(2_u8).unwrap();
+        report_unconfirmed_queue_work(
+            &delivery,
+            ConsumerFinishOutcome::TimedOut,
+            screenpipe_events::AudioQueueKind::Recording,
+            &receiver,
+        );
+        let status = delivery.status();
+        assert_eq!(status.possible_lost_deliveries(), 3);
+        assert_eq!(status.dropped_deliveries(), 0);
     }
 
     #[tokio::test]

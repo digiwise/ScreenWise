@@ -868,13 +868,14 @@ async fn finalize_batch(
         return discard_canceled_transcription(db, pending, data_dir, secondary_file_paths).await;
     }
     if let Err(e) = db
-        .insert_diarization_run_with_segments(
+        .insert_diarization_run_with_segments_if_current(
             pending.audio_chunk_id,
             "background",
             provider,
             Some(&pending.engine),
             None,
             &segments,
+            pending.privacy.unwrap(),
         )
         .await
     {
@@ -882,6 +883,23 @@ async fn finalize_batch(
             "reconciliation: failed to insert diarization segment for chunk {}: {}",
             pending.audio_chunk_id, e
         );
+    }
+    if !pending
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        return match discard_canceled_transcription(db, pending, data_dir, secondary_file_paths)
+            .await
+        {
+            Ok(count) => Ok(count),
+            Err(_) => {
+                error!(
+                    reason_code = "audio_privacy_compensation_failed",
+                    "Failed to remove privacy-invalidated audio persistence."
+                );
+                Err("privacy-invalidated audio persistence cleanup failed".to_string())
+            }
+        };
     }
 
     // Record the DB write so health-check doesn't flag a false "stalled" alarm.
@@ -1575,6 +1593,27 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.count_audio_transcriptions(primary_id).await.unwrap(), 1);
+        db.insert_diarization_run_with_segments(
+            primary_id,
+            "background",
+            "test",
+            None,
+            None,
+            &[NewDiarizationSegment {
+                provider_speaker_label: "speaker:test".to_string(),
+                speaker_id: None,
+                source: "test".to_string(),
+                start_time: 0.0,
+                end_time: 1.0,
+                confidence: None,
+                overlap: false,
+                metadata: Some("synthetic metadata".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        let diarization_before = db.count_diarization_runs(primary_id).await.unwrap();
+        assert_eq!(diarization_before, 1);
         let mut pending = pending_with_diarization(Vec::new());
         pending.audio_chunk_id = primary_id;
         pending.file_path = primary_path.to_str().unwrap().to_string();
@@ -1594,6 +1633,8 @@ mod tests {
         assert!(db.audio_chunk_exists(primary_id).await.unwrap());
         assert!(!db.audio_chunk_exists(secondary_id).await.unwrap());
         assert_eq!(db.count_audio_transcriptions(primary_id).await.unwrap(), 0);
+        let diarization_after = db.count_diarization_runs(primary_id).await.unwrap();
+        assert_eq!(diarization_after, 0);
         assert!(primary_path.exists());
         assert!(!secondary_path.exists());
         assert!(!recovery_path.exists());

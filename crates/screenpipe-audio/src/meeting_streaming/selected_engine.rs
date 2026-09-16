@@ -29,6 +29,16 @@ const LIVE_CHUNK_MIN: Duration = Duration::from_secs(2);
 const FLUSH_TICK: Duration = Duration::from_millis(750);
 const MIN_LIVE_RMS: f32 = 0.003;
 
+fn sample_final_queue(sender: &mpsc::Sender<MeetingTranscriptFinal>) {
+    let capacity = sender.max_capacity();
+    let pending = capacity.saturating_sub(sender.capacity());
+    screenpipe_events::audio_delivery_reporter().sample_queue(
+        screenpipe_events::AudioQueueKind::MeetingFinal,
+        pending,
+        capacity,
+    );
+}
+
 pub async fn run_selected_engine_stream(
     config: MeetingStreamingConfig,
     engine_ref: Arc<RwLock<Option<TranscriptionEngine>>>,
@@ -245,10 +255,13 @@ async fn flush_buffer(
     };
     if chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
         let _ = screenpipe_events::send_event("meeting_transcript_final", final_event.clone());
-        final_tx
-            .send(final_event)
-            .await
-            .map_err(|_| anyhow!("meeting final owner is unavailable"))?;
+        sample_final_queue(final_tx);
+        if final_tx.send(final_event).await.is_err() {
+            screenpipe_events::audio_delivery_reporter()
+                .record_confirmed_loss(screenpipe_events::AudioQueueKind::MeetingFinal, 1);
+            return Err(anyhow!("meeting final owner is unavailable"));
+        }
+        sample_final_queue(final_tx);
     }
 
     Ok(())
