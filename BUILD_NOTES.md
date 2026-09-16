@@ -155,6 +155,24 @@ TCP handshake to the fixed endpoint. The ScreenWise diagnostic then returned
 comparative result, together with the exact ActiveStore rule inspection,
 establishes blocking for this IPv4 TCP attempt. It is not packet-drop tracing,
 continuous coverage, a UDP result or an externally routed IPv6 result.
+
+## Current-build selected-output transcription (2026-09-16)
+
+The rebuilt release binary then passed the prepared short `audio-output` batch
+with the exact selected device `Headphones (2- Realtek USB2.0 Audio)`. The
+controller waited for the capture handle before playing two fixed local speech
+fixtures through Windows default output. Six audio chunks and nine local
+transcription rows were written. The fixed `silver cedar` and `amber window`
+markers each appeared once in persisted transcription rows and were each found
+through authenticated local search. No unrelated marker appeared. The fresh
+store's SQLite `quick_check` returned `ok`; protected API checks retained the
+403/403/200 missing/wrong/valid bearer behavior; playback stopped and the
+recorder, audio workers and fixture shut down cleanly on the first attempt. An
+independent post-run check found no owned processes and no TCP or UDP endpoints
+on the two test ports. No captured audio or transcript body was inspected beyond
+the allowlisted synthetic-marker counts. This establishes the two known phrases,
+selected-device routing and persistence/search, not full-clip transcription
+accuracy, diarization quality, every audio device or final-tail preservation.
 The final staged tree excluded 45 inherited asset paths while preserving their
 local bytes. It contained no active upstream workflow, private evidence path or
 maintainer private-email match in the 520 changed text files checked. A separate
