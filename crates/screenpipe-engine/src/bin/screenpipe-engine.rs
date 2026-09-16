@@ -24,8 +24,9 @@ use screenpipe_core::paths;
 use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{
     cli::{
-        audio::handle_audio_command, search::handle_search_command, status::handle_status_command,
-        vision::handle_vision_command, Cli, Command, RecordArgSources,
+        audio::handle_audio_command, diagnostic::run_fixed_outbound_tcp_probe,
+        search::handle_search_command, status::handle_status_command,
+        vision::handle_vision_command, Cli, Command, DiagnosticCommand, RecordArgSources,
     },
     crash_log,
     high_fps_controller::HighFpsController,
@@ -373,6 +374,15 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 eprintln!("some checks failed — fix the issues above before running screenpipe");
                 std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Command::Diagnostic { ref subcommand } => {
+            let connected = match subcommand {
+                DiagnosticCommand::OutboundTcpProbe => run_fixed_outbound_tcp_probe().await,
+            };
+            if !connected {
+                std::process::exit(2);
             }
             return Ok(());
         }

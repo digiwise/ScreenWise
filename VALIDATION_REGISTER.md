@@ -22,7 +22,7 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 | Audio shutdown | One 13.798 s selected-output partial chunk retained both synthetic markers; authenticated search found it after a distinct process restart and found a new chunk | Active-meeting shutdown, same-process restart and every device are not covered |
 | Lock/unlock | Audio-disabled real transition passed: 11.890 s confirmed locked plateau, frame count 7->7 and UIA count 11->11; synthetic before/after capture/search passed | Included-window gate remained active; not isolated lock-gate or every-pixel proof |
 | Safe lock notices | Fixed unlocked/desktop-unavailable/locked reasons persisted through timeline API and local logs; clean stop with no owned processes remaining | Packaged desktop timeline was not visually exercised in this run |
-| OS firewall | Exact recorder/media paths had outbound block rules; helper IPv4 probes failed while an unscoped control succeeded; helper IPv4/IPv6 localhost access worked | External IPv6 route unavailable; active recorder/UDP/drop-trace coverage and closeout incomplete |
+| OS firewall | Exact recorder/media paths had outbound block rules; the fixed no-payload `screenpipe.exe` IPv4 TCP diagnostic was denied while an unscoped control handshake succeeded; helper IPv4/IPv6 localhost access worked | External IPv6 route unavailable; UDP/drop-trace coverage and closeout incomplete |
 | Published checkout | Clean offline release build, CLI help/doctor and nine event tests passed at `1b22c5b84`; a fresh gated run wrote 15 distinct snapshots, three admitted accessibility-tree frames and five UI events; Windows Native on-demand OCR persisted the known synthetic marker; SQLite `quick_check` and capture-run shutdown passed | Synthetic text admission only; image pixels, clipboard, real DRM, audio and firewall drops were not exercised; the vision-disabled OCR restart required forced shutdown after its watched-process signal |
 
 The final lock result's SHA-256 was
@@ -69,7 +69,7 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | SW-T05 | Ordinary clipboard positive control, password/unknown-focus filtering, provider failure and clipboard restoration/fault recovery. |
 | SW-T06 | Audio/meeting completeness, diarization quality, active-meeting shutdown, pending recovery and same-process restart. |
 | SW-T07 | Combined WGC/UIA/OCR+audio/STT soak, unplug/replug, monitor changes, backlog and loss diagnostics. |
-| SW-T08 | Recorder-originated safe outbound attempt, usable external IPv6 and UDP controls, OS drop evidence. Sampling alone is insufficient. |
+| SW-T08 | Fixed no-payload `screenpipe.exe` IPv4 TCP attempt passed blocked-versus-unscoped control. Usable external IPv6 and UDP controls plus OS drop tracing remain open. |
 | SW-T09 | Desktop/WebView/MCP/optional executable scope: inventory relevant child processes before extending firewall claims. |
 | SW-T10 | Owner-confirmed disposition/restoration of exact test rules, independent read-only final inspection and original milestone closeout. |
 | SW-T11 | Visual desktop status and broader safe-notice audit across acquisition/audio/input failures and independent queues. |

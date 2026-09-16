@@ -6,6 +6,7 @@ pub mod audio;
 pub mod auth;
 pub mod backup;
 pub mod db;
+pub mod diagnostic;
 pub mod export;
 pub mod search;
 pub mod status;
@@ -184,6 +185,13 @@ pub enum Command {
     /// Check system readiness (permissions, ffmpeg, etc.)
     Doctor,
 
+    /// Developer-only diagnostics with fixed, non-configurable behavior
+    #[command(hide = true)]
+    Diagnostic {
+        #[command(subcommand)]
+        subcommand: DiagnosticCommand,
+    },
+
     /// Manage local API authentication
     Auth {
         #[command(subcommand)]
@@ -211,6 +219,12 @@ pub enum Command {
     /// `~/.screenpipe/db.sqlite` directly — no daemon required.
     #[command(alias = "export-meeting")]
     Export(ExportArgs),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum DiagnosticCommand {
+    /// Attempt one TCP handshake to a fixed public endpoint without sending data
+    OutboundTcpProbe,
 }
 
 // =============================================================================
@@ -1376,6 +1390,25 @@ mod tests {
             }
             _ => panic!("expected Record command"),
         }
+    }
+
+    #[test]
+    fn fixed_outbound_tcp_probe_accepts_no_destination_arguments() {
+        let cli = Cli::try_parse_from(["screenpipe", "diagnostic", "outbound-tcp-probe"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Diagnostic {
+                subcommand: DiagnosticCommand::OutboundTcpProbe
+            }
+        ));
+
+        assert!(Cli::try_parse_from([
+            "screenpipe",
+            "diagnostic",
+            "outbound-tcp-probe",
+            "8.8.8.8:443"
+        ])
+        .is_err());
     }
 
     #[test]

@@ -124,6 +124,23 @@ Keep that output private. Protected API requests require the bearer token even
 on localhost. `/health` is startup-safe; the normal listener is `127.0.0.1:3030`.
 Never disable authentication to repair a test or model configuration problem.
 
+## Fixed outbound firewall diagnostic
+
+Developers validating an executable-scoped outbound firewall rule can run:
+
+```powershell
+.\target\release\screenpipe.exe diagnostic outbound-tcp-probe
+```
+
+This hidden diagnostic makes exactly one TCP connection attempt to the fixed
+address `1.1.1.1:443`, waits at most five seconds and closes a successful
+handshake immediately. It performs no DNS lookup or application-protocol
+exchange, sends and receives no application data, and accepts no destination,
+port, payload, retry or timeout argument. Exit code 0 means the TCP handshake
+completed; exit code 2 means it did not. Validate reachability separately with
+an unscoped process and inspect the exact active OS firewall rule: the
+diagnostic's own failure alone does not prove that the firewall caused it.
+
 ## Desktop packaging
 
 Desktop build dependencies and native sidecars must be provisioned separately.

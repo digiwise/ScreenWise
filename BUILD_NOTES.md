@@ -137,6 +137,24 @@ shutdown result for the auxiliary OCR restart.
 The Windows OCR integration target compiled and listed successfully without
 executing capture/OCR. Its external-fixture test and the two Apple OCR fixture
 tests are explicitly ignored pending operator-provided reviewed fixtures.
+
+## Fixed outbound firewall diagnostic (2026-09-16)
+
+The release CLI now has a hidden developer diagnostic,
+`diagnostic outbound-tcp-probe`. It accepts no address or other network
+arguments and makes exactly one TCP connection attempt to `1.1.1.1:443` with a
+five-second limit. A completed handshake is closed immediately; the diagnostic
+does not perform DNS, TLS, HTTP, application reads or application writes.
+
+The locked offline release build passed. The active Windows Firewall rule named
+`ScreenWise-Offline-20260916-1b22c5b84-recorder` was enabled, outbound, blocking
+all non-loopback IPv4 and IPv6 addresses, and scoped to the exact rebuilt
+`screenpipe.exe` path. A one-attempt unscoped PowerShell control completed the
+TCP handshake to the fixed endpoint. The ScreenWise diagnostic then returned
+`PermissionDenied`, reported zero application bytes and exited 2. This
+comparative result, together with the exact ActiveStore rule inspection,
+establishes blocking for this IPv4 TCP attempt. It is not packet-drop tracing,
+continuous coverage, a UDP result or an externally routed IPv6 result.
 The final staged tree excluded 45 inherited asset paths while preserving their
 local bytes. It contained no active upstream workflow, private evidence path or
 maintainer private-email match in the 520 changed text files checked. A separate
