@@ -1060,7 +1060,7 @@ pub async fn pi_start_inner(
     }
 
     // Bun 1.3+ fixed the readline pipe bug (bun 1.2 needed a PTY workaround).
-    // The bundled bun is 1.3.10, so piped stdin works correctly.
+    // The bundled bun is 1.4.0, so piped stdin works correctly.
     // PTY canonical mode has a ~1024-byte line limit on macOS which silently
     // drops large JSON commands (prompts are 2500+ bytes), so pipe is required.
     cmd.stdin(Stdio::piped());

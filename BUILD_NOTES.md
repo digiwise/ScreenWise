@@ -212,9 +212,9 @@ obsolete generic-click and persistent-underline expectations; the second stale
 exclusion named an OCR test removed by the existing frame-text hook replacement.
 Both exclusions were removed. Renaming the Vitest config to the explicit ESM
 `.mts` extension also removed the Vite CommonJS deprecation warning. These tests
-used installed Bun 1.4.0 while the manifest declares Bun 1.3.10; the lockfile was
-not rewritten. Real overload/soak and visual packaged-timeline checks remain
-outstanding.
+used installed Bun 1.4.0, now also declared by the manifest and packaging pins;
+the lockfile was not rewritten. Real overload/soak and visual packaged-timeline
+checks remain outstanding.
 
 The reusable interactive controller now also contains an inert 25-second
 browser/password/clipboard sequence with five fixed phases, strict positive and

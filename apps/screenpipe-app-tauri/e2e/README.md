@@ -53,7 +53,7 @@ IPC and do not expose a separate HTTP listener.
 
 ### Prerequisites
 
-- **Bun** ≥ 1.3.10 — `winget install oven-sh.bun` or from [bun.sh](https://bun.sh)
+- **Bun** ≥ 1.4.0 — `winget install oven-sh.bun` or from [bun.sh](https://bun.sh)
 - **Rust** stable (x86_64-pc-windows-msvc) — `rustup target add x86_64-pc-windows-msvc`
 - **MSVC build tools** — Visual Studio 2022 Build Tools with C++ workload
 - **ONNX Runtime** — the pre_build script downloads this automatically during `bun tauri build`

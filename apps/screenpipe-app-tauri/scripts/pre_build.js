@@ -170,7 +170,7 @@ async function copyBunBinary() {
 
 		// Download the baseline bun variant for broader glibc compatibility.
 		// Use npm's tarball mirror because GitHub release assets can 504.
-		const bunVersion = '1.3.10';
+		const bunVersion = '1.4.0';
 		const baselineUrl = `https://registry.npmjs.org/@oven/bun-linux-x64-baseline/-/bun-linux-x64-baseline-${bunVersion}.tgz`;
 		console.log(`downloading bun baseline v${bunVersion} for linux...`);
 		const tmpArchive = path.join(cwd, 'bun-baseline.tgz');
@@ -208,7 +208,7 @@ async function copyBunBinary() {
 		// macos-26 runner, so copying systemBun bundled an arm64 binary into
 		// the Intel app — surfaced as Pi-install "Bad CPU type in executable
 		// (os error 86)" on Intel Macs).
-		const bunVersion = '1.3.10';
+		const bunVersion = '1.4.0';
 		const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET;
 
 		const archMap = [
