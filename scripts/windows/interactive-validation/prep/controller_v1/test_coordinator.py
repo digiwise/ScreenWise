@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from coordinator import BatchRunner, ControlError, PRIVACY_PHASES, consume_confirmation, prepare, session_path
+from browser_clipboard_sequence import ALL_MARKERS
 
 
 class FakeBackend:
@@ -42,6 +43,28 @@ class FakeBackend:
     def final_evidence(self): return {}
     def audio_marker_count(self, marker): return self.allowed
     def play_stimulus(self, name): self.phase=name; return 16
+
+
+class BrowserBackend(FakeBackend):
+    def __init__(self):
+        super().__init__()
+        self.marker_counts = {marker: 0 for marker in ALL_MARKERS}
+        self.browser_cleanup = {'browser_stopped': True, 'server_stopped': True}
+    def start_browser_fixture(self): self.calls.append('start_browser_fixture')
+    def browser_clipboard_marker_counts(self): return dict(self.marker_counts)
+    def browser_clipboard_phase(self, phase): self.phase=phase; self.calls.append('phase:'+phase)
+    def sample(self, phase):
+        if phase == 'browser_allowed':
+            self.marker_counts['public browser cedar'] += 1
+            self.marker_counts['public bronze hill'] += 1
+        elif phase == 'clipboard_plain':
+            self.marker_counts['public cedar garden'] += 1
+        if self.leak and phase == 'clipboard_password':
+            self.marker_counts['hidden tulip waterfall'] += 1
+    def close_browser_fixture(self):
+        self.calls.append('close_browser_fixture')
+        return dict(self.browser_cleanup)
+    def final_evidence(self): return {'available': True, 'forbidden_count': 0}
 
 
 class CoordinatorTests(unittest.TestCase):
@@ -141,6 +164,28 @@ class CoordinatorTests(unittest.TestCase):
         result=runner.run_audio_output(confirmed=True)
         self.assertEqual(result['reason'],'persisted_audio_positive_control_missing')
         self.assertEqual(result['controls'],[])
+
+    def test_browser_clipboard_sequence_passes_and_restores_after_stop(self):
+        backend=BrowserBackend();now=[0.0]
+        result=BatchRunner(backend,clock=lambda:now[0],sleep=lambda s:now.__setitem__(0,now[0]+s)).run_browser_clipboard(confirmed=True)
+        self.assertEqual(result['status'],'passed_scoped_browser_clipboard_checks')
+        self.assertEqual([row['name'] for row in result['phases']],
+                         ['browser_allowed','browser_password','browser_excluded','clipboard_plain','clipboard_password'])
+        self.assertLess(backend.calls.index('stop_recorder'),backend.calls.index('restore_clipboard'))
+        self.assertIn('close_browser_fixture',backend.calls)
+
+    def test_browser_clipboard_password_leak_fails(self):
+        backend=BrowserBackend();backend.leak=True;now=[0.0]
+        result=BatchRunner(backend,clock=lambda:now[0],sleep=lambda s:now.__setitem__(0,now[0]+s)).run_browser_clipboard(confirmed=True)
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(result['reason'],'synthetic_forbidden_marker_persisted')
+
+    def test_browser_clipboard_unverified_stop_never_restores(self):
+        backend=BrowserBackend();backend.stop_ok=False;now=[0.0]
+        result=BatchRunner(backend,clock=lambda:now[0],sleep=lambda s:now.__setitem__(0,now[0]+s)).run_browser_clipboard(confirmed=True)
+        self.assertEqual(result['status'],'incomplete')
+        self.assertNotIn('restore_clipboard',backend.calls)
+        self.assertTrue(result['cleanup_required'])
 
 
 if __name__=='__main__':unittest.main()

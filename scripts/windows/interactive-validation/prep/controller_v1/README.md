@@ -35,6 +35,7 @@ time or the PC being unlocked. Gate files have no expiry.
 | privacy | Leave compact synthetic window foreground for about 90 seconds | Plain-text positive controls; password and foreground/background exclusion marker absence; API auth; WTS/focus; DB and endpoint metadata |
 | audio-output | Allow local speech through the selected USB headphones for roughly two minutes | Five-second chunks; before/after local transcription, persistence and authenticated search |
 | drm | Allow compact synthetic Netflix-identity window and speech for roughly two minutes | Observed DRM pause and recovery; forbidden marker absence through final persistence; before/after positive controls |
+| browser | Leave the compact synthetic Chrome and native fixture windows foreground while the automatic 25-second sequence runs | Allowed browser positive controls; browser-password, excluded-host and password-paste marker absence; clipboard-safe cleanup |
 
 These durations are estimates. Active execution has bounded waits and a safety
 watchdog (at most 240 seconds of recording before shutdown is attempted). Readiness
@@ -56,29 +57,34 @@ batches instead of recording through an unverified state. No fullscreen UI is us
   hides/closes only owned fixtures and verifies quiescence. Forced shutdown makes
   a run incomplete. Confirmed forbidden persistence remains a failure even when
   cleanup or recovery also fails. No private clipboard is restored while a
-  recorder may still be running. These three batches do not mutate the clipboard.
+  recorder may still be running. The browser batch temporarily replaces the
+  clipboard only with fixed synthetic text, keeps the prior data as an opaque
+  `IDataObject`, and restores it after verified recorder stop. An external
+  clipboard change is preserved instead of overwritten.
 - The watchdog runs in the controller process. It is not crash-proof containment:
   killing Python or rebooting bypasses its normal cleanup. Do not leave a failed
   cleanup unresolved or claim an active recorder has stopped from logs alone.
 
 ## Remaining integration and limits
 
-Real Win+L/unlock, microphone reading, UAC, browser URL/password and clipboard
-sequences remain separately planned. live.py explicitly refuses those modes.
-Their synthetic fixtures, speech reference and transport helpers are prepared;
-their complete owner-action sequencing is not yet wired. Browser transport has
-strict loopback Host/path checks and no external resources; no browser/server has
-been started. A browser would need its own separately reviewed firewall scope.
+Real Win+L/unlock, microphone reading and UAC sequences remain separately planned.
+`live.py` explicitly refuses those modes. The browser URL/password/clipboard
+sequence is wired behind the same fresh owner gate, but has not been run. Its
+preflight requires the exact configured Chrome executable and SHA-256, no existing
+process using that executable, and a separately reviewed outbound firewall rule.
+The fixture server binds only to `127.0.0.1`, permits exact loopback Host values,
+and serves a self-contained page with no external resources.
 
 `browser_clipboard_sequence.py` now fixes the later browser/clipboard batch to
 five 5-second phases: allowed browser text, browser password, excluded localhost,
 ordinary synthetic clipboard copy/paste, and password-field clipboard behavior.
-Its pure acceptance policy requires per-phase OS/surface verification, positive
-controls, zero forbidden-marker deltas, recorder stop before clipboard restore,
-and verified browser/server/fixture cleanup. The live adapter is intentionally
-still disabled until it can own and verify the entire browser process tree and
-the exact browser executable has a separately reviewed firewall scope. This
-preparation neither starts a listener/browser nor reads or changes the clipboard.
+Its acceptance policy requires per-phase OS/surface verification, positive
+controls, zero forbidden-marker deltas, a final aggregate forbidden-marker
+recheck, recorder stop before clipboard restore, and verified browser/server/
+fixture cleanup. Each browser phase uses a fresh profile and exact process
+identity. Remaining Chrome children, focus loss, a non-loopback endpoint, or
+unverified cleanup makes the run incomplete or failed. Preparation and mock tests
+do not start the listener/browser or access the clipboard.
 
 Native marker absence does not prove redacted image pixels or every monitor.
 Synthetic Netflix identity does not exercise actual DRM media. Device enumeration

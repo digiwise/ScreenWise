@@ -22,7 +22,7 @@
     {
       "archive_path": "prep/controller_v1/coordinator.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/coordinator.py",
-      "sha256": "05927DCC50CB3A4F3425858C00B50BED509B528679B411081DBB36CE41DEEEB3",
+      "sha256": "221B625E80F0BC52B543FABC982356AE7AF476CCC1395F5F53E143CCF48DA4BF",
       "original_sha256": "05927DCC50CB3A4F3425858C00B50BED509B528679B411081DBB36CE41DEEEB3"
     },
     {
@@ -40,7 +40,7 @@
     {
       "archive_path": "prep/controller_v1/fixture_transport.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/fixture_transport.py",
-      "sha256": "6995E799EBB9ADCBDEB18F63120C8634DE32929692BF0C603917048D17EB3EBA",
+      "sha256": "A8E0BC1ABCE772CCD4CFFA999B613C0862D9ACB4B15470486962FEBAA2A07DAF",
       "original_sha256": "6995E799EBB9ADCBDEB18F63120C8634DE32929692BF0C603917048D17EB3EBA"
     },
     {
@@ -52,7 +52,7 @@
     {
       "archive_path": "prep/controller_v1/live.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/live.py",
-      "sha256": "AF6F8B73FADF8427496369A12576B62DB09743BF5A67099B1A2A63C5AE4A926E",
+      "sha256": "7F30351BE13821F53579354A114D19322FD834D579A0B977D503E7B13BC5B195",
       "original_sha256": "028296E5FB6C68FF5D4A50BB996FCE497E2494B1C0713CF1B935107A38BF9CD9"
     },
     {
@@ -64,13 +64,13 @@
     {
       "archive_path": "prep/controller_v1/README.md",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/README.md",
-      "sha256": "903DEF9CD7EF5DC3203E9A841046C5C498A69EDEB2580ABD8763E654E1CECFEE",
+      "sha256": "99BB0A899946E1BFB97F825F10E2885021506570B785C39BCD3BCAFFE862D689",
       "original_sha256": "53A4176BCD551E91EA1BF3587B9484C4C81CF2441CAC460B7E2D2805474473B5"
     },
     {
       "archive_path": "prep/controller_v1/test_coordinator.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_coordinator.py",
-      "sha256": "8B4109169A1B1CFC44D335BBED450B5E36BDE30756642FF1A1A3FE70AF47055F",
+      "sha256": "45093B4F8EDC9265EDCB0306E016EBE9AB8B16B4ADC6997ABA0365E5DABF814B",
       "original_sha256": "8B4109169A1B1CFC44D335BBED450B5E36BDE30756642FF1A1A3FE70AF47055F"
     },
     {
@@ -88,13 +88,13 @@
     {
       "archive_path": "prep/controller_v1/test_fixture_transport.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_fixture_transport.py",
-      "sha256": "79A55E945B7C3607D5EF4788F57595AAF0618DA1D11E176CC55023DA754CB021",
+      "sha256": "8003D6FF28D36EADBCB62F69B3E6A39DE0CB9034CD29EB2474FB7886525ED637",
       "original_sha256": "79A55E945B7C3607D5EF4788F57595AAF0618DA1D11E176CC55023DA754CB021"
     },
     {
       "archive_path": "prep/controller_v1/test_live.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_live.py",
-      "sha256": "9C9853B5646F8F30C8AFCFA21253F604490D485EC0FBAD6BB6992446840CFD15",
+      "sha256": "AEC9568755707AFEDE7BF7BEC2CF26C2E616BD89D5CFBB50D38351655370B243",
       "original_sha256": "9C9853B5646F8F30C8AFCFA21253F604490D485EC0FBAD6BB6992446840CFD15"
     },
     {
@@ -112,7 +112,7 @@
     {
       "archive_path": "prep/fixtures/browser-fixture.html",
       "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/browser-fixture.html",
-      "sha256": "C04F3E3AD08BF1EE20A174C196275F5CFE716D2E85BB42D6A5E3C098FEEBAFDC",
+      "sha256": "4CFB28180C38CCE445AB0CED53CBD786DF32D163B5CE8C8E58BEDC62DE183E1B",
       "original_sha256": "C04F3E3AD08BF1EE20A174C196275F5CFE716D2E85BB42D6A5E3C098FEEBAFDC"
     },
     {
@@ -130,7 +130,7 @@
     {
       "archive_path": "prep/fixtures/PrivacyFixture.cs",
       "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/PrivacyFixture.cs",
-      "sha256": "39482A187D789EC821A0CE9948C7B970AC3700CD2564A49542627AAC3B4D082A",
+      "sha256": "F58B08A24B50A69822A59422A5C384FA7AEFFDB79E4B08CC934D4A5AE3DE224A",
       "original_sha256": "F5ABC6A1AFF9D1B30A1544BC5ECAD11F7EC95AB24CDCE084E5723141F9E462CD"
     },
     {
@@ -154,7 +154,7 @@
     {
       "archive_path": "prep/preflight.ps1",
       "stage_path": "target/interactive-prep-20260915-01a09e45/preflight.ps1",
-      "sha256": "CC23990F3ECB2A2AE13B5B0C63727D9AF5C29C282B6FB11BEAEAB427CBE34784",
+      "sha256": "BC13F28C6E674B4F129EEDE388B3F3EBE28A6A1763DEC53C1BF7B1E447CAA3BB",
       "original_sha256": "B6310559742F4844EBF6FC3856427CA6BFFD1BFAE4C894A9804039EF801834DB"
     },
     {
@@ -262,14 +262,38 @@
     {
       "archive_path": "common/config.example.json",
       "stage_path": "target/interactive-validation/common/config.example.json",
-      "sha256": "4C648875927E28200D0C0D40AFC254DD34EBE96364494026835B68D32C6F2C77",
+      "sha256": "BAF4E2BDB0398370656576CF49751BA4317DF053B4F5A759C256DC4356B495EA",
       "original_sha256": "DD52935A9B41F5FD1875E56DF5391328B329CE033D78DB99DA0A6AFDE7A8A21C"
     },
     {
       "archive_path": "common/Invoke-ValidationController.ps1",
       "stage_path": "target/interactive-validation/common/Invoke-ValidationController.ps1",
-      "sha256": "F2BBA26F7CF526CA633DC94DCF46E0B4A4F730A725FCD2501630D02C94313D57",
+      "sha256": "00D6885D0B18319405C333D6156A0BEAA3493DB6EFEB405DE28C7D46EDA5BD9D",
       "original_sha256": "1F8728A4E1F14A39F251B7C4E266CF0DE8306570616D34E042FDFFF83D9FF9C3"
+    },
+    {
+      "archive_path": "prep/controller_v1/browser_clipboard_sequence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/browser_clipboard_sequence.py",
+      "sha256": "CBA7C93C6AE38201130965F5198ADEF5C0F7C28CBBBFD5F2EFDE49A42161B230",
+      "original_sha256": "CBA7C93C6AE38201130965F5198ADEF5C0F7C28CBBBFD5F2EFDE49A42161B230"
+    },
+    {
+      "archive_path": "prep/controller_v1/browser_runtime.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/browser_runtime.py",
+      "sha256": "7AE4F933BB92C90C315A29A4B04A92D01F1E95EB8FC44205D98633BC7C6ABB67",
+      "original_sha256": "7AE4F933BB92C90C315A29A4B04A92D01F1E95EB8FC44205D98633BC7C6ABB67"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_browser_clipboard_sequence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_browser_clipboard_sequence.py",
+      "sha256": "F82F7325F3B5C4DFB6CE97AC9A6A7C5216D980F600D8D0A3D090E092D9A81DF7",
+      "original_sha256": "F82F7325F3B5C4DFB6CE97AC9A6A7C5216D980F600D8D0A3D090E092D9A81DF7"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_browser_runtime.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_browser_runtime.py",
+      "sha256": "B75A0A3C262A67C16839AC9F797C5078A5C3DEE80D53C2D5E994962FDF7C1B94",
+      "original_sha256": "B75A0A3C262A67C16839AC9F797C5078A5C3DEE80D53C2D5E994962FDF7C1B94"
     }
   ]
 }

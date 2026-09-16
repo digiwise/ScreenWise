@@ -22,6 +22,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from coordinator import BatchRunner, ControlError, ROOT, consume_confirmation, session_path
+from browser_clipboard_sequence import ALL_MARKERS as BROWSER_CLIPBOARD_MARKERS
+from browser_runtime import BrowserFixtureRuntime, BrowserRuntimeError
 import evidence
 from fixture_transport import FixtureClient
 import windows_controls as windows
@@ -30,19 +32,28 @@ PREP = ROOT.parent
 RELEASE = Path(os.environ.get('SCREENWISE_VALIDATION_RELEASE_DIR', PREP.parent / 'release'))
 FIXTURE = PREP / 'fixtures' / 'PrivacyFixture.exe'
 SCOPED = [RELEASE / name for name in ('screenpipe.exe', 'ffmpeg.exe', 'ffprobe.exe')]
-MARKERS = ['public cedar garden', 'hidden tulip waterfall', 'forbidden violet orchard', 'silver cedar', 'amber window', 'forbidden golden harbour', 'crimson bridge']
+MARKERS = list(dict.fromkeys([
+    'public cedar garden', 'hidden tulip waterfall', 'forbidden violet orchard',
+    'silver cedar', 'amber window', 'forbidden golden harbour', 'crimson bridge',
+    *BROWSER_CLIPBOARD_MARKERS,
+]))
 OUTPUT = os.environ.get('SCREENWISE_VALIDATION_OUTPUT_DEVICE', '<output-device-not-configured>')
 API_PORT = int(os.environ.get('SCREENWISE_VALIDATION_API_PORT', '31479'))
+FIXTURE_PORT = int(os.environ.get('SCREENWISE_VALIDATION_FIXTURE_PORT', '31480'))
 API_URL = f'http://127.0.0.1:{API_PORT}'
-LIVE_MODES = ('privacy', 'audio-output', 'drm')
+LIVE_MODES = ('privacy', 'audio-output', 'drm', 'browser')
 
 
-def require_runtime_configuration():
+def require_runtime_configuration(mode=None):
     required = ('SCREENWISE_VALIDATION_CONFIG', 'SCREENWISE_VALIDATION_REPO_ROOT',
                 'SCREENWISE_VALIDATION_RELEASE_DIR', 'SCREENWISE_VALIDATION_POWERSHELL_EXE',
                 'SCREENWISE_VALIDATION_CONFIG_SHA256',
                 'SCREENWISE_VALIDATION_INPUT_DEVICE', 'SCREENWISE_VALIDATION_OUTPUT_DEVICE',
                 'SCREENWISE_VALIDATION_API_PORT', 'OPENBLAS_PATH', 'ORT_LIB_LOCATION')
+    if mode == 'browser':
+        required += ('SCREENWISE_VALIDATION_BROWSER_EXE',
+                     'SCREENWISE_VALIDATION_BROWSER_SHA256',
+                     'SCREENWISE_VALIDATION_FIXTURE_PORT')
     if any(not os.environ.get(name) for name in required):
         raise ControlError('explicit_runtime_configuration_required')
 
@@ -79,6 +90,8 @@ class WindowsBackend:
         self.fixture_dir = path / 'fixture'
         self.recorder = self.fixture = self.client = None
         self.drm_fixture = self.drm_client = None
+        self.browser_runtime = None
+        self.browser_surface_active = False
         self.token = None
         self.expected_hwnd = None
         self.expected_pid = None
@@ -97,10 +110,20 @@ class WindowsBackend:
             f.write(json.dumps({'utc': utc(), 'kind': kind, **value}) + '\n')
 
     def quiescent(self):
-        inventory = windows.inventory_known_executables(SCOPED + [FIXTURE, FIXTURE.parent/'Netflix.exe'])
+        inventory = windows.inventory_known_executables(
+            self.scoped_paths() + [FIXTURE, FIXTURE.parent/'Netflix.exe'])
         if inventory.get('error_code') or inventory.get('processes'):
             raise ControlError('existing_or_unverified_test_process')
         return True
+
+    def scoped_paths(self):
+        paths = list(SCOPED)
+        if self.record.get('mode') == 'browser':
+            browser = os.environ.get('SCREENWISE_VALIDATION_BROWSER_EXE')
+            if not browser or not Path(browser).is_absolute():
+                raise ControlError('browser_runtime_configuration_required')
+            paths.append(Path(browser))
+        return paths
 
     def preflight(self):
         self.quiescent()
@@ -125,6 +148,8 @@ class WindowsBackend:
                    '-ConfigPath', os.environ['SCREENWISE_VALIDATION_CONFIG'],
                    '-ExpectedConfigSha256', os.environ['SCREENWISE_VALIDATION_CONFIG_SHA256'],
                    '-RequireState', 'unlocked']
+        if self.record.get('mode') == 'browser':
+            command.append('-RequireBrowser')
         self.journal('command', {'argv': command})
         with (self.path/'preflight-output.txt').open('xb') as output:
             check = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT,
@@ -170,6 +195,10 @@ class WindowsBackend:
             args += ['--disable-keyboard-capture','--disable-clipboard-capture',
                      '--included-windows','ScreenWise Synthetic Privacy Fixture',
                      '--included-windows','ScreenWise SYNTHETIC DRM TEST']
+        elif self.record['mode'] == 'browser':
+            args += ['--idle-capture-interval-ms','1000', '--min-capture-interval-ms','500',
+                     '--included-windows','ScreenWise Synthetic Browser Fixture',
+                     '--included-windows','ScreenWise Synthetic Privacy Fixture']
         self.journal('command', {'argv': args})
         self.recorder = windows.OwnedProcess.start(args, RELEASE, self.data/'stdout.log', self.data/'stderr.log')
         self.journal('recorder_identity', {'pid': self.recorder.pid, 'creation_ticks': self.recorder.creation_time_ticks})
@@ -265,10 +294,82 @@ class WindowsBackend:
         self.journal('fixture_ack', ack)
 
     def foreground_valid(self, phase):
+        if self.record.get('mode') == 'browser' and self.browser_surface_active:
+            return self.browser_runtime is not None and self.browser_runtime.foreground_valid()
         identity = windows.foreground_identity()
         target = self.drm_fixture if self.drm_fixture is not None and self.expected_pid==self.drm_fixture.pid else self.fixture
         return (target is not None and target.poll() is None
                 and identity['pid'] == self.expected_pid and identity['hwnd'] == self.expected_hwnd)
+
+    def start_browser_fixture(self):
+        if self.record.get('mode') != 'browser' or self.browser_runtime is not None:
+            raise ControlError('browser_fixture_state_invalid')
+        try:
+            self.browser_runtime = BrowserFixtureRuntime(
+                os.environ['SCREENWISE_VALIDATION_BROWSER_EXE'], FIXTURE_PORT,
+                PREP/'fixtures'/'browser-fixture.html', self.path,
+                self.record['run_id'])
+            url = self.browser_runtime.start_server()
+        except (BrowserRuntimeError, KeyError) as error:
+            raise ControlError('browser_fixture_start_failed') from error
+        self.journal('browser_server', {'url_origin': f'http://127.0.0.1:{FIXTURE_PORT}',
+                                        'route': '/browser-fixture.html'})
+        return url
+
+    def _fixture_background_action(self, action, phase):
+        self.counter += 1
+        ack = self.client.send(f'{self.counter:04d}-{phase}', action,
+                               expected_pid=self.fixture.pid)
+        if ack.get('success') is not True:
+            raise ControlError('fixture_action_failed')
+        self.journal('fixture_ack', ack)
+
+    def browser_clipboard_phase(self, phase):
+        if self.record.get('mode') != 'browser' or self.browser_runtime is None:
+            raise ControlError('browser_fixture_not_started')
+        browser_phases = {
+            'browser_allowed': ('127.0.0.1', 'ordinary'),
+            'browser_password': ('127.0.0.1', 'secret'),
+            'browser_excluded': ('localhost', 'ordinary'),
+        }
+        try:
+            if phase in browser_phases:
+                self._fixture_background_action('browser-handoff', phase+'-handoff')
+                host, focus = browser_phases[phase]
+                identity = self.browser_runtime.show_phase(host, phase, focus)
+                self.expected_pid = identity['pid']
+                self.expected_hwnd = identity['hwnd']
+                self.browser_surface_active = True
+            elif phase == 'clipboard_plain':
+                if self.browser_runtime.stop_browser().get('stopped') is not True:
+                    raise ControlError('browser_process_tree_not_stopped')
+                self.browser_surface_active = False
+                self.fixture_action('plain-copy', phase+'-copy')
+                self.fixture_action('plain-paste', phase+'-paste')
+            elif phase == 'clipboard_password':
+                self.browser_surface_active = False
+                self.fixture_action('stage-password-clipboard', phase+'-stage')
+                self.fixture_action('password-paste', phase+'-paste')
+            else:
+                raise ControlError('unknown_browser_clipboard_phase')
+        except BrowserRuntimeError as error:
+            raise ControlError('browser_phase_setup_failed') from error
+
+    def browser_clipboard_marker_counts(self):
+        hits = self.aggregate()['marker_hit_counts']
+        return {marker: sum(surface.get(marker, 0) for surface in hits.values())
+                for marker in BROWSER_CLIPBOARD_MARKERS}
+
+    def close_browser_fixture(self):
+        self.browser_surface_active = False
+        if self.browser_runtime is None:
+            return {'browser_stopped': True, 'server_stopped': True}
+        result = self.browser_runtime.close()
+        self.journal('browser_cleanup', {
+            'browser_stopped': result.get('browser_stopped') is True,
+            'server_stopped': result.get('server_stopped') is True,
+        })
+        return result
 
     def start_drm(self):
         executable=FIXTURE.parent/'Netflix.exe'
@@ -336,13 +437,17 @@ class WindowsBackend:
         result['network_limits']='Sampled TCP/UDP metadata only; no packet-drop proof or continuous coverage.'
         if self.record['mode']=='privacy':result['forbidden_count']=self.counts()['forbidden']
         elif self.record['mode']=='drm':result['forbidden_count']=self.forbidden_count()
+        elif self.record['mode']=='browser':
+            hits=result['marker_hit_counts']
+            always_forbidden=('hidden coral orchard','forbidden cyan orchard','hidden tulip waterfall')
+            result['forbidden_count']=sum(v.get(m,0) for v in hits.values() for m in always_forbidden)
         return result
 
     def sample(self, phase):
         if self.recorder.poll() is not None: raise ControlError('recorder_exited')
         if time.monotonic()-self.last_sample < 1: return
         self.last_sample=time.monotonic()
-        inventory=windows.inventory_known_executables(SCOPED)
+        inventory=windows.inventory_known_executables(self.scoped_paths())
         if inventory.get('error_code'):raise ControlError('process_inventory_unavailable')
         if not any(row['pid']==self.recorder.pid and
                    row['creation_time_ticks']==self.recorder.creation_time_ticks and
@@ -423,8 +528,25 @@ class WindowsBackend:
         return ack.get('success') is True and visibility.get('has_visible_window') is False and not visibility.get('error_code')
 
     def restore_clipboard(self):
-        # Current batches intentionally contain no clipboard mutations.
-        return self.recorder is None or self.recorder.poll() is not None
+        if self.recorder is not None and self.recorder.poll() is None:
+            return False
+        if self.record.get('mode') != 'browser':
+            return True
+        if self.client is None or self.fixture is None or self.fixture.poll() is not None:
+            return False
+        self.counter += 1
+        ack = self.client.send(f'{self.counter:04d}-restore-clipboard',
+                               'restore-clipboard-after-recorder-stop',
+                               expected_pid=self.fixture.pid,
+                               recorder_stopped=True)
+        terminal = (ack.get('success') is True or
+                    ack.get('errorCode') == 'clipboard_changed_external_preserved')
+        if terminal:
+            self.journal('clipboard_restore', {
+                'restored': ack.get('success') is True,
+                'external_change_preserved': ack.get('errorCode') == 'clipboard_changed_external_preserved',
+            })
+        return terminal
 
     def close_fixture(self):
         if self.fixture is None or self.fixture.poll() is not None:return True
@@ -477,7 +599,7 @@ def main(argv=None):
     if not args.execute_interactive:
         print(json.dumps({'state':'waiting_for_owner','recording_started':False,'mode':record['mode'],'prompt':record['prompt']}))
         return 0
-    require_runtime_configuration()
+    require_runtime_configuration(record['mode'])
     if record['mode'] not in LIVE_MODES:raise ControlError('mode_not_yet_wired_for_live_execution')
     verify_prepared_pins()
     backend=WindowsBackend(record,path)
@@ -488,6 +610,8 @@ def main(argv=None):
     if record['mode']=='drm':
         from drm_sequence import DrmRunner
         result=DrmRunner(backend).run(confirmed=True)
+    elif record['mode']=='browser':
+        result=runner.run_browser_clipboard(confirmed=True)
     else:
         result=(runner.run_privacy(confirmed=True) if record['mode']=='privacy' else runner.run_audio_output(confirmed=True))
     (path/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')

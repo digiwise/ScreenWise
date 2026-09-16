@@ -43,7 +43,7 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | SW-V03 | Two unexpected WGC acquisition failures observed. Safe placeholders were retained; possible secure-desktop/focus confounding is not an established cause. Reproduce with controlled OS state. |
 | SW-V04 | Microphone transcript rows/phrase hits passed, complete passage accuracy and retention did not. Distinguish ASR substitutions, VAD rejection and actual loss. |
 | SW-V05 | Earlier DRM audio tests lacked positive before/after controls; they cannot establish suppression. Retry only with working controls. |
-| SW-V06 | Ordinary clipboard-content positive control remains missing. Audit deferred read/focus permits using fake values only; no secret payload logging. |
+| SW-V06 | Live clipboard privacy evidence remains missing. The prepared fixture uses only fixed synthetic ordinary/secret values, keeps prior clipboard data opaque, and restores only after verified recorder stop; it has not yet been exercised against the current build. |
 | SW-V07 | Earlier audio-gap/UIA-drop/pending-status warnings need load and no-speech lifecycle diagnosis. They do not establish a broken microphone. |
 | SW-V08 | Fixture focus/equality limitations addressed with OS identity and stimulus acknowledgements; continue using these guards. |
 | SW-V09 | Windows locked-state detection repaired and already-locked regression passed; later audio-disabled transition passed. Audio recovery remains open. |
@@ -64,10 +64,10 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | ID | Required scope |
 |---|---|
 | SW-T01 | Extend the passed audio-disabled lock transition to audio cancellation/recovery and stale-generation suppression; retain independent OS observations. |
-| SW-T02 | Run the prepared 25-second browser batch for URL/domain exclusions and HTML password controls with the self-contained loopback fixture and positive controls. First implement and review ownership of the entire browser process tree and exact browser firewall scope. |
+| SW-T02 | Run the wired 25-second browser batch for URL/domain exclusions and HTML password controls. Process identity, focus, loopback serving and fail-closed cleanup are implemented and mock-tested; the exact Chrome outbound rule still must be installed and pass preflight. |
 | SW-T03 | Sustained real/synthetic DRM distinction and audio recovery; repair the DRM fixture's similar command re-entry pattern before reuse. |
 | SW-T04 | App-only and App::Title exclusions, rapid transitions, enumeration failure and race stress. |
-| SW-T05 | Run the prepared ordinary/password clipboard phases, then add provider-failure and unknown-focus fault cases. The prepared policy requires the recorder to stop before restoration and a verified safe clipboard terminal state. |
+| SW-T05 | Run the wired ordinary/password clipboard phases. Provider/focus failures are fail-closed in mocked checks; live evidence still must confirm positive ordinary capture, zero synthetic-secret persistence, recorder stop before restoration and a safe clipboard terminal state. |
 | SW-T06 | Audio/meeting completeness, diarization quality, active-meeting shutdown, pending recovery and same-process restart. |
 | SW-T07 | Combined WGC/UIA/OCR+audio/STT soak, unplug/replug, monitor changes, backlog and loss diagnostics. |
 | SW-T08 | Fixed no-payload `screenpipe.exe` IPv4 TCP attempt passed blocked-versus-unscoped control. Usable external IPv6 and UDP controls plus OS drop tracing remain open. |

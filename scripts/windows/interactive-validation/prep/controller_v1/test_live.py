@@ -54,6 +54,46 @@ class LivePreparationTests(unittest.TestCase):
         backend=live.WindowsBackend({'mode':'privacy'},pathlib.Path('synthetic-test'))
         with patch.object(live.windows,'inventory_known_executables',return_value={'error_code':'unknown','processes':[]}):
             with self.assertRaises(coordinator.ControlError):backend.quiescent()
+
+    def browser_backend(self):
+        backend=live.WindowsBackend({'mode':'browser','run_id':'browser-test'},pathlib.Path('synthetic-test'))
+        backend.journal=Mock()
+        backend.fixture=Mock(pid=77)
+        backend.fixture.poll.return_value=None
+        backend.client=Mock()
+        backend.client.send.return_value={
+            'success':True,'verifiedForeground':True,'foregroundHwnd':88,
+            'visible':True,'action':'synthetic','phaseId':'synthetic',
+        }
+        backend.browser_runtime=Mock()
+        backend.browser_runtime.show_phase.return_value={'pid':99,'hwnd':100}
+        backend.browser_runtime.stop_browser.return_value={'stopped':True}
+        return backend
+
+    def test_browser_phase_maps_allowed_and_excluded_hosts(self):
+        backend=self.browser_backend()
+        backend.browser_clipboard_phase('browser_allowed')
+        backend.browser_runtime.show_phase.assert_called_once_with('127.0.0.1','browser_allowed','ordinary')
+        self.assertTrue(backend.browser_surface_active)
+        backend.browser_runtime.show_phase.reset_mock()
+        backend.browser_clipboard_phase('browser_excluded')
+        backend.browser_runtime.show_phase.assert_called_once_with('localhost','browser_excluded','ordinary')
+
+    def test_browser_password_clipboard_uses_distinct_synthetic_stage(self):
+        backend=self.browser_backend()
+        backend.browser_clipboard_phase('clipboard_password')
+        actions=[call.args[1] for call in backend.client.send.call_args_list]
+        self.assertEqual(actions,['stage-password-clipboard','password-paste'])
+        self.assertFalse(backend.browser_surface_active)
+
+    def test_browser_clipboard_restore_is_stop_gated_and_accepts_external_change(self):
+        backend=self.browser_backend()
+        backend.recorder=Mock();backend.recorder.poll.return_value=None
+        self.assertFalse(backend.restore_clipboard())
+        backend.recorder.poll.return_value=0
+        backend.client.send.return_value={'success':False,'errorCode':'clipboard_changed_external_preserved'}
+        self.assertTrue(backend.restore_clipboard())
+        self.assertTrue(backend.client.send.call_args.kwargs['recorder_stopped'])
     def test_forced_shutdown_can_cleanup_but_cannot_pass(self):
         from test_coordinator import FakeBackend
         backend=FakeBackend();backend.clean_shutdown=lambda:False;now=[0.0]

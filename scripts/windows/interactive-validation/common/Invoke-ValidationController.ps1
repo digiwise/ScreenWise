@@ -55,6 +55,13 @@ if ($ExecuteInteractive) {
     $release = Require-ConfiguredString $config 'release_dir'
     $inputDevice = Require-ConfiguredString $config.audio 'input_device'
     $outputDevice = Require-ConfiguredString $config.audio 'output_device'
+    $browserExecutable = $null
+    $browserSha256 = $null
+    if ($config.browser) {
+        $browserExecutable = Require-ConfiguredString $config.browser 'executable'
+        $browserSha256 = Require-ConfiguredString $config.browser 'sha256'
+        if ($browserSha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'Configured browser SHA-256 is invalid.' }
+    }
     try { $apiPort = [int]$config.api_port; $fixturePort = [int]$config.fixture_port }
     catch { throw 'Configured ports must be integers.' }
     if ($apiPort -ne $config.api_port -or $apiPort -lt 1024 -or $apiPort -gt 65535) {
@@ -98,6 +105,17 @@ if ($ExecuteInteractive) {
     $env:SCREENWISE_VALIDATION_OUTPUT_DEVICE = $outputDevice
     $env:SCREENWISE_VALIDATION_API_PORT = [string]$apiPort
     $env:SCREENWISE_VALIDATION_FIXTURE_PORT = [string]$fixturePort
+    if ($browserExecutable) {
+        if (-not [IO.Path]::IsPathFullyQualified($browserExecutable) -or
+            -not (Test-Path -LiteralPath $browserExecutable -PathType Leaf)) {
+            throw 'Configured browser executable is not an existing absolute file.'
+        }
+        $env:SCREENWISE_VALIDATION_BROWSER_EXE = (Resolve-Path -LiteralPath $browserExecutable).Path
+        $env:SCREENWISE_VALIDATION_BROWSER_SHA256 = $browserSha256.ToUpperInvariant()
+    } else {
+        Remove-Item Env:SCREENWISE_VALIDATION_BROWSER_EXE -ErrorAction SilentlyContinue
+        Remove-Item Env:SCREENWISE_VALIDATION_BROWSER_SHA256 -ErrorAction SilentlyContinue
+    }
     $env:OPENBLAS_PATH = (Resolve-Path -LiteralPath $openBlas).Path
     $env:CMAKE_GENERATOR = 'Ninja'
     $env:ORT_LIB_LOCATION = (Resolve-Path -LiteralPath $ort).Path

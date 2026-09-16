@@ -15,6 +15,10 @@
     "input_device": "<exact recorder audio input name>",
     "output_device": "<exact recorder audio output name>"
   },
+  "browser": {
+    "executable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "sha256": "<reviewed SHA-256 of the exact browser executable>"
+  },
   "models": {
     "parakeet_encoder": "<absolute path to encoder-model.int8.onnx>",
     "parakeet_decoder": "<absolute path to decoder_joint-model.int8.onnx>",

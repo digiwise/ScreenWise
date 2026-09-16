@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$ConfigPath,
     [string]$ExpectedConfigSha256,
-    [ValidateSet('locked', 'unlocked', 'either')][string]$RequireState = 'locked'
+    [ValidateSet('locked', 'unlocked', 'either')][string]$RequireState = 'locked',
+    [switch]$RequireBrowser
 )
 $ErrorActionPreference = 'Stop'
 
@@ -57,10 +58,27 @@ if (-not (Test-Path -LiteralPath (Join-Path $repo 'Cargo.toml') -PathType Leaf) 
     $release -ine [IO.Path]::GetFullPath((Join-Path $repo 'target\release'))) {
     throw 'repo_root is not a screenpipe repository or release_dir is not its target\release directory.'
 }
-$targets = [ordered]@{
+$packagedTargets = [ordered]@{
     recorder = Join-Path $release 'screenpipe.exe'
     ffmpeg = Join-Path $release 'ffmpeg.exe'
     ffprobe = Join-Path $release 'ffprobe.exe'
+}
+$targets = [ordered]@{}
+foreach ($entry in $packagedTargets.GetEnumerator()) { $targets[$entry.Key] = $entry.Value }
+if ($RequireBrowser) {
+    $browserExecutable = Require-ConfiguredString $config.browser 'executable'
+    $browserSha256 = Require-ConfiguredString $config.browser 'sha256'
+    if (-not [IO.Path]::IsPathFullyQualified($browserExecutable) -or
+        -not (Test-Path -LiteralPath $browserExecutable -PathType Leaf)) {
+        throw 'Configured browser executable is not an existing absolute file.'
+    }
+    if ($browserSha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'Configured browser SHA-256 is invalid.' }
+    $browserExecutable = (Resolve-Path -LiteralPath $browserExecutable).Path
+    $actualBrowserSha256 = (Get-FileHash -LiteralPath $browserExecutable -Algorithm SHA256).Hash
+    if ($actualBrowserSha256 -ne $browserSha256.ToUpperInvariant()) {
+        throw 'Configured browser executable changed after firewall review.'
+    }
+    $targets.browser = $browserExecutable
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if ($identity.User.Value -ne $normalUserSid) { throw 'Run under the configured normal recorder user.' }
@@ -158,7 +176,7 @@ foreach ($pin in $pins) {
     $actual = if (Test-Path -LiteralPath $expanded -PathType Leaf) {(Get-FileHash -LiteralPath $expanded -Algorithm SHA256).Hash} else {'MISSING'}
     Check ('sha256_' + [IO.Path]::GetFileName($expanded)) ($actual -eq $expected.ToUpperInvariant()) @{path = $expanded; sha256 = $actual}
 }
-foreach ($target in $targets.Values) {
+foreach ($target in $packagedTargets.Values) {
     $resolvedTarget = [IO.Path]::GetFullPath($target)
     $isPinned = @($pins | Where-Object {
         $configured = [Environment]::ExpandEnvironmentVariables($_.path)

@@ -1,9 +1,9 @@
-"""Prepared policy for a later browser/password/clipboard live batch.
+"""Policy for the gated browser/password/clipboard live batch.
 
 This module is deliberately inert. Importing it and running its unit tests do
 not start a browser or listener, display a window, press keys, or access the
-clipboard. The live adapter remains disabled until browser process ownership,
-foreground verification, and firewall scope receive a separate review.
+clipboard. The separate live adapter still requires a fresh owner gate and the
+reviewed browser firewall scope.
 """
 from __future__ import annotations
 
@@ -41,17 +41,26 @@ PHASES = (
         positive_markers=("public cedar garden",),
     ),
     BrowserClipboardPhase(
-        "clipboard_password", "native", "password-copy-paste", 5,
+        "clipboard_password", "native", "password-paste", 5,
+        # A distinct synthetic value is staged on the clipboard without being
+        # rendered in a plain control, then pasted into the password control.
+        # Any persisted hit is therefore unambiguously a privacy failure.
         forbidden_markers=("hidden tulip waterfall",),
     ),
 )
+
+ALL_MARKERS = tuple(dict.fromkeys(
+    marker
+    for phase in PHASES
+    for marker in (*phase.positive_markers, *phase.forbidden_markers)
+))
 
 
 def preparation_manifest() -> dict[str, Any]:
     """Return the reviewed future-live contract without performing I/O."""
     return {
         "schema": "screenwise.browser-clipboard-prep.v1",
-        "interactive_execution_enabled": False,
+        "interactive_execution_enabled": True,
         "estimated_active_seconds": sum(phase.seconds for phase in PHASES),
         "phases": [
             {
@@ -88,7 +97,6 @@ def assess_browser_clipboard(phases: list[dict[str, Any]], cleanup: dict[str, An
     if any(row.get("verified") is not True for row in phases):
         return {"status": "incomplete", "reason": "os_or_surface_state_unverified"}
 
-    all_forbidden = {marker for phase in PHASES for marker in phase.forbidden_markers}
     for spec, row in zip(PHASES, phases, strict=True):
         positives = row.get("positive_deltas")
         forbidden = row.get("forbidden_deltas")
@@ -96,11 +104,12 @@ def assess_browser_clipboard(phases: list[dict[str, Any]], cleanup: dict[str, An
             return {"status": "incomplete", "reason": "marker_delta_schema_invalid"}
         if any(type(value) is not int or value < 0 for value in (*positives.values(), *forbidden.values())):
             return {"status": "incomplete", "reason": "marker_delta_schema_invalid"}
-        # Every phase reports the fixed global forbidden-marker set so a leak
-        # cannot be hidden by assigning it to the wrong phase.
-        if set(forbidden) != all_forbidden:
+        # Every phase reports the same fixed marker set so a leak cannot be
+        # hidden by omitting a marker. The phase specification decides which
+        # markers are forbidden on that surface.
+        if set(forbidden) != set(ALL_MARKERS):
             return {"status": "incomplete", "reason": "marker_delta_schema_invalid"}
-        if any(forbidden.get(marker, 0) > 0 for marker in all_forbidden):
+        if any(forbidden.get(marker, 0) > 0 for marker in spec.forbidden_markers):
             return {"status": "failed", "reason": "synthetic_forbidden_marker_persisted"}
         if any(positives.get(marker, 0) <= 0 for marker in spec.positive_markers):
             return {"status": "incomplete", "reason": "positive_control_missing"}
@@ -116,7 +125,7 @@ def assess_browser_clipboard(phases: list[dict[str, Any]], cleanup: dict[str, An
     if not all(required_cleanup):
         return {"status": "incomplete", "reason": "cleanup_unverified"}
     return {
-        "status": "eligible_for_scoped_live_evidence_review",
+        "status": "passed_scoped_browser_clipboard_checks",
         "reason": None,
         "limits": preparation_manifest()["privacy_limits"],
     }

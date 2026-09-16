@@ -32,6 +32,13 @@
       document.getElementById('marker').textContent = excluded ? 'forbidden cyan orchard' : 'public bronze hill';
       document.documentElement.dataset.fixtureReadyUtc = new Date().toISOString();
       document.documentElement.dataset.fixtureCase = excluded ? 'excluded' : 'allowed';
+      const focusTarget = query.get('focus');
+      if (focusTarget === 'ordinary' || focusTarget === 'secret') {
+        document.getElementById(focusTarget).focus({preventScroll: true});
+        document.documentElement.dataset.fixtureFocus = focusTarget;
+      } else {
+        document.documentElement.dataset.fixtureFocus = 'none';
+      }
     })();
   </script>
 </body>

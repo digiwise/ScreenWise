@@ -55,6 +55,21 @@ class FixtureTransportTests(unittest.TestCase):
             with self.assertRaises(ft.FixtureTransportError): c.send("p1", "restore-clipboard-after-recorder-stop")
             with self.assertRaises(ft.FixtureTransportError): c.send("p2", "hide", recorder_stopped=True)
 
+    def test_clipboard_commands_contain_no_clipboard_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, clock = Path(tmp), Clock(); self.ready(root)
+            actions = ("plain-copy", "password-copy", "plain-paste",
+                       "stage-password-clipboard", "password-paste")
+            for index, action in enumerate(actions):
+                phase = f"clipboard-{index}"
+                c = ft.FixtureClient(root, "run-1", clock=clock, sleep=lambda _: None)
+                c.sleep = self.ack_on_sleep(root, phase, action, clock)
+                c.send(phase, action)
+                command = json.loads((root / "commands" / f"{phase}.json").read_text(encoding="utf-8"))
+                self.assertEqual(command, {"runId": "run-1", "phaseId": phase, "action": action})
+                self.assertNotIn("public cedar garden", json.dumps(command))
+                self.assertNotIn("hidden tulip waterfall", json.dumps(command))
+
     def test_ready_identity_and_strict_ack(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, clock = Path(tmp), Clock(); self.ready(root)
@@ -107,6 +122,34 @@ class FixtureTransportTests(unittest.TestCase):
                 (root / "acks/p1.json").write_text(json.dumps({"schemaVersion":1,"fixture":"privacy","runId":"run-1",
                     "phaseId":"p1","action":"hide","success":False,"verifiedForeground":True,"foregroundHwnd":1,"visible":False}), encoding="utf-8"))
             with self.assertRaises(ft.FixtureTransportError): c.send("p1", "hide")
+
+    def test_external_clipboard_change_is_terminal_only_for_stop_gated_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, clock = Path(tmp), Clock(); self.ready(root)
+            c = ft.FixtureClient(root, "run-1", clock=clock)
+            c.sleep = lambda seconds: (clock.sleep(seconds), (root / "acks").mkdir(exist_ok=True),
+                (root / "acks/restore.json").write_text(json.dumps({
+                    "schemaVersion": 1, "fixture": "privacy", "runId": "run-1", "phaseId": "restore",
+                    "action": "restore-clipboard-after-recorder-stop", "success": False,
+                    "verifiedForeground": True, "foregroundHwnd": 1, "visible": False,
+                    "errorCode": "clipboard_changed_external_preserved",
+                }), encoding="utf-8"))
+            ack = c.send("restore", "restore-clipboard-after-recorder-stop", recorder_stopped=True)
+            self.assertFalse(ack["success"])
+            self.assertEqual(ack["errorCode"], "clipboard_changed_external_preserved")
+
+    def test_unallowlisted_ack_error_cannot_reach_controller(self):
+        for error_code in ("private clipboard contents", ["private clipboard contents"]):
+            with self.subTest(error_code=error_code), tempfile.TemporaryDirectory() as tmp:
+                root, clock = Path(tmp), Clock(); self.ready(root)
+                c = ft.FixtureClient(root, "run-1", clock=clock)
+                c.sleep = lambda seconds: (clock.sleep(seconds), (root / "acks").mkdir(exist_ok=True),
+                    (root / "acks/p1.json").write_text(json.dumps({
+                        "schemaVersion": 1, "fixture": "privacy", "runId": "run-1", "phaseId": "p1",
+                        "action": "plain-copy", "success": False, "verifiedForeground": True,
+                        "foregroundHwnd": 1, "visible": False, "errorCode": error_code,
+                    }), encoding="utf-8"))
+                with self.assertRaises(ft.FixtureTransportError): c.send("p1", "plain-copy")
 
     def test_timeout_boundary_is_finite_and_does_not_spin_at_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:

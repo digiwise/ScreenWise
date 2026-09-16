@@ -20,13 +20,23 @@ _ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 _KINDS = {"privacy", "drm"}
 _PRIVACY_ACTIONS = {
     "idle", "plain", "password", "plain-clipboard-target", "password-clipboard-target",
-    "plain-copy", "password-copy", "plain-paste", "password-paste",
+    "plain-copy", "password-copy", "plain-paste", "stage-password-clipboard", "password-paste",
     "restore-clipboard-after-recorder-stop", "excluded-foreground", "excluded-background",
     "browser-handoff", "hide", "release-focus", "show", "close",
 }
 _DRM_ACTIONS = {"hide", "release-focus", "show", "close"}
 _ACK_FIELDS = {"schemaVersion", "fixture", "runId", "phaseId", "action", "timestamp", "utc", "success",
                "verifiedForeground", "foregroundHwnd", "visible", "excludedVisible", "errorCode"}
+_ACK_ERROR_CODES = {
+    "unknown_or_incomplete_option", "invalid_run_id", "missing_out_dir", "output_dir_exists",
+    "missing_runId", "missing_phaseId", "missing_action", "missing_recorderState",
+    "run_id_mismatch", "invalid_phase_id", "recorder_not_confirmed_stopped", "unsupported_action",
+    "focus_not_verified", "clipboard_copy_not_observed", "clipboard_not_fixture_owned",
+    "clipboard_changed_external_preserved", "clipboard_restore_required", "output_exists",
+    "invalid_diagnostic_code", "invalid_argument", "unexpected_unauthorized_access",
+    "unexpected_io", "unexpected_invalid_data", "unexpected_argument", "unexpected_invalid_operation",
+    "unexpected_external", "unexpected_other",
+}
 _READY_FIELDS = {"schemaVersion", "fixture", "runId", "phaseId", "pid", "processId", "caller", "callerPid",
                  "timestamp", "utc", "verifiedForeground", "foregroundHwnd", "visible", "commandDirectory", "ackDirectory", "success"}
 
@@ -155,6 +165,10 @@ class FixtureClient:
                         or not isinstance(ack.get("foregroundHwnd"), int)
                         or ack.get("foregroundHwnd", -1) < 0
                         or not isinstance(ack.get("visible"), bool)):
+                    raise FixtureTransportError("invalid acknowledgement")
+                error_code = ack.get("errorCode")
+                if (error_code is not None
+                        and (not isinstance(error_code, str) or error_code not in _ACK_ERROR_CODES)):
                     raise FixtureTransportError("invalid acknowledgement")
                 for boolean in ("verifiedForeground", "excludedVisible"):
                     if boolean in ack and not isinstance(ack[boolean], bool):

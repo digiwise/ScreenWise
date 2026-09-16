@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from browser_clipboard_sequence import ALL_MARKERS, PHASES as BROWSER_CLIPBOARD_PHASES, assess_browser_clipboard
+
 ROOT = pathlib.Path(__file__).resolve().parent
 MODES = ('privacy', 'audio-output', 'audio-microphone', 'lock', 'drm', 'browser', 'uac')
 SAFE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
@@ -330,6 +332,123 @@ class BatchRunner:
                 if row['step'] != 'stop_recorder'))
             if not cleanup_ok:
                 result.update(status='incomplete', cleanup_required=True)
+        return result
+
+    def run_browser_clipboard(self, *, confirmed: bool, max_seconds: float = 120) -> dict:
+        """Run the fixed browser/password/clipboard sequence after one owner gate."""
+        if confirmed is not True:
+            raise ControlError('owner_readiness_required')
+        if not 60 <= max_seconds <= 180:
+            raise ControlError('invalid_watchdog_budget')
+        self.deadline = self.clock() + max_seconds
+        result: dict[str, Any] = {'status': 'incomplete', 'phases': self.phases}
+        cleanup_rows: list[dict[str, Any]] = []
+        stopped = False
+        clipboard_safe = False
+        browser_stopped = False
+        server_stopped = False
+        fixture_stopped = False
+        try:
+            self.backend.preflight()
+            self.guard()
+            self.backend.start_fixture()
+            self.backend.start_browser_fixture()
+            self.backend.start_recorder()
+            self.backend.await_api()
+            result['api'] = self.backend.api_checks()
+            if result['api'].get('passed') is not True:
+                raise ControlError('api_preconditions_failed')
+            for phase in BROWSER_CLIPBOARD_PHASES:
+                self.guard()
+                before = self.backend.browser_clipboard_marker_counts()
+                self.backend.browser_clipboard_phase(phase.name)
+                self.guard(phase.name)
+                until = self.clock() + phase.seconds
+                samples = 0
+                while self.clock() < until:
+                    self.guard(phase.name)
+                    self.backend.sample(phase.name)
+                    samples += 1
+                    self.sleep(min(.5, max(0, until-self.clock())))
+                self.guard(phase.name)
+                after = self.backend.browser_clipboard_marker_counts()
+                deltas = {marker: after[marker] - before[marker] for marker in ALL_MARKERS}
+                self.phases.append({
+                    'name': phase.name,
+                    'verified': samples > 0,
+                    'positive_deltas': {marker: deltas[marker] for marker in phase.positive_markers},
+                    'forbidden_deltas': deltas,
+                })
+        except Exception as error:
+            result.update(status='incomplete', reason=str(error) if isinstance(error, ControlError) else 'backend_failure')
+        finally:
+            for attempt in (1, 2):
+                try:
+                    stopped = self.backend.stop_recorder() is True
+                except Exception:
+                    stopped = False
+                cleanup_rows.append({'step': 'stop_recorder', 'attempt': attempt, 'ok': stopped})
+                if stopped:
+                    break
+            if stopped:
+                try:
+                    result['final_evidence'] = self.backend.final_evidence()
+                    if result['final_evidence'].get('forbidden_count', 0) > 0:
+                        result.update(status='failed', reason='synthetic_forbidden_marker_persisted')
+                except Exception:
+                    cleanup_rows.append({'step': 'final_evidence', 'ok': False})
+                try:
+                    clipboard_safe = self.backend.restore_clipboard() is True
+                except Exception:
+                    clipboard_safe = False
+                cleanup_rows.append({'step': 'restore_clipboard', 'ok': clipboard_safe})
+            else:
+                cleanup_rows.append({'step': 'restore_clipboard', 'ok': False,
+                                     'reason': 'recorder_stop_unverified'})
+            try:
+                browser_cleanup = self.backend.close_browser_fixture()
+                browser_stopped = browser_cleanup.get('browser_stopped') is True
+                server_stopped = browser_cleanup.get('server_stopped') is True
+            except Exception:
+                browser_stopped = server_stopped = False
+            cleanup_rows.extend([
+                {'step': 'browser_process_tree_stopped', 'ok': browser_stopped},
+                {'step': 'loopback_server_stopped', 'ok': server_stopped},
+            ])
+            try:
+                cleanup_rows.append({'step': 'release_focus', 'ok': self.backend.release_focus() is True})
+            except Exception:
+                cleanup_rows.append({'step': 'release_focus', 'ok': False})
+            try:
+                fixture_stopped = self.backend.close_fixture() is True
+            except Exception:
+                fixture_stopped = False
+            cleanup_rows.append({'step': 'fixture_stopped', 'ok': fixture_stopped})
+            try:
+                cleanup_rows.append({'step': 'processes_stopped', 'ok': self.backend.processes_stopped() is True})
+            except Exception:
+                cleanup_rows.append({'step': 'processes_stopped', 'ok': False})
+            try:
+                cleanup_rows.append({'step': 'clean_shutdown', 'ok': self.backend.clean_shutdown() is True})
+            except Exception:
+                cleanup_rows.append({'step': 'clean_shutdown', 'ok': False})
+            result['cleanup'] = cleanup_rows
+            assessed = assess_browser_clipboard(self.phases, {
+                'recorder_stopped': stopped,
+                'clipboard_restore_attempted_after_stop': stopped,
+                'clipboard_safe_terminal_state': clipboard_safe,
+                'browser_process_tree_stopped': browser_stopped,
+                'loopback_server_stopped': server_stopped,
+                'fixture_stopped': fixture_stopped,
+            })
+            if assessed['status'] == 'failed':
+                result.update(assessed)
+            elif result.get('reason') is None:
+                result.update(assessed)
+            if any(row.get('ok') is not True for row in cleanup_rows):
+                if result['status'] != 'failed':
+                    result['status'] = 'incomplete'
+                result['cleanup_required'] = True
         return result
 
 

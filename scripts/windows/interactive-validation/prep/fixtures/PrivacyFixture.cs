@@ -69,7 +69,7 @@ internal sealed class PrivacyFixture : Form
     private static readonly HashSet<string> AllowedActions = new HashSet<string>(StringComparer.Ordinal)
     {
         "idle", "plain", "password", "plain-clipboard-target", "password-clipboard-target",
-        "plain-copy", "password-copy", "plain-paste", "password-paste",
+        "plain-copy", "password-copy", "plain-paste", "stage-password-clipboard", "password-paste",
         "restore-clipboard-after-recorder-stop", "excluded-foreground", "excluded-background",
         "browser-handoff", "hide", "release-focus", "show", "close"
     };
@@ -257,6 +257,7 @@ internal sealed class PrivacyFixture : Form
         if (action == "plain-copy") { CloseExcluded(); ShowMain(); return CopyWithKeys(plain); }
         if (action == "password-copy") { CloseExcluded(); ShowMain(); return CopyWithKeys(password); }
         if (action == "plain-paste") { CloseExcluded(); ShowMain(); return PasteWithKeys(plain); }
+        if (action == "stage-password-clipboard") { CloseExcluded(); ShowMain(); return StagePasswordClipboard(); }
         if (action == "password-paste") { CloseExcluded(); ShowMain(); return PasteWithKeys(password); }
         if (action == "restore-clipboard-after-recorder-stop") { RestoreClipboardIfUnchanged(); return false; }
         if (action == "excluded-foreground") { ShowExcluded(); return FocusForm(excluded); }
@@ -309,6 +310,23 @@ internal sealed class PrivacyFixture : Form
         SendKeys.SendWait("^v");
         Application.DoEvents();
         return GetForegroundWindow() == Handle && target.Focused;
+    }
+
+    private bool StagePasswordClipboard()
+    {
+        password.Clear();
+        if (!FocusControl(password)) throw new InvalidDataException("focus_not_verified");
+        if (!clipboardSnapshotTaken)
+        {
+            savedClipboard = Clipboard.GetDataObject();
+            clipboardSnapshotTaken = true;
+        }
+        Clipboard.SetText("hidden tulip waterfall");
+        Application.DoEvents();
+        fixtureClipboardSequence = GetClipboardSequenceNumber();
+        if (fixtureClipboardSequence == 0)
+            throw new InvalidDataException("clipboard_copy_not_observed");
+        return GetForegroundWindow() == Handle && password.Focused;
     }
 
     private void RestoreClipboardIfUnchanged()
