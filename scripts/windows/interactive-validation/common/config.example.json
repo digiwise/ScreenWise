@@ -1,0 +1,48 @@
+{
+  "schema": "screenwise.interactive-validation-config.v1",
+  "repo_root": "<absolute path to the screenpipe repository>",
+  "python_exe": "<absolute path to python.exe>",
+  "powershell_exe": "<absolute path to PowerShell 7 pwsh.exe>",
+  "developer_shell": "<absolute path to Launch-VsDevShell.ps1>",
+  "launcher_helper_sha256": "<reviewed SHA-256 of Invoke-ValidationController.ps1>",
+  "openblas_path": "<absolute path containing include and lib directories>",
+  "ort_lib_location": "<absolute path to the pinned ONNX Runtime directory>",
+  "release_dir": "<absolute path to the reviewed release directory>",
+  "api_port": 31479,
+  "fixture_port": 31480,
+  "normal_user_sid": "<SID of the non-elevated Windows account that will run the recorder>",
+  "audio": {
+    "input_device": "<exact recorder audio input name>",
+    "output_device": "<exact recorder audio output name>"
+  },
+  "models": {
+    "parakeet_encoder": "<absolute path to encoder-model.int8.onnx>",
+    "parakeet_decoder": "<absolute path to decoder_joint-model.int8.onnx>",
+    "parakeet_vocab": "<absolute path to vocab.txt>",
+    "silero_vad": "<absolute path to silero_vad_v5.onnx>",
+    "segmentation": "<absolute path to segmentation-3.0.onnx>",
+    "wespeaker": "<absolute path to wespeaker_en_voxceleb_CAM++.onnx>"
+  },
+  "firewall": {
+    "group": "<existing reviewed outbound-block firewall rule group>",
+    "remote_addresses": [
+      "0.0.0.0-126.255.255.255",
+      "128.0.0.0-255.255.255.255",
+      "::",
+      "::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+    ]
+  },
+  "runtime_pins": [
+    {"role": "recorder", "path": "target/release/screenpipe.exe", "sha256": "<reviewed SHA-256>"},
+    {"role": "ffmpeg", "path": "target/release/ffmpeg.exe", "sha256": "<reviewed SHA-256>"},
+    {"role": "ffprobe", "path": "target/release/ffprobe.exe", "sha256": "<reviewed SHA-256>"},
+    {"role": "libopenblas", "path": "target/release/libopenblas.dll", "sha256": "<reviewed SHA-256>"},
+    {"role": "onnxruntime", "path": "target/release/onnxruntime.dll", "sha256": "<reviewed SHA-256>"},
+    {"role": "parakeet_encoder", "path": "<same absolute path as models.parakeet_encoder>", "sha256": "<reviewed SHA-256>"},
+    {"role": "parakeet_decoder", "path": "<same absolute path as models.parakeet_decoder>", "sha256": "<reviewed SHA-256>"},
+    {"role": "parakeet_vocab", "path": "<same absolute path as models.parakeet_vocab>", "sha256": "<reviewed SHA-256>"},
+    {"role": "silero_vad", "path": "<same absolute path as models.silero_vad>", "sha256": "<reviewed SHA-256>"},
+    {"role": "segmentation", "path": "<same absolute path as models.segmentation>", "sha256": "<reviewed SHA-256>"},
+    {"role": "wespeaker", "path": "<same absolute path as models.wespeaker>", "sha256": "<reviewed SHA-256>"}
+  ]
+}

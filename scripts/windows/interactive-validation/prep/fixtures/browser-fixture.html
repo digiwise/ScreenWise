@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; connect-src 'none'; media-src 'none'">
+  <title>ScreenWise Synthetic Browser Fixture</title>
+  <style>
+    body { max-width: 720px; margin: 2rem auto; padding: 1.5rem; font: 18px/1.4 system-ui, sans-serif; background: #fff; color: #172033; }
+    body.excluded { background: #d8fbff; }
+    .marker { padding: .8rem; border: 3px solid #526; font-size: 1.35rem; font-weight: 700; }
+    label { display: block; margin-top: 1rem; }
+    input { box-sizing: border-box; width: 100%; padding: .6rem; font-size: 1rem; }
+    small { display: block; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>ScreenWise synthetic browser fixture</h1>
+  <p id="identity"></p>
+  <p id="marker" class="marker"></p>
+  <label for="ordinary">Ordinary fake value</label>
+  <input id="ordinary" aria-label="Synthetic ordinary browser field" value="public browser cedar" autocomplete="off">
+  <label for="secret">Password fake value</label>
+  <input id="secret" aria-label="Synthetic password browser field" type="password" value="hidden coral orchard" autocomplete="off">
+  <small>Local, self-contained fixture. No submissions, network requests, media, or real credentials.</small>
+  <script>
+    (() => {
+      const query = new URLSearchParams(location.search);
+      const excluded = location.hostname.toLowerCase() === 'localhost' || query.get('case') === 'excluded';
+      document.body.classList.toggle('excluded', excluded);
+      document.getElementById('identity').textContent = `runId=${query.get('runId') || 'unspecified'} phaseId=${query.get('phaseId') || 'unspecified'} host=${location.hostname || 'file'}`;
+      document.getElementById('marker').textContent = excluded ? 'forbidden cyan orchard' : 'public bronze hill';
+      document.documentElement.dataset.fixtureReadyUtc = new Date().toISOString();
+      document.documentElement.dataset.fixtureCase = excluded ? 'excluded' : 'allowed';
+    })();
+  </script>
+</body>
+</html>

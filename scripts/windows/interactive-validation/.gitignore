@@ -1,0 +1,31 @@
+# The repository ignores Python globally; retain only this curated source tree.
+!*.py
+!**/*.py
+
+# Never retain generated/runtime artifacts here.
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.exe
+*.obj
+*.wav
+*.mp3
+*.mp4
+*.db
+*.sqlite
+*.sqlite-*
+*.log
+sessions/
+**/sessions/
+runs/
+**/runs/
+data/
+**/data/
+media/
+**/media/
+models/
+**/models/
+pins*.json
+config.local.json
+**/config.local.json
+*evidence*.json

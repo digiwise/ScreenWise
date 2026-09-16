@@ -1,0 +1,5 @@
+# Preserve the reviewed snapshot byte-for-byte across Git checkouts.
+prep/** -text whitespace=trailing-space,space-before-tab,cr-at-eol
+tail/** -text whitespace=trailing-space,space-before-tab,cr-at-eol
+lock/** -text whitespace=trailing-space,space-before-tab,cr-at-eol
+common/** -text whitespace=trailing-space,space-before-tab,cr-at-eol

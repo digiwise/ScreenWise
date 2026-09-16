@@ -1,0 +1,275 @@
+{
+  "schema": "screenwise.interactive-validation-source-archive.v2",
+  "snapshot_date": "2026-09-16",
+  "provenance": {
+    "kind": "locally_authored_screenwise_validation_sources",
+    "upstream_fetch": false,
+    "note": "Portable adaptation of locally authored Windows validation controllers, fixtures, generators, launchers, and tests. original_sha256 preserves the historical source hash and sha256 verifies the current public source. No post-MIT Screenpipe or Litepipe source was fetched or copied."
+  },
+  "assets": [
+    {
+      "archive_path": "prep/audio/generate.ps1",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/audio/generate.ps1",
+      "sha256": "E3CE8BB098C4F739F9F88270E732ECF276AAC266E30DD1E8FCB849D1ADDDDBD0",
+      "original_sha256": "E3CE8BB098C4F739F9F88270E732ECF276AAC266E30DD1E8FCB849D1ADDDDBD0"
+    },
+    {
+      "archive_path": "prep/audio/validate.ps1",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/audio/validate.ps1",
+      "sha256": "A110E0AA622A0438BE5B026EE38DD8775334A873DDAF95A38E42D44C0EF71648",
+      "original_sha256": "A110E0AA622A0438BE5B026EE38DD8775334A873DDAF95A38E42D44C0EF71648"
+    },
+    {
+      "archive_path": "prep/controller_v1/coordinator.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/coordinator.py",
+      "sha256": "05927DCC50CB3A4F3425858C00B50BED509B528679B411081DBB36CE41DEEEB3",
+      "original_sha256": "05927DCC50CB3A4F3425858C00B50BED509B528679B411081DBB36CE41DEEEB3"
+    },
+    {
+      "archive_path": "prep/controller_v1/drm_sequence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/drm_sequence.py",
+      "sha256": "172F04E5B014B3525C0A8560D98AFD75016AFCAB2F9070D444C292F09FBCDB5D",
+      "original_sha256": "172F04E5B014B3525C0A8560D98AFD75016AFCAB2F9070D444C292F09FBCDB5D"
+    },
+    {
+      "archive_path": "prep/controller_v1/evidence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/evidence.py",
+      "sha256": "96C549A55A9863A73EB0DD305D60A107BA008B9A6990D0FAC7471AB569C08B96",
+      "original_sha256": "96C549A55A9863A73EB0DD305D60A107BA008B9A6990D0FAC7471AB569C08B96"
+    },
+    {
+      "archive_path": "prep/controller_v1/fixture_transport.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/fixture_transport.py",
+      "sha256": "6995E799EBB9ADCBDEB18F63120C8634DE32929692BF0C603917048D17EB3EBA",
+      "original_sha256": "6995E799EBB9ADCBDEB18F63120C8634DE32929692BF0C603917048D17EB3EBA"
+    },
+    {
+      "archive_path": "prep/controller_v1/launch.ps1",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/launch.ps1",
+      "sha256": "714968551532833712E696F7CFA26C5E58FBDFD1B573245898591119BA1B5AA5",
+      "original_sha256": "9D4C5315C6D6EB7A59BC1A4E178B3217ABE227E4250363929F9ECA6FB6FBA308"
+    },
+    {
+      "archive_path": "prep/controller_v1/live.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/live.py",
+      "sha256": "AF6F8B73FADF8427496369A12576B62DB09743BF5A67099B1A2A63C5AE4A926E",
+      "original_sha256": "028296E5FB6C68FF5D4A50BB996FCE497E2494B1C0713CF1B935107A38BF9CD9"
+    },
+    {
+      "archive_path": "prep/controller_v1/package_preparation.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/package_preparation.py",
+      "sha256": "C705B8C723CE835BA6BD38730BF07FCE2118E56BB7D6AFAE07F0C346E538AF5B",
+      "original_sha256": "0D72C5DEEA550796EF7DD0B118B79BDBBFF31EE3106AF2F44B966F58EBDA873F"
+    },
+    {
+      "archive_path": "prep/controller_v1/README.md",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/README.md",
+      "sha256": "903DEF9CD7EF5DC3203E9A841046C5C498A69EDEB2580ABD8763E654E1CECFEE",
+      "original_sha256": "53A4176BCD551E91EA1BF3587B9484C4C81CF2441CAC460B7E2D2805474473B5"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_coordinator.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_coordinator.py",
+      "sha256": "8B4109169A1B1CFC44D335BBED450B5E36BDE30756642FF1A1A3FE70AF47055F",
+      "original_sha256": "8B4109169A1B1CFC44D335BBED450B5E36BDE30756642FF1A1A3FE70AF47055F"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_drm_sequence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_drm_sequence.py",
+      "sha256": "BAD845B541155A2937E6E1D94384D1B00D9A3E03B4CE125774CCC2BE5C9ED8A5",
+      "original_sha256": "BAD845B541155A2937E6E1D94384D1B00D9A3E03B4CE125774CCC2BE5C9ED8A5"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_evidence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_evidence.py",
+      "sha256": "F5652C42F2EDA9F8D964E5FCF922C36934D5DAE8DA6C01921E770A444307E536",
+      "original_sha256": "F5652C42F2EDA9F8D964E5FCF922C36934D5DAE8DA6C01921E770A444307E536"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_fixture_transport.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_fixture_transport.py",
+      "sha256": "79A55E945B7C3607D5EF4788F57595AAF0618DA1D11E176CC55023DA754CB021",
+      "original_sha256": "79A55E945B7C3607D5EF4788F57595AAF0618DA1D11E176CC55023DA754CB021"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_live.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_live.py",
+      "sha256": "9C9853B5646F8F30C8AFCFA21253F604490D485EC0FBAD6BB6992446840CFD15",
+      "original_sha256": "9C9853B5646F8F30C8AFCFA21253F604490D485EC0FBAD6BB6992446840CFD15"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_windows_controls.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_windows_controls.py",
+      "sha256": "5703B35AD2D247C9B7F8C89822F37826D6047CBB1AC97F44914D392D3C77AEE2",
+      "original_sha256": "5703B35AD2D247C9B7F8C89822F37826D6047CBB1AC97F44914D392D3C77AEE2"
+    },
+    {
+      "archive_path": "prep/controller_v1/windows_controls.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/windows_controls.py",
+      "sha256": "E2E6B31BB7796DD1F2A40949C3D6C69270704DC4D6CB2894BFD0BB6AC5DAA396",
+      "original_sha256": "E2E6B31BB7796DD1F2A40949C3D6C69270704DC4D6CB2894BFD0BB6AC5DAA396"
+    },
+    {
+      "archive_path": "prep/fixtures/browser-fixture.html",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/browser-fixture.html",
+      "sha256": "C04F3E3AD08BF1EE20A174C196275F5CFE716D2E85BB42D6A5E3C098FEEBAFDC",
+      "original_sha256": "C04F3E3AD08BF1EE20A174C196275F5CFE716D2E85BB42D6A5E3C098FEEBAFDC"
+    },
+    {
+      "archive_path": "prep/fixtures/build.ps1",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/build.ps1",
+      "sha256": "AF6B0E48E32EB9E2503EF1FF24EC3512AB252337D544AB4CE09A02D48B2E767C",
+      "original_sha256": "0B8884947365F264D6659A113F8B56FF9E9C6B9014F2D11C193FE386942C842C"
+    },
+    {
+      "archive_path": "prep/fixtures/DrmFixture.cs",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/DrmFixture.cs",
+      "sha256": "9A89340FCB5504A106545DBDD21D2D1A32525D02824B4D116225131258359968",
+      "original_sha256": "9A89340FCB5504A106545DBDD21D2D1A32525D02824B4D116225131258359968"
+    },
+    {
+      "archive_path": "prep/fixtures/PrivacyFixture.cs",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/PrivacyFixture.cs",
+      "sha256": "39482A187D789EC821A0CE9948C7B970AC3700CD2564A49542627AAC3B4D082A",
+      "original_sha256": "F5ABC6A1AFF9D1B30A1544BC5ECAD11F7EC95AB24CDCE084E5723141F9E462CD"
+    },
+    {
+      "archive_path": "prep/fixtures/README.md",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/README.md",
+      "sha256": "5C00D2CDAAF324845AAB61F4848A324E382373C2AD5524B89AFDC7E920805AF3",
+      "original_sha256": "2C7EECAFAF76A220983B60D0723CC54C263D92F0A5929A57277B1436C1A2F6E3"
+    },
+    {
+      "archive_path": "prep/lock_probe.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/lock_probe.py",
+      "sha256": "CDD890DB2F983683EC0AB6BECFB1E379A96BAB01FB7C2C38004ACB70EC976017",
+      "original_sha256": "CDD890DB2F983683EC0AB6BECFB1E379A96BAB01FB7C2C38004ACB70EC976017"
+    },
+    {
+      "archive_path": "prep/plan.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/plan.py",
+      "sha256": "5ED4F08C662D7E1A47DB94CD72403B8BE997D11C89010739258C676F0DAA8047",
+      "original_sha256": "43DD77D95475E64FF770600AF38F8075F361663618CF669BD8B60EAEA0565785"
+    },
+    {
+      "archive_path": "prep/preflight.ps1",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/preflight.ps1",
+      "sha256": "CC23990F3ECB2A2AE13B5B0C63727D9AF5C29C282B6FB11BEAEAB427CBE34784",
+      "original_sha256": "B6310559742F4844EBF6FC3856427CA6BFFD1BFAE4C894A9804039EF801834DB"
+    },
+    {
+      "archive_path": "prep/test_plan.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/test_plan.py",
+      "sha256": "F71C0F0FA0D731532122896F44202872C3435A0E53D2C61954B5FE66296C3C80",
+      "original_sha256": "F71C0F0FA0D731532122896F44202872C3435A0E53D2C61954B5FE66296C3C80"
+    },
+    {
+      "archive_path": "tail/generate-speech.ps1",
+      "stage_path": "target/background-meeting-20260916-01a09e45/generate-speech.ps1",
+      "sha256": "E1129F682C5D38902D34BC684FA4B42A0E96D982FA94FE49DF96F7DF011D37E1",
+      "original_sha256": "E1129F682C5D38902D34BC684FA4B42A0E96D982FA94FE49DF96F7DF011D37E1"
+    },
+    {
+      "archive_path": "tail/preparation/launch.ps1",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/launch.ps1",
+      "sha256": "BB814554D7E1649076BA117C3DB8F0E32468318EB1AD78E58D8C0DBFDD137151",
+      "original_sha256": "D673703D7CD2B40142BB0190637528598E59AD48EB2594D678541537EB9A1E31"
+    },
+    {
+      "archive_path": "tail/preparation/README.md",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/README.md",
+      "sha256": "A2351B808139E7AD49AA78547ABA4309B142E93EFB1CB0F97BC8AAAC57E46EB7",
+      "original_sha256": "066CE6E6031897B1E0EE5EEBDADE38B948CDE8B428BB67EFB691562A4D71D52D"
+    },
+    {
+      "archive_path": "tail/preparation/tail_acceptance_60s.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/tail_acceptance_60s.py",
+      "sha256": "7F3DB93FFF20F4E60C10908A0E2F6353220859FD31F05F80031E14ECFFDA0B00",
+      "original_sha256": "1F8762E2352A18AF175E86D205B153D8E1A3BED46E266823C8A18D1B0D2539FF"
+    },
+    {
+      "archive_path": "tail/preparation/tail_acceptance.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/tail_acceptance.py",
+      "sha256": "404698A29264FD3C90C6C2D2F1FFE508537C62781D45B8B9EEACC3C1369CAF57",
+      "original_sha256": "0562AD35EA0152768E1F2379D437C2097CCF978FD1F68A77AD7A6C8277E0E1F6"
+    },
+    {
+      "archive_path": "tail/preparation/tail_collector_60s.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/tail_collector_60s.py",
+      "sha256": "D8EC83574DEDBD2849E563A93CA2345E14CB58B0DCEFB44C24C0E5C264F47894",
+      "original_sha256": "C3E62495358438E0EDBEAAA156B378F8F5CDBA3BFED86D3EE62EBC310E97A080"
+    },
+    {
+      "archive_path": "tail/preparation/test_tail_acceptance_60s.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/test_tail_acceptance_60s.py",
+      "sha256": "59B1553321E04685CBD1736D295FA47FD56E9B5F87C59119B15E035338D2F692",
+      "original_sha256": "59B1553321E04685CBD1736D295FA47FD56E9B5F87C59119B15E035338D2F692"
+    },
+    {
+      "archive_path": "tail/preparation/test_tail_acceptance.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/test_tail_acceptance.py",
+      "sha256": "2A3F68C4514B3990AC779B5BEB85EA16EF0B29C478994064EA3F6DA63E411158",
+      "original_sha256": "2A3F68C4514B3990AC779B5BEB85EA16EF0B29C478994064EA3F6DA63E411158"
+    },
+    {
+      "archive_path": "tail/preparation/test_tail_collector_60s.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/preparation/test_tail_collector_60s.py",
+      "sha256": "86339DAB3A609789B1096515F4B5DEB6886F6C3C3916440882BD755DC3BBEA0C",
+      "original_sha256": "B8437C11A4F901669A14CFE040A13F2C696EF76412749ED1B5782BFA297BCA40"
+    },
+    {
+      "archive_path": "tail/prepare-waiting.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/prepare-waiting.py",
+      "sha256": "D4D3D5A21ECC81AE5195C4E4CFFD98C52428549AA42BD9AEC5751877547EE82C",
+      "original_sha256": "8FA87569DA9A5845F74F84EA3A1D8167C5C2AFC3CAC15195C988CC90BBEBC085"
+    },
+    {
+      "archive_path": "tail/validate-speech.py",
+      "stage_path": "target/background-meeting-20260916-01a09e45/validate-speech.py",
+      "sha256": "0FFA05EAFBF8B6684A62F615806C62870CCCF471DCE217B851628156CB9FA7E7",
+      "original_sha256": "0FFA05EAFBF8B6684A62F615806C62870CCCF471DCE217B851628156CB9FA7E7"
+    },
+    {
+      "archive_path": "lock/launch.ps1",
+      "stage_path": "target/lock-transition-20260916-01a09e45/launch.ps1",
+      "sha256": "B91AF395A05FD7938AE0CC126D448245F5F1BB9BA9407953BCF4ED4FB059DF52",
+      "original_sha256": "7F16315C6A42F00DD445075FC039E3E7C5A4D5F95BE585F3B13F98A123BD7284"
+    },
+    {
+      "archive_path": "lock/lock_acceptance.py",
+      "stage_path": "target/lock-transition-20260916-01a09e45/lock_acceptance.py",
+      "sha256": "4589D2A216FE02C10D58C7BE9CD892F81D747A1F3A0958ABFEDB596EA8243727",
+      "original_sha256": "E0423F22BBDFD30B73791AA16E53B661EADF4030EC5F20A0AF8631A86B2BEDF4"
+    },
+    {
+      "archive_path": "lock/lock_live.py",
+      "stage_path": "target/lock-transition-20260916-01a09e45/lock_live.py",
+      "sha256": "25A4A3284280B135F5DA4429A6E51EB8A63F9BC3CDCDC0FD5DD6059AAD1EAD8F",
+      "original_sha256": "FB670D8596F3CF03FDA4BC6DAED0E51E7153CDA9A88AC38782350401D9DC1EAC"
+    },
+    {
+      "archive_path": "lock/test_lock_acceptance.py",
+      "stage_path": "target/lock-transition-20260916-01a09e45/test_lock_acceptance.py",
+      "sha256": "EFF788A2A8F3F48E6755BC3E41D0C6BADFB3428DA92BD2320A3C012768AF054B",
+      "original_sha256": "4889048F6F927B1DE12755F10E57F5BA4E845F6E741D25BDD0979730B0A8B1B0"
+    },
+    {
+      "archive_path": "lock/test_lock_live.py",
+      "stage_path": "target/lock-transition-20260916-01a09e45/test_lock_live.py",
+      "sha256": "5416BF0BFDEE34D698A0ED4ECE63FA3B49110E20F2875D981034E76EA2D85565",
+      "original_sha256": "AFD66702D73384DA1C91EFAA4F0F15D45EB0E73A3B8FBC26DE5F7B415A54538D"
+    },
+    {
+      "archive_path": "common/config.example.json",
+      "stage_path": "target/interactive-validation/common/config.example.json",
+      "sha256": "4C648875927E28200D0C0D40AFC254DD34EBE96364494026835B68D32C6F2C77",
+      "original_sha256": "DD52935A9B41F5FD1875E56DF5391328B329CE033D78DB99DA0A6AFDE7A8A21C"
+    },
+    {
+      "archive_path": "common/Invoke-ValidationController.ps1",
+      "stage_path": "target/interactive-validation/common/Invoke-ValidationController.ps1",
+      "sha256": "F2BBA26F7CF526CA633DC94DCF46E0B4A4F730A725FCD2501630D02C94313D57",
+      "original_sha256": "1F8728A4E1F14A39F251B7C4E266CF0DE8306570616D34E042FDFFF83D9FF9C3"
+    }
+  ]
+}
