@@ -109,6 +109,31 @@ fixture phases; it does not establish image-pixel redaction, clipboard safety,
 other-monitor behavior, real DRM behavior, audio capture/transcription or
 firewall drop enforcement. No captured content was inspected.
 
+A fresh current-binary capture verification then exercised the same synthetic
+fixture. Its first gated attempt stopped before recording because fixture focus
+could not be verified; scoped cleanup passed. The retry started Windows capture
+for all three detected monitors and passed the fixture phases. The fresh SQLite
+store contained 15 frame rows referencing 15 distinct existing snapshot files,
+including three admitted frames with image hashes, accessibility trees and the
+known synthetic marker in accessibility text. Twelve other rows were explicit
+privacy placeholders. Five UI-event rows recorded two app switches, two window
+focus changes and one safe privacy notice. SQLite `quick_check` returned `ok` at
+the end of this capture run, and the controller completed a clean shutdown.
+
+Because those admitted frames selected accessibility text rather than OCR, a
+separate vision-disabled restart invoked the authenticated on-demand frame-text
+endpoint for one reviewed synthetic frame. Windows Native OCR persisted one
+`ocr_text` row containing the known marker. No new capture was enabled and no
+arbitrary captured text or image pixels were inspected. The stock Python SQLite
+library could not repeat `quick_check` after application vector indexes were
+loaded because it lacks the registered `vec_length()` function; direct reads
+confirmed the OCR row after process exit. The watched-process signal was logged
+but this auxiliary restart did not finish within the wrapper's 45-second limit
+and was force-stopped. A final independent check found no recorder or fixture
+processes and no TCP or UDP endpoints on the test ports. This shutdown warning
+does not invalidate the persisted WGC/UIA/OCR evidence, but it is not a clean
+shutdown result for the auxiliary OCR restart.
+
 The Windows OCR integration target compiled and listed successfully without
 executing capture/OCR. Its external-fixture test and the two Apple OCR fixture
 tests are explicitly ignored pending operator-provided reviewed fixtures.
