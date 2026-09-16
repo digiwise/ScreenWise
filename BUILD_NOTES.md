@@ -204,9 +204,16 @@ the existing general activity timeline; current latched state is exposed by
 tests, 179 audio tests with one ignored test, and six scoped engine notice tests.
 The documented Developer PowerShell environment also completed a locked offline
 release build in 7m17s.
-The desktop component source and fixtures were updated, but its Vitest command
-was not run because JavaScript dependencies are not installed and this work did
-not download them. Real overload/soak and visual packaged-timeline checks remain
+After installing the exact dependency graph from the unchanged `bun.lock`, the
+timeline component test passed 5/5 and `tsc --noEmit` passed. The complete
+frontend command then passed 37 Vitest files/404 tests and 13 Bun files/150
+tests. This includes the previously excluded text-overlay file after removing
+obsolete generic-click and persistent-underline expectations; the second stale
+exclusion named an OCR test removed by the existing frame-text hook replacement.
+Both exclusions were removed. Renaming the Vitest config to the explicit ESM
+`.mts` extension also removed the Vite CommonJS deprecation warning. These tests
+used installed Bun 1.4.0 while the manifest declares Bun 1.3.10; the lockfile was
+not rewritten. Real overload/soak and visual packaged-timeline checks remain
 outstanding.
 
 The reusable interactive controller now also contains an inert 25-second

@@ -40,15 +40,6 @@ export default defineConfig({
 			"lib/events/__tests__/types.test.ts",
 			"lib/hooks/__tests__/server-poll-logic.test.ts",
 			"lib/events/__tests__/bus.test.ts",
-			// KNOWN-BROKEN: pre-existing failures surfaced when wiring tests
-			// into CI. Each is a real assertion failure (component drifted
-			// from its test) — excluded so we can ship the CI gate now and
-			// fix in follow-ups. Don't add new entries without an owner.
-			//   - text-overlay.test.tsx: container.firstChild null + missing
-			//     "solid" underline on link blocks
-			//   - use-frame-ocr-data.test.ts: fetch flow drifted
-			"components/__tests__/text-overlay.test.tsx",
-			"lib/hooks/__tests__/use-frame-ocr-data.test.ts",
 		],
 	},
 	resolve: {
