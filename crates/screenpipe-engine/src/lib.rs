@@ -26,6 +26,7 @@ pub mod meeting_persister;
 pub mod meeting_watcher;
 pub mod permission_monitor;
 pub mod power;
+pub mod privacy_notices;
 pub mod recording_config;
 mod resource_monitor;
 pub mod retention;

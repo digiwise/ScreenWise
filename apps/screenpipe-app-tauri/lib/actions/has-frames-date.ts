@@ -7,7 +7,7 @@ import { localFetch } from "@/lib/api";
 
 /**
  * List the local-calendar days that have ANY captured data — screen
- * frames OR audio chunks. Used by the timeline calendar picker to
+ * frames, audio chunks, or privacy notices. Used by the timeline calendar picker to
  * disable empty days.
  *
  * Returns a Set of "YYYY-MM-DD" local-day strings. SQL applies SQLite's
@@ -45,6 +45,8 @@ export async function listDaysWithFrames(): Promise<Set<string>> {
 				SELECT timestamp FROM frames WHERE timestamp IS NOT NULL
 				UNION ALL
 				SELECT timestamp FROM audio_transcriptions WHERE timestamp IS NOT NULL
+				UNION ALL
+				SELECT timestamp FROM ui_events WHERE event_type = 'privacy_notice' AND timestamp IS NOT NULL
 			)
 			ORDER BY day
 			LIMIT 10000
@@ -174,7 +176,11 @@ export async function findNearestDateWithFrames(
 
 		const query = `
 			SELECT f.timestamp
-			FROM frames f
+			FROM (
+				SELECT timestamp FROM frames
+				UNION ALL SELECT timestamp FROM audio_transcriptions
+				UNION ALL SELECT timestamp FROM ui_events WHERE event_type = 'privacy_notice'
+			) f
 			WHERE f.timestamp >= '${rangeStart.toISOString()}'
 			AND f.timestamp <= '${rangeEnd.toISOString()}'
 			ORDER BY f.timestamp ${order}

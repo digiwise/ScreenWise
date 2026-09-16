@@ -54,7 +54,7 @@ fn stage_explicit_onnxruntime() {
             "ONNX Runtime 1.22.0 must be provisioned before building screenpipe-audio. \
              Expected {}. Install the pinned {} package locally, then set \
              ORT_LIB_LOCATION to its directory (for example: \
-             $env:ORT_LIB_LOCATION = \"D:\\Data\\NoSync\\Repos\\ScreenWise\\screenpipe\\apps\\screenpipe-app-tauri\\src-tauri\\{}\"). \
+             $env:ORT_LIB_LOCATION = \"C:\\Dependencies\\{}\"). \
              ScreenWise never downloads build dependencies automatically.",
             dll_path.display(),
             package_name,

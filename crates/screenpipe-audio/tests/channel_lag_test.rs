@@ -1,7 +1,6 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 
 /// Test that reproduces a historically observed "channel lagged" error
 /// (`error receiving audio data: channel lagged by 214`).
@@ -92,37 +91,37 @@ async fn test_broadcast_channel_lag_recovery() {
 #[tokio::test]
 async fn test_slow_consumer_causes_lag() {
     let (tx, mut rx) = broadcast::channel::<Vec<f32>>(100);
-    let is_running = Arc::new(AtomicBool::new(true));
-    let is_running_producer = is_running.clone();
-    let lag_detected = Arc::new(AtomicBool::new(false));
-    let lag_detected_clone = lag_detected.clone();
+    let (consumer_started_tx, consumer_started_rx) = oneshot::channel();
+    let (backlog_ready_tx, backlog_ready_rx) = oneshot::channel();
 
     // Producer: simulates fast audio input (~44100 samples/sec in chunks)
     let producer = tokio::spawn(async move {
+        tx.send(vec![0.0f32; 1024]).unwrap();
+        consumer_started_rx.await.unwrap();
         for _i in 0..200 {
-            if !is_running_producer.load(Ordering::Relaxed) {
-                break;
-            }
             let chunk = vec![0.0f32; 1024]; // ~23ms of audio at 44.1kHz
-            let _ = tx.send(chunk);
-            // Audio comes in faster than we process
-            tokio::time::sleep(Duration::from_micros(100)).await;
+            tx.send(chunk).unwrap();
         }
+        backlog_ready_tx.send(()).unwrap();
     });
 
     // Consumer: simulates slow transcription processing
     let consumer = tokio::spawn(async move {
+        // Hold the consumer while the producer builds a known backlog. Wall-clock
+        // sleeps do not guarantee lag on Windows or a busy CI worker.
+        rx.recv().await.unwrap();
+        consumer_started_tx.send(()).unwrap();
+        backlog_ready_rx.await.unwrap();
         let mut received = 0;
+        let mut lagged = 0;
         loop {
             match rx.recv().await {
                 Ok(_chunk) => {
                     received += 1;
-                    // Simulate slow processing (transcription takes time)
-                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     println!("Consumer lagged by {} chunks at message {}", n, received);
-                    lag_detected_clone.store(true, Ordering::Relaxed);
+                    lagged += n;
                     // With fix: continue instead of failing
                     continue;
                 }
@@ -135,17 +134,13 @@ async fn test_slow_consumer_causes_lag() {
                 break;
             }
         }
-        received
+        (received, lagged)
     });
 
-    let _ = producer.await;
-    is_running.store(false, Ordering::Relaxed);
-    let received = consumer.await.unwrap();
+    producer.await.unwrap();
+    let (received, lagged) = consumer.await.unwrap();
 
     println!("Consumer received {} chunks", received);
-    assert!(
-        lag_detected.load(Ordering::Relaxed),
-        "Slow consumer should have experienced lag"
-    );
+    assert!(lagged > 0, "Slow consumer should have experienced lag");
     assert!(received > 0, "Should have received some chunks despite lag");
 }

@@ -567,7 +567,7 @@ impl AudioStream {
 
         if let Some(thread_arc) = self.stream_thread.as_ref() {
             let thread_arc_clone = thread_arc.clone();
-            tokio::task::spawn_blocking(move || {
+            let forced_abort = tokio::task::spawn_blocking(move || {
                 let mut thread_guard = thread_arc_clone.blocking_lock();
                 if let Some(join_handle) = thread_guard.take() {
                     // Wait up to 3s for the playback task to exit naturally so cpal
@@ -591,10 +591,18 @@ impl AudioStream {
                             "audio stream thread did not exit within 3s; aborting (potential cpal/CoreAudio wedge)"
                         );
                         join_handle.abort();
+                        return true;
                     }
                 }
+                false
             })
             .await?;
+            if forced_abort {
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+                );
+                return Err(anyhow!("audio stream stop timed out"));
+            }
         }
 
         Ok(())

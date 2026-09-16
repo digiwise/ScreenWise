@@ -557,6 +557,7 @@ impl SCServer {
 
         // NOTE: websockets and sse is not supported by openapi so we move it down here
         router
+            .route("/capture-events", get(crate::privacy_notices::capture_events))
             .route("/stream/frames", get(stream_frames_handler))
             .route("/ws/events", get(ws_events_handler))
             .route("/ws/health", get(ws_health_handler))

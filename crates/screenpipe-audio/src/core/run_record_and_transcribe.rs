@@ -81,10 +81,17 @@ const INPUT_SILENT_BUFFER_TIMEOUT_SECS: u64 = 30;
 /// a muted-by-hand AirPods mic — sits well above this floor.
 const SILENT_BUFFER_PEAK_THRESHOLD: f32 = 1e-6;
 const RECORDER_OUTPUT_CHANNELS: u16 = 1;
+const RECORDING_STOP_POLL: Duration = Duration::from_millis(25);
 
 #[inline]
 fn is_silent_buffer(chunk: &[f32]) -> bool {
     !chunk.is_empty() && chunk.iter().all(|s| s.abs() < SILENT_BUFFER_PEAK_THRESHOLD)
+}
+
+async fn wait_for_recording_stop(is_running: &AtomicBool) {
+    while is_running.load(Ordering::Acquire) {
+        tokio::time::sleep(RECORDING_STOP_POLL).await;
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -273,16 +280,18 @@ pub async fn run_record_and_transcribe(
             if !segment_privacy.is_some_and(AudioPrivacyPermit::is_current) {
                 break;
             }
-            match recv_audio_chunk(
-                &mut receiver,
-                &audio_stream,
-                &device_name,
-                &metrics,
-                &stream_start,
-                &mut last_non_zero_at,
-            )
-            .await?
-            {
+            let received = tokio::select! {
+                _ = wait_for_recording_stop(&is_running) => break,
+                received = recv_audio_chunk(
+                    &mut receiver,
+                    &audio_stream,
+                    &device_name,
+                    &metrics,
+                    &stream_start,
+                    &mut last_non_zero_at,
+                ) => received?,
+            };
+            match received {
                 Some(chunk) => {
                     if chunk.privacy != segment_privacy
                         || !chunk.privacy.is_some_and(AudioPrivacyPermit::is_current)
@@ -310,6 +319,13 @@ pub async fn run_record_and_transcribe(
                 }
                 None => continue,
             }
+        }
+
+        // A stop during collection leaves a partial segment. Send it once through
+        // the final zero-overlap flush rather than splitting off a two-second
+        // fragment that may be too short to transcribe independently.
+        if !is_running.load(Ordering::Acquire) {
+            break;
         }
 
         segment_count += 1;
@@ -345,7 +361,10 @@ pub async fn run_record_and_transcribe(
     )
     .await
     {
-        warn!("final flush failed for {}: {}", device_name, e);
+        screenpipe_events::report_audio_shutdown_issue(
+            screenpipe_events::AudioShutdownIssue::QueuedWorkDiscarded,
+        );
+        return Err(e);
     }
 
     if audio_stream.is_disconnected.load(Ordering::Relaxed) {
@@ -522,7 +541,7 @@ async fn flush_audio(
     capture_timestamp: u64,
     audio_stream: &Arc<AudioStream>,
     whisper_sender: &Arc<crossbeam::channel::Sender<AudioInput>>,
-    device_name: &str,
+    _device_name: &str,
     metrics: &Arc<AudioPipelineMetrics>,
     privacy: Option<AudioPrivacyPermit>,
 ) -> Result<()> {
@@ -538,6 +557,12 @@ async fn flush_audio(
         return Ok(());
     }
 
+    // A short partial buffer has no non-overlap prefix to emit yet. Retain it for the
+    // final zero-overlap shutdown flush; sending it here would duplicate the same samples.
+    if overlap_samples > 0 && collected_audio.len() <= overlap_samples {
+        return Ok(());
+    }
+
     debug!("sending audio segment to audio model");
 
     // Split off the overlap tail *before* sending to avoid cloning the entire buffer.
@@ -549,31 +574,40 @@ async fn flush_audio(
     };
     let send_data = std::mem::replace(collected_audio, overlap_tail);
 
-    match whisper_sender.send_timeout(
-        AudioInput {
-            privacy,
-            data: Arc::new(send_data),
-            device: audio_stream.device.clone(),
-            sample_rate: audio_stream.device_config.sample_rate().0,
-            channels: RECORDER_OUTPUT_CHANNELS,
-            capture_timestamp,
-        },
-        Duration::from_secs(30),
-    ) {
-        Ok(_) => {
-            debug!("sent audio segment to audio model");
-            metrics.record_chunk_sent();
+    let mut input = AudioInput {
+        privacy,
+        data: Arc::new(send_data),
+        device: audio_stream.device.clone(),
+        sample_rate: audio_stream.device_config.sample_rate().0,
+        channels: RECORDER_OUTPUT_CHANNELS,
+        capture_timestamp,
+    };
+    let send_started = Instant::now();
+    loop {
+        if !privacy.is_some_and(AudioPrivacyPermit::is_current) {
+            info!("audio segment discarded after privacy transition");
+            break;
         }
-        Err(e) => {
-            if e.is_disconnected() {
+        match whisper_sender.try_send(input) {
+            Ok(()) => {
+                debug!("sent audio segment to audio model");
+                metrics.record_chunk_sent();
+                break;
+            }
+            Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
                 error!("whisper channel disconnected, restarting recording process");
                 return Err(anyhow!("Whisper channel disconnected"));
-            } else if e.is_timeout() {
-                metrics.record_channel_full();
-                warn!(
-                    "whisper channel still full after 30s, dropping audio segment for {}",
-                    device_name
-                );
+            }
+            Err(crossbeam::channel::TrySendError::Full(returned)) => {
+                input = returned;
+                if send_started.elapsed() >= Duration::from_secs(30) {
+                    metrics.record_channel_full();
+                    screenpipe_events::report_audio_shutdown_issue(
+                        screenpipe_events::AudioShutdownIssue::QueuedWorkDiscarded,
+                    );
+                    return Err(anyhow!("Audio buffer delivery deadline exceeded"));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
     }
@@ -585,6 +619,75 @@ async fn flush_audio(
 mod tests {
     use super::*;
     use crate::core::device::AudioDevice;
+
+    async fn synthetic_partial_stop(
+        sample_count: usize,
+        disconnect_consumer: bool,
+    ) -> (Result<()>, Vec<AudioInput>) {
+        let device = Arc::new(AudioDevice::new("tail-unit".to_string(), DeviceType::Input));
+        let (stream, tx) = AudioStream::from_sender_for_test(device, 16_000, 1);
+        let (meeting_tx, _) = broadcast::channel(8);
+        let tap = MeetingAudioTap::new(meeting_tx, Arc::new(AtomicBool::new(false)));
+        tap.set_active(true);
+        let mut observed = tap.subscribe();
+        let (delivery_tx, delivery_rx) = crossbeam::channel::bounded(4);
+        let delivery_rx = if disconnect_consumer {
+            drop(delivery_rx);
+            None
+        } else {
+            Some(delivery_rx)
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let producer = tokio::spawn(run_record_and_transcribe(
+            Arc::new(stream),
+            Duration::from_secs(60),
+            Arc::new(delivery_tx),
+            running.clone(),
+            Arc::new(AudioPipelineMetrics::new()),
+            Some(tap),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("producer did not subscribe");
+        tx.send(vec![0.25; sample_count].into()).unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), observed.recv())
+            .await
+            .expect("producer did not consume samples")
+            .unwrap();
+        assert_eq!(frame.samples.len(), sample_count);
+        running.store(false, Ordering::Release);
+        let result = tokio::time::timeout(Duration::from_secs(1), producer)
+            .await
+            .expect("stop exceeded bound")
+            .expect("producer panicked");
+        let delivered = delivery_rx
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        (result, delivered)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_partial_longer_than_overlap_is_one_complete_segment() {
+        let (result, delivered) = synthetic_partial_stop(48_000, false).await;
+        result.unwrap();
+        assert_eq!(delivered.len(), 1, "shutdown split a partial segment");
+        assert_eq!(delivered[0].data.len(), 48_000);
+        assert!(delivered[0].data.iter().all(|sample| *sample == 0.25));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_final_flush_cannot_report_clean_producer_exit() {
+        let (result, delivered) = synthetic_partial_stop(8_000, true).await;
+        assert!(
+            result.is_err(),
+            "failed final delivery was reported as clean"
+        );
+        assert!(delivered.is_empty());
+    }
 
     #[tokio::test]
     async fn privacy_denied_flush_discards_audio_and_overlap() {
@@ -610,6 +713,83 @@ mod tests {
         .unwrap();
         assert!(samples.is_empty());
         assert!(rx.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_privacy_generation_cannot_flush_shutdown_buffer() {
+        let device = Arc::new(AudioDevice::new(
+            "stale-privacy-test".to_string(),
+            DeviceType::Input,
+        ));
+        let (stream, _) = AudioStream::from_sender_for_test(device, 16_000, 1);
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        let mut samples = vec![0.5; 8_000];
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+        let current = AudioPrivacyPermit::current().expect("audio privacy allowed for test");
+        let mut encoded = serde_json::to_value(current).unwrap();
+        let generation = encoded["generation"].as_u64().unwrap();
+        encoded["generation"] = serde_json::json!(generation.wrapping_add(1));
+        let stale = serde_json::from_value(encoded).unwrap();
+
+        flush_audio(
+            &mut samples,
+            0,
+            1234,
+            &Arc::new(stream),
+            &Arc::new(tx),
+            "stale-privacy-test",
+            &metrics,
+            Some(stale),
+        )
+        .await
+        .unwrap();
+
+        assert!(samples.is_empty());
+        assert!(rx.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cooperative_stop_flushes_partial_buffer_without_wake_chunk() {
+        let sample_rate = 16_000_u32;
+        let chunk_samples = 320_usize;
+        let device = Arc::new(AudioDevice::new(
+            "partial-shutdown-test".to_string(),
+            DeviceType::Input,
+        ));
+        let (stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 1);
+        let stream = Arc::new(stream);
+        let (whisper_tx, whisper_rx) = crossbeam::channel::bounded::<AudioInput>(2);
+        let is_running = Arc::new(AtomicBool::new(true));
+        let pipeline = tokio::spawn(run_record_and_transcribe(
+            stream,
+            Duration::from_secs(10),
+            Arc::new(whisper_tx),
+            is_running.clone(),
+            Arc::new(AudioPipelineMetrics::new()),
+            None,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..10 {
+            tx.send(vec![0.25; chunk_samples].into()).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        is_running.store(false, Ordering::Release);
+
+        tokio::time::timeout(Duration::from_secs(1), pipeline)
+            .await
+            .expect("producer ignored cooperative stop")
+            .expect("producer task failed")
+            .expect("producer returned an error");
+        let partial = whisper_rx
+            .try_recv()
+            .expect("partial shutdown buffer was not flushed");
+        assert_eq!(partial.data.len(), chunk_samples * 10);
+        assert!(
+            whisper_rx.is_empty(),
+            "partial shutdown tail was duplicated"
+        );
+        assert!(partial.privacy.is_some_and(AudioPrivacyPermit::is_current));
     }
 
     #[test]

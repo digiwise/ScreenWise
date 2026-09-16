@@ -288,7 +288,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let mut text_buffer = String::with_capacity(4096);
         let mut nodes = Vec::with_capacity(256);
         let mut browser_url: Option<String> = None;
-        let mut hit_ignored_extension = false;
+        let mut hit_ignored_subtree = false;
         extract_text_from_tree(
             &root,
             0,
@@ -300,12 +300,12 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             &window_rect,
             &ignored_patterns,
             &app_lower,
-            &mut hit_ignored_extension,
+            &mut hit_ignored_subtree,
         );
 
-        if hit_ignored_extension {
+        if hit_ignored_subtree {
             debug!(
-                "skipping capture: browser extension popup matched ignored window in app={}",
+                "skipping capture: accessibility subtree matched ignored window in app={}",
                 app_name
             );
             return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
@@ -521,13 +521,30 @@ fn extract_text_from_tree(
     window_rect: &Option<WindowRect>,
     ignored_patterns: &[WindowPattern],
     focused_app_lower: &str,
-    hit_ignored_extension: &mut bool,
+    hit_ignored_subtree: &mut bool,
 ) {
     if depth > max_depth {
         return;
     }
 
     let ct = node.control_type.as_str();
+
+    // Some UIA providers attach an owned top-level window to the focused
+    // window's subtree when both windows belong to the same process. The
+    // foreground HWND was already admitted above, but extracting such a nested
+    // Window would bypass its own title exclusion and persist its descendants
+    // in both accessibility_text and accessibility_tree_json. Apply ignored
+    // patterns before reading any nested-window content and fail the entire
+    // snapshot closed so callers cannot pair a partial tree with the frame.
+    if depth > 0
+        && ct.eq_ignore_ascii_case("Window")
+        && node.name.as_deref().is_some_and(|name| {
+            window_pattern::matches_any(ignored_patterns, focused_app_lower, &name.to_lowercase())
+        })
+    {
+        *hit_ignored_subtree = true;
+        return;
+    }
 
     // Skip decorative elements
     if SKIP_TYPES.iter().any(|&s| ct.eq_ignore_ascii_case(s)) {
@@ -615,7 +632,7 @@ fn extract_text_from_tree(
                 if node.name.as_deref().is_some_and(|n| matches(n))
                     || node.value.as_deref().is_some_and(|v| matches(v))
                 {
-                    *hit_ignored_extension = true;
+                    *hit_ignored_subtree = true;
                     return;
                 }
 
@@ -632,7 +649,7 @@ fn extract_text_from_tree(
                 if is_extension_popup
                     && extension_subtree_matches_ignored(node, ignored_patterns, focused_app_lower)
                 {
-                    *hit_ignored_extension = true;
+                    *hit_ignored_subtree = true;
                     return;
                 }
             }
@@ -724,7 +741,7 @@ fn extract_text_from_tree(
             window_rect,
             ignored_patterns,
             focused_app_lower,
-            hit_ignored_extension,
+            hit_ignored_subtree,
         );
     }
 }
@@ -1123,6 +1140,74 @@ mod tests {
             !buf.contains("hunter2"),
             "password content must not be extracted, got: {buf}"
         );
+    }
+
+    #[test]
+    fn nested_ignored_window_fails_snapshot_closed_before_extracting_descendants() {
+        use crate::events::AccessibilityNode;
+
+        let tree = AccessibilityNode {
+            control_type: "Window".to_string(),
+            name: Some("ScreenWise Synthetic Privacy Fixture".to_string()),
+            children: vec![
+                AccessibilityNode {
+                    control_type: "Text".to_string(),
+                    name: Some("allowed foreground content".to_string()),
+                    ..Default::default()
+                },
+                AccessibilityNode {
+                    control_type: "Window".to_string(),
+                    name: Some("::SW EXCLUDED Synthetic Fixture".to_string()),
+                    children: vec![AccessibilityNode {
+                        control_type: "Text".to_string(),
+                        name: Some("forbidden nested content".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        for raw_pattern in [
+            "::SW EXCLUDED",
+            "privacyfixture::SW EXCLUDED Synthetic Fixture",
+        ] {
+            let ignored = WindowPattern::parse_list(&[raw_pattern.to_string()]);
+            let mut buffer = String::new();
+            let mut nodes = Vec::new();
+            let mut browser_url = None;
+            let mut hit = false;
+
+            extract_text_from_tree(
+                &tree,
+                0,
+                10,
+                &mut buffer,
+                &mut nodes,
+                &mut browser_url,
+                &None,
+                &None,
+                &ignored,
+                "privacyfixture",
+                &mut hit,
+            );
+
+            assert!(
+                hit,
+                "nested Window must match ignored pattern {raw_pattern}"
+            );
+            assert!(
+                !buffer.contains("forbidden nested content"),
+                "ignored descendant text was extracted for {raw_pattern}"
+            );
+            assert!(
+                nodes
+                    .iter()
+                    .all(|node| !node.text.contains("forbidden nested content")),
+                "ignored descendant entered serialized tree nodes for {raw_pattern}"
+            );
+        }
     }
 
     #[test]

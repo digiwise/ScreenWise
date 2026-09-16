@@ -9,8 +9,8 @@ use chrono::Utc;
 use futures::StreamExt;
 use screenpipe_db::DatabaseManager;
 use tokio::{
-    sync::{broadcast, mpsc, RwLock},
-    task::JoinHandle,
+    sync::{broadcast, mpsc, oneshot, RwLock},
+    task::{JoinHandle, JoinSet},
     time::{sleep, Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -28,6 +28,8 @@ use super::{
 
 const LIVE_FINAL_PERSIST_ATTEMPTS: usize = 18;
 const LIVE_FINAL_PERSIST_RETRY_DELAY: Duration = Duration::from_secs(5);
+const OWNED_FINAL_BUFFER: usize = 128;
+const MAX_IN_FLIGHT_FINAL_PERSISTENCE: usize = 128;
 const PROVIDER_STREAM_RESTART_BACKOFF: Duration = Duration::from_secs(5);
 const LIVE_INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const LIVE_NO_AUDIO_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -67,6 +69,84 @@ struct ActiveMeetingStream {
     device_retry_after: HashMap<String, Instant>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeetingStreamingStopOutcome {
+    Confirmed,
+    Failed,
+    Unconfirmed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MeetingStreamingCompletion {
+    Confirmed,
+    Failed,
+}
+
+pub struct MeetingStreamingHandle {
+    stop_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<MeetingStreamingCompletion>>,
+}
+
+impl MeetingStreamingHandle {
+    pub fn request_stop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+    }
+
+    pub async fn wait(mut self, timeout: Duration) -> MeetingStreamingStopOutcome {
+        self.request_stop();
+        let Some(task) = self.task.as_mut() else {
+            return MeetingStreamingStopOutcome::Failed;
+        };
+
+        if task.is_finished() {
+            let result = task.await;
+            self.task.take();
+            return completion_outcome(result);
+        }
+
+        match tokio::time::timeout(timeout, task).await {
+            Ok(result) => {
+                self.task.take();
+                completion_outcome(result)
+            }
+            Err(_) => {
+                // Aborting the async owner cannot forcibly stop native inference already
+                // running on a blocking thread. Keep this outcome explicitly unconfirmed.
+                if let Some(task) = self.task.as_ref() {
+                    task.abort();
+                }
+                MeetingStreamingStopOutcome::Unconfirmed
+            }
+        }
+    }
+
+    pub fn abort(mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for MeetingStreamingHandle {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+fn completion_outcome(
+    result: Result<MeetingStreamingCompletion, tokio::task::JoinError>,
+) -> MeetingStreamingStopOutcome {
+    match result {
+        Ok(MeetingStreamingCompletion::Confirmed) => MeetingStreamingStopOutcome::Confirmed,
+        Ok(MeetingStreamingCompletion::Failed) | Err(_) => MeetingStreamingStopOutcome::Failed,
+    }
+}
+
 /// Start the meeting-streaming lifecycle coordinator.
 ///
 /// The coordinator treats detector/manual meeting events as stable lifecycle
@@ -79,13 +159,14 @@ pub fn start_meeting_streaming_loop(
     mut audio_rx: broadcast::Receiver<MeetingAudioFrame>,
     db: Arc<DatabaseManager>,
     transcription_engine: Arc<RwLock<Option<TranscriptionEngine>>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> MeetingStreamingHandle {
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
         if !config.enabled {
             info!("meeting streaming: coordinator disabled");
             audio_tap.set_active(false);
             audio_tap.set_background_suppressed(false);
-            return;
+            return MeetingStreamingCompletion::Confirmed;
         }
 
         let mut started_sub =
@@ -95,14 +176,17 @@ pub fn start_meeting_streaming_loop(
         let mut delta_sub = screenpipe_events::subscribe_to_event::<MeetingTranscriptDelta>(
             "meeting_transcript_delta",
         );
-        let mut final_sub = screenpipe_events::subscribe_to_event::<MeetingTranscriptFinal>(
-            "meeting_transcript_final",
-        );
         let mut error_sub = screenpipe_events::subscribe_to_event::<MeetingStreamingError>(
             "meeting_streaming_error",
         );
         let mut inactivity_tick = tokio::time::interval(LIVE_INACTIVITY_CHECK_INTERVAL);
         let mut active: Option<ActiveMeetingStream> = None;
+        let mut stream_workers = JoinSet::new();
+        let mut persistence_workers = JoinSet::new();
+        let (owned_final_tx, mut owned_final_rx) =
+            mpsc::channel::<MeetingTranscriptFinal>(OWNED_FINAL_BUFFER);
+        let mut stream_workers_clean = true;
+        let mut persistence_workers_clean = true;
 
         info!(
             "meeting streaming: coordinator listening (provider={})",
@@ -137,6 +221,11 @@ pub fn start_meeting_streaming_loop(
 
         let mut observed_privacy = screenpipe_config::AudioPrivacyPermit::current();
         loop {
+            reap_ready_stream_workers(&mut stream_workers, &mut stream_workers_clean);
+            reap_ready_persistence_workers(
+                &mut persistence_workers,
+                &mut persistence_workers_clean,
+            );
             let privacy = screenpipe_config::AudioPrivacyPermit::current();
             if privacy != observed_privacy {
                 if let Some(session) = active.as_mut() {
@@ -152,6 +241,10 @@ pub fn start_meeting_streaming_loop(
                 info!("meeting audio privacy transition cleared buffered live state");
             }
             tokio::select! {
+                _ = &mut stop_rx => {
+                    info!("meeting streaming: coordinator shutdown requested");
+                    break;
+                }
                 Some(event) = started_sub.next() => {
                     let Some(meeting_id) = event.data.resolved_meeting_id() else {
                         warn!("meeting streaming: ignoring meeting_started without meeting_id");
@@ -208,19 +301,19 @@ pub fn start_meeting_streaming_loop(
                         }
                     }
                 }
-                Some(event) = final_sub.next() => {
-                    if !event.data.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { info!("meeting transcript event discarded by privacy policy"); continue; }
+                Some(final_event) = owned_final_rx.recv() => {
+                    if !final_event.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { info!("meeting transcript event discarded by privacy policy"); continue; }
                     if let Some(session) = active.as_mut() {
-                        note_live_transcript(&audio_tap, session, event.data.meeting_id);
+                        note_live_transcript(&audio_tap, session, final_event.meeting_id);
                     }
-                    if !config.persist_finals {
-                        continue;
-                    }
-                    let db = db.clone();
-                    let use_pii_removal = config.use_pii_removal;
-                    tokio::spawn(async move {
-                        persist_live_final_with_retry(db, event.data, use_pii_removal).await;
-                    });
+                    queue_live_final_persistence(
+                        final_event,
+                        &mut persistence_workers,
+                        &config,
+                        &db,
+                        &mut persistence_workers_clean,
+                    )
+                    .await;
                 }
                 Some(event) = delta_sub.next() => {
                     if !event.data.privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) { info!("meeting transcript event discarded by privacy policy"); continue; }
@@ -250,6 +343,8 @@ pub fn start_meeting_streaming_loop(
                                         &transcription_engine,
                                         session,
                                         frame,
+                                        &mut stream_workers,
+                                        &owned_final_tx,
                                     );
                                 }
                             }
@@ -259,7 +354,7 @@ pub fn start_meeting_streaming_loop(
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             warn!("meeting streaming: live audio tap closed");
-                            return;
+                            break;
                         }
                     }
                 }
@@ -317,7 +412,36 @@ pub fn start_meeting_streaming_loop(
                 }
             }
         }
-    })
+
+        audio_tap.set_active(false);
+        audio_tap.set_background_suppressed(false);
+        drop(active.take());
+
+        drop(owned_final_tx);
+        let shutdown_streams_clean = finish_stream_workers_and_drain_finals(
+            &mut stream_workers,
+            &mut owned_final_rx,
+            &mut persistence_workers,
+            &config,
+            &db,
+            &mut persistence_workers_clean,
+        )
+        .await;
+        let mut completed_cleanly = stream_workers_clean & shutdown_streams_clean;
+        completed_cleanly &= persistence_workers_clean;
+        completed_cleanly &= finish_persistence_workers(&mut persistence_workers).await;
+
+        if completed_cleanly {
+            MeetingStreamingCompletion::Confirmed
+        } else {
+            MeetingStreamingCompletion::Failed
+        }
+    });
+
+    MeetingStreamingHandle {
+        stop_tx: Some(stop_tx),
+        task: Some(task),
+    }
 }
 
 async fn start_streaming_session(
@@ -445,45 +569,161 @@ async fn mark_live_covered_chunks(db: &Arc<DatabaseManager>, meeting_id: i64) {
     }
 }
 
+fn reap_ready_stream_workers(workers: &mut JoinSet<bool>, completed_cleanly: &mut bool) {
+    while let Some(result) = workers.try_join_next() {
+        record_stream_worker_result(result, completed_cleanly);
+    }
+}
+
+fn reap_ready_persistence_workers(workers: &mut JoinSet<bool>, completed_cleanly: &mut bool) {
+    while let Some(result) = workers.try_join_next() {
+        record_persistence_worker_result(result, completed_cleanly);
+    }
+}
+
+fn record_stream_worker_result(
+    result: Result<bool, tokio::task::JoinError>,
+    completed_cleanly: &mut bool,
+) {
+    if !matches!(result, Ok(true)) {
+        *completed_cleanly = false;
+        warn!(
+            reason_code = "meeting_selected_engine_worker_failed",
+            "Meeting streaming worker stopped unexpectedly."
+        );
+        screenpipe_events::report_audio_shutdown_issue(
+            screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+        );
+    }
+}
+
+fn record_persistence_worker_result(
+    result: Result<bool, tokio::task::JoinError>,
+    completed_cleanly: &mut bool,
+) {
+    if !matches!(result, Ok(true)) {
+        *completed_cleanly = false;
+        warn!(
+            reason_code = "meeting_final_persistence_failed",
+            "Meeting transcript persistence did not complete successfully."
+        );
+        screenpipe_events::report_audio_shutdown_issue(
+            screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+        );
+    }
+}
+
+async fn queue_live_final_persistence(
+    event: MeetingTranscriptFinal,
+    persistence_workers: &mut JoinSet<bool>,
+    config: &MeetingStreamingConfig,
+    db: &Arc<DatabaseManager>,
+    completed_cleanly: &mut bool,
+) {
+    if !event
+        .privacy
+        .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
+    {
+        info!("meeting transcript event discarded by privacy policy");
+        return;
+    }
+    if !config.persist_finals {
+        return;
+    }
+    if persistence_workers.len() >= MAX_IN_FLIGHT_FINAL_PERSISTENCE {
+        if let Some(result) = persistence_workers.join_next().await {
+            record_persistence_worker_result(result, completed_cleanly);
+        }
+    }
+    let db = db.clone();
+    let use_pii_removal = config.use_pii_removal;
+    persistence_workers
+        .spawn(async move { persist_live_final_with_retry(db, event, use_pii_removal).await });
+}
+
+async fn finish_stream_workers_and_drain_finals(
+    stream_workers: &mut JoinSet<bool>,
+    final_rx: &mut mpsc::Receiver<MeetingTranscriptFinal>,
+    persistence_workers: &mut JoinSet<bool>,
+    config: &MeetingStreamingConfig,
+    db: &Arc<DatabaseManager>,
+    persistence_completed_cleanly: &mut bool,
+) -> bool {
+    let mut stream_completed_cleanly = true;
+    loop {
+        let streams_pending = !stream_workers.is_empty();
+        let finals_pending = !(final_rx.is_closed() && final_rx.is_empty());
+        if !streams_pending && !finals_pending {
+            break;
+        }
+
+        tokio::select! {
+            result = stream_workers.join_next(), if streams_pending => {
+                if let Some(result) = result {
+                    record_stream_worker_result(result, &mut stream_completed_cleanly);
+                }
+            }
+            event = final_rx.recv(), if finals_pending => {
+                if let Some(event) = event {
+                    queue_live_final_persistence(
+                        event,
+                        persistence_workers,
+                        config,
+                        db,
+                        persistence_completed_cleanly,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+    stream_completed_cleanly
+}
+
+async fn finish_persistence_workers(workers: &mut JoinSet<bool>) -> bool {
+    let mut completed_cleanly = true;
+    while let Some(result) = workers.join_next().await {
+        record_persistence_worker_result(result, &mut completed_cleanly);
+    }
+    completed_cleanly
+}
+
 async fn persist_live_final_with_retry(
     db: Arc<DatabaseManager>,
     event: MeetingTranscriptFinal,
     use_pii_removal: bool,
-) {
+) -> bool {
     for attempt in 1..=LIVE_FINAL_PERSIST_ATTEMPTS {
         if !event
             .privacy
             .is_some_and(screenpipe_config::AudioPrivacyPermit::is_current)
         {
             info!("meeting final retry discarded after privacy transition");
-            return;
+            return true;
         }
         match persist_live_final_once(db.clone(), &event, use_pii_removal).await {
-            Ok(true) => return,
+            Ok(true) => return true,
             Ok(false) if attempt < LIVE_FINAL_PERSIST_ATTEMPTS => {
                 sleep(LIVE_FINAL_PERSIST_RETRY_DELAY).await;
             }
             Ok(false) => {
-                warn!(
-                    "meeting streaming: could not persist live final after {} attempts (meeting_id={}, item_id={})",
-                    attempt, event.meeting_id, event.item_id
-                );
+                warn!("meeting streaming: live final persistence exhausted retry budget");
+                return false;
             }
-            Err(err) if attempt < LIVE_FINAL_PERSIST_ATTEMPTS => {
+            Err(_) if attempt < LIVE_FINAL_PERSIST_ATTEMPTS => {
                 debug!(
-                    "meeting streaming: live final persistence retry {}/{} failed: {}",
-                    attempt, LIVE_FINAL_PERSIST_ATTEMPTS, err
+                    "meeting streaming: live final persistence retry {}/{} failed",
+                    attempt, LIVE_FINAL_PERSIST_ATTEMPTS
                 );
                 sleep(LIVE_FINAL_PERSIST_RETRY_DELAY).await;
             }
-            Err(err) => {
-                warn!(
-                    "meeting streaming: failed to persist live final (meeting_id={}, item_id={}): {}",
-                    event.meeting_id, event.item_id, err
-                );
+            Err(_) => {
+                warn!("meeting streaming: live final persistence exhausted retry budget");
+                return false;
             }
         }
     }
+    false
 }
 
 async fn persist_live_final_once(
@@ -579,6 +819,8 @@ fn route_frame_to_provider(
     transcription_engine: &Arc<RwLock<Option<TranscriptionEngine>>>,
     session: &mut ActiveMeetingStream,
     frame: MeetingAudioFrame,
+    stream_workers: &mut JoinSet<bool>,
+    owned_final_tx: &mpsc::Sender<MeetingTranscriptFinal>,
 ) {
     if !frame
         .privacy
@@ -599,14 +841,15 @@ fn route_frame_to_provider(
         let (tx, rx) = mpsc::channel(128);
         match config.provider {
             MeetingStreamingProvider::SelectedEngine => {
-                selected_engine::spawn_selected_engine_stream(
+                stream_workers.spawn(selected_engine::run_selected_engine_stream(
                     config.clone(),
                     transcription_engine.clone(),
                     session.meeting_id,
                     frame.device_name.clone(),
                     frame.device_type.clone(),
                     rx,
-                );
+                    owned_final_tx.clone(),
+                ));
                 session.device_senders.insert(key.clone(), tx);
             }
             MeetingStreamingProvider::Disabled => {
@@ -853,6 +1096,14 @@ fn emit_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
 
     fn test_session(now: Instant, live: bool) -> ActiveMeetingStream {
         ActiveMeetingStream {
@@ -1124,5 +1375,194 @@ mod tests {
         assert!(!session.live_transcript_seen);
         assert!(session.last_live_transcript_at.is_none());
         assert!(!audio_tap.background_suppressed());
+    }
+
+    #[tokio::test]
+    async fn owned_persistence_failure_prevents_confirmed_completion() {
+        let mut workers = JoinSet::new();
+        workers.spawn(async { false });
+
+        assert!(!finish_persistence_workers(&mut workers).await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_saturated_owned_final_queue_while_joining_worker() {
+        const FINAL_COUNT: usize = 6;
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let meeting_id = db
+            .insert_meeting("TestApp", "test", Some("Test meeting"), None)
+            .await
+            .unwrap();
+        let (final_tx, mut final_rx) = mpsc::channel(2);
+        let event_template = MeetingTranscriptFinal {
+            privacy: screenpipe_config::AudioPrivacyPermit::current(),
+            meeting_id,
+            provider: "selected-engine".to_string(),
+            model: Some("test-model".to_string()),
+            item_id: String::new(),
+            device_name: "Test microphone".to_string(),
+            device_type: "input".to_string(),
+            speaker_name: None,
+            transcript: String::new(),
+            captured_at: Utc::now(),
+        };
+        for index in 0..256 {
+            screenpipe_events::send_event(
+                "unrelated_meeting_test_event",
+                serde_json::json!({ "index": index }),
+            )
+            .unwrap();
+        }
+        let (saturated_tx, saturated_rx) = oneshot::channel();
+        let worker_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut stream_workers = JoinSet::new();
+        let worker_final_tx = final_tx.clone();
+        let worker_completed_flag = worker_completed.clone();
+        stream_workers.spawn(async move {
+            let mut saturated_tx = Some(saturated_tx);
+            for index in 0..FINAL_COUNT {
+                let mut event = event_template.clone();
+                event.item_id = format!("queued-final-{index}");
+                event.transcript = format!("queued final text {index}");
+                worker_final_tx.send(event).await.unwrap();
+                if index == 1 {
+                    let _ = saturated_tx.take().unwrap().send(());
+                }
+            }
+            worker_completed_flag.store(true, std::sync::atomic::Ordering::Release);
+            true
+        });
+        tokio::time::timeout(Duration::from_secs(1), saturated_rx)
+            .await
+            .expect("owned worker did not fill final queue")
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !worker_completed.load(std::sync::atomic::Ordering::Acquire),
+            "bounded final queue did not backpressure its owner"
+        );
+        drop(final_tx);
+
+        let mut persistence_workers = JoinSet::new();
+        let mut persistence_clean = true;
+        let config = MeetingStreamingConfig::default();
+        {
+            let completion = finish_stream_workers_and_drain_finals(
+                &mut stream_workers,
+                &mut final_rx,
+                &mut persistence_workers,
+                &config,
+                &db,
+                &mut persistence_clean,
+            );
+            tokio::pin!(completion);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), &mut completion)
+                    .await
+                    .expect("saturated final queue deadlocked shutdown")
+            );
+        }
+        assert!(worker_completed.load(std::sync::atomic::Ordering::Acquire));
+        assert!(persistence_clean);
+        assert!(finish_persistence_workers(&mut persistence_workers).await);
+
+        let segments = db
+            .list_meeting_transcript_segments(meeting_id)
+            .await
+            .unwrap();
+        assert_eq!(segments.len(), FINAL_COUNT);
+        let mut transcripts = segments
+            .into_iter()
+            .map(|segment| segment.transcript)
+            .collect::<Vec<_>>();
+        transcripts.sort();
+        assert_eq!(
+            transcripts,
+            (0..FINAL_COUNT)
+                .map(|index| format!("queued final text {index}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_handle_timeout_is_unconfirmed_and_aborts_async_owner() {
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = stop_rx.await;
+            std::future::pending::<MeetingStreamingCompletion>().await
+        });
+        let handle = MeetingStreamingHandle {
+            stop_tx: Some(stop_tx),
+            task: Some(task),
+        };
+
+        assert_eq!(
+            handle.wait(Duration::from_millis(20)).await,
+            MeetingStreamingStopOutcome::Unconfirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_handle_wait_aborts_owned_coordinator() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = tokio::spawn({
+            let dropped = dropped.clone();
+            async move {
+                let _drop_flag = DropFlag(dropped);
+                let _ = started_tx.send(());
+                let _ = stop_rx.await;
+                std::future::pending::<MeetingStreamingCompletion>().await
+            }
+        });
+        let handle = MeetingStreamingHandle {
+            stop_tx: Some(stop_tx),
+            task: Some(task),
+        };
+        let waiter = tokio::spawn(handle.wait(Duration::from_secs(60)));
+        started_rx.await.unwrap();
+
+        waiter.abort();
+        let _ = waiter.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned coordinator was detached after wait cancellation");
+    }
+
+    #[tokio::test]
+    async fn enabled_coordinator_handles_repeated_clean_start_stop() {
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let engine = Arc::new(RwLock::new(None));
+
+        for _ in 0..2 {
+            let audio_tap = test_audio_tap();
+            let handle = start_meeting_streaming_loop(
+                MeetingStreamingConfig::default(),
+                audio_tap.clone(),
+                audio_tap.subscribe(),
+                db.clone(),
+                engine.clone(),
+            );
+            tokio::task::yield_now().await;
+            assert_eq!(
+                handle.wait(Duration::from_secs(1)).await,
+                MeetingStreamingStopOutcome::Confirmed
+            );
+            assert!(!audio_tap.is_active());
+            assert!(!audio_tap.background_suppressed());
+        }
     }
 }

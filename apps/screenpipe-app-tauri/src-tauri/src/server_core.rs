@@ -49,6 +49,7 @@ pub struct ServerCore {
     /// `tokio::time::timeout` internally) panic with "A Tokio 1.x context
     /// was found, but it is being shutdown."
     redact_shutdown: Arc<Notify>,
+    privacy_notice_recorder: screenpipe_engine::privacy_notices::PrivacyNoticeRecorder,
 }
 
 impl ServerCore {
@@ -256,6 +257,7 @@ impl ServerCore {
         // --- Resource + sleep monitors (long-lived) ---
         let resource_monitor = ResourceMonitor::new();
         resource_monitor.start_monitoring(Duration::from_secs(30));
+        let privacy_notice_recorder = screenpipe_engine::privacy_notices::start(db.clone());
         start_sleep_monitor();
 
         // --- HTTP server ---
@@ -554,6 +556,7 @@ impl ServerCore {
             port: config.port,
             local_api_key: api_auth_key,
             redact_shutdown,
+            privacy_notice_recorder,
         })
     }
 
@@ -573,8 +576,14 @@ impl ServerCore {
         info!("Shutting down audio manager...");
         match tokio::time::timeout(Duration::from_secs(15), self.audio_manager.shutdown()).await {
             Ok(Ok(())) => info!("Audio manager shut down cleanly"),
-            Ok(Err(e)) => warn!("Audio manager shutdown error: {:?}", e),
-            Err(_) => warn!("Audio manager shutdown timed out after 15s"),
+            Ok(Err(_)) => {
+                if !screenpipe_events::audio_shutdown_attempt_degraded() {
+                    screenpipe_events::report_audio_shutdown_issue(screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed);
+                }
+            },
+            Err(_) => screenpipe_events::report_audio_shutdown_issue(screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout),
         }
+        // Keep the writer alive until audio has emitted its final safe status.
+        self.privacy_notice_recorder.stop().await;
     }
 }

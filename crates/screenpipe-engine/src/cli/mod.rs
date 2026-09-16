@@ -846,9 +846,11 @@ impl RecordArgs {
         let persisted_settings = load_recording_settings_from_store(&data_dir)?;
         let loaded_from_store = persisted_settings.is_some();
         let mut settings = persisted_settings.unwrap_or_else(|| self.to_recording_settings());
-        if loaded_from_store {
-            self.apply_explicit_overrides(&mut settings, sources);
-        }
+        // Apply source-aware overrides for fresh settings as well as persisted
+        // settings. In particular, `to_recording_settings` preserves Clap's
+        // `use_system_default_audio=true` default, which otherwise masks an
+        // explicitly supplied `--audio-device` on a fresh directory.
+        self.apply_explicit_overrides(&mut settings, sources);
 
         // First-launch tier detection for CLI users
         if settings.device_tier.is_none() {
@@ -1697,6 +1699,113 @@ mod tests {
             settings.disable_audio,
             "absent audio flags must not flip a persisted disable_audio"
         );
+    }
+
+    #[tokio::test]
+    async fn test_into_recording_config_fresh_audio_device_uses_explicit_device() {
+        let args = ["screenpipe", "record", "--audio-device", "fresh microphone"];
+        let sources = record_sources(args);
+        let data_dir = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        let config = match cli.command {
+            Command::Record(record) => record
+                .into_recording_config(data_dir.path().to_path_buf(), &sources)
+                .await
+                .unwrap(),
+            _ => panic!("expected Record command"),
+        };
+
+        assert_eq!(config.audio_devices, vec!["fresh microphone"]);
+        assert!(!config.use_system_default_audio);
+        assert!(!config.disable_audio);
+    }
+
+    #[tokio::test]
+    async fn test_into_recording_config_persisted_audio_device_survives_followup_launch() {
+        let args = [
+            "screenpipe",
+            "record",
+            "--audio-device",
+            "persisted microphone",
+        ];
+        let sources = record_sources(args);
+        let data_dir = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        match cli.command {
+            Command::Record(record) => {
+                record
+                    .into_recording_config(data_dir.path().to_path_buf(), &sources)
+                    .await
+                    .unwrap();
+            }
+            _ => panic!("expected Record command"),
+        }
+
+        let followup_args = ["screenpipe", "record"];
+        let followup_sources = record_sources(followup_args);
+        let followup_cli = Cli::try_parse_from(followup_args).unwrap();
+        let config = match followup_cli.command {
+            Command::Record(record) => record
+                .into_recording_config(data_dir.path().to_path_buf(), &followup_sources)
+                .await
+                .unwrap(),
+            _ => panic!("expected Record command"),
+        };
+
+        assert_eq!(config.audio_devices, vec!["persisted microphone"]);
+        assert!(!config.use_system_default_audio);
+    }
+
+    #[tokio::test]
+    async fn test_into_recording_config_fresh_explicit_follow_system_defaults_wins() {
+        let args = [
+            "screenpipe",
+            "record",
+            "--audio-device",
+            "explicit microphone",
+            "--use-system-default-audio",
+        ];
+        let sources = record_sources(args);
+        let data_dir = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        let config = match cli.command {
+            Command::Record(record) => record
+                .into_recording_config(data_dir.path().to_path_buf(), &sources)
+                .await
+                .unwrap(),
+            _ => panic!("expected Record command"),
+        };
+
+        assert!(config.use_system_default_audio);
+        assert_eq!(config.audio_devices, vec!["explicit microphone"]);
+    }
+
+    #[tokio::test]
+    async fn test_into_recording_config_fresh_explicit_disable_audio_wins() {
+        let args = [
+            "screenpipe",
+            "record",
+            "--audio-device",
+            "disabled microphone",
+            "--disable-audio",
+        ];
+        let sources = record_sources(args);
+        let data_dir = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        let config = match cli.command {
+            Command::Record(record) => record
+                .into_recording_config(data_dir.path().to_path_buf(), &sources)
+                .await
+                .unwrap(),
+            _ => panic!("expected Record command"),
+        };
+
+        assert_eq!(config.audio_devices, vec!["disabled microphone"]);
+        assert!(config.disable_audio);
     }
 
     #[test]

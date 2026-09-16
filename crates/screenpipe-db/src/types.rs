@@ -575,6 +575,8 @@ pub enum UiEventType {
     AppSwitch,
     WindowFocus,
     Clipboard,
+    /// Content-free system diagnosis, never a captured user-input event.
+    PrivacyNotice,
 }
 
 impl Display for UiEventType {
@@ -588,6 +590,7 @@ impl Display for UiEventType {
             UiEventType::AppSwitch => write!(f, "app_switch"),
             UiEventType::WindowFocus => write!(f, "window_focus"),
             UiEventType::Clipboard => write!(f, "clipboard"),
+            UiEventType::PrivacyNotice => write!(f, "privacy_notice"),
         }
     }
 }
@@ -605,6 +608,7 @@ impl std::str::FromStr for UiEventType {
             "app_switch" => Ok(UiEventType::AppSwitch),
             "window_focus" => Ok(UiEventType::WindowFocus),
             "clipboard" => Ok(UiEventType::Clipboard),
+            "privacy_notice" => Ok(UiEventType::PrivacyNotice),
             _ => Err(format!("Unknown UI event type: {}", s)),
         }
     }

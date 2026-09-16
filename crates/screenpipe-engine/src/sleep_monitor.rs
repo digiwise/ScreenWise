@@ -7,12 +7,15 @@
 //! macOS: polls `CGSessionCopyCurrentDictionary` every 2s to detect screen lock
 //! (catches Cmd+Ctrl+Q, menu lock, hot corner, auto-lock, display sleep).
 //! Also listens for NSWorkspace sleep/wake notifications for the `RECENTLY_WOKE` flag.
-//! Windows: polls `OpenInputDesktop` every 5s and detects wake via clock-gap.
+//! Windows: polls WTS session state plus input-desktop access every 250ms and
+//! detects wake via clock-gap.
 //! Linux: detects wake via clock-gap polling.
 //! Exposes an `screen_is_locked()` flag so capture loops can skip work while
 //! the screen is locked / screensaver is active.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -580,56 +583,419 @@ async fn check_recording_health() -> (bool, bool) {
     }
 }
 
-/// Start the sleep/screen-lock monitor on Windows.
-///
-/// Spawns a background thread that polls `OpenInputDesktop` four times per
-/// second. Windows' process-independent session notifications require a window
-/// or service control handler, neither of which exists in every retained
-/// recorder entry point; the short poll bounds acquisition after a lock while
-/// keeping CLI and desktop behavior identical.
-/// When the interactive desktop is not accessible the screen is locked.
 #[cfg(target_os = "windows")]
-pub fn start_sleep_monitor() {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsSessionQueryResult {
+    Valid {
+        requested_session_id: u32,
+        reported_session_id: u32,
+        connection_state: i32,
+        session_flags: i32,
+    },
+    ProcessSessionQueryFailed,
+    WtsQueryFailed,
+    ShortBuffer,
+    UnsupportedLevel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsLockNoticeState {
+    Locked,
+    Unlocked,
+    DetectionFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsLockNoticeReason {
+    WtsSessionLocked,
+    WtsSessionUnlocked,
+    WtsSessionDisconnected,
+    InputDesktopUnavailable,
+    ProcessSessionQueryFailed,
+    WtsQueryFailed,
+    WtsShortBuffer,
+    WtsUnsupportedLevel,
+    WtsSessionMismatch,
+    WtsSessionStateUnknown,
+    WtsSessionFlagsUnknown,
+    WtsSessionFlagsInvalid,
+}
+
+impl WindowsLockNoticeReason {
+    pub fn state(self) -> WindowsLockNoticeState {
+        match self {
+            Self::WtsSessionLocked
+            | Self::WtsSessionDisconnected
+            | Self::InputDesktopUnavailable => WindowsLockNoticeState::Locked,
+            Self::WtsSessionUnlocked => WindowsLockNoticeState::Unlocked,
+            Self::ProcessSessionQueryFailed
+            | Self::WtsQueryFailed
+            | Self::WtsShortBuffer
+            | Self::WtsUnsupportedLevel
+            | Self::WtsSessionMismatch
+            | Self::WtsSessionStateUnknown
+            | Self::WtsSessionFlagsUnknown
+            | Self::WtsSessionFlagsInvalid => WindowsLockNoticeState::DetectionFailed,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::WtsSessionLocked => "wts_session_locked",
+            Self::WtsSessionUnlocked => "wts_session_unlocked",
+            Self::WtsSessionDisconnected => "wts_session_disconnected",
+            Self::InputDesktopUnavailable => "input_desktop_unavailable",
+            Self::ProcessSessionQueryFailed => "process_session_query_failed",
+            Self::WtsQueryFailed => "wts_query_failed",
+            Self::WtsShortBuffer => "wts_short_buffer",
+            Self::WtsUnsupportedLevel => "wts_unsupported_level",
+            Self::WtsSessionMismatch => "wts_session_mismatch",
+            Self::WtsSessionStateUnknown => "wts_session_state_unknown",
+            Self::WtsSessionFlagsUnknown => "wts_session_flags_unknown",
+            Self::WtsSessionFlagsInvalid => "wts_session_flags_invalid",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::WtsSessionLocked => "Screen locked; screen/UI capture paused.",
+            Self::WtsSessionUnlocked => {
+                "Screen unlocked; other privacy and recording controls still apply."
+            }
+            Self::WtsSessionDisconnected => {
+                "Windows session disconnected; screen/UI capture paused."
+            }
+            Self::InputDesktopUnavailable => {
+                "Secure desktop active or input desktop unavailable; screen/UI capture paused."
+            }
+            Self::ProcessSessionQueryFailed
+            | Self::WtsQueryFailed
+            | Self::WtsShortBuffer
+            | Self::WtsUnsupportedLevel
+            | Self::WtsSessionMismatch
+            | Self::WtsSessionStateUnknown
+            | Self::WtsSessionFlagsUnknown
+            | Self::WtsSessionFlagsInvalid => {
+                "Screen lock detection unavailable; screen/UI capture paused for privacy."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct WindowsLockStatusEvent {
+    pub reason: WindowsLockNoticeReason,
+}
+
+pub const SCREEN_LOCK_STATUS_CHANGED_EVENT: &str = "screen_lock_status_changed";
+
+fn should_publish_windows_lock_status(
+    previous: Option<WindowsLockStatusEvent>,
+    current: WindowsLockStatusEvent,
+) -> bool {
+    previous != Some(current)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_lock_status(
+    session: WindowsSessionQueryResult,
+    input_desktop_accessible: bool,
+) -> WindowsLockStatusEvent {
+    use windows::Win32::System::RemoteDesktop::{
+        WTSActive, WTSDisconnected, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNKNOWN,
+        WTS_SESSIONSTATE_UNLOCK,
+    };
+    use WindowsLockNoticeReason as Reason;
+
+    let reason = match session {
+        WindowsSessionQueryResult::ProcessSessionQueryFailed => Reason::ProcessSessionQueryFailed,
+        WindowsSessionQueryResult::WtsQueryFailed => Reason::WtsQueryFailed,
+        WindowsSessionQueryResult::ShortBuffer => Reason::WtsShortBuffer,
+        WindowsSessionQueryResult::UnsupportedLevel => Reason::WtsUnsupportedLevel,
+        WindowsSessionQueryResult::Valid {
+            requested_session_id,
+            reported_session_id,
+            connection_state,
+            session_flags,
+        } => {
+            if requested_session_id != reported_session_id {
+                Reason::WtsSessionMismatch
+            } else if connection_state == WTSDisconnected.0 {
+                Reason::WtsSessionDisconnected
+            } else if connection_state != WTSActive.0 {
+                Reason::WtsSessionStateUnknown
+            } else if session_flags == WTS_SESSIONSTATE_LOCK as i32 {
+                Reason::WtsSessionLocked
+            } else if session_flags == WTS_SESSIONSTATE_UNKNOWN as i32 {
+                Reason::WtsSessionFlagsUnknown
+            } else if session_flags != WTS_SESSIONSTATE_UNLOCK as i32 {
+                Reason::WtsSessionFlagsInvalid
+            } else if !input_desktop_accessible {
+                Reason::InputDesktopUnavailable
+            } else {
+                Reason::WtsSessionUnlocked
+            }
+        }
+    };
+
+    WindowsLockStatusEvent { reason }
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_session_state() -> WindowsSessionQueryResult {
+    use windows::core::PWSTR;
+    use windows::Win32::System::RemoteDesktop::{
+        ProcessIdToSessionId, WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx,
+        WTSINFOEXW, WTS_CURRENT_SERVER_HANDLE,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+
+    // Resolve the recorder process' own session instead of assuming the active
+    // console session. This also covers an interactive RDP recorder correctly.
+    let mut session_id = 0;
+    if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id) }.is_err() {
+        return WindowsSessionQueryResult::ProcessSessionQueryFailed;
+    }
+
+    let mut buffer = PWSTR(std::ptr::null_mut());
+    let mut bytes_returned = 0;
+    if unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            session_id,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut bytes_returned,
+        )
+    }
+    .is_err()
+    {
+        return WindowsSessionQueryResult::WtsQueryFailed;
+    }
+
+    // WTS owns the returned allocation. Free it on every successful query,
+    // including malformed responses, after copying only when the buffer is long
+    // enough for the documented WTSINFOEXW structure.
+    let result =
+        if buffer.0.is_null() || (bytes_returned as usize) < std::mem::size_of::<WTSINFOEXW>() {
+            WindowsSessionQueryResult::ShortBuffer
+        } else {
+            let info = unsafe { std::ptr::read_unaligned(buffer.0.cast::<WTSINFOEXW>()) };
+            if info.Level != 1 {
+                WindowsSessionQueryResult::UnsupportedLevel
+            } else {
+                let level1 = unsafe { info.Data.WTSInfoExLevel1 };
+                WindowsSessionQueryResult::Valid {
+                    requested_session_id: session_id,
+                    reported_session_id: level1.SessionId,
+                    connection_state: level1.SessionState.0,
+                    session_flags: level1.SessionFlags,
+                }
+            }
+        };
+
+    if !buffer.0.is_null() {
+        unsafe { WTSFreeMemory(buffer.0.cast()) };
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn windows_input_desktop_accessible() -> bool {
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, OpenInputDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
     };
+
+    // Keep the secure-desktop check as a second condition. WTS explicitly
+    // unlocked is necessary but insufficient while UAC or another secure
+    // desktop prevents capture of the interactive input desktop.
+    unsafe {
+        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0)) {
+            Ok(handle) => {
+                let _ = CloseDesktop(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn check_windows_lock_status() -> WindowsLockStatusEvent {
+    windows_lock_status(
+        query_windows_session_state(),
+        windows_input_desktop_accessible(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn publish_windows_lock_status(event: WindowsLockStatusEvent) {
+    match event.reason.state() {
+        WindowsLockNoticeState::DetectionFailed => {
+            tracing::warn!(
+                reason_code = event.reason.code(),
+                "{}",
+                event.reason.message()
+            );
+        }
+        WindowsLockNoticeState::Locked | WindowsLockNoticeState::Unlocked => {
+            tracing::info!(
+                reason_code = event.reason.code(),
+                "{}",
+                event.reason.message()
+            );
+        }
+    }
+
+    if screenpipe_events::send_event(SCREEN_LOCK_STATUS_CHANGED_EVENT, event).is_err() {
+        tracing::warn!("Failed to publish screen lock status notice");
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct WindowsLockMonitorState {
+    worker_started: bool,
+    last_status: Option<WindowsLockStatusEvent>,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_LOCK_MONITOR: Mutex<WindowsLockMonitorState> = Mutex::new(WindowsLockMonitorState {
+    worker_started: false,
+    last_status: None,
+});
+
+#[cfg(target_os = "windows")]
+fn observe_windows_lock_status(
+    monitor: &mut WindowsLockMonitorState,
+    status: WindowsLockStatusEvent,
+    publish_initial: bool,
+    mut apply: impl FnMut(bool),
+    mut publish: impl FnMut(WindowsLockStatusEvent),
+) {
+    let locked = status.reason.state() != WindowsLockNoticeState::Unlocked;
+    apply(locked);
+    if publish_initial || should_publish_windows_lock_status(monitor.last_status, status) {
+        publish(status);
+    }
+    monitor.last_status = Some(status);
+}
+
+#[cfg(target_os = "windows")]
+fn initialize_windows_lock_monitor(
+    monitor: &Mutex<WindowsLockMonitorState>,
+    mut probe: impl FnMut() -> WindowsLockStatusEvent,
+    apply: impl FnMut(bool),
+    publish: impl FnMut(WindowsLockStatusEvent),
+    spawn: impl FnOnce(),
+) {
+    let should_spawn = {
+        let mut monitor = monitor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let status = probe();
+        observe_windows_lock_status(&mut monitor, status, true, apply, publish);
+        if monitor.worker_started {
+            false
+        } else {
+            monitor.worker_started = true;
+            true
+        }
+    };
+
+    if should_spawn {
+        spawn();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn poll_windows_lock_monitor(
+    monitor: &Mutex<WindowsLockMonitorState>,
+    mut probe: impl FnMut() -> WindowsLockStatusEvent,
+    apply: impl FnMut(bool),
+    publish: impl FnMut(WindowsLockStatusEvent),
+) {
+    let mut monitor = monitor
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status = probe();
+    observe_windows_lock_status(&mut monitor, status, false, apply, publish);
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsLockTransition {
+    Unchanged,
+    Locked,
+    Unlocked,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_lock_transition(was_locked: bool, locked: bool) -> WindowsLockTransition {
+    match (was_locked, locked) {
+        (false, true) => WindowsLockTransition::Locked,
+        (true, false) => WindowsLockTransition::Unlocked,
+        _ => WindowsLockTransition::Unchanged,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_lock_state(locked: bool) -> WindowsLockTransition {
+    let was_locked = SCREEN_IS_LOCKED.swap(locked, Ordering::SeqCst);
+    screenpipe_config::set_screen_locked(locked);
+    let transition = windows_lock_transition(was_locked, locked);
+    if transition == WindowsLockTransition::Unlocked {
+        SCREEN_UNLOCK_NOTIFY.notify_one();
+    }
+    transition
+}
+
+/// Start the sleep/screen-lock monitor on Windows.
+///
+/// Establishes the initial privacy state synchronously, then polls the current
+/// process session's WTS extended state and input-desktop access four times per
+/// second. Any failed, unknown, malformed, mismatched, or disconnected WTS
+/// result is treated as locked. Clearing the state requires both an explicitly
+/// active/unlocked WTS session and an accessible input desktop.
+#[cfg(target_os = "windows")]
+pub fn start_sleep_monitor() {
     let poll_interval = std::time::Duration::from_millis(250);
 
-    info!("Starting Windows screen-lock monitor (250ms OpenInputDesktop polling)");
+    info!("Initializing Windows screen-lock monitor (250ms WTS polling)");
 
-    std::thread::spawn(move || {
-        let mut last_tick = std::time::SystemTime::now();
-        loop {
-            if detected_wake_from_poll_gap(&mut last_tick, poll_interval) {
-                mark_recently_woke("windows");
-            }
-
-            // SAFETY: Win32 call — if the return is invalid the desktop is
-            // not accessible (screen locked / screensaver / UAC).
-            let locked = unsafe {
-                match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0)) {
-                    Ok(handle) => {
-                        // Desktop accessible — close the handle and report unlocked
-                        let _ = CloseDesktop(handle);
-                        false
+    // Every recorder/server start probes synchronously and publishes the
+    // current diagnosis for its newly installed notice writer. The shared
+    // mutex also prevents that probe from racing a poller's older result.
+    initialize_windows_lock_monitor(
+        &WINDOWS_LOCK_MONITOR,
+        check_windows_lock_status,
+        |locked| {
+            apply_windows_lock_state(locked);
+        },
+        publish_windows_lock_status,
+        move || {
+            let _ = std::thread::spawn(move || {
+                let mut last_tick = std::time::SystemTime::now();
+                loop {
+                    if detected_wake_from_poll_gap(&mut last_tick, poll_interval) {
+                        mark_recently_woke("windows");
                     }
-                    Err(_) => true,
-                }
-            };
 
-            let was_locked = SCREEN_IS_LOCKED.swap(locked, Ordering::SeqCst);
-            screenpipe_config::set_screen_locked(locked);
-            if locked != was_locked {
-                if locked {
-                    info!("Screen locked (OpenInputDesktop unavailable)");
-                } else {
-                    info!("Screen unlocked (OpenInputDesktop available)");
+                    poll_windows_lock_monitor(
+                        &WINDOWS_LOCK_MONITOR,
+                        check_windows_lock_status,
+                        |locked| {
+                            apply_windows_lock_state(locked);
+                        },
+                        publish_windows_lock_status,
+                    );
+                    std::thread::sleep(poll_interval);
                 }
-            }
-
-            std::thread::sleep(poll_interval);
-        }
-    });
+            });
+        },
+    );
 }
 
 /// Start the wake monitor on Linux.
@@ -677,6 +1043,284 @@ mod tests {
         assert!(screen_is_locked());
         SCREEN_IS_LOCKED.store(false, Ordering::SeqCst);
         assert!(!screen_is_locked());
+    }
+
+    #[cfg(target_os = "windows")]
+    fn valid_windows_session(session_flags: i32) -> WindowsSessionQueryResult {
+        use windows::Win32::System::RemoteDesktop::WTSActive;
+
+        WindowsSessionQueryResult::Valid {
+            requested_session_id: 7,
+            reported_session_id: 7,
+            connection_state: WTSActive.0,
+            session_flags,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_locked_wts_state_wins_when_input_desktop_is_accessible() {
+        use windows::Win32::System::RemoteDesktop::WTS_SESSIONSTATE_LOCK;
+
+        let status = windows_lock_status(valid_windows_session(WTS_SESSIONSTATE_LOCK as i32), true);
+        assert_eq!(status.reason.state(), WindowsLockNoticeState::Locked);
+        assert_eq!(status.reason, WindowsLockNoticeReason::WtsSessionLocked);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_unlock_requires_explicit_active_wts_state_and_desktop_access() {
+        use windows::Win32::System::RemoteDesktop::{WTSDisconnected, WTS_SESSIONSTATE_UNLOCK};
+
+        let unlocked = valid_windows_session(WTS_SESSIONSTATE_UNLOCK as i32);
+        let status = windows_lock_status(unlocked, true);
+        assert_eq!(status.reason.state(), WindowsLockNoticeState::Unlocked);
+        assert_eq!(status.reason, WindowsLockNoticeReason::WtsSessionUnlocked);
+
+        let status = windows_lock_status(unlocked, false);
+        assert_eq!(status.reason.state(), WindowsLockNoticeState::Locked);
+        assert_eq!(
+            status.reason,
+            WindowsLockNoticeReason::InputDesktopUnavailable
+        );
+
+        let disconnected = WindowsSessionQueryResult::Valid {
+            requested_session_id: 7,
+            reported_session_id: 7,
+            connection_state: WTSDisconnected.0,
+            session_flags: WTS_SESSIONSTATE_UNLOCK as i32,
+        };
+        let status = windows_lock_status(disconnected, true);
+        assert_eq!(status.reason.state(), WindowsLockNoticeState::Locked);
+        assert_eq!(
+            status.reason,
+            WindowsLockNoticeReason::WtsSessionDisconnected
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_unknown_failed_and_malformed_session_results_fail_closed() {
+        use windows::Win32::System::RemoteDesktop::{
+            WTSConnected, WTS_SESSIONSTATE_UNKNOWN, WTS_SESSIONSTATE_UNLOCK,
+        };
+
+        let unknown_flags =
+            windows_lock_status(valid_windows_session(WTS_SESSIONSTATE_UNKNOWN as i32), true);
+        assert_eq!(
+            unknown_flags.reason.state(),
+            WindowsLockNoticeState::DetectionFailed
+        );
+        assert_eq!(
+            unknown_flags.reason,
+            WindowsLockNoticeReason::WtsSessionFlagsUnknown
+        );
+
+        for (result, reason) in [
+            (
+                WindowsSessionQueryResult::ProcessSessionQueryFailed,
+                WindowsLockNoticeReason::ProcessSessionQueryFailed,
+            ),
+            (
+                WindowsSessionQueryResult::WtsQueryFailed,
+                WindowsLockNoticeReason::WtsQueryFailed,
+            ),
+            (
+                WindowsSessionQueryResult::ShortBuffer,
+                WindowsLockNoticeReason::WtsShortBuffer,
+            ),
+            (
+                WindowsSessionQueryResult::UnsupportedLevel,
+                WindowsLockNoticeReason::WtsUnsupportedLevel,
+            ),
+        ] {
+            let status = windows_lock_status(result, true);
+            assert_eq!(
+                status.reason.state(),
+                WindowsLockNoticeState::DetectionFailed
+            );
+            assert_eq!(status.reason, reason);
+        }
+
+        let unknown_state = WindowsSessionQueryResult::Valid {
+            requested_session_id: 7,
+            reported_session_id: 7,
+            connection_state: WTSConnected.0,
+            session_flags: WTS_SESSIONSTATE_UNLOCK as i32,
+        };
+        assert_eq!(
+            windows_lock_status(unknown_state, true).reason,
+            WindowsLockNoticeReason::WtsSessionStateUnknown
+        );
+
+        assert_eq!(
+            windows_lock_status(valid_windows_session(2), true).reason,
+            WindowsLockNoticeReason::WtsSessionFlagsInvalid
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_session_id_mismatch_fails_closed() {
+        use windows::Win32::System::RemoteDesktop::{WTSActive, WTS_SESSIONSTATE_UNLOCK};
+
+        let mismatch = WindowsSessionQueryResult::Valid {
+            requested_session_id: 7,
+            reported_session_id: 8,
+            connection_state: WTSActive.0,
+            session_flags: WTS_SESSIONSTATE_UNLOCK as i32,
+        };
+        let status = windows_lock_status(mismatch, true);
+        assert_eq!(
+            status.reason.state(),
+            WindowsLockNoticeState::DetectionFailed
+        );
+        assert_eq!(status.reason, WindowsLockNoticeReason::WtsSessionMismatch);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_lock_transitions_notify_only_on_unlock() {
+        assert_eq!(
+            windows_lock_transition(false, true),
+            WindowsLockTransition::Locked
+        );
+        assert_eq!(
+            windows_lock_transition(true, false),
+            WindowsLockTransition::Unlocked
+        );
+        assert_eq!(
+            windows_lock_transition(false, false),
+            WindowsLockTransition::Unchanged
+        );
+        assert_eq!(
+            windows_lock_transition(true, true),
+            WindowsLockTransition::Unchanged
+        );
+    }
+
+    #[test]
+    fn windows_lock_notice_payload_uses_fixed_codes_and_messages() {
+        let event = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsShortBuffer,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "reason": "wts_short_buffer"
+            })
+        );
+        assert_eq!(event.reason.code(), "wts_short_buffer");
+        assert_eq!(
+            event.reason.message(),
+            "Screen lock detection unavailable; screen/UI capture paused for privacy."
+        );
+    }
+
+    #[test]
+    fn windows_lock_notice_emits_initial_and_changed_diagnoses_only() {
+        let locked = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsSessionLocked,
+        };
+        let failed = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsQueryFailed,
+        };
+
+        assert!(should_publish_windows_lock_status(None, locked));
+        assert!(!should_publish_windows_lock_status(Some(locked), locked));
+        assert!(should_publish_windows_lock_status(Some(locked), failed));
+        assert!(!should_publish_windows_lock_status(Some(failed), failed));
+        assert_eq!(
+            locked.reason.message(),
+            "Screen locked; screen/UI capture paused."
+        );
+        assert_eq!(
+            WindowsLockNoticeReason::WtsSessionUnlocked.message(),
+            "Screen unlocked; other privacy and recording controls still apply."
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_monitor_initializer_rechecks_each_start_but_spawns_once() {
+        use std::cell::{Cell, RefCell};
+
+        let monitor = Mutex::new(WindowsLockMonitorState::default());
+        let applied = RefCell::new(Vec::new());
+        let published = RefCell::new(Vec::new());
+        let spawn_count = Cell::new(0);
+        let locked = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsSessionLocked,
+        };
+        let unlocked = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsSessionUnlocked,
+        };
+
+        initialize_windows_lock_monitor(
+            &monitor,
+            || locked,
+            |value| applied.borrow_mut().push(value),
+            |event| published.borrow_mut().push(event),
+            || spawn_count.set(spawn_count.get() + 1),
+        );
+        initialize_windows_lock_monitor(
+            &monitor,
+            || unlocked,
+            |value| applied.borrow_mut().push(value),
+            |event| published.borrow_mut().push(event),
+            || spawn_count.set(spawn_count.get() + 1),
+        );
+
+        assert_eq!(spawn_count.get(), 1);
+        assert_eq!(applied.borrow().as_slice(), &[true, false]);
+        assert_eq!(published.borrow().as_slice(), &[locked, unlocked]);
+        let monitor = monitor.lock().unwrap();
+        assert!(monitor.worker_started);
+        assert_eq!(monitor.last_status, Some(unlocked));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_monitor_polling_deduplicates_unchanged_status_after_reinitialization() {
+        use std::cell::RefCell;
+
+        let monitor = Mutex::new(WindowsLockMonitorState::default());
+        let published = RefCell::new(Vec::new());
+        let unlocked = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsSessionUnlocked,
+        };
+        let failed = WindowsLockStatusEvent {
+            reason: WindowsLockNoticeReason::WtsQueryFailed,
+        };
+
+        initialize_windows_lock_monitor(
+            &monitor,
+            || unlocked,
+            |_| {},
+            |event| published.borrow_mut().push(event),
+            || {},
+        );
+        poll_windows_lock_monitor(
+            &monitor,
+            || unlocked,
+            |_| {},
+            |event| published.borrow_mut().push(event),
+        );
+        poll_windows_lock_monitor(
+            &monitor,
+            || failed,
+            |_| {},
+            |event| published.borrow_mut().push(event),
+        );
+        poll_windows_lock_monitor(
+            &monitor,
+            || failed,
+            |_| {},
+            |event| published.borrow_mut().push(event),
+        );
+
+        assert_eq!(published.borrow().as_slice(), &[unlocked, failed]);
+        assert_eq!(monitor.lock().unwrap().last_status, Some(failed));
     }
 
     /// `notify_one` must either wake a parked waiter or buffer a permit that

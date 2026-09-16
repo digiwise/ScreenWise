@@ -9,7 +9,6 @@ use chrono::{DateTime, Utc};
 use screenpipe_config::AudioPrivacyPermit;
 use tokio::{
     sync::{mpsc, RwLock},
-    task::JoinHandle,
     time::{interval, Duration},
 };
 use tracing::{debug, info, warn};
@@ -30,38 +29,40 @@ const LIVE_CHUNK_MIN: Duration = Duration::from_secs(2);
 const FLUSH_TICK: Duration = Duration::from_millis(750);
 const MIN_LIVE_RMS: f32 = 0.003;
 
-pub fn spawn_selected_engine_stream(
+pub async fn run_selected_engine_stream(
     config: MeetingStreamingConfig,
     engine_ref: Arc<RwLock<Option<TranscriptionEngine>>>,
     meeting_id: i64,
     device_name: String,
     device_type: DeviceType,
     rx: mpsc::Receiver<MeetingAudioFrame>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let device_type_label = device_type_label(&device_type).to_string();
-        info!(
-            "meeting streaming: starting selected-engine live stream (meeting_id={}, device={}, type={})",
-            meeting_id, device_name, device_type_label
-        );
+    final_tx: mpsc::Sender<MeetingTranscriptFinal>,
+) -> bool {
+    let device_type_label = device_type_label(&device_type).to_string();
+    info!(
+        "meeting streaming: starting selected-engine live stream (meeting_id={}, device={}, type={})",
+        meeting_id, device_name, device_type_label
+    );
 
-        if let Err(err) = run_stream(
-            config.clone(),
-            engine_ref,
-            meeting_id,
-            device_name.clone(),
-            device_type_label,
-            rx,
-        )
-        .await
-        {
-            warn!(
-                "meeting streaming: selected-engine live stream failed (meeting_id={}, device={}): {:?}",
-                meeting_id, device_name, err
-            );
-            emit_error(meeting_id, &config, Some(device_name), format!("{err:#}"));
-        }
-    })
+    if let Err(err) = run_stream(
+        config.clone(),
+        engine_ref,
+        meeting_id,
+        device_name.clone(),
+        device_type_label,
+        rx,
+        final_tx,
+    )
+    .await
+    {
+        warn!(
+            reason_code = "meeting_selected_engine_worker_failed",
+            "Meeting streaming worker stopped unexpectedly."
+        );
+        emit_error(meeting_id, &config, Some(device_name), format!("{err:#}"));
+        return false;
+    }
+    true
 }
 
 async fn run_stream(
@@ -71,6 +72,7 @@ async fn run_stream(
     device_name: String,
     device_type: String,
     mut rx: mpsc::Receiver<MeetingAudioFrame>,
+    final_tx: mpsc::Sender<MeetingTranscriptFinal>,
 ) -> Result<()> {
     let mut session = selected_engine_session(&engine_ref).await?;
     let model = selected_engine_model(&session);
@@ -83,7 +85,7 @@ async fn run_stream(
         tokio::select! {
             maybe_frame = rx.recv() => {
                 let Some(frame) = maybe_frame else {
-                    flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
+                    flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence, &final_tx).await?;
                     break;
                 };
 
@@ -104,13 +106,13 @@ async fn run_stream(
                 }
                 buffer.push_with_privacy(samples, frame.captured_at_unix_ms, frame.privacy);
                 if buffer.duration() >= LIVE_CHUNK_TARGET {
-                    flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
+                    flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence, &final_tx).await?;
                 }
             }
             _ = flush_tick.tick() => {
                 if !buffer.privacy.is_some_and(AudioPrivacyPermit::is_current) { buffer.clear(); }
                 if buffer.duration() >= LIVE_CHUNK_MIN {
-                    flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
+                    flush_buffer(&mut buffer, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence, &final_tx).await?;
                 }
             }
         }
@@ -167,6 +169,7 @@ async fn flush_buffer(
     device_type: &str,
     model: Option<String>,
     sequence: &mut u64,
+    final_tx: &mpsc::Sender<MeetingTranscriptFinal>,
 ) -> Result<()> {
     let Some(chunk) = buffer.take() else {
         return Ok(());
@@ -241,7 +244,11 @@ async fn flush_buffer(
         captured_at,
     };
     if chunk.privacy.is_some_and(AudioPrivacyPermit::is_current) {
-        let _ = screenpipe_events::send_event("meeting_transcript_final", final_event);
+        let _ = screenpipe_events::send_event("meeting_transcript_final", final_event.clone());
+        final_tx
+            .send(final_event)
+            .await
+            .map_err(|_| anyhow!("meeting final owner is unavailable"))?;
     }
 
     Ok(())

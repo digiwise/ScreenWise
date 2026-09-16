@@ -1396,6 +1396,11 @@ async fn run_pinned_input_fallback_sweep(
 pub async fn stop_device_monitor() -> Result<()> {
     if let Some(handle) = DEVICE_MONITOR.lock().await.take() {
         handle.abort();
+        match handle.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => return Err(anyhow::anyhow!("device monitor stop failed: {error}")),
+        }
     }
 
     Ok(())

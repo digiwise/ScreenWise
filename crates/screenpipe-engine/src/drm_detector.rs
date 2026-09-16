@@ -391,9 +391,28 @@ pub fn pre_capture_drm_check(pause_on_drm_content: bool, trigger_app_name: Optio
     result.unwrap_or(false)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn pre_capture_drm_check(_pause_on_drm_content: bool, _trigger_app_name: Option<&str>) -> bool {
     false
+}
+
+#[cfg(target_os = "windows")]
+pub fn pre_capture_drm_check(pause_on_drm_content: bool, _trigger_app_name: Option<&str>) -> bool {
+    if !pause_on_drm_content {
+        return false;
+    }
+
+    if drm_content_paused() {
+        return true;
+    }
+
+    let foreground = windows_foreground_assessment();
+    let block = windows_pre_capture_should_block(foreground);
+
+    if block {
+        set_drm_paused(true);
+    }
+    block
 }
 
 /// Check if any on-screen window belongs to a DRM app or has a DRM-related title.
@@ -611,10 +630,166 @@ fn get_arc_url_for_drm() -> Option<String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn poll_drm_clear() -> bool {
     set_drm_paused(false);
     false
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsForegroundAssessment {
+    Drm,
+    BrowserUrlUnknown,
+    Other,
+    Unknown,
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_browser(process_name: &str) -> bool {
+    let process_name = process_name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(process_name)
+        .to_ascii_lowercase();
+    let process_name = process_name.trim_end_matches(".exe");
+
+    matches!(
+        process_name,
+        "chrome"
+            | "msedge"
+            | "firefox"
+            | "brave"
+            | "opera"
+            | "opera_gx"
+            | "vivaldi"
+            | "chromium"
+            | "arc"
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_pre_capture_should_block(foreground: WindowsForegroundAssessment) -> bool {
+    match foreground {
+        WindowsForegroundAssessment::Drm | WindowsForegroundAssessment::Unknown => true,
+        // Windows does not yet have a narrow pre-capture browser URL query.
+        // Existing capture metadata can engage DRM pause after acquisition;
+        // once paused, poll_drm_clear() conservatively retains that pause while
+        // a browser remains foreground and its URL is unknown.
+        WindowsForegroundAssessment::BrowserUrlUnknown | WindowsForegroundAssessment::Other => {
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_poll_should_stay_paused(foreground: WindowsForegroundAssessment) -> bool {
+    !matches!(foreground, WindowsForegroundAssessment::Other)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_foreground_identity_matches(
+    expected_hwnd: usize,
+    expected_pid: u32,
+    current_hwnd: usize,
+    current_pid: u32,
+) -> bool {
+    expected_hwnd == current_hwnd && expected_pid == current_pid
+}
+
+#[cfg(target_os = "windows")]
+fn windows_foreground_assessment() -> WindowsForegroundAssessment {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    // Read one fresh HWND and derive its PID and process from that exact window.
+    // This avoids choosing another window owned by a multi-window browser and
+    // does not enumerate windows, capture pixels, or inspect accessibility
+    // content while recording is paused.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return WindowsForegroundAssessment::Unknown;
+    }
+
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return WindowsForegroundAssessment::Unknown;
+    }
+
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(process) => process,
+        Err(_) => return WindowsForegroundAssessment::Unknown,
+    };
+    let mut path = [0u16; 1024];
+    let mut path_len = path.len() as u32;
+    let query_result = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(path.as_mut_ptr()),
+            &mut path_len,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    if query_result.is_err() || path_len == 0 {
+        return WindowsForegroundAssessment::Unknown;
+    }
+
+    let process_path = String::from_utf16_lossy(&path[..path_len as usize]);
+    let process_name = process_path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(process_path.as_ref());
+    if is_drm_app(process_name) {
+        return WindowsForegroundAssessment::Drm;
+    }
+
+    let assessment = if is_windows_browser(process_name) {
+        WindowsForegroundAssessment::BrowserUrlUnknown
+    } else {
+        WindowsForegroundAssessment::Other
+    };
+
+    // Process lookup crosses a scheduling boundary. Before treating this as a
+    // current non-DRM foreground, confirm both the HWND and PID are still
+    // current. A focus change or recycled handle becomes Unknown, which
+    // preserves or engages the pause until the next poll.
+    let current_hwnd = unsafe { GetForegroundWindow() };
+    let mut current_pid = 0;
+    unsafe { GetWindowThreadProcessId(current_hwnd, Some(&mut current_pid)) };
+    if !windows_foreground_identity_matches(
+        hwnd.0 as usize,
+        pid,
+        current_hwnd.0 as usize,
+        current_pid,
+    ) {
+        return WindowsForegroundAssessment::Unknown;
+    }
+
+    assessment
+}
+
+#[cfg(target_os = "windows")]
+pub fn poll_drm_clear() -> bool {
+    let foreground = windows_foreground_assessment();
+    if windows_poll_should_stay_paused(foreground) {
+        debug!(
+            "Windows DRM poll kept capture paused; foreground assessment={:?}",
+            foreground
+        );
+        true
+    } else {
+        set_drm_paused(false);
+        false
+    }
 }
 
 #[cfg(test)]
@@ -750,9 +925,8 @@ mod tests {
     }
 
     // ── pre_capture_drm_check unit tests ──────────────────────────────
-    // Gated to macOS: the non-macOS build provides a `false`-returning stub
-    // of `pre_capture_drm_check` (see definition above), so these tests
-    // would spuriously fail on Linux/Windows CI.
+    // These cases exercise the macOS trigger fast path. Windows instead uses
+    // fresh foreground-process metadata; its pure policy tests are below.
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1035,5 +1209,60 @@ mod tests {
             "should return true when flag was true and app unknown"
         );
         screenpipe_config::audio_privacy::set_drm_paused(false);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_browser_process_matching_is_exact() {
+        assert!(is_windows_browser(
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        ));
+        assert!(is_windows_browser("msedge.exe"));
+        assert!(is_windows_browser("Firefox.EXE"));
+        assert!(!is_windows_browser("chromedriver.exe"));
+        assert!(!is_windows_browser("edge-helper.exe"));
+        assert!(!is_windows_browser("notchrome.exe"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_poll_never_clears_drm_on_unknown_foreground() {
+        assert!(windows_poll_should_stay_paused(
+            WindowsForegroundAssessment::Drm
+        ));
+        assert!(windows_poll_should_stay_paused(
+            WindowsForegroundAssessment::BrowserUrlUnknown
+        ));
+        assert!(windows_poll_should_stay_paused(
+            WindowsForegroundAssessment::Unknown
+        ));
+        assert!(!windows_poll_should_stay_paused(
+            WindowsForegroundAssessment::Other
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_safe_foreground_requires_stable_hwnd_and_pid() {
+        assert!(windows_foreground_identity_matches(100, 7, 100, 7));
+        assert!(!windows_foreground_identity_matches(100, 7, 101, 7));
+        assert!(!windows_foreground_identity_matches(100, 7, 100, 8));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_pre_capture_blocks_native_drm_and_unknown_foreground() {
+        assert!(windows_pre_capture_should_block(
+            WindowsForegroundAssessment::Drm
+        ));
+        assert!(windows_pre_capture_should_block(
+            WindowsForegroundAssessment::Unknown
+        ));
+        assert!(!windows_pre_capture_should_block(
+            WindowsForegroundAssessment::Other
+        ));
+        assert!(!windows_pre_capture_should_block(
+            WindowsForegroundAssessment::BrowserUrlUnknown
+        ));
     }
 }

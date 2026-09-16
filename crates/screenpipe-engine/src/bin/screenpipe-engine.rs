@@ -627,6 +627,7 @@ async fn main() -> anyhow::Result<()> {
     // NOTE: must be started AFTER database init — the monitor spawns background
     // threads with ObjC run loops that segfault during process teardown if an
     // earlier init step (like DB) fails and the process exits.
+    let privacy_notice_recorder = screenpipe_engine::privacy_notices::start(db.clone());
     start_sleep_monitor();
 
     // Start the permission monitor — polls OS permission state and emits
@@ -1483,25 +1484,38 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = ctrl_c_future => {
             info!("received ctrl+c, initiating shutdown");
-            audio_manager.shutdown().await?;
-            // Stop UI recorder if running
-            if let Some(ref handle) = ui_recorder_handle {
-                info!("stopping UI event capture");
-                handle.stop();
-            }
-            let _ = shutdown_tx.send(());
         }
     }
+
+    // Every exit path (including server failure and auto-destruct) drains audio
+    // while the safe status writer is still alive.
+    let audio_shutdown_complete = audio_manager.shutdown().await.is_ok();
+    if !audio_shutdown_complete && !screenpipe_events::audio_shutdown_attempt_degraded() {
+        screenpipe_events::report_audio_shutdown_issue(
+            screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+        );
+    }
+    if let Some(ref handle) = ui_recorder_handle {
+        info!("stopping UI event capture");
+        handle.stop();
+    }
+    let _ = shutdown_tx.send(());
 
     // Wait for UI recorder to finish
     if let Some(handle) = ui_recorder_handle {
         handle.join().await;
     }
+    privacy_notice_recorder.stop().await;
 
     tokio::task::block_in_place(|| {
         drop(audio_manager);
     });
 
+    if !audio_shutdown_complete {
+        return Err(anyhow::anyhow!(
+            "Audio shutdown incomplete; consult the local diagnostic log."
+        ));
+    }
     info!("shutdown complete");
 
     Ok(())

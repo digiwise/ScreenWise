@@ -33,12 +33,15 @@ use crate::{
     },
     device::device_manager::DeviceManager,
     meeting_detector::MeetingDetector,
-    meeting_streaming::{start_meeting_streaming_loop, MeetingAudioTap},
+    meeting_streaming::{
+        start_meeting_streaming_loop, MeetingAudioTap, MeetingStreamingHandle,
+        MeetingStreamingStopOutcome,
+    },
     metrics::AudioPipelineMetrics,
     segmentation::segmentation_manager::SegmentationManager,
     transcription::{
         engine::TranscriptionEngine,
-        handle_new_transcript,
+        handle_new_transcript_until_shutdown,
         stt::{process_audio_input, SAMPLE_RATE},
         whisper::model::get_cached_whisper_model_path,
     },
@@ -101,9 +104,26 @@ struct MeetingEventData {
 
 type RecordingHandlesMap = DashMap<AudioDevice, Arc<Mutex<JoinHandle<Result<()>>>>>;
 const MEETING_AUDIO_FRAME_BUFFER: usize = 512;
+const MANAGER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(12);
+const PRODUCER_STOP_TIMEOUT: Duration = Duration::from_secs(4);
+const RECORDING_CONSUMER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const TRANSCRIPTION_CONSUMER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+const CONSUMER_STOP_POLL: Duration = Duration::from_millis(50);
+
+#[derive(Debug)]
+struct DropCleanupOwner(bool);
+
+impl Clone for DropCleanupOwner {
+    fn clone(&self) -> Self {
+        Self(false)
+    }
+}
 
 #[derive(Clone)]
 pub struct AudioManager {
+    drop_cleanup_owner: DropCleanupOwner,
+    lifecycle_lock: Arc<Mutex<()>>,
+    shutdown_incomplete: Arc<AtomicBool>,
     options: Arc<RwLock<AudioManagerOptions>>,
     device_manager: Arc<DeviceManager>,
     segmentation_manager: Arc<SegmentationManager>,
@@ -116,8 +136,10 @@ pub struct AudioManager {
     transcription_receiver: Arc<crossbeam::channel::Receiver<TranscriptionResult>>,
     transcription_sender: Arc<crossbeam::channel::Sender<TranscriptionResult>>,
     transcription_receiver_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
-    meeting_streaming_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    meeting_streaming_handle: Arc<RwLock<Option<MeetingStreamingHandle>>>,
     recording_receiver_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    recording_receiver_stop_requested: Arc<AtomicBool>,
+    transcription_receiver_stop_requested: Arc<AtomicBool>,
     pub metrics: Arc<AudioPipelineMetrics>,
     meeting_detector: Arc<RwLock<Option<Arc<MeetingDetector>>>>,
     meeting_audio_tap: MeetingAudioTap,
@@ -130,6 +152,7 @@ pub struct AudioManager {
     engine: Arc<RwLock<Option<TranscriptionEngine>>>,
     /// Handle to the reconciliation background task so we can abort it on shutdown.
     reconciliation_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    reconciliation_stop_requested: Arc<AtomicBool>,
     /// Output devices temporarily stopped due to DRM content detection.
     /// Stored so they can be restarted when DRM clears.
     drm_stopped_devices: Arc<RwLock<Vec<AudioDevice>>>,
@@ -146,6 +169,76 @@ pub struct CentralHandlerRestartResult {
     pub transcription_restarted: bool,
     pub recording_error: Option<String>,
     pub transcription_error: Option<String>,
+}
+
+async fn receive_until_stopped<T>(
+    receiver: &crossbeam::channel::Receiver<T>,
+    stop_requested: &AtomicBool,
+) -> Option<T> {
+    loop {
+        match receiver.try_recv() {
+            Ok(value) => return Some(value),
+            Err(crossbeam::channel::TryRecvError::Empty)
+                if stop_requested.load(Ordering::Acquire) && receiver.is_empty() =>
+            {
+                return None;
+            }
+            Err(crossbeam::channel::TryRecvError::Empty) => {
+                tokio::time::sleep(CONSUMER_STOP_POLL).await;
+            }
+            Err(crossbeam::channel::TryRecvError::Disconnected) => return None,
+        }
+    }
+}
+
+async fn wait_for_stop_or_timeout(stop_requested: &AtomicBool, timeout: Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if stop_requested.load(Ordering::Acquire) {
+            return true;
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(remaining.min(CONSUMER_STOP_POLL)).await;
+    }
+}
+
+fn remaining_phase_budget(started: std::time::Instant, phase_limit: Duration) -> Duration {
+    MANAGER_SHUTDOWN_TIMEOUT
+        .saturating_sub(started.elapsed())
+        .min(phase_limit)
+}
+
+async fn finish_consumer(handle_slot: &RwLock<Option<JoinHandle<()>>>, timeout: Duration) {
+    let phase_started = std::time::Instant::now();
+    let Ok(mut slot) = tokio::time::timeout(timeout, handle_slot.write()).await else {
+        screenpipe_events::report_audio_shutdown_issue(
+            screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
+        );
+        return;
+    };
+    let Some(mut handle) = slot.take() else {
+        return;
+    };
+    drop(slot);
+
+    match tokio::time::timeout(timeout.saturating_sub(phase_started.elapsed()), &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => screenpipe_events::report_audio_shutdown_issue(
+            screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+        ),
+        Err(_) => {
+            // A Tokio abort cannot cancel blocking persistence/inference already running on
+            // the blocking pool. The latched event therefore reports possible delayed work
+            // or loss; this path makes no claim that the in-flight operation was discarded.
+            handle.abort();
+            screenpipe_events::report_audio_shutdown_issue(
+                screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
+            );
+        }
+    }
 }
 
 impl AudioManager {
@@ -195,6 +288,9 @@ impl AudioManager {
             MeetingAudioTap::new(meeting_audio_tx, Arc::new(AtomicBool::new(false)));
 
         let manager = Self {
+            drop_cleanup_owner: DropCleanupOwner(true),
+            lifecycle_lock: Arc::new(Mutex::new(())),
+            shutdown_incomplete: Arc::new(AtomicBool::new(false)),
             options: Arc::new(RwLock::new(options)),
             device_manager: Arc::new(device_manager),
             segmentation_manager,
@@ -207,6 +303,8 @@ impl AudioManager {
             transcription_sender: Arc::new(transcription_sender),
             recording_handles: Arc::new(recording_handles),
             recording_receiver_handle: Arc::new(RwLock::new(None)),
+            recording_receiver_stop_requested: Arc::new(AtomicBool::new(false)),
+            transcription_receiver_stop_requested: Arc::new(AtomicBool::new(false)),
             transcription_receiver_handle: Arc::new(RwLock::new(None)),
             meeting_streaming_handle: Arc::new(RwLock::new(None)),
             metrics: Arc::new(AudioPipelineMetrics::new()),
@@ -216,6 +314,7 @@ impl AudioManager {
             on_transcription_insert: None,
             engine: Arc::new(RwLock::new(None)),
             reconciliation_handle: Arc::new(RwLock::new(None)),
+            reconciliation_stop_requested: Arc::new(AtomicBool::new(false)),
             drm_stopped_devices: Arc::new(RwLock::new(Vec::new())),
             user_disabled_devices: Arc::new(RwLock::new(HashSet::new())),
         };
@@ -230,6 +329,7 @@ impl AudioManager {
     /// devices, language, vocabulary, and batch mode
     /// update on a capture-level restart.
     pub async fn apply_options(&self, options: AudioManagerOptions) -> Result<()> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         if self.status().await == AudioManagerStatus::Running {
             self.stop_internal().await?;
         }
@@ -262,6 +362,10 @@ impl AudioManager {
     }
 
     pub async fn start(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.shutdown_incomplete.load(Ordering::Acquire) {
+            return Err(anyhow!("audio restart refused after incomplete shutdown"));
+        }
         if self.options.read().await.is_disabled {
             info!("audio manager start skipped because audio capture is disabled");
             return Ok(());
@@ -276,7 +380,16 @@ impl AudioManager {
     }
 
     async fn start_internal(&self) -> Result<()> {
+        if self.shutdown_incomplete.load(Ordering::Acquire) {
+            return Err(anyhow!("audio restart refused after incomplete shutdown"));
+        }
         *self.status.write().await = AudioManagerStatus::Running;
+        self.transcription_receiver_stop_requested
+            .store(false, Ordering::Release);
+        self.recording_receiver_stop_requested
+            .store(false, Ordering::Release);
+        self.reconciliation_stop_requested
+            .store(false, Ordering::Release);
         let mut transcription_receiver_handle = self.transcription_receiver_handle.write().await;
         *transcription_receiver_handle = Some(self.start_transcription_receiver_handler().await?);
 
@@ -309,9 +422,12 @@ impl AudioManager {
             let output_path_bg = self.options.read().await.output_path.clone();
             let metrics_bg = self.metrics.clone();
             let meeting_detector_bg = self.meeting_detector().await;
+            let stop_requested = self.reconciliation_stop_requested.clone();
             let handle = tokio::spawn(async move {
                 // Wait for model to load + initial recordings
-                tokio::time::sleep(Duration::from_secs(120)).await;
+                if wait_for_stop_or_timeout(&stop_requested, Duration::from_secs(120)).await {
+                    return;
+                }
                 loop {
                     // Contain a panic inside a sweep so it cannot kill this
                     // long-lived worker (issue #3498: a single panic used to
@@ -370,7 +486,9 @@ impl AudioManager {
                             reason
                         );
                     }
-                    tokio::time::sleep(Duration::from_secs(120)).await;
+                    if wait_for_stop_or_timeout(&stop_requested, Duration::from_secs(120)).await {
+                        return;
+                    }
                 }
             });
             *self.reconciliation_handle.write().await = Some(handle);
@@ -396,6 +514,10 @@ impl AudioManager {
     }
 
     pub async fn restart(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.shutdown_incomplete.load(Ordering::Acquire) {
+            return Err(anyhow!("audio restart refused after incomplete shutdown"));
+        }
         self.stop_internal().await?;
         self.start_internal().await?;
         info!("audio manager restarted");
@@ -403,62 +525,262 @@ impl AudioManager {
     }
 
     async fn stop_internal(&self) -> Result<()> {
+        let shutdown_started = std::time::Instant::now();
+        screenpipe_events::begin_audio_shutdown_attempt();
         *self.status.write().await = AudioManagerStatus::Stopped;
 
-        stop_device_monitor().await?;
-
-        // Stop producers FIRST: abort per-device recording tasks and the OS audio streams.
-        // This must happen before killing the consumer so any audio already queued in the
-        // crossbeam channel (including the final 30s flush) can still be drained.
-        for pair in self.recording_handles.iter() {
-            let handle = pair.value();
-            handle.lock().await.abort();
+        match tokio::time::timeout(
+            MANAGER_SHUTDOWN_TIMEOUT.saturating_sub(shutdown_started.elapsed()),
+            stop_device_monitor(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => screenpipe_events::report_audio_shutdown_issue(
+                screenpipe_events::AudioShutdownIssue::ProducerStopFailed,
+            ),
+            Err(_) => screenpipe_events::report_audio_shutdown_issue(
+                screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+            ),
         }
-        self.recording_handles.clear();
-        self.device_manager.stop_all_devices().await?;
 
-        // Drain the channel: wait until the pipeline handler has consumed all queued chunks
-        // (or a hard timeout expires). The early persist — file write + DB insert — happens
-        // at the very start of each chunk's processing, before any deferral decision.
-        // A 5s window is enough: the persist itself takes <100ms per chunk.
-        const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-        const DRAIN_POLL: Duration = Duration::from_millis(100);
-        let drain_start = std::time::Instant::now();
-        while drain_start.elapsed() < DRAIN_TIMEOUT {
-            if self.recording_receiver.is_empty() {
-                break;
+        // Reconciliation can independently use the transcription engine and database.
+        // Stop it before draining the two ordered pipeline consumers, and before a restart
+        // can install another reconciliation worker.
+        self.reconciliation_stop_requested
+            .store(true, Ordering::Release);
+        finish_consumer(
+            &self.reconciliation_handle,
+            MANAGER_SHUTDOWN_TIMEOUT
+                .saturating_sub(shutdown_started.elapsed())
+                .min(Duration::from_millis(500)),
+        )
+        .await;
+
+        // Signal meeting shutdown before the other drains. Its selected-engine and final
+        // persistence workers then finish concurrently with producer/consumer shutdown,
+        // while the final join below remains bounded by this manager's shared deadline.
+        let mut meeting_streaming = match tokio::time::timeout(
+            MANAGER_SHUTDOWN_TIMEOUT.saturating_sub(shutdown_started.elapsed()),
+            self.meeting_streaming_handle.write(),
+        )
+        .await
+        {
+            Ok(mut slot) => slot.take(),
+            Err(_) => {
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::WorkerCompletionUnconfirmed,
+                );
+                None
             }
-            tokio::time::sleep(DRAIN_POLL).await;
+        };
+        if let Some(handle) = meeting_streaming.as_mut() {
+            handle.request_stop();
+        }
+        self.meeting_audio_tap.set_active(false);
+        self.meeting_audio_tap.set_background_suppressed(false);
+
+        // Stop all producers cooperatively. Their running flags are cleared before the
+        // stream is torn down, and their tasks are joined so their privacy-checked final
+        // partial-buffer flush can enqueue before the consumer drain starts.
+        let mut devices = self.current_devices();
+        for device in self.device_manager.active_devices() {
+            if !devices.contains(&device) {
+                devices.push(device);
+            }
+        }
+        let _ = self
+            .stop_recording_devices(
+                &devices,
+                remaining_phase_budget(shutdown_started, PRODUCER_STOP_TIMEOUT),
+            )
+            .await;
+
+        // Each consumer exits only after its current item and queued items finish. Joining
+        // the task, rather than observing an empty queue, proves there is no hidden in-flight
+        // persistence/transcript operation on the successful path.
+        self.recording_receiver_stop_requested
+            .store(true, Ordering::Release);
+        finish_consumer(
+            &self.recording_receiver_handle,
+            remaining_phase_budget(shutdown_started, RECORDING_CONSUMER_DRAIN_TIMEOUT),
+        )
+        .await;
+
+        self.transcription_receiver_stop_requested
+            .store(true, Ordering::Release);
+        finish_consumer(
+            &self.transcription_receiver_handle,
+            remaining_phase_budget(shutdown_started, TRANSCRIPTION_CONSUMER_DRAIN_TIMEOUT),
+        )
+        .await;
+
+        if let Some(handle) = meeting_streaming {
+            match handle
+                .wait(MANAGER_SHUTDOWN_TIMEOUT.saturating_sub(shutdown_started.elapsed()))
+                .await
+            {
+                MeetingStreamingStopOutcome::Confirmed => {}
+                MeetingStreamingStopOutcome::Failed => {
+                    screenpipe_events::report_audio_shutdown_issue(
+                        screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+                    );
+                }
+                MeetingStreamingStopOutcome::Unconfirmed => {
+                    screenpipe_events::report_audio_shutdown_issue(
+                        screenpipe_events::AudioShutdownIssue::WorkerCompletionUnconfirmed,
+                    );
+                }
+            }
         }
 
-        // Now it is safe to kill the consumer — any remaining chunks are already persisted
-        // to disk and the DB, so the background reconciliation sweep will transcribe them.
-        let mut recording_receiver_handle = self.recording_receiver_handle.write().await;
-        if let Some(handle) = recording_receiver_handle.take() {
-            handle.abort();
+        if self.shutdown_incomplete.load(Ordering::Acquire)
+            || screenpipe_events::audio_shutdown_attempt_degraded()
+        {
+            self.shutdown_incomplete.store(true, Ordering::Release);
+            return Err(anyhow!("audio shutdown incomplete"));
         }
 
-        let mut transcription_receiver_handle = self.transcription_receiver_handle.write().await;
-        if let Some(handle) = transcription_receiver_handle.take() {
-            handle.abort();
-        }
-
-        let mut meeting_streaming_handle = self.meeting_streaming_handle.write().await;
-        if let Some(handle) = meeting_streaming_handle.take() {
-            handle.abort();
-        }
-
-        info!("audio manager stopped");
+        info!("audio manager stopped cleanly");
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
-        if self.status().await == AudioManagerStatus::Stopped {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.status().await == AudioManagerStatus::Stopped
+            && !self.shutdown_incomplete.load(Ordering::Acquire)
+        {
             return Ok(());
         }
-        *self.status.write().await = AudioManagerStatus::Stopped;
-        stop_device_monitor().await?;
         self.stop_internal().await
+    }
+
+    async fn stop_recording_devices(
+        &self,
+        devices: &[AudioDevice],
+        timeout: Duration,
+    ) -> Result<()> {
+        let phase_started = std::time::Instant::now();
+        let producer_join_deadline = phase_started + timeout.min(Duration::from_secs(1));
+        let mut failed = false;
+        let mut timed_out = false;
+
+        // Stop requests are visible to every producer before any join begins, so a slow
+        // device cannot delay another device from reaching its final flush.
+        for device in devices {
+            if let Some(is_running) = self.device_manager.is_running_mut(device) {
+                is_running.store(false, Ordering::Release);
+            }
+        }
+
+        let handles = devices
+            .iter()
+            .filter_map(|device| {
+                self.recording_handles
+                    .remove(device)
+                    .map(|(_, handle)| (device.clone(), handle))
+            })
+            .collect::<Vec<_>>();
+
+        let mut aborted_handles = Vec::new();
+        for (device, handle_cell) in &handles {
+            let remaining =
+                producer_join_deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(mut handle) = tokio::time::timeout(remaining, handle_cell.lock()).await else {
+                timed_out = true;
+                self.recording_handles
+                    .insert(device.clone(), handle_cell.clone());
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+                );
+                continue;
+            };
+            let remaining =
+                producer_join_deadline.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(remaining, &mut *handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                    failed = true;
+                    screenpipe_events::report_audio_shutdown_issue(
+                        screenpipe_events::AudioShutdownIssue::ProducerStopFailed,
+                    );
+                }
+                Err(_) => {
+                    timed_out = true;
+                    handle.abort();
+                    aborted_handles.push((device.clone(), handle_cell.clone()));
+                    screenpipe_events::report_audio_shutdown_issue(
+                        screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+                    );
+                }
+            }
+        }
+
+        // An abort request is not a completion acknowledgement. Wait briefly for every
+        // aborted producer before allowing an empty consumer queue to terminate.
+        let abort_ack_deadline =
+            (producer_join_deadline + Duration::from_millis(250)).min(phase_started + timeout);
+        for (device, handle_cell) in aborted_handles {
+            let remaining = abort_ack_deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(mut handle) = tokio::time::timeout(remaining, handle_cell.lock()).await else {
+                timed_out = true;
+                self.recording_handles.insert(device, handle_cell.clone());
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+                );
+                continue;
+            };
+            let remaining = abort_ack_deadline.saturating_duration_since(std::time::Instant::now());
+            if tokio::time::timeout(remaining, &mut *handle).await.is_err() {
+                timed_out = true;
+                drop(handle);
+                self.recording_handles.insert(device, handle_cell.clone());
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+                );
+            }
+        }
+
+        let remaining = timeout.saturating_sub(phase_started.elapsed());
+        let stop_results = tokio::time::timeout(
+            remaining,
+            futures::future::join_all(
+                devices
+                    .iter()
+                    .map(|device| self.device_manager.stop_device(device)),
+            ),
+        )
+        .await;
+        match stop_results {
+            Ok(results) => {
+                for result in results {
+                    if let Err(error) = result {
+                        let message = error.to_string();
+                        if !message.contains("already stopped") && !message.contains("not running")
+                        {
+                            failed = true;
+                            screenpipe_events::report_audio_shutdown_issue(
+                                screenpipe_events::AudioShutdownIssue::ProducerStopFailed,
+                            );
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                timed_out = true;
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::ProducerStopTimeout,
+                );
+            }
+        }
+
+        if timed_out {
+            Err(anyhow!("audio producer stop timed out"))
+        } else if failed {
+            Err(anyhow!("audio producer stop failed"))
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn devices(&self) -> Result<Vec<AudioDevice>> {
@@ -485,28 +807,15 @@ impl AudioManager {
     /// Idempotent — safe to call on already-stopped devices.
     /// Used by device monitor for force-cycling devices after sleep/wake.
     pub async fn stop_device_recording(&self, device: &AudioDevice) -> Result<()> {
-        // Signal the recording loop to stop BEFORE aborting the handle,
-        // so it exits cleanly without triggering "stream dead" warnings.
-        if let Some(is_running) = self.device_manager.is_running_mut(device) {
-            is_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        screenpipe_events::begin_audio_shutdown_attempt();
+        let result = self
+            .stop_recording_devices(std::slice::from_ref(device), PRODUCER_STOP_TIMEOUT)
+            .await;
+        if result.is_err() {
+            self.shutdown_incomplete.store(true, Ordering::Release);
         }
-
-        // Ignore "already stopped" errors
-        if let Err(e) = self.device_manager.stop_device(device).await {
-            let msg = e.to_string();
-            if !msg.contains("already stopped") && !msg.contains("not running") {
-                return Err(e);
-            }
-        }
-
-        if let Some(pair) = self.recording_handles.get(device) {
-            let handle = pair.value();
-            handle.lock().await.abort();
-        }
-
-        self.recording_handles.remove(device);
-
-        Ok(())
+        result
     }
 
     pub async fn status(&self) -> AudioManagerStatus {
@@ -565,6 +874,12 @@ impl AudioManager {
     }
 
     pub async fn start_device(&self, device: &AudioDevice) -> Result<()> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.shutdown_incomplete.load(Ordering::Acquire) {
+            return Err(anyhow!(
+                "audio device restart refused after incomplete shutdown"
+            ));
+        }
         // Don't restart devices that are paused due to DRM content detection.
         // The monitor watcher will call start_output_devices() when DRM clears.
         if self
@@ -644,29 +959,27 @@ impl AudioManager {
         let meeting_audio_tap = self.meeting_audio_tap.clone();
 
         let recording_handle = tokio::spawn(async move {
-            let record_result = tokio::spawn(record_and_transcribe_with_live_tap(
+            let record_result = record_and_transcribe_with_live_tap(
                 stream.clone(),
                 audio_chunk_duration,
                 recording_sender.clone(),
                 is_running.clone(),
                 metrics,
                 Some(meeting_audio_tap),
-            ))
+            )
             .await;
 
-            // Check for JoinError (task panic/cancel)
-            if let Err(ref e) = record_result {
-                error!("Record and transcribe error: {}", e);
-                return Err(anyhow!("record_device failed: {}", e));
-            }
-
             // Check for inner Result errors (record_and_transcribe returned Err)
-            if let Ok(Err(ref e)) = record_result {
+            if let Err(ref e) = record_result {
                 warn!(
                     "recording for device {} exited with error: {}",
                     device_clone, e
                 );
                 return Err(anyhow!("record_device {} failed: {}", device_clone, e));
+            }
+
+            if !is_running.load(Ordering::Acquire) {
+                return Ok(());
             }
 
             warn!(
@@ -714,6 +1027,7 @@ impl AudioManager {
         let db = self.db.clone();
         let shared_engine = self.engine.clone();
         let on_insert_session = self.on_transcription_insert.clone();
+        let stop_requested = self.recording_receiver_stop_requested.clone();
 
         // Build unified transcription engine — only loads the needed model
         let engine = TranscriptionEngine::new(
@@ -743,7 +1057,8 @@ impl AudioManager {
             let mut deferral_started: Option<std::time::Instant> = None;
 
             let mut session_privacy = None;
-            while let Ok(audio) = whisper_receiver.recv() {
+            while let Some(audio) = receive_until_stopped(&whisper_receiver, &stop_requested).await
+            {
                 let Some(privacy) = audio.privacy.filter(|p| p.is_current()) else {
                     info!("queued audio chunk discarded by privacy policy");
                     continue;
@@ -1057,7 +1372,8 @@ impl AudioManager {
         drop(options); // Release lock before spawning
         let metrics = self.metrics.clone();
         let on_insert = self.on_transcription_insert.clone();
-        Ok(tokio::spawn(handle_new_transcript(
+        let stop_requested = self.transcription_receiver_stop_requested.clone();
+        Ok(tokio::spawn(handle_new_transcript_until_shutdown(
             db,
             transcription_receiver,
             transcription_engine,
@@ -1065,6 +1381,7 @@ impl AudioManager {
             use_pii_removal,
             metrics,
             on_insert,
+            stop_requested,
         )))
     }
 
@@ -1126,6 +1443,8 @@ impl AudioManager {
     pub async fn stop_output_devices(&self) -> Result<()> {
         use crate::core::device::DeviceType;
 
+        let _lifecycle = self.lifecycle_lock.lock().await;
+
         let output_devices: Vec<AudioDevice> = self
             .current_devices()
             .into_iter()
@@ -1141,23 +1460,18 @@ impl AudioManager {
             output_devices.len()
         );
 
-        for device in &output_devices {
-            // Stop the underlying stream
-            if let Err(e) = self.device_manager.stop_device(device).await {
-                warn!("DRM: failed to stop audio device {}: {:?}", device, e);
-            }
-
-            // Abort the recording task
-            if let Some(pair) = self.recording_handles.get(device) {
-                pair.value().lock().await.abort();
-            }
-            self.recording_handles.remove(device);
+        screenpipe_events::begin_audio_shutdown_attempt();
+        let stop_result = self
+            .stop_recording_devices(&output_devices, PRODUCER_STOP_TIMEOUT)
+            .await;
+        if stop_result.is_err() {
+            self.shutdown_incomplete.store(true, Ordering::Release);
         }
 
         // Store stopped devices for later restart
         *self.drm_stopped_devices.write().await = output_devices;
 
-        Ok(())
+        stop_result
     }
 
     /// Restart SCK-based (Output) audio devices after DRM clears.
@@ -1580,15 +1894,23 @@ async fn run_meeting_speaker_constraint_loop(
 
 impl Drop for AudioManager {
     fn drop(&mut self) {
+        if !self.drop_cleanup_owner.0 {
+            return;
+        }
+
         let rec = self.recording_handles.clone();
         let recording = self.recording_receiver_handle.clone();
         let transcript = self.transcription_receiver_handle.clone();
+        let meeting_streaming = self.meeting_streaming_handle.clone();
         let reconciliation = self.reconciliation_handle.clone();
         let device_manager = self.device_manager.clone();
 
         tokio::spawn(async move {
             // Abort reconciliation first to stop MLX usage before engine is dropped
             if let Some(handle) = reconciliation.write().await.take() {
+                handle.abort();
+            }
+            if let Some(handle) = meeting_streaming.write().await.take() {
                 handle.abort();
             }
             let _ = stop_device_monitor().await;
@@ -1610,6 +1932,70 @@ impl Drop for AudioManager {
 mod tests {
     use super::*;
     use crate::core::device::{AudioDevice, DeviceType};
+
+    #[test]
+    fn cloned_manager_cleanup_token_is_non_owning() {
+        let owner = DropCleanupOwner(true);
+        assert!(owner.0);
+        assert!(!owner.clone().0);
+    }
+
+    #[tokio::test]
+    async fn consumer_stop_waits_for_in_flight_work_after_queue_is_empty() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        sender.send(7_u8).unwrap();
+        let consumer = tokio::spawn({
+            let stop_requested = stop_requested.clone();
+            let completed = completed.clone();
+            async move {
+                let mut started_tx = Some(started_tx);
+                let mut release_rx = Some(release_rx);
+                while receive_until_stopped(&receiver, &stop_requested)
+                    .await
+                    .is_some()
+                {
+                    if let Some(started_tx) = started_tx.take() {
+                        let _ = started_tx.send(());
+                    }
+                    if let Some(release_rx) = release_rx.take() {
+                        let _ = release_rx.await;
+                    }
+                    completed.store(true, Ordering::Release);
+                }
+            }
+        });
+
+        started_rx.await.unwrap();
+        stop_requested.store(true, Ordering::Release);
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(!consumer.is_finished(), "empty queue hid in-flight work");
+        assert!(!completed.load(Ordering::Acquire));
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), consumer)
+            .await
+            .expect("consumer did not finish after in-flight work")
+            .expect("consumer task failed");
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn consumer_timeout_latches_degraded_shutdown_evidence() {
+        screenpipe_events::begin_audio_shutdown_attempt();
+        let handle_slot = RwLock::new(Some(tokio::spawn(std::future::pending::<()>())));
+
+        finish_consumer(&handle_slot, Duration::from_millis(20)).await;
+
+        assert!(handle_slot.read().await.is_none());
+        assert!(screenpipe_events::audio_shutdown_degraded());
+        assert!(screenpipe_events::audio_shutdown_issues()
+            .contains(&screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout));
+    }
 
     #[test]
     fn test_central_handler_restart_result_defaults() {

@@ -1675,6 +1675,16 @@ async fn persist_windows_placeholder(
         .expect("placeholder capture outcomes always expose a disclosure notice");
     let image =
         render_windows_capture_notice(params.monitor.width(), params.monitor.height(), notice);
+    // A lock/privacy pause may have arrived during acquisition. Even synthetic
+    // redaction placeholders must not produce new rows or files while paused.
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            windows_outcome: outcome,
+        });
+    }
     let ctx = CaptureContext {
         db: params.db,
         snapshot_writer: params.snapshot_writer,
@@ -2224,7 +2234,10 @@ async fn do_capture(
                 #[cfg(target_os = "windows")]
                 windows_outcome,
             });
-        } else if crate::sleep_monitor::screen_is_locked() {
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        if crate::sleep_monitor::screen_is_locked() {
             // Screen was marked locked but now a real app is focused — unlock
             debug!(
                 "screen unlocked: app '{}' detected on monitor {}",
@@ -2301,6 +2314,18 @@ async fn do_capture(
         app_name_owned.as_deref(),
         browser_url_owned.as_deref(),
     ) {
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            #[cfg(target_os = "windows")]
+            windows_outcome,
+        });
+    }
+
+    // Recheck after awaited acquisition and metadata work. An ordinary app in
+    // stale metadata is not evidence that the Windows session became unlocked.
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
         return Ok(CaptureOutput {
             result: None,
             image,

@@ -19,6 +19,7 @@ import { getStartDate } from "@/lib/actions/get-start-date";
 import { useTimelineData } from "@/lib/hooks/use-timeline-data";
 import { useCurrentFrame } from "@/lib/hooks/use-current-frame";
 import { TimelineSlider } from "@/components/rewind/timeline/timeline";
+import { PrivacyNoticeTrack } from "@/components/rewind/privacy-notice-track";
 import { SearchResultStrip } from "@/components/rewind/search-result-strip";
 import { useMeetings } from "@/lib/hooks/use-meetings";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
@@ -1342,6 +1343,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 
 				{/* Bottom Timeline - Overlay that doesn't cut off image */}
 				<div className="absolute bottom-0 left-0 right-0 z-40 pointer-events-auto">
+					<PrivacyNoticeTrack currentDate={currentDate} />
 					{frames.length > 0 ? (
 						<TimelineSlider
 							frames={frames}

@@ -13,17 +13,41 @@ use crate::utils::audio::resample;
 use crate::utils::ffmpeg::{get_new_file_path_with_timestamp, write_audio_to_file};
 use crate::vad::VadEngine;
 use crate::{AudioInput, TranscriptionResult};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use screenpipe_config::AudioPrivacyPermit;
 use std::path::PathBuf;
 use std::{sync::Arc, sync::Mutex as StdMutex};
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 use tracing::{error, info};
 
 use super::TranscriptionOutput;
 
 /// The sample rate used by the local transcription pipeline.
 pub const SAMPLE_RATE: u32 = 16_000;
+const RESULT_SEND_POLL: Duration = Duration::from_millis(25);
+
+async fn send_with_async_backpressure<T>(
+    sender: &crossbeam::channel::Sender<T>,
+    mut value: T,
+    is_current: impl Fn() -> bool,
+) -> Result<bool> {
+    loop {
+        if !is_current() {
+            return Ok(false);
+        }
+        match sender.try_send(value) {
+            Ok(()) => return Ok(true),
+            Err(crossbeam::channel::TrySendError::Full(returned)) => {
+                value = returned;
+                tokio::time::sleep(RESULT_SEND_POLL).await;
+            }
+            Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                return Err(anyhow!("transcription result channel disconnected"));
+            }
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn process_audio_input(
@@ -120,8 +144,9 @@ pub async fn process_audio_input(
             info!("audio transcription result discarded after privacy transition");
             return Ok(());
         }
-        if output_sender.send(result).is_err() {
-            break;
+        if !send_with_async_backpressure(output_sender, result, || privacy.is_current()).await? {
+            info!("audio transcription result discarded after privacy transition");
+            return Ok(());
         }
     }
     Ok(())
@@ -211,4 +236,77 @@ fn offset_diarization_segments(
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn full_result_queue_wait_is_cancellation_safe() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        sender.send(1_u8).unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(75),
+            send_with_async_backpressure(&sender, 2_u8, || true),
+        )
+        .await;
+        assert!(result.is_err(), "full queue wait should remain pending");
+
+        assert_eq!(receiver.try_recv().unwrap(), 1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn full_result_queue_delivers_after_receiver_recovers() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        sender.send(1_u8).unwrap();
+        let sender_for_task = sender.clone();
+        let send = tokio::spawn(async move {
+            send_with_async_backpressure(&sender_for_task, 2_u8, || true).await
+        });
+
+        tokio::time::sleep(RESULT_SEND_POLL * 2).await;
+        assert_eq!(receiver.try_recv().unwrap(), 1);
+        assert!(send.await.unwrap().unwrap());
+        assert_eq!(receiver.try_recv().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn stale_privacy_drops_result_while_waiting_for_queue() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        sender.send(1_u8).unwrap();
+        let current = Arc::new(AtomicBool::new(true));
+        let current_for_task = current.clone();
+        let send = tokio::spawn(async move {
+            send_with_async_backpressure(&sender, 2_u8, || current_for_task.load(Ordering::Acquire))
+                .await
+        });
+
+        tokio::time::sleep(RESULT_SEND_POLL * 2).await;
+        current.store(false, Ordering::Release);
+        assert!(!tokio::time::timeout(Duration::from_millis(100), send)
+            .await
+            .expect("stale send did not stop")
+            .unwrap()
+            .unwrap());
+        assert_eq!(receiver.try_recv().unwrap(), 1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnected_result_queue_returns_error() {
+        let (sender, receiver) = crossbeam::channel::bounded::<u8>(1);
+        drop(receiver);
+
+        let error = send_with_async_backpressure(&sender, 1_u8, || true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "transcription result channel disconnected"
+        );
+    }
 }

@@ -8,7 +8,9 @@ mod events;
 mod selected_engine;
 
 pub use config::{MeetingStreamingConfig, MeetingStreamingProvider};
-pub use controller::start_meeting_streaming_loop;
+pub use controller::{
+    start_meeting_streaming_loop, MeetingStreamingHandle, MeetingStreamingStopOutcome,
+};
 pub use events::{
     MeetingAudioFrame, MeetingAudioTap, MeetingLifecycleEvent, MeetingStreamingSessionEnded,
     MeetingStreamingSessionStarted, MeetingStreamingStatusChanged,
