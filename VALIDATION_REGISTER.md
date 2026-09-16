@@ -64,10 +64,10 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | ID | Required scope |
 |---|---|
 | SW-T01 | Extend the passed audio-disabled lock transition to audio cancellation/recovery and stale-generation suppression; retain independent OS observations. |
-| SW-T02 | Browser URL/domain exclusions and HTML password controls, with local synthetic pages and positive controls. |
+| SW-T02 | Run the prepared 25-second browser batch for URL/domain exclusions and HTML password controls with the self-contained loopback fixture and positive controls. First implement and review ownership of the entire browser process tree and exact browser firewall scope. |
 | SW-T03 | Sustained real/synthetic DRM distinction and audio recovery; repair the DRM fixture's similar command re-entry pattern before reuse. |
 | SW-T04 | App-only and App::Title exclusions, rapid transitions, enumeration failure and race stress. |
-| SW-T05 | Ordinary clipboard positive control, password/unknown-focus filtering, provider failure and clipboard restoration/fault recovery. |
+| SW-T05 | Run the prepared ordinary/password clipboard phases, then add provider-failure and unknown-focus fault cases. The prepared policy requires the recorder to stop before restoration and a verified safe clipboard terminal state. |
 | SW-T06 | Audio/meeting completeness, diarization quality, active-meeting shutdown, pending recovery and same-process restart. |
 | SW-T07 | Combined WGC/UIA/OCR+audio/STT soak, unplug/replug, monitor changes, backlog and loss diagnostics. |
 | SW-T08 | Fixed no-payload `screenpipe.exe` IPv4 TCP attempt passed blocked-versus-unscoped control. Usable external IPv6 and UDP controls plus OS drop tracing remain open. |

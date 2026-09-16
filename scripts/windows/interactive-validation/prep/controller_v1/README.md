@@ -70,6 +70,16 @@ their complete owner-action sequencing is not yet wired. Browser transport has
 strict loopback Host/path checks and no external resources; no browser/server has
 been started. A browser would need its own separately reviewed firewall scope.
 
+`browser_clipboard_sequence.py` now fixes the later browser/clipboard batch to
+five 5-second phases: allowed browser text, browser password, excluded localhost,
+ordinary synthetic clipboard copy/paste, and password-field clipboard behavior.
+Its pure acceptance policy requires per-phase OS/surface verification, positive
+controls, zero forbidden-marker deltas, recorder stop before clipboard restore,
+and verified browser/server/fixture cleanup. The live adapter is intentionally
+still disabled until it can own and verify the entire browser process tree and
+the exact browser executable has a separately reviewed firewall scope. This
+preparation neither starts a listener/browser nor reads or changes the clipboard.
+
 Native marker absence does not prove redacted image pixels or every monitor.
 Synthetic Netflix identity does not exercise actual DRM media. Device enumeration
 does not prove audio routing; persisted positive controls are mandatory. SW-V11

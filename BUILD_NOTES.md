@@ -208,3 +208,11 @@ The desktop component source and fixtures were updated, but its Vitest command
 was not run because JavaScript dependencies are not installed and this work did
 not download them. Real overload/soak and visual packaged-timeline checks remain
 outstanding.
+
+The reusable interactive controller now also contains an inert 25-second
+browser/password/clipboard sequence with five fixed phases, strict positive and
+forbidden synthetic marker deltas, and verified cleanup requirements. Its 82
+offline Python tests passed. It does not start a listener or browser and does
+not read or modify the clipboard. Live execution stays disabled until the
+controller can own and verify the browser process tree and the exact browser
+executable receives a separately reviewed firewall scope.

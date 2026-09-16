@@ -73,6 +73,21 @@ class FixtureTransportTests(unittest.TestCase):
         self.assertEqual(ft.route_browser_fixture("/x", "127.0.0.1:31480", 31480)[0], 404)
         self.assertEqual(ft.route_browser_fixture("/browser-fixture.html", "evil:31480", 31480)[0], 403)
 
+    def test_actual_browser_fixture_is_self_contained_and_uses_synthetic_markers(self):
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "browser-fixture.html"
+        body = fixture.read_bytes()
+        status, headers, served = ft.route_browser_fixture(
+            "/browser-fixture.html?runId=test&phaseId=allowed",
+            "127.0.0.1:31480", 31480, body,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(served, body)
+        self.assertIn(b"default-src 'none'", headers["Content-Security-Policy"].encode())
+        for marker in (b"public browser cedar", b"hidden coral orchard", b"public bronze hill", b"forbidden cyan orchard"):
+            self.assertIn(marker, served)
+        self.assertNotIn(b"https://", served.lower())
+        self.assertNotIn(b"http://", served.lower())
+
     def test_drm_reuses_fixed_startup_ready_for_each_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); clock = Clock()
