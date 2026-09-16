@@ -91,6 +91,24 @@ it stopped UI capture and VisionManager and logged `shutdown complete` with exit
 code 0. This exercises orderly managed shutdown, but not Ctrl+C delivery from a
 normal Windows console. No captured content was inspected.
 
+A subsequent one-time-gated synthetic privacy run used the same published
+checkout and release binary with audio disabled. Known allowed text was admitted
+before and after the privacy phases: the fresh store contained 13 frames, five
+UI events and three frame matches for the allowed marker. Password,
+excluded-foreground and excluded-background phases each produced zero matches
+for their fixed forbidden markers across frame text, transcripts and UI events.
+The run also persisted one fixed `windows_lock` notice with reason
+`wts_session_unlocked`. Health returned 200; protected search, audio-device
+status, capture-events and audio-metrics endpoints each returned 403 for missing
+and wrong bearer tokens and 200 for the correct local token. SQLite
+`quick_check` returned `ok`, the recorder logged a clean managed shutdown, and a
+separate post-run inspection found no owned recorder/fixture processes or TCP or
+UDP endpoints on the two test ports. The run made no outbound diagnostic
+attempts. This establishes only synthetic text admission for the exercised
+fixture phases; it does not establish image-pixel redaction, clipboard safety,
+other-monitor behavior, real DRM behavior, audio capture/transcription or
+firewall drop enforcement. No captured content was inspected.
+
 The Windows OCR integration target compiled and listed successfully without
 executing capture/OCR. Its external-fixture test and the two Apple OCR fixture
 tests are explicitly ignored pending operator-provided reviewed fixtures.
