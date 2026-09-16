@@ -13,7 +13,7 @@
     "publisher": "Mediar, Inc.",
     "category": "DeveloperTool",
     "shortDescription": "24/7 memory for your desktop",
-    "longDescription": "24/7 memory for your desktop. 100% local. You own your data.",
+    "longDescription": "Experimental Screenpipe fork for developers. Local processing and privacy are aims, not guarantees. No privacy, security, support or maintenance assurances from the maintainer or Digiwise.",
     "copyright": "",
     "targets": [
       "app",

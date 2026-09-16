@@ -2,7 +2,11 @@
 
 On-device AI processing for screenpipe using Apple's Foundation Models framework (macOS 26+).
 
-**Zero cloud. Zero privacy concerns. All processing happens locally on Apple Silicon.**
+> **Experimental inherited component — no privacy or security guarantees.**
+> On-device processing is a design aim, not protection against every disclosure
+> path. Neither the maintainer nor Digiwise guarantees this system/code is private,
+> secure or safe, or provides support or maintenance commitments. This macOS
+> component is outside the Windows validation scope; see the root README.
 
 ## What is this?
 
@@ -10,7 +14,9 @@ This crate provides Rust bindings to Apple's [Foundation Models](https://develop
 
 ### Why?
 
-Screenpipe records everything on your screen and audio. Processing this data with AI to extract action items, summaries, and insights currently requires sending data to cloud APIs. Foundation Models lets us do this **entirely on-device** — your data never leaves your machine.
+The upstream design uses Foundation Models for on-device processing of selected
+screen/audio context. Local inference is not proof of complete network isolation
+or confidentiality. Features and validation of this fork differ from upstream.
 
 ## Architecture
 

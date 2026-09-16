@@ -19,6 +19,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "requires operator-provided reviewed OCR fixture; see docs/DISTRIBUTION_SCOPE.md"]
     async fn test_process_ocr_task_windows() {
         // Use an absolute path that works in both local and CI environments
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

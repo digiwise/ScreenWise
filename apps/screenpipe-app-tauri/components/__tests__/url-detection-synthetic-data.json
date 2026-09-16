@@ -1,0 +1,158 @@
+{
+  "metadata": {
+    "total_frames": 9,
+    "total_ocr_blocks": 9,
+    "blocks_with_urls": 6,
+    "total_ground_truth_urls": 7,
+    "frames_with_browser_url": 6
+  },
+  "browser_urls": {
+    "1": "https://example.com",
+    "2": "https://example.org/docs",
+    "3": "http://example.net/path",
+    "4": "www.example.com",
+    "5": "https://example.com/help",
+    "9": "https://example.net/offscreen"
+  },
+  "labeled_blocks": [
+    {
+      "frame_id": 1,
+      "browser_url": "https://example.com",
+      "app_name": "SyntheticFixture",
+      "text": "https://example.com",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": [
+        "https://example.com"
+      ]
+    },
+    {
+      "frame_id": 2,
+      "browser_url": "https://example.org/docs",
+      "app_name": "SyntheticFixture",
+      "text": "Visit https://example.org/docs for documentation",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": [
+        "https://example.org/docs"
+      ]
+    },
+    {
+      "frame_id": 3,
+      "browser_url": "http://example.net/path",
+      "app_name": "SyntheticFixture",
+      "text": "http://example.net/path",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": [
+        "http://example.net/path"
+      ]
+    },
+    {
+      "frame_id": 4,
+      "browser_url": "www.example.com",
+      "app_name": "SyntheticFixture",
+      "text": "www.example.com",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": [
+        "www.example.com"
+      ]
+    },
+    {
+      "frame_id": 5,
+      "browser_url": "https://example.com/help",
+      "app_name": "SyntheticFixture",
+      "text": "https://example.com/help https://example.org/about",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": [
+        "https://example.com/help",
+        "https://example.org/about"
+      ]
+    },
+    {
+      "frame_id": 6,
+      "browser_url": null,
+      "app_name": "SyntheticFixture",
+      "text": "user@example.com",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": []
+    },
+    {
+      "frame_id": 7,
+      "browser_url": null,
+      "app_name": "SyntheticFixture",
+      "text": "Plain synthetic text without a web address",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": []
+    },
+    {
+      "frame_id": 8,
+      "browser_url": null,
+      "app_name": "SyntheticFixture",
+      "text": "test_script.rs",
+      "confidence": 1.0,
+      "bounds": {
+        "left": 0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": []
+    },
+    {
+      "frame_id": 9,
+      "browser_url": "https://example.net/offscreen",
+      "app_name": "SyntheticFixture",
+      "text": "https://example.net/offscreen",
+      "confidence": 1.0,
+      "bounds": {
+        "left": -0.1,
+        "top": 0.1,
+        "width": 0.5,
+        "height": 0.1
+      },
+      "ground_truth_urls": [
+        "https://example.net/offscreen"
+      ]
+    }
+  ]
+}

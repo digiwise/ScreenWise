@@ -5,14 +5,20 @@ description: "Compare screenpipe and Rewind.ai: an open-source, local-first, cro
 icon: "scale-balanced"
 ---
 
-screenpipe is the open source alternative to Rewind.ai. after Rewind pivoted to Limitless and discontinued its desktop app, screenpipe continues to provide 24/7 screen memory with complete privacy.
+> **Historical upstream documentation — not ScreenWise assurances.** This page
+> describes upstream features/comparisons that may be outdated or absent from this fork.
+> ScreenWise privacy and security are development aims with incomplete validation,
+> not guarantees. Neither the maintainer nor Digiwise guarantees this code or system
+> is private, secure or safe, or provides support or maintenance commitments.
+
+screenpipe is the open source alternative to Rewind.ai. after Rewind pivoted to Limitless and discontinued its desktop app, screenpipe continues to provide 24/7 screen memory with a focus on local processing.
 
 ## comparison
 
 | feature | screenpipe | rewind.ai |
 |---------|-----------|-----------|
 | **open source** | yes (MIT) | no |
-| **data location** | 100% local | local |
+| **data location** | local by design | local |
 | **platforms** | macOS, Windows, Linux | macOS only |
 | **status** | active | discontinued (pivoted to Limitless) |
 | **extensibility** | plugins (pipes) | limited |
@@ -40,7 +46,7 @@ build custom integrations with the REST API and MCP server. integrate with any s
 ### privacy-first
 
 - all processing happens locally
-- use local LLMs (Ollama) for complete privacy
+- use local LLMs (Ollama) for a focus on local processing
 - no telemetry or data collection
 - you can audit the source code
 

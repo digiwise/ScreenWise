@@ -1,5 +1,9 @@
 # Vision
 
+> Historical upstream product document. ScreenWise's current Windows-first,
+> local-only scope and privacy requirements are defined in README.md and AGENTS.md.
+> This document is not authorization to add hosted services or autonomous capture.
+
 > "Civilization advances by extending the number of important operations which we can perform without thinking about them." — Alfred North Whitehead
 
 ## What screenpipe is

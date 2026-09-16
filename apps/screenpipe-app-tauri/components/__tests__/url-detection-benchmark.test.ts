@@ -1,8 +1,9 @@
 /**
  * URL Detection Benchmark
  *
- * Measures accuracy of URL detection from real screenpipe OCR data.
- * Uses 200 random frames from the local database with ground-truth labels.
+ * Checks URL detection with a small, hand-authored synthetic fixture.
+ * No captured OCR or local database contents are used. Reported metrics describe
+ * this fixture only and are not a real-world accuracy or privacy benchmark.
  *
  * Metrics:
  *   - Precision: of URLs we detect, how many are real URLs?
@@ -17,7 +18,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { isUrl, extractUrlsFromText, normalizeUrl } from "../text-overlay";
-import benchmarkData from "./url-detection-benchmark-data.json";
+import benchmarkData from "./url-detection-synthetic-data.json";
 
 // Types for the benchmark data
 interface LabeledBlock {

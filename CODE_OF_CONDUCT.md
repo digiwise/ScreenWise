@@ -59,8 +59,11 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-louis@screenpi.pe.
+reported only through a private moderation channel if one is explicitly offered
+for this repository. None is currently configured; do not post sensitive reports
+publicly or send them to Digiwise or upstream Screenpipe on this fork's behalf.
+This developer-only repository is not supported in any way by its owner or
+Digiwise, and does not promise a response or moderation service.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

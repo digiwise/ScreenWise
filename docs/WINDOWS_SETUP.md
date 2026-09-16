@@ -1,0 +1,143 @@
+# Windows setup
+
+> [!WARNING]
+> **Experimental code: no privacy or security guarantees.** Setup success does
+> not establish that recording, exclusions, redaction or network controls are
+> safe for confidential use. Use synthetic or non-sensitive data. Read the
+> prominent [README notice](../README.md) and [known limitations](../VALIDATION_REGISTER.md).
+
+This is a developer build guide, not an end-user installation or support service.
+Neither the repository owner nor Digiwise provides support for this project in
+any way. Developers must assess and maintain their own builds and test environments.
+
+ScreenWise can be built from this repository alone. The checkout directory may
+have any name; the executable and existing package identifiers remain `screenpipe`
+for compatibility. Neither a parent ScreenWise workspace nor Litepipe is required.
+
+## Prerequisites
+
+This is a source distribution. Models, inherited recorded test fixtures and
+compiled helpers are not bundled. See [distribution scope](DISTRIBUTION_SCOPE.md)
+before acquiring or redistributing artifacts. Some manual tests and benchmarks
+require separately supplied fixtures and cannot run from a plain clone.
+
+Provision tools explicitly before building. The validated x64 combination was
+Rust/Cargo 1.93.1, Visual Studio 2026 Developer PowerShell 18.9.2, MSVC 14.51,
+Windows SDK 10.0.26100.0, CMake 3.31.8 and Ninja 1.13.2. Use the pinned
+rust-toolchain.toml; other Visual Studio versions have not been revalidated here.
+CMake 4.x failed with some bundled native scripts. CMake 3.31 does not know the
+Visual Studio 2026 generator, so select Ninja explicitly.
+
+Required native inputs:
+
+| Input | Layout / requirement |
+|---|---|
+| OpenBLAS x64 | Root contains `include/cblas.h`, `lib/libopenblas.lib`, `bin/libopenblas.dll` |
+| ONNX Runtime 1.22.0 x64 | Root contains `lib/onnxruntime.dll`; the audio build verifies the pinned DLL checksum |
+| FFmpeg and FFprobe | Matching installed pair on PATH or beside screenpipe.exe; no runtime download fallback |
+| Desktop tools (optional) | Bun/Node and the locked frontend packages; provision required sidecars explicitly |
+
+The accepted x64 ONNX DLL SHA-256 is
+`579B636403983254346A5C1D80BD28F1519CD1E284CD204F8D4FF41F8D711559`.
+The OpenBLAS DLL used in validation had SHA-256
+`B554C45AF7B39154C561FB4879FD784D4928462E9A70335AADD9B1DE3C75E9E2`.
+Windows ARM64 requires separately audited artifacts and an explicit
+`SCREENPIPE_ORT_DLL_SHA256`; x64 results do not validate ARM64.
+
+Open the Developer PowerShell supplied by your Visual Studio installation,
+change to the repository root, and set paths to your provisioned directories:
+
+```powershell
+$repoRoot = (Get-Location).Path
+$env:OPENBLAS_PATH = 'C:\Dependencies\OpenBLAS\win64' # choose your location
+$env:ORT_LIB_LOCATION = 'C:\Dependencies\onnxruntime-win-x64-1.22.0'
+$env:CMAKE_GENERATOR = 'Ninja'
+$env:PATH = "$(Join-Path $env:OPENBLAS_PATH 'bin');$env:PATH"
+cargo build --release --locked
+```
+
+Cargo may acquire missing locked dependencies during an ordinary build. To
+require a network-free build after explicit dependency provisioning, add
+`--offline`. Neither flag supplies the separately provisioned native artifacts.
+The build stages ONNX Runtime beside the executable. Copy the provisioned
+OpenBLAS DLL beside it for distribution, or retain its `bin` directory on PATH.
+Do not download an arbitrary replacement DLL to suppress a load error.
+
+GnuWin32/unzip is only needed by tooling that actually invokes it; it is not a
+reason to run old bootstrap scripts or installers. Check applicable tool scripts
+before installing optional dependencies. Do not run broad `clean` scripts: some
+inherited commands remove provisioned sidecars and unrelated build inputs.
+
+## Native tests
+
+For tests that link libsamplerate, use Ninja Multi-Config. If that package was
+previously built with the wrong generator, `cargo clean -p libsamplerate-sys`
+is the scoped cleanup; do not clean the whole workspace to fix this mismatch.
+
+```powershell
+$env:CMAKE_GENERATOR = 'Ninja Multi-Config'
+$env:PATH = "$(Join-Path $env:OPENBLAS_PATH 'bin');$env:PATH"
+cargo test -p screenpipe-events --lib --locked --offline
+cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' test `
+  -p screenpipe-app `
+  --manifest-path apps\screenpipe-app-tauri\src-tauri\Cargo.toml `
+  --locked --offline tauri_bindings_are_current -- --nocapture
+```
+
+The root workspace already provides the knf-rs-sys CRT override; the desktop is
+a separate workspace and needs the transient setting. Missing runtime PATH can
+produce STATUS_DLL_NOT_FOUND even after successful linking. Changing to release
+tests does not solve the single-config samplerate layout mismatch.
+
+## Local models and recording
+
+Model acquisition is explicit and separate from recording. Runtime code verifies
+supported files and fails locally rather than downloading missing artifacts.
+For Parakeet, the manifest, immutable revision and expected file hashes are in
+[`provisioning.rs`](../crates/screenpipe-audio/src/models/provisioning.rs).
+On Windows its model directory is
+`%LOCALAPPDATA%\screenpipe\audio-models\parakeet-tdt-0.6b-v3`.
+Silero VAD is under `%LOCALAPPDATA%\screenpipe\vad`; segmentation and speaker
+models are under `%LOCALAPPDATA%\screenpipe\models`. Consult their source
+manifests for the accepted filenames/checksums. Redaction provisioning is
+documented by [`screenpipe-redact`](../crates/screenpipe-redact/src/provisioning.rs).
+Record each model's source revision, checksum and applicable license; a checksum
+alone does not establish redistribution permission. Do not commit model caches.
+
+Recording is an explicit action and may capture sensitive data. Use `--help`
+to choose devices, local engines and privacy settings before starting. Default
+data is `%USERPROFILE%\.screenpipe`; use a fresh `--data-dir` for tests.
+The matching local API token is retrieved with:
+
+```powershell
+.\target\release\screenpipe.exe auth token --data-dir '<your-test-directory>'
+```
+
+Keep that output private. Protected API requests require the bearer token even
+on localhost. `/health` is startup-safe; the normal listener is `127.0.0.1:3030`.
+Never disable authentication to repair a test or model configuration problem.
+
+## Desktop packaging
+
+Desktop build dependencies and native sidecars must be provisioned separately.
+From `apps/screenpipe-app-tauri`, with Developer PowerShell and the variables above,
+the validated unsigned NSIS command used:
+
+```powershell
+$env:CMAKE_GENERATOR = 'Ninja Multi-Config'
+$env:CMAKE_CONFIGURATION_TYPES = 'Debug;Release;RelWithDebInfo;MinSizeRel'
+node node_modules\@tauri-apps\cli\tauri.js build `
+  --config src-tauri\tauri.prod.conf.json `
+  --config src-tauri\tauri.windows.conf.json `
+  --bundles nsis --no-sign --ci -- --locked --offline
+```
+
+The Windows override must follow the production config. Tauri may acquire its
+packaging tools separately; Cargo's `--offline` does not control that acquisition.
+Provision those caches beforehand for a fully disconnected packaging operation.
+The package stages OpenBLAS, ONNX Runtime and the provisioned Bun sidecar. FFmpeg
+remains an external prerequisite. No signed public release is claimed by the
+historical unsigned packaging test.
+
+See [validation status](../VALIDATION_REGISTER.md) and the
+[interactive test guide](../scripts/windows/interactive-validation/README.md).

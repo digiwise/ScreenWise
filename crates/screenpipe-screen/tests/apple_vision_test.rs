@@ -7,6 +7,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    #[ignore = "requires operator-provided reviewed OCR fixture; see docs/DISTRIBUTION_SCOPE.md"]
     async fn test_apple_native_ocr() {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("tests");
@@ -37,6 +38,7 @@ mod tests {
     }
     // # 中文测试
     #[tokio::test]
+    #[ignore = "requires operator-provided reviewed OCR fixture; see docs/DISTRIBUTION_SCOPE.md"]
     async fn test_apple_native_ocr_chinese() {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("tests");

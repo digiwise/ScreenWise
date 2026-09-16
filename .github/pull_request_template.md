@@ -11,15 +11,20 @@ assignees: ''
 
 brief description of the changes in this pr.
 
+This is an unsupported developer-only project. Neither the repository owner nor
+Digiwise promises review, support, maintenance or a release.
+
 related issue: #
 
 ## before
 
-a screen recording of the app/cli before this change
+Describe the previous behavior using a synthetic example. Do not upload private
+recordings, transcripts, databases, bearer tokens or unreviewed logs.
 
 ## after
 
-a screen recording of the app/cli after this change
+Describe the resulting behavior and relevant verification. Synthetic, non-private
+illustrations are optional; a screen recording is not required.
 
 ## how to test
 

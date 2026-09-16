@@ -5,9 +5,15 @@ description: "Redact personal information locally with deterministic patterns an
 icon: "shield-halved"
 ---
 
-ScreenWise can redact personal information from captured text before returning
-search results to local clients. Redaction runs on the same machine as the
-recorder and never sends captured text to a hosted service.
+> **EXPERIMENTAL — NO PRIVACY OR SECURITY GUARANTEES.** Redaction can miss
+> sensitive information. Neither the maintainer nor Digiwise guarantees the
+> privacy, security or safety of this system or its code, or provides support
+> or maintenance commitments. Use synthetic or non-sensitive data.
+
+ScreenWise attempts to redact personal information from captured text before
+returning search results to local clients. The intended redaction path runs on
+the recorder's machine without a hosted service. This is an implementation aim,
+not proof against disclosure through every path or dependency.
 
 For the complete data-flow model, see [privacy data flow](/privacy-data-flow).
 
