@@ -10,9 +10,12 @@ The Windows x64 development baseline used Rust/Cargo 1.93.1, Visual Studio 2026
 Developer PowerShell 18.9.2, MSVC 14.51, Windows SDK 10.0.26100.0, CMake 3.31.8
 and Ninja 1.13.2. Other configurations are not implied to pass.
 
-- Release builds use Ninja; native tests linking libsamplerate need Ninja
-  Multi-Config. The desktop's separate Cargo workspace needs the documented
-  transient knf-rs-sys debug CRT override.
+- Cold Windows release builds and native tests linking libsamplerate use Ninja
+  Multi-Config with `MinSizeRel` included in `CMAKE_CONFIGURATION_TYPES`.
+  Single-config Ninja can build `samplerate.lib` successfully but place it
+  outside the configuration-specific path used by `libsamplerate-sys`. The
+  desktop's separate Cargo workspace needs the documented transient knf-rs-sys
+  debug CRT override.
 - OpenBLAS headers/libraries and its runtime DLL are separate requirements.
   Put its bin directory on runtime PATH or bundle the DLL beside the executable.
 - Explicitly provision ONNX Runtime 1.22.0. The audio build verifies and stages
@@ -63,6 +66,30 @@ clone's cold build, packaging and omitted-fixture tests are not claimed to pass.
 
 Source review identified the pre-existing audio privacy/persistence race recorded
 as SW-V19. This checkpoint preserves incomplete validation, not privacy certification.
+
+## Published-checkout build and initial run (2026-09-16)
+
+A clean `screenwise-public` target built offline from the published source at
+`1b22c5b8443659142bab84d50f6d89829b5c47a4` using explicitly provisioned native
+inputs. The first attempt exposed the single-config libsamplerate output layout
+above. After the scoped dependency cleanup, Ninja Multi-Config with `MinSizeRel`
+enabled completed the optimized build in 6m29s. `screenpipe --help`, `screenpipe
+doctor`, Rust formatting, `git diff --check`, and nine release-profile
+event-pressure tests passed. Doctor confirmed screen-recording, microphone and
+accessibility permissions, FFmpeg discovery and port availability. The staged
+ONNX Runtime and OpenBLAS DLLs matched the documented hashes.
+
+A fresh audio-disabled initial run started the authenticated API, discovered all
+three monitors, created its SQLite store and listened only on `127.0.0.1:3030`.
+Health returned 200; protected search returned 403 without or with a wrong token,
+and 200 with the data-directory token. The DRM gate activated immediately and
+safely stopped vision/UI acquisition, so this run does not establish frame, UIA
+or OCR writes from the published checkout. The controlling PTY did not deliver a
+Windows console-control event, so that first verified test PID was stopped
+explicitly. A second fresh run used the recorder's watched-process shutdown path;
+it stopped UI capture and VisionManager and logged `shutdown complete` with exit
+code 0. This exercises orderly managed shutdown, but not Ctrl+C delivery from a
+normal Windows console. No captured content was inspected.
 
 The Windows OCR integration target compiled and listed successfully without
 executing capture/OCR. Its external-fixture test and the two Apple OCR fixture

@@ -63,9 +63,12 @@ permission to inspect captured data. Public documents contain sanitized summarie
   not the obsolete claim that they still equal the upstream baseline.
 - Use Visual Studio Developer PowerShell and the native environment described in
   docs/WINDOWS_SETUP.md. Never hard-code one developer's checkout or runtime paths.
-- Production builds use `CMAKE_GENERATOR=Ninja`. Native tests linking
-  libsamplerate use `Ninja Multi-Config`. The separate desktop workspace needs
-  the documented transient knf-rs-sys CRT override for debug tests.
+- On Windows, cold release builds and native tests that link libsamplerate use
+  `Ninja Multi-Config`. Include `MinSizeRel` in `CMAKE_CONFIGURATION_TYPES`:
+  the Rust release profile maps to that CMake configuration. Single-config
+  Ninja places `samplerate.lib` in a directory the dependency does not search.
+  The separate desktop workspace needs the documented transient knf-rs-sys
+  debug CRT override.
 - Put the provisioned OpenBLAS `bin` on the test/runtime PATH. OPENBLAS_PATH alone
   is a header/library location. Provision ONNX Runtime explicitly; do not use the
   incompatible Windows system DLL as a fallback.

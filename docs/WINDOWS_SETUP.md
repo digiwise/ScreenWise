@@ -26,7 +26,9 @@ Rust/Cargo 1.93.1, Visual Studio 2026 Developer PowerShell 18.9.2, MSVC 14.51,
 Windows SDK 10.0.26100.0, CMake 3.31.8 and Ninja 1.13.2. Use the pinned
 rust-toolchain.toml; other Visual Studio versions have not been revalidated here.
 CMake 4.x failed with some bundled native scripts. CMake 3.31 does not know the
-Visual Studio 2026 generator, so select Ninja explicitly.
+Visual Studio 2026 generator, so select Ninja Multi-Config explicitly. Include
+`MinSizeRel`: the Rust release profile maps to that CMake configuration, and
+`libsamplerate-sys` searches its configuration-specific output directory.
 
 Required native inputs:
 
@@ -51,7 +53,8 @@ change to the repository root, and set paths to your provisioned directories:
 $repoRoot = (Get-Location).Path
 $env:OPENBLAS_PATH = 'C:\Dependencies\OpenBLAS\win64' # choose your location
 $env:ORT_LIB_LOCATION = 'C:\Dependencies\onnxruntime-win-x64-1.22.0'
-$env:CMAKE_GENERATOR = 'Ninja'
+$env:CMAKE_GENERATOR = 'Ninja Multi-Config'
+$env:CMAKE_CONFIGURATION_TYPES = 'Debug;Release;RelWithDebInfo;MinSizeRel'
 $env:PATH = "$(Join-Path $env:OPENBLAS_PATH 'bin');$env:PATH"
 cargo build --release --locked
 ```
@@ -70,12 +73,16 @@ inherited commands remove provisioned sidecars and unrelated build inputs.
 
 ## Native tests
 
-For tests that link libsamplerate, use Ninja Multi-Config. If that package was
-previously built with the wrong generator, `cargo clean -p libsamplerate-sys`
-is the scoped cleanup; do not clean the whole workspace to fix this mismatch.
+For builds and tests that link libsamplerate, use Ninja Multi-Config. If that
+package was previously built with the wrong generator, use the exact package
+spec `cargo clean -p 'libsamplerate-sys@0.1.12' --release` for release output
+(omit `--release` for debug output); do not clean the whole workspace. The
+unqualified cleanup did not remove the cached release artifacts in the fresh
+published checkout.
 
 ```powershell
 $env:CMAKE_GENERATOR = 'Ninja Multi-Config'
+$env:CMAKE_CONFIGURATION_TYPES = 'Debug;Release;RelWithDebInfo;MinSizeRel'
 $env:PATH = "$(Join-Path $env:OPENBLAS_PATH 'bin');$env:PATH"
 cargo test -p screenpipe-events --lib --locked --offline
 cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' test `
