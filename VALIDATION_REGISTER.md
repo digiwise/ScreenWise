@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-09-16. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-09-18. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -23,7 +23,7 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 | Lock/unlock | Audio-disabled real transition passed: 11.890 s confirmed locked plateau, frame count 7->7 and UIA count 11->11; synthetic before/after capture/search passed | Included-window gate remained active; not isolated lock-gate or every-pixel proof |
 | Safe lock notices | Fixed unlocked/desktop-unavailable/locked reasons persisted through timeline API and local logs; clean stop with no owned processes remaining | Packaged desktop timeline was not visually exercised in this run |
 | OS firewall | Exact recorder/media paths had outbound block rules; the fixed no-payload `screenpipe.exe` IPv4 TCP diagnostic was denied while an unscoped control handshake succeeded; helper IPv4/IPv6 localhost access worked | External IPv6 route unavailable; UDP/drop-trace coverage and closeout incomplete |
-| Published checkout | Clean offline release build, CLI help/doctor and nine event tests passed; fresh gated runs wrote 15 distinct snapshots, three accessibility-tree frames and Windows Native OCR text, then persisted and found both selected-USB-output audio controls; SQLite checks and main capture/audio shutdowns passed | Image pixels, clipboard, real DRM, full audio accuracy and every-device behavior were not exercised; the separate vision-disabled OCR restart required forced shutdown after its watched-process signal |
+| Published checkout | Clean offline release build, CLI help/doctor and nine event tests passed; fresh gated runs wrote 15 distinct snapshots, three accessibility-tree frames and Windows Native OCR text, persisted and found both selected-USB-output audio controls, and passed a scoped five-phase Chrome/password/excluded-host/clipboard run; SQLite checks and main capture/audio shutdowns passed | Image-pixel redaction, arbitrary browser/clipboard providers, real DRM, full audio accuracy and every-device behavior were not exercised; the separate vision-disabled OCR restart required forced shutdown after its watched-process signal |
 
 The final lock result's SHA-256 was
 `A82FA50F5DD29402319997CEB75EAD9E70DC6FDC03CF663F86907B2CB1AE0F89`.
@@ -38,12 +38,12 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 
 | ID | Current state / next check |
 |---|---|
-| SW-V01 | Native foreground DRM policy repaired in source; sustained DRM/audio recovery, background/other-monitor and browser transitions remain incomplete. No protected playback bypass. |
+| SW-V01 | Native foreground DRM policy repaired in source; scoped synthetic Chrome allowed/password/excluded-host transitions passed. Sustained real DRM/audio recovery and broader background/other-monitor transitions remain incomplete. No protected playback bypass. |
 | SW-V02 | Explicit audio selection repaired; selected-output live regression passed. Broader fresh/persisted microphone-only, defaults, disable-audio and device changes still need coverage. |
 | SW-V03 | Two unexpected WGC acquisition failures observed. Safe placeholders were retained; possible secure-desktop/focus confounding is not an established cause. Reproduce with controlled OS state. |
 | SW-V04 | Microphone transcript rows/phrase hits passed, complete passage accuracy and retention did not. Distinguish ASR substitutions, VAD rejection and actual loss. |
 | SW-V05 | Earlier DRM audio tests lacked positive before/after controls; they cannot establish suppression. Retry only with working controls. |
-| SW-V06 | Live clipboard privacy evidence remains missing. The prepared fixture uses only fixed synthetic ordinary/secret values, keeps prior clipboard data opaque, and restores only after verified recorder stop; it has not yet been exercised against the current build. |
+| SW-V06 | Scoped live clipboard evidence passed: an ordinary fixed marker produced three positive rows, the password-phase secret marker produced zero rows, three clipboard UI events were present, and opaque clipboard restoration followed verified recorder stop. Arbitrary providers, applications, formats and race timing remain open. |
 | SW-V07 | Earlier audio-gap/UIA-drop/pending-status warnings need load and no-speech lifecycle diagnosis. They do not establish a broken microphone. |
 | SW-V08 | Fixture focus/equality limitations addressed with OS identity and stimulus acknowledgements; continue using these guards. |
 | SW-V09 | Windows locked-state detection repaired and already-locked regression passed; later audio-disabled transition passed. Audio recovery remains open. |
@@ -64,10 +64,10 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | ID | Required scope |
 |---|---|
 | SW-T01 | Extend the passed audio-disabled lock transition to audio cancellation/recovery and stale-generation suppression; retain independent OS observations. |
-| SW-T02 | Run the wired 25-second browser batch for URL/domain exclusions and HTML password controls. Process identity, focus, loopback serving and fail-closed cleanup are implemented and mock-tested; the exact Chrome outbound rule still must be installed and pass preflight. |
+| SW-T02 | **Scoped complete:** the exact Chrome rule and 74-check preflight passed; fixed allowed browser controls persisted while the browser-password and excluded-host markers remained at zero. Exact-path Chrome inventory and cleanup passed. This does not establish universal browser secrecy or actual firewall packet drops. |
 | SW-T03 | Sustained real/synthetic DRM distinction and audio recovery; repair the DRM fixture's similar command re-entry pattern before reuse. |
 | SW-T04 | App-only and App::Title exclusions, rapid transitions, enumeration failure and race stress. |
-| SW-T05 | Run the wired ordinary/password clipboard phases. Provider/focus failures are fail-closed in mocked checks; live evidence still must confirm positive ordinary capture, zero synthetic-secret persistence, recorder stop before restoration and a safe clipboard terminal state. |
+| SW-T05 | **Scoped complete:** fixed ordinary clipboard text persisted, the password-phase secret marker remained at zero, recorder stop preceded opaque clipboard restoration, and cleanup passed. Live provider-failure, unknown-focus and non-text-format faults remain untested beyond deterministic checks. |
 | SW-T06 | Audio/meeting completeness, diarization quality, active-meeting shutdown, pending recovery and same-process restart. |
 | SW-T07 | Combined WGC/UIA/OCR+audio/STT soak, unplug/replug, monitor changes, backlog and loss diagnostics. |
 | SW-T08 | Fixed no-payload `screenpipe.exe` IPv4 TCP attempt passed blocked-versus-unscoped control. Usable external IPv6 and UDP controls plus OS drop tracing remain open. |
@@ -87,3 +87,36 @@ The three original local firewall rules remain installed pending owner dispositi
 this public summary deliberately does not provide machine-specific removal commands.
 A newly configured harness must pass its offline checks and a new authorized live
 run; historical passes do not validate its portability changes.
+
+## Scoped browser and clipboard validation, 2026-09-18
+
+The first gated attempt ended incomplete before any phase with
+`process_inventory_unavailable`. Chrome had exited between a Toolhelp snapshot
+and its identity query, and child processes briefly outlived the root process.
+Cleanup still stopped the recorder and fixture, restored the clipboard, closed
+the loopback server and reached later exact-path process quiescence. The harness
+was repaired to retry only that bounded exit race while retaining fail-closed
+behavior for persistent unknown identities, and to allow exact-path Chrome
+children a bounded drain after root shutdown. The complete controller suite then
+passed 105 tests and the live preflight passed all 74 checks.
+
+The fresh retry completed all five verified phases. Fixed public browser markers
+had positive deltas of one each, the ordinary clipboard marker had a positive
+delta of three, and the allowed clipboard control had a positive delta of one.
+The browser-password, excluded-host and password-clipboard secret markers all
+remained at zero in the final aggregate query. The store contained 12 frames and
+eight UI events (two app switches, three clipboard events, one privacy notice and
+two window-focus events); `PRAGMA quick_check` returned `ok`. Missing, wrong and
+valid bearer requests returned 403/403/200 for each protected endpoint, `/health`
+returned 200, and the recorder reported no persistence degradation.
+
+Cleanup passed for the recorder, clipboard, exact-path browser process tree,
+loopback fixture server, focus release, native fixture and final process
+quiescence. A separate post-run inventory found zero scoped processes. Network
+inspection found no listening or established TCP connections and no UDP endpoint
+for the scoped paths; 45 TCP entries were only `TIME_WAIT`. The exact Chrome
+outbound block rule was active with the reviewed non-loopback IPv4/IPv6 scope.
+The batch made no deliberate browser-originated outbound attempt and collected no
+packet-drop evidence (`outbound_attempt_samples` was zero), so this result must
+not be described as proof that Chrome was offline. Only aggregate counts for
+fixed synthetic markers were inspected; captured contents were not read.

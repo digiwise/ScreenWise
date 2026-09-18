@@ -64,7 +64,7 @@
     {
       "archive_path": "prep/controller_v1/README.md",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/README.md",
-      "sha256": "99BB0A899946E1BFB97F825F10E2885021506570B785C39BCD3BCAFFE862D689",
+      "sha256": "D8D5B3B81C82BD550ECDCB7168044F9A952829F115B52523C050AF4499E6EE35",
       "original_sha256": "53A4176BCD551E91EA1BF3587B9484C4C81CF2441CAC460B7E2D2805474473B5"
     },
     {
@@ -100,13 +100,13 @@
     {
       "archive_path": "prep/controller_v1/test_windows_controls.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_windows_controls.py",
-      "sha256": "5703B35AD2D247C9B7F8C89822F37826D6047CBB1AC97F44914D392D3C77AEE2",
+      "sha256": "E677DE107985D8DE0F701011EA41D76AE34201B55683D5128F4770129D48A143",
       "original_sha256": "5703B35AD2D247C9B7F8C89822F37826D6047CBB1AC97F44914D392D3C77AEE2"
     },
     {
       "archive_path": "prep/controller_v1/windows_controls.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/windows_controls.py",
-      "sha256": "E2E6B31BB7796DD1F2A40949C3D6C69270704DC4D6CB2894BFD0BB6AC5DAA396",
+      "sha256": "4D83B8EAEC117073098D0162F7AD6349F3A4197875A37C579652F5699C6EC76A",
       "original_sha256": "E2E6B31BB7796DD1F2A40949C3D6C69270704DC4D6CB2894BFD0BB6AC5DAA396"
     },
     {
@@ -280,7 +280,7 @@
     {
       "archive_path": "prep/controller_v1/browser_runtime.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/browser_runtime.py",
-      "sha256": "7AE4F933BB92C90C315A29A4B04A92D01F1E95EB8FC44205D98633BC7C6ABB67",
+      "sha256": "F24179C2A18DFA0C64A645AAFAEE135DF5BC88F627019B6E3937CE9CB0D100F4",
       "original_sha256": "7AE4F933BB92C90C315A29A4B04A92D01F1E95EB8FC44205D98633BC7C6ABB67"
     },
     {
@@ -292,7 +292,7 @@
     {
       "archive_path": "prep/controller_v1/test_browser_runtime.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_browser_runtime.py",
-      "sha256": "B75A0A3C262A67C16839AC9F797C5078A5C3DEE80D53C2D5E994962FDF7C1B94",
+      "sha256": "B61B99A5B180D19B4BFD20B3EE44ED1712A86C54001D422EF3B199349E3AF331",
       "original_sha256": "B75A0A3C262A67C16839AC9F797C5078A5C3DEE80D53C2D5E994962FDF7C1B94"
     }
   ]

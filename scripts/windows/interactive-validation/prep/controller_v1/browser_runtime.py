@@ -121,6 +121,14 @@ def _handler_factory(browser_html: bytes):
         raise BrowserRuntimeError("browser_fixture_invalid")
 
     class BrowserFixtureHandler(BaseHTTPRequestHandler):
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionResetError, BrokenPipeError):
+                # Chrome may reset an idle keep-alive connection while a phase
+                # closes. This carries no request data and is not a test fault.
+                return
+
         def do_GET(self):  # noqa: N802
             port = int(self.server.server_address[1])
             status, headers, body = route_browser_fixture(
@@ -344,34 +352,28 @@ class OwnedChrome:
         return int(self.process.pid)
 
     def stop(self, timeout: float = 10.0) -> dict[str, object]:
-        """Stop the identity-guarded root and report any remaining exact-path processes."""
+        """Stop the root and allow its exact-path children a bounded drain."""
         result = self.process.graceful_stop(timeout=timeout)
         if result.get("stopped") is not True:
             return result
-        remaining = self.inventory([self.executable_path])
-        if not isinstance(remaining, Mapping):
-            return {
-                "stopped": False,
-                "forced": bool(result.get("forced")),
-                "exit_code": result.get("exit_code"),
-                "error_code": "browser_inventory_failed_after_stop",
-            }
-        if remaining.get("error_code") is not None:
-            return {
-                "stopped": False,
-                "forced": bool(result.get("forced")),
-                "exit_code": result.get("exit_code"),
-                "error_code": "browser_inventory_failed_after_stop",
-            }
-        entries = remaining.get("processes")
-        if entries:
-            return {
-                "stopped": False,
-                "forced": bool(result.get("forced")),
-                "exit_code": result.get("exit_code"),
-                "error_code": "owned_browser_children_remain",
-            }
-        return result
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        error_code = "owned_browser_children_remain"
+        while True:
+            remaining = self.inventory([self.executable_path])
+            if not isinstance(remaining, Mapping) or remaining.get("error_code") is not None:
+                error_code = "browser_inventory_failed_after_stop"
+            elif not remaining.get("processes"):
+                return result
+            else:
+                error_code = "owned_browser_children_remain"
+            if time.monotonic() >= deadline:
+                return {
+                    "stopped": False,
+                    "forced": bool(result.get("forced")),
+                    "exit_code": result.get("exit_code"),
+                    "error_code": error_code,
+                }
+            time.sleep(0.05)
 
 
 def _normalize_process_path(path: os.PathLike[str] | str) -> str:

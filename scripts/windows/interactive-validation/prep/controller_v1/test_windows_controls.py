@@ -317,11 +317,28 @@ class StartAndInventoryTests(unittest.TestCase):
             (4321, "fixture.exe"),
         ]
         api.process_identity.return_value = None
-        with patch.object(controls, "_api", return_value=api):
+        with patch.object(controls, "_api", return_value=api), patch.object(
+            controls.time, "sleep"
+        ):
             result = controls.inventory_known_executables([r"C:\Tools\fixture.exe"])
 
         self.assertEqual([], result["processes"])
         self.assertEqual("candidate_identity_unavailable", result["error_code"])
+        self.assertEqual(5, api.process_identity.call_count)
+
+    def test_matching_process_that_exits_during_identity_query_is_retried(self):
+        api = Mock()
+        api.process_entries.side_effect = [
+            [(4321, "fixture.exe")],
+            [],
+        ]
+        api.process_identity.return_value = None
+        with patch.object(controls, "_api", return_value=api), patch.object(
+            controls.time, "sleep"
+        ):
+            result = controls.inventory_known_executables([r"C:\Tools\fixture.exe"])
+
+        self.assertEqual({"processes": [], "error_code": None}, result)
         api.process_identity.assert_called_once_with(4321)
 
     def test_inaccessible_unrelated_process_does_not_fail_inventory(self):

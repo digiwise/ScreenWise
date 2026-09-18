@@ -215,10 +215,31 @@ class ChromeLaunchTests(unittest.TestCase):
                 "http://127.0.0.1:31480/browser-fixture.html",
                 inventory=inventory_for([{"pid": 999}]),
             )
-            result = browser.stop()
+            result = browser.stop(timeout=0)
             self.assertFalse(result["stopped"])
             self.assertEqual("owned_browser_children_remain", result["error_code"])
             self.assertEqual(1, owned.graceful_calls)
+
+    def test_stop_waits_for_exact_path_children_to_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            exe, profile, _stdout, _stderr = self.make_paths(root)
+            owned = FakeOwned()
+            inventory = Mock(side_effect=[
+                {"processes": [{"pid": 999}], "error_code": None},
+                {"processes": [], "error_code": None},
+            ])
+            browser = runtime.OwnedChrome(
+                owned, str(exe.resolve()), profile,
+                "http://127.0.0.1:31480/browser-fixture.html",
+                inventory=inventory,
+            )
+            with patch.object(runtime.time, "monotonic", side_effect=[0.0, 0.0]), patch.object(
+                runtime.time, "sleep"
+            ):
+                result = browser.stop(timeout=1)
+            self.assertTrue(result["stopped"])
+            self.assertEqual(2, inventory.call_count)
 
 
 class BrowserFixtureRuntimeTests(unittest.TestCase):

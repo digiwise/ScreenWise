@@ -69,11 +69,15 @@ batches instead of recording through an unverified state. No fullscreen UI is us
 
 Real Win+L/unlock, microphone reading and UAC sequences remain separately planned.
 `live.py` explicitly refuses those modes. The browser URL/password/clipboard
-sequence is wired behind the same fresh owner gate, but has not been run. Its
-preflight requires the exact configured Chrome executable and SHA-256, no existing
-process using that executable, and a separately reviewed outbound firewall rule.
-The fixture server binds only to `127.0.0.1`, permits exact loopback Host values,
-and serves a self-contained page with no external resources.
+sequence completed a scoped live run on 2026-09-18 after its exact configured
+Chrome executable, SHA-256, process inventory and separately reviewed outbound
+firewall rule passed preflight. The first attempt ended before its phases when a
+Chrome process exited between snapshot and identity lookup. A bounded fresh-
+snapshot retry now handles that narrow exit race while persistent unknown
+identities still fail closed. Browser cleanup also allows exact-path children a
+bounded drain after root shutdown. The fixture server binds only to `127.0.0.1`,
+permits exact loopback Host values, and serves a self-contained page with no
+external resources.
 
 `browser_clipboard_sequence.py` now fixes the later browser/clipboard batch to
 five 5-second phases: allowed browser text, browser password, excluded localhost,
@@ -86,7 +90,13 @@ identity. Remaining Chrome children, focus loss, a non-loopback endpoint, or
 unverified cleanup makes the run incomplete or failed. Preparation and mock tests
 do not start the listener/browser or access the clipboard.
 
-Native marker absence does not prove redacted image pixels or every monitor.
+The scoped browser run found its fixed allowed markers, kept all fixed forbidden
+browser/password/clipboard markers at zero, restored the opaque prior clipboard
+after verified recorder stop, and reached exact-path process quiescence. It made
+no deliberate browser-originated outbound connection attempt and collected no
+packet-drop evidence, so the firewall precondition is not proof of browser
+offline behavior. Native marker absence does not prove redacted image pixels or
+every monitor.
 Synthetic Netflix identity does not exercise actual DRM media. Device enumeration
 does not prove audio routing; persisted positive controls are mandatory. SW-V11
 partial-buffer/in-flight shutdown loss remains unresolved, so audio checks require

@@ -571,23 +571,35 @@ def inspect_network_endpoints(scoped_pids: Iterable[int]) -> dict[str, object]:
 def inventory_known_executables(
     known_paths: Iterable[os.PathLike[str] | str],
 ) -> dict[str, object]:
-    """Inventory exact paths and fail closed on unresolved matching basenames."""
+    """Inventory exact paths and fail closed on persistently unresolved candidates.
+
+    Browser subprocesses can exit between the process snapshot and identity
+    query. Retry that narrow race against a fresh snapshot; an inaccessible or
+    otherwise unresolved matching process still fails closed after all retries.
+    """
     known: Mapping[str, str] = {
         _normalize_path(path): os.path.abspath(os.fspath(path)) for path in known_paths
     }
     candidate_names = {os.path.basename(path).casefold() for path in known}
-    matches: list[dict[str, object]] = []
     try:
         api = _api()
-        for pid, executable_name in api.process_entries():
+    except (OSError, AttributeError):
+        return {"processes": [], "error_code": "process_inventory_failed"}
+    matches: list[dict[str, object]] = []
+    for attempt in range(5):
+        matches = []
+        unresolved = False
+        try:
+            entries = api.process_entries()
+        except (OSError, AttributeError):
+            return {"processes": [], "error_code": "process_inventory_failed"}
+        for pid, executable_name in entries:
             if executable_name.casefold() not in candidate_names:
                 continue
             identity = api.process_identity(pid)
             if identity is None:
-                return {
-                    "processes": matches,
-                    "error_code": "candidate_identity_unavailable",
-                }
+                unresolved = True
+                break
             if identity.executable_path in known:
                 matches.append(
                     {
@@ -596,12 +608,14 @@ def inventory_known_executables(
                         "creation_time_ticks": identity.creation_time_ticks,
                     }
                 )
-    except (OSError, AttributeError):
-        return {"processes": [], "error_code": "process_inventory_failed"}
-    matches.sort(
-        key=lambda item: (str(item["executable_path"]).casefold(), int(item["pid"]))
-    )
-    return {"processes": matches, "error_code": None}
+        if not unresolved:
+            matches.sort(
+                key=lambda item: (str(item["executable_path"]).casefold(), int(item["pid"]))
+            )
+            return {"processes": matches, "error_code": None}
+        if attempt < 4:
+            time.sleep(0.02)
+    return {"processes": matches, "error_code": "candidate_identity_unavailable"}
 
 
 def _signal_owned(pid: int, expected_path: str, creation_time_ticks: int) -> int:
