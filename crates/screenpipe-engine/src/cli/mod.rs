@@ -492,12 +492,30 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub disable_clipboard_capture: bool,
 
+    /// Explicitly enable clipboard event/content persistence, overriding a
+    /// persisted disabled setting. Conflicts with --disable-clipboard-capture.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "disable_clipboard_capture"
+    )]
+    pub enable_clipboard_capture: bool,
+
     /// Disable persisting keyboard / typed-text rows. Keyboard events still
     /// wake event-driven capture, and the accessibility tree + OCR still
     /// capture on-screen text. Useful when piping ~/.screenpipe data into a
     /// remote LLM (secrets get typed).
     #[arg(long, default_value_t = false)]
     pub disable_keyboard_capture: bool,
+
+    /// Explicitly enable keyboard/typed-text persistence, overriding a
+    /// persisted disabled setting. Conflicts with --disable-keyboard-capture.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "disable_keyboard_capture"
+    )]
+    pub enable_keyboard_capture: bool,
 
     /// Encrypt secrets (API keys, OAuth tokens) at rest using the OS keychain.
     /// Creates a keychain key if one doesn't exist. Without this flag, the CLI
@@ -575,7 +593,9 @@ pub struct RecordArgSources {
     pub video_quality: bool,
     pub pause_on_drm_content: bool,
     pub disable_clipboard_capture: bool,
+    pub enable_clipboard_capture: bool,
     pub disable_keyboard_capture: bool,
+    pub enable_keyboard_capture: bool,
     pub encrypt_secrets: bool,
     pub disable_snapshot_compaction: bool,
     pub disable_meeting_detector: bool,
@@ -619,7 +639,9 @@ impl RecordArgSources {
             video_quality: from_command_line(record, "video_quality"),
             pause_on_drm_content: from_command_line(record, "pause_on_drm_content"),
             disable_clipboard_capture: from_command_line(record, "disable_clipboard_capture"),
+            enable_clipboard_capture: from_command_line(record, "enable_clipboard_capture"),
             disable_keyboard_capture: from_command_line(record, "disable_keyboard_capture"),
+            enable_keyboard_capture: from_command_line(record, "enable_keyboard_capture"),
             encrypt_secrets: from_command_line(record, "encrypt_secrets"),
             disable_snapshot_compaction: from_command_line(record, "disable_snapshot_compaction"),
             disable_meeting_detector: from_command_line(record, "disable_meeting_detector"),
@@ -655,7 +677,9 @@ impl RecordArgSources {
             || self.video_quality
             || self.pause_on_drm_content
             || self.disable_clipboard_capture
+            || self.enable_clipboard_capture
             || self.disable_keyboard_capture
+            || self.enable_keyboard_capture
             || self.encrypt_secrets
             || self.disable_snapshot_compaction
             || self.disable_meeting_detector
@@ -1075,8 +1099,14 @@ impl RecordArgs {
         if sources.disable_clipboard_capture {
             settings.disable_clipboard_capture = self.disable_clipboard_capture;
         }
+        if sources.enable_clipboard_capture {
+            settings.disable_clipboard_capture = false;
+        }
         if sources.disable_keyboard_capture {
             settings.disable_keyboard_capture = self.disable_keyboard_capture;
+        }
+        if sources.enable_keyboard_capture {
+            settings.disable_keyboard_capture = false;
         }
         if sources.disable_snapshot_compaction {
             settings.disable_snapshot_compaction = self.disable_snapshot_compaction;
@@ -1552,6 +1582,53 @@ mod tests {
             }
             _ => panic!("expected Record command"),
         }
+    }
+
+    #[test]
+    fn explicit_input_capture_flags_override_persisted_opt_outs() {
+        let args = [
+            "screenpipe",
+            "record",
+            "--enable-keyboard-capture",
+            "--enable-clipboard-capture",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            disable_keyboard_capture: true,
+            disable_clipboard_capture: true,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(record) => {
+                record.apply_explicit_overrides(&mut settings, &sources);
+            }
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(!settings.disable_keyboard_capture);
+        assert!(!settings.disable_clipboard_capture);
+        assert!(sources.enable_keyboard_capture);
+        assert!(sources.enable_clipboard_capture);
+    }
+
+    #[test]
+    fn input_capture_enable_and_disable_flags_conflict() {
+        assert!(Cli::try_parse_from([
+            "screenpipe",
+            "record",
+            "--enable-keyboard-capture",
+            "--disable-keyboard-capture",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "screenpipe",
+            "record",
+            "--enable-clipboard-capture",
+            "--disable-clipboard-capture",
+        ])
+        .is_err());
     }
     /// `--monitor-id` must override the `--use-all-monitors=true` default so
     /// that users restricting capture for privacy actually get only the

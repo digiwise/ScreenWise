@@ -306,6 +306,9 @@ pub struct UiRecorderStatus {
     pub mode: UiRecorderMode,
     /// Is clipboard content capture configured? Subset of `configured`.
     pub clipboard_capture: bool,
+    /// Is keyboard/typed-text persistence configured? This records intent;
+    /// `input_tap_running` must also be true for keyboard events to arrive.
+    pub keyboard_capture: bool,
     /// CGEventTap thread is alive — keystrokes and clicks are being
     /// captured. False when Input Monitoring is not granted (the recorder
     /// then runs in reduced mode with clipboard + app/window events only).
@@ -324,6 +327,7 @@ pub struct UiRecorderStatus {
 static UI_RECORDER_CONFIGURED: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_RUNNING: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_CLIPBOARD: AtomicBool = AtomicBool::new(false);
+static UI_RECORDER_KEYBOARD: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_INPUT_TAP: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_APP_EVENTS: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_EVENTS_INSERTED: AtomicU64 = AtomicU64::new(0);
@@ -332,12 +336,14 @@ static UI_RECORDER_LAST_EVENT_UNIX: AtomicU64 = AtomicU64::new(0);
 fn set_ui_recorder_state(
     configured: bool,
     running: bool,
+    keyboard: bool,
     clipboard: bool,
     input_tap: bool,
     app_events: bool,
 ) {
     UI_RECORDER_CONFIGURED.store(configured, Ordering::Relaxed);
     UI_RECORDER_RUNNING.store(running, Ordering::Relaxed);
+    UI_RECORDER_KEYBOARD.store(keyboard, Ordering::Relaxed);
     UI_RECORDER_CLIPBOARD.store(clipboard, Ordering::Relaxed);
     UI_RECORDER_INPUT_TAP.store(input_tap, Ordering::Relaxed);
     UI_RECORDER_APP_EVENTS.store(app_events, Ordering::Relaxed);
@@ -375,6 +381,7 @@ pub fn ui_recorder_status_snapshot() -> UiRecorderStatus {
         configured: UI_RECORDER_CONFIGURED.load(Ordering::Relaxed),
         running,
         mode,
+        keyboard_capture: UI_RECORDER_KEYBOARD.load(Ordering::Relaxed),
         clipboard_capture: UI_RECORDER_CLIPBOARD.load(Ordering::Relaxed),
         input_tap_running: input_tap,
         app_events_running: UI_RECORDER_APP_EVENTS.load(Ordering::Relaxed),
@@ -450,7 +457,7 @@ pub async fn start_ui_recording(
 ) -> Result<UiRecorderHandle> {
     if !config.enabled {
         info!("UI event capture is disabled");
-        set_ui_recorder_state(false, false, false, false, false);
+        set_ui_recorder_state(false, false, false, false, false, false);
         return Ok(UiRecorderHandle {
             stop_flag: Arc::new(AtomicBool::new(true)),
             task_handle: None,
@@ -503,7 +510,14 @@ pub async fn start_ui_recording(
              (accessibility is required even for reduced/clipboard-only mode). {}",
             hint
         );
-        set_ui_recorder_state(true, false, config.capture_clipboard_content, false, false);
+        set_ui_recorder_state(
+            true,
+            false,
+            config.record_keyboard_events,
+            config.capture_clipboard_content,
+            false,
+            false,
+        );
         return Ok(UiRecorderHandle {
             stop_flag: Arc::new(AtomicBool::new(true)),
             task_handle: None,
@@ -547,7 +561,14 @@ pub async fn start_ui_recording(
         Ok(h) => h,
         Err(e) => {
             error!("Failed to start UI recorder: {}", e);
-            set_ui_recorder_state(true, false, config.capture_clipboard_content, false, false);
+            set_ui_recorder_state(
+                true,
+                false,
+                config.record_keyboard_events,
+                config.capture_clipboard_content,
+                false,
+                false,
+            );
             return Err(e);
         }
     };
@@ -559,6 +580,7 @@ pub async fn start_ui_recording(
     set_ui_recorder_state(
         true,
         true,
+        record_keyboard_events,
         config.capture_clipboard_content,
         input_tap_running,
         true,
@@ -1584,10 +1606,11 @@ mod tests {
         // Note: globals are process-wide, but no other test in this binary
         // touches these atomics, so this single test is race-free.
         // Full mode: both perms granted → input_tap + app_events both up.
-        set_ui_recorder_state(true, true, true, true, true);
+        set_ui_recorder_state(true, true, true, true, true, true);
         let snap = ui_recorder_status_snapshot();
         assert!(snap.configured);
         assert!(snap.running);
+        assert!(snap.keyboard_capture);
         assert!(snap.clipboard_capture);
         assert!(snap.input_tap_running);
         assert!(snap.app_events_running);
@@ -1613,16 +1636,17 @@ mod tests {
         // Reduced mode: input monitoring missing — input_tap_running flips
         // off, app_events_running stays up (driven by accessibility only).
         // Mode must follow.
-        set_ui_recorder_state(true, true, true, false, true);
+        set_ui_recorder_state(true, true, true, true, false, true);
         let reduced = ui_recorder_status_snapshot();
         assert!(reduced.running && reduced.app_events_running);
         assert!(!reduced.input_tap_running);
         assert_eq!(reduced.mode, UiRecorderMode::Reduced);
 
         // Disabled path: everything off → Off, regardless of bool combos.
-        set_ui_recorder_state(false, false, false, false, false);
+        set_ui_recorder_state(false, false, false, false, false, false);
         let off = ui_recorder_status_snapshot();
-        assert!(!off.configured && !off.running && !off.clipboard_capture);
+        assert!(!off.configured && !off.running && !off.keyboard_capture);
+        assert!(!off.clipboard_capture);
         assert!(!off.input_tap_running && !off.app_events_running);
         assert_eq!(off.mode, UiRecorderMode::Off);
         // Counter and timestamp persist across state transitions — they're
@@ -1632,7 +1656,7 @@ mod tests {
         // Edge case: !running + input_tap=true (shouldn't happen in
         // practice but the derivation must not regress to Full just
         // because a flag got out of sync).
-        set_ui_recorder_state(true, false, true, true, true);
+        set_ui_recorder_state(true, false, true, true, true, true);
         assert_eq!(ui_recorder_status_snapshot().mode, UiRecorderMode::Off);
     }
 
