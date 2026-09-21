@@ -77,6 +77,20 @@ pub struct LinkUpdate {
     pub frame_id: i64,
 }
 
+/// Half-paired entries removed by one TTL sweep. Keeping the two directions
+/// separate makes a live warning actionable without exposing event content.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameLinkerTtlEvictions {
+    pub events_without_frames: usize,
+    pub frames_without_events: usize,
+}
+
+impl FrameLinkerTtlEvictions {
+    pub fn total(self) -> usize {
+        self.events_without_frames + self.frames_without_events
+    }
+}
+
 /// Why a triggering event will never get a frame. Reported by the
 /// capture loop at the moment it decides to drop a trigger, so the
 /// linker can release the pending entry immediately instead of waiting
@@ -244,18 +258,19 @@ impl FrameLinker {
     }
 
     /// Drop half-paired entries older than `ttl`. Call periodically
-    /// from the host actor. Returns the number of entries evicted —
-    /// useful for metrics ("how many events never got a frame").
-    pub fn tick(&mut self, now: Instant) -> usize {
+    /// from the host actor. Returns directional counts so diagnostics can
+    /// distinguish events that never got a frame from frames whose event row
+    /// never arrived.
+    pub fn tick(&mut self, now: Instant) -> FrameLinkerTtlEvictions {
         let cutoff = now.checked_sub(self.config.ttl);
-        let mut evicted = 0;
+        let mut evicted = FrameLinkerTtlEvictions::default();
         if let Some(cutoff) = cutoff {
             let before_events = self.pending_events.len();
             self.pending_events.retain(|_, pe| pe.inserted_at >= cutoff);
-            evicted += before_events - self.pending_events.len();
+            evicted.events_without_frames = before_events - self.pending_events.len();
             let before_frames = self.pending_frames.len();
             self.pending_frames.retain(|pf| pf.inserted_at >= cutoff);
-            evicted += before_frames - self.pending_frames.len();
+            evicted.frames_without_events = before_frames - self.pending_frames.len();
             self.resolved
                 .retain(|_, resolved_at| *resolved_at >= cutoff);
         }
@@ -519,7 +534,13 @@ mod tests {
         // 61s later, no matching frame ever arrived.
         let t1 = t0 + Duration::from_secs(61);
         let evicted = linker.tick(t1);
-        assert_eq!(evicted, 1);
+        assert_eq!(
+            evicted,
+            FrameLinkerTtlEvictions {
+                events_without_frames: 1,
+                frames_without_events: 0,
+            }
+        );
         assert_eq!(linker.pending_len(), (0, 0));
 
         // A late frame for that correlation id is a no-op (no row to update).
@@ -549,7 +570,13 @@ mod tests {
 
         let t1 = t0 + Duration::from_secs(61);
         let evicted = linker.tick(t1);
-        assert_eq!(evicted, 1);
+        assert_eq!(
+            evicted,
+            FrameLinkerTtlEvictions {
+                events_without_frames: 0,
+                frames_without_events: 1,
+            }
+        );
         assert_eq!(linker.pending_len(), (0, 0));
     }
 
@@ -654,7 +681,10 @@ mod tests {
         );
         assert!(second.is_empty());
         assert_eq!(linker.pending_len(), (0, 0));
-        assert_eq!(linker.tick(t0 + Duration::from_secs(59)), 0);
+        assert_eq!(
+            linker.tick(t0 + Duration::from_secs(59)),
+            FrameLinkerTtlEvictions::default()
+        );
     }
 
     #[test]
@@ -701,7 +731,10 @@ mod tests {
             )
             .is_empty());
         assert_eq!(linker.pending_len(), (0, 0));
-        assert_eq!(linker.tick(t0 + Duration::from_secs(59)), 0);
+        assert_eq!(
+            linker.tick(t0 + Duration::from_secs(59)),
+            FrameLinkerTtlEvictions::default()
+        );
     }
 
     #[test]

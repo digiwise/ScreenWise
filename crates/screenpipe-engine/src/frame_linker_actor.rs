@@ -36,6 +36,10 @@ pub struct LinkerMetrics {
     pub updates_failed: u64,
     /// Half-paired entries dropped because their TTL expired without a match.
     pub evicted_ttl: u64,
+    /// Persisted UI event rows whose matching frame never arrived.
+    pub evicted_ttl_events_without_frames: u64,
+    /// Captured frames whose matching persisted UI event row never arrived.
+    pub evicted_ttl_frames_without_events: u64,
     /// Triggers explicitly dropped by the capture loop, broken down by
     /// reason. Reported via [`LinkerMessage::TriggerDropped`]; these
     /// numbers should account for the bulk of NULL `frame_id` rows
@@ -50,6 +54,8 @@ pub struct LinkerMetrics {
 static PAIRS_EMITTED: AtomicU64 = AtomicU64::new(0);
 static UPDATES_FAILED: AtomicU64 = AtomicU64::new(0);
 static EVICTED_TTL: AtomicU64 = AtomicU64::new(0);
+static EVICTED_TTL_EVENTS_WITHOUT_FRAMES: AtomicU64 = AtomicU64::new(0);
+static EVICTED_TTL_FRAMES_WITHOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static DROPPED_DRM: AtomicU64 = AtomicU64::new(0);
 static DROPPED_PAUSED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_LAGGED: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +69,10 @@ pub fn linker_metrics_snapshot() -> LinkerMetrics {
         pairs_emitted: PAIRS_EMITTED.load(Ordering::Relaxed),
         updates_failed: UPDATES_FAILED.load(Ordering::Relaxed),
         evicted_ttl: EVICTED_TTL.load(Ordering::Relaxed),
+        evicted_ttl_events_without_frames: EVICTED_TTL_EVENTS_WITHOUT_FRAMES
+            .load(Ordering::Relaxed),
+        evicted_ttl_frames_without_events: EVICTED_TTL_FRAMES_WITHOUT_EVENTS
+            .load(Ordering::Relaxed),
         dropped_drm: DROPPED_DRM.load(Ordering::Relaxed),
         dropped_paused: DROPPED_PAUSED.load(Ordering::Relaxed),
         dropped_lagged: DROPPED_LAGGED.load(Ordering::Relaxed),
@@ -223,17 +233,28 @@ pub fn spawn_frame_linker(
                     let evicted = linker.tick(Instant::now());
                     let (pe, pf) = linker.pending_len();
                     let total_pairs = PAIRS_EMITTED.load(Ordering::Relaxed);
-                    let total_evicted = EVICTED_TTL.load(Ordering::Relaxed) + evicted as u64;
+                    let evicted_total = evicted.total() as u64;
+                    let total_evicted = EVICTED_TTL.load(Ordering::Relaxed) + evicted_total;
                     let total_failed = UPDATES_FAILED.load(Ordering::Relaxed);
                     let dropped_drm = DROPPED_DRM.load(Ordering::Relaxed);
                     let dropped_paused = DROPPED_PAUSED.load(Ordering::Relaxed);
                     let dropped_lagged = DROPPED_LAGGED.load(Ordering::Relaxed);
                     let dropped_capture_error = DROPPED_CAPTURE_ERROR.load(Ordering::Relaxed);
                     let dropped_other = DROPPED_OTHER.load(Ordering::Relaxed);
-                    if evicted > 0 {
-                        EVICTED_TTL.fetch_add(evicted as u64, Ordering::Relaxed);
+                    if evicted_total > 0 {
+                        EVICTED_TTL.fetch_add(evicted_total, Ordering::Relaxed);
+                        EVICTED_TTL_EVENTS_WITHOUT_FRAMES.fetch_add(
+                            evicted.events_without_frames as u64,
+                            Ordering::Relaxed,
+                        );
+                        EVICTED_TTL_FRAMES_WITHOUT_EVENTS.fetch_add(
+                            evicted.frames_without_events as u64,
+                            Ordering::Relaxed,
+                        );
                         warn!(
-                            evicted,
+                            evicted = evicted_total,
+                            events_without_frames = evicted.events_without_frames,
+                            frames_without_events = evicted.frames_without_events,
                             pending_events = pe,
                             pending_frames = pf,
                             total_pairs,

@@ -237,8 +237,10 @@ fn setup_logging(local_data_dir: &PathBuf, debug: bool) -> anyhow::Result<Worker
         }
     };
 
-    let timer =
-        tracing_subscriber::fmt::time::ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
+    // The suffix is `Z`, so the clock must actually be UTC. Using ChronoLocal
+    // here produced Melbourne wall-clock values labelled as UTC and broke
+    // correlation with the trial monitor's genuine UTC timestamps.
+    let timer = tracing_subscriber::fmt::time::ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
 
     let tracing_registry = tracing_subscriber::registry()
         .with(
@@ -251,6 +253,9 @@ fn setup_logging(local_data_dir: &PathBuf, debug: bool) -> anyhow::Result<Worker
             fmt::layer()
                 .with_writer(file_writer)
                 .with_timer(timer)
+                // Rolling files are machine-readable operational evidence.
+                // ANSI escapes made timestamp and severity parsing unreliable.
+                .with_ansi(false)
                 .with_filter(make_env_filter()),
         );
 

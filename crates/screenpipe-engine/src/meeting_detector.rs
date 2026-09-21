@@ -789,7 +789,7 @@ impl MeetingUiScanner {
         let signals_found = matched_signals.len();
         let is_in_call = signals_found >= profile.min_signals_required;
 
-        info!(
+        debug!(
             "meeting scanner: pid={} app={} signals={} in_call={}",
             pid, app_name, signals_found, is_in_call,
         );

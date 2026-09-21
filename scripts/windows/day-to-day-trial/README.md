@@ -57,6 +57,25 @@ The launcher therefore records a successful inferred exit only when it finds a
 new `shutdown complete` entry written after that launch; it never treats a stale
 log entry as current evidence.
 
+For a concise content-free status while a trial is running, use a separate
+PowerShell window:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Get-ScreenWiseTrialStatus.ps1
+```
+
+It reports pipeline counters and fixed warning categories only. It does not emit
+captured text, titles, URLs, clipboard/keyboard values, transcripts or tokens.
+Routine per-frame redaction and negative meeting scans are DEBUG-level in current
+builds so INFO remains useful for lifecycle and state changes.
+The launcher also writes this report as `trial-summary.json` after shutdown. It
+includes lock-pause duration, whether frame/audio counters advanced inside the
+sampled locked interval, scoped clean-shutdown and process-cleanup evidence, and
+failure counts split by safe acquisition stage. Current builds also distinguish
+frame-link TTL expiry direction (event without frame versus frame without event).
+An intentional lock/DRM/schedule audio pause remains healthy in `/health`; the
+audio-pipeline `transcription_paused` flag shows that acquisition is paused.
+
 Review can establish health counters, warnings, candidate capture gaps, fixed
 safe placeholders, lock intervals, transcription status and leftover processes.
 Current `/health` samples distinguish requested-but-unavailable transcription

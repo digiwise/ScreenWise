@@ -164,6 +164,8 @@ pub struct PipelineHealthInfo {
     pub frame_links_emitted: u64,
     pub frame_link_updates_failed: u64,
     pub frame_link_ttl_evictions: u64,
+    pub frame_link_ttl_events_without_frames: u64,
+    pub frame_link_ttl_frames_without_events: u64,
     pub frame_link_dropped_drm: u64,
     pub frame_link_dropped_paused: u64,
     pub frame_link_dropped_lagged: u64,
@@ -436,6 +438,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
 
     let now = Utc::now();
     let now_ts = now.timestamp() as u64;
+    let audio_privacy_paused = !screenpipe_config::audio_capture_allowed();
     let audio_reconciliation_backlog = if !state.audio_disabled {
         get_audio_reconciliation_backlog(state, now).await
     } else {
@@ -555,6 +558,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     };
 
     let audio_db_write_stalled = if !state.audio_disabled
+        && !audio_privacy_paused
         && global_audio_active
         && audio_snap.uptime_secs > 120.0
     {
@@ -642,6 +646,11 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         "disabled".to_string()
     } else if transcription_unavailable {
         "transcription_unavailable".to_string()
+    } else if audio_privacy_paused {
+        // A lock, DRM gate or schedule pause deliberately stops acquisition.
+        // Match the vision-side treatment: stale timestamps during a known
+        // privacy pause are expected and must not degrade /health.
+        "ok".to_string()
     } else if audio_never_captured {
         "not_started".to_string()
     } else if stream_hijacked && global_audio_active {
@@ -721,21 +730,19 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
 
     // Audio degradation: chunks_channel_full > 0 means the Whisper consumer
     // couldn't keep up and audio was dropped even after a 30s backpressure wait.
-    // A reconciliation backlog means audio exists but transcript has not landed
-    // yet, which should be visible instead of reported as healthy — *unless*
-    // the backlog is the expected result of batch mode deferring during a
-    // live session, in which case it's not a problem to surface.
+    // A small/fresh reconciliation backlog is normal because batch mode has a
+    // deliberate freshness delay. Only the bounded stall test above may turn
+    // that backlog into degradation; merely having pending chunks must not
+    // produce a permanent 503 during ordinary recording.
     let audio_degraded = if !state.audio_disabled && audio_snap.uptime_secs > 120.0 {
         let channel_full = audio_snap.chunks_channel_full > 0;
-        let transcription_backlog =
-            pending_transcription_segments.is_some() && !intentionally_deferring;
         if channel_full {
             warn!(
                 "health_check: {} audio chunk(s) dropped (transcription engine too slow)",
                 audio_snap.chunks_channel_full
             );
         }
-        channel_full || audio_db_write_stalled || transcription_backlog
+        channel_full || audio_db_write_stalled
     } else {
         false
     };
@@ -881,6 +888,8 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             frame_links_emitted: linker.pairs_emitted,
             frame_link_updates_failed: linker.updates_failed,
             frame_link_ttl_evictions: linker.evicted_ttl,
+            frame_link_ttl_events_without_frames: linker.evicted_ttl_events_without_frames,
+            frame_link_ttl_frames_without_events: linker.evicted_ttl_frames_without_events,
             frame_link_dropped_drm: linker.dropped_drm,
             frame_link_dropped_paused: linker.dropped_paused,
             frame_link_dropped_lagged: linker.dropped_lagged,
@@ -930,10 +939,11 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             }
         },
         audio_pipeline: if !state.audio_disabled {
-            let is_paused = state
-                .audio_manager
-                .transcription_paused
-                .load(Ordering::Relaxed);
+            let is_paused = audio_privacy_paused
+                || state
+                    .audio_manager
+                    .transcription_paused
+                    .load(Ordering::Relaxed);
 
             // meeting_detected / meeting_app were queried earlier (next to
             // the stall gates that depend on them) — reuse them here.

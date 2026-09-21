@@ -89,7 +89,7 @@ while ($stoppedSamples -lt 3) {
     $stoppedSamples = 0
 
     $sample = [ordered]@{
-        schema = 'screenwise.day-to-day-trial-sample.v1'
+        schema = 'screenwise.day-to-day-trial-sample.v2'
         sampled_at_utc = (Get-Date).ToUniversalTime().ToString('o')
         recorder_process_count = $current.Count
         api = [ordered]@{ reachable = $false; authenticated = [bool]$token }

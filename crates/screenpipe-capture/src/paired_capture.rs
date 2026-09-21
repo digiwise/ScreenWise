@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Strip gutter-line-number runs from OCR output.
 ///
@@ -378,7 +378,7 @@ pub async fn paired_capture(
         .await?;
 
     if pii_redaction_applied {
-        info!(
+        debug!(
             frame_id,
             "Basic PII redaction applied to captured frame text or metadata"
         );

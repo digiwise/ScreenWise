@@ -156,8 +156,12 @@ $sessionName = '{0}-{1}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmm
 $sessionDir = Join-Path $auditRoot $sessionName
 [IO.Directory]::CreateDirectory($sessionDir) | Out-Null
 
+$initialLogLengths = [ordered]@{}
+Get-ChildItem -LiteralPath $DataDir -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue |
+    ForEach-Object { $initialLogLengths[$_.FullName] = [long]$_.Length }
+
 $launch = [ordered]@{
-    schema = 'screenwise.day-to-day-trial-launch.v1'
+    schema = 'screenwise.day-to-day-trial-launch.v2'
     started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
     executable_path = $ExecutablePath
     executable_sha256 = (Get-FileHash -LiteralPath $ExecutablePath -Algorithm SHA256).Hash
@@ -171,6 +175,7 @@ $launch = [ordered]@{
     audio_models_ready = $audioModelsReady
     ignored_windows = @($IgnoredWindow)
     ignored_urls = @($IgnoredUrl)
+    recorder_log_offsets = $initialLogLengths
 }
 $launch | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'launch.json') -Encoding utf8
 
@@ -210,15 +215,11 @@ Write-Host "ScreenWise trial data: $DataDir"
 Write-Host "Operational audit: $sessionDir"
 Write-Host 'Press Ctrl+C once when you want ScreenWise to shut down cleanly.'
 
-$initialLogLengths = @{}
-Get-ChildItem -LiteralPath $DataDir -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue |
-    ForEach-Object { $initialLogLengths[$_.FullName] = [long]$_.Length }
-
 function Test-CleanShutdownAfterLaunch {
-    param([string]$Root, [hashtable]$Offsets)
+    param([string]$Root, [System.Collections.IDictionary]$Offsets)
 
     foreach ($log in @(Get-ChildItem -LiteralPath $Root -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue)) {
-        $offset = if ($Offsets.ContainsKey($log.FullName)) { [long]$Offsets[$log.FullName] } else { 0L }
+        $offset = if ($Offsets.Contains($log.FullName)) { [long]$Offsets[$log.FullName] } else { 0L }
         $stream = $null
         $reader = $null
         try {
@@ -226,7 +227,8 @@ function Test-CleanShutdownAfterLaunch {
             if ($stream.Length -lt $offset) { $offset = 0L }
             [void]$stream.Seek($offset, [IO.SeekOrigin]::Begin)
             $reader = [IO.StreamReader]::new($stream)
-            if ($reader.ReadToEnd() -match '(?m)^\S+\s+INFO\s+screenpipe:\s+shutdown complete\s*$') {
+            $newLogText = $reader.ReadToEnd() -replace "`e\[[0-9;]*m", ''
+            if ($newLogText -match '(?m)^\S+\s+INFO\s+screenpipe:\s+shutdown complete\s*$') {
                 return $true
             }
         }
@@ -261,6 +263,20 @@ finally {
     Receive-Job -Job $monitorJob -ErrorAction SilentlyContinue | Out-Host
     Stop-Job -Job $monitorJob -ErrorAction SilentlyContinue
     Remove-Job -Job $monitorJob -Force -ErrorAction SilentlyContinue
+
+    # Persist the same content-free summary maintainers can request during a
+    # run. A summary failure must remain visible but must not replace the
+    # recorder's exit result.
+    try {
+        $statusPath = Join-Path $PSScriptRoot 'Get-ScreenWiseTrialStatus.ps1'
+        $summaryPath = Join-Path $sessionDir 'trial-summary.json'
+        & $statusPath -DataDir $DataDir -SessionName $sessionName -AsJson |
+            Set-Content -LiteralPath $summaryPath -Encoding utf8
+        Write-Host "Content-free trial summary: $summaryPath"
+    }
+    catch {
+        Write-Warning "Content-free trial summary failed: $($_.Exception.Message)"
+    }
 }
 
 exit $(if ($null -eq $exitCode) { 1 } else { $exitCode })
