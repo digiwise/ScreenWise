@@ -33,6 +33,10 @@ directly:
 .\target\release\screenpipe.exe audio models --output json
 ```
 
+If that check fails, the launcher reports each unavailable component and its
+underlying access, integrity or runtime error; it does not collapse native
+stderr into a generic PowerShell `NativeCommandError`.
+
 Run from ordinary (non-elevated) PowerShell after the reviewed firewall rules are
 installed:
 

@@ -83,10 +83,32 @@ if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyCon
 
 $audioModelsReady = $null
 if ($TranscriptionEngine -eq 'parakeet') {
-    $modelOutput = (& $ExecutablePath audio models --output json 2>$null | Out-String).Trim()
-    $modelExitCode = $LASTEXITCODE
+    # Do not invoke the diagnostic through PowerShell's native pipeline while
+    # ErrorActionPreference is Stop. On Windows PowerShell, any native stderr
+    # line can otherwise become a terminating NativeCommandError before we can
+    # parse the command's structured stdout and report the failing component.
+    $modelProcessInfo = [Diagnostics.ProcessStartInfo]::new()
+    $modelProcessInfo.FileName = $ExecutablePath
+    $modelProcessInfo.Arguments = 'audio models --output json'
+    $modelProcessInfo.UseShellExecute = $false
+    $modelProcessInfo.CreateNoWindow = $true
+    $modelProcessInfo.RedirectStandardOutput = $true
+    $modelProcessInfo.RedirectStandardError = $true
+    $modelProcess = [Diagnostics.Process]::new()
+    $modelProcess.StartInfo = $modelProcessInfo
+    try {
+        [void]$modelProcess.Start()
+        $modelOutput = $modelProcess.StandardOutput.ReadToEnd().Trim()
+        $modelError = $modelProcess.StandardError.ReadToEnd().Trim()
+        $modelProcess.WaitForExit()
+        $modelExitCode = $modelProcess.ExitCode
+    }
+    finally {
+        $modelProcess.Dispose()
+    }
     if ([string]::IsNullOrWhiteSpace($modelOutput)) {
-        throw 'The ScreenWise audio-model preflight returned no status.'
+        $detail = if ($modelError) { $modelError } else { 'no diagnostic output' }
+        throw "The ScreenWise audio-model preflight returned no status: $detail. Recording was not started."
     }
     try {
         $modelStatus = $modelOutput | ConvertFrom-Json
@@ -96,7 +118,19 @@ if ($TranscriptionEngine -eq 'parakeet') {
     }
     $audioModelsReady = [bool]$modelStatus.success
     if ($modelExitCode -ne 0 -or -not $audioModelsReady) {
-        throw 'Required local audio models are unavailable. Run screenpipe audio models for content-free diagnostics; recording was not started.'
+        $failures = @()
+        foreach ($file in @($modelStatus.data.parakeet.files | Where-Object { -not $_.ready })) {
+            $failures += "Parakeet/$($file.filename): $($file.error)"
+        }
+        foreach ($component in @('silero_vad', 'speaker_embedding', 'speaker_segmentation')) {
+            $state = $modelStatus.data.$component
+            if ($state -and -not $state.ready) {
+                $failures += "${component}: $($state.error)"
+            }
+        }
+        if ($failures.Count -eq 0 -and $modelError) { $failures += $modelError }
+        if ($failures.Count -eq 0) { $failures += "diagnostic exited $modelExitCode without a component error" }
+        throw "Required local audio models are unavailable: $($failures -join '; '). Recording was not started."
     }
 }
 
