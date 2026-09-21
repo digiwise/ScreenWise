@@ -4,7 +4,10 @@
 
 //! Read-only inspection of explicitly provisioned transcription artifacts.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -72,12 +75,23 @@ fn inspect_parakeet(directory: &Path, manifest: &[(&str, &str)]) -> AudioModelSt
         .iter()
         .map(|(filename, sha256)| {
             let path = directory.join(filename);
-            let error = if path.is_file() {
-                verify_file_sha256(&path, sha256)
+            let error = match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => verify_file_sha256(&path, sha256)
                     .err()
-                    .map(|error| error.to_string())
-            } else {
-                Some(format!("required local model file is missing: {}", path.display()))
+                    .map(|error| error.to_string()),
+                Ok(_) => Some(format!(
+                    "required local model path is not a regular file: {}",
+                    path.display()
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(format!(
+                    "required local model file is missing: {}",
+                    path.display()
+                )),
+                Err(error) => Some(format!(
+                    "cannot inspect required local model file {}: {}; verify file permissions and the execution identity",
+                    path.display(),
+                    error
+                )),
             };
             AudioModelFileStatus {
                 filename: (*filename).to_string(),

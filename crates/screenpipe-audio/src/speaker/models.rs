@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
@@ -28,13 +28,32 @@ pub enum PyannoteModel {
 pub async fn load_local_model(model_type: PyannoteModel) -> Result<LoadedModel> {
     let (filename, expected_sha256) = model_state(model_type);
     let path = get_cache_dir()?.join(filename);
-    if !path.is_file() {
-        return Err(anyhow!(
-            "required local model {} is missing at {}; provision the MIT-baseline artifact with SHA-256 {} before starting screenpipe",
-            filename,
-            path.display(),
-            expected_sha256
-        ));
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(anyhow!(
+                "required local model {} is not a regular file at {}; replace it with the MIT-baseline artifact with SHA-256 {} before starting screenpipe",
+                filename,
+                path.display(),
+                expected_sha256
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!(
+                "required local model {} is missing at {}; provision the MIT-baseline artifact with SHA-256 {} before starting screenpipe",
+                filename,
+                path.display(),
+                expected_sha256
+            ))
+        }
+        Err(error) => {
+            return Err(anyhow!(
+                "cannot inspect required local model {} at {}: {}; verify file permissions and the execution identity",
+                filename,
+                path.display(),
+                error
+            ))
+        }
     }
     verify_file_sha256(&path, expected_sha256)?;
     let session = create_session(&path)?;

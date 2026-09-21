@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-09-18. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-09-21. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -44,7 +44,7 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | SW-V04 | Microphone transcript rows/phrase hits passed, complete passage accuracy and retention did not. Distinguish ASR substitutions, VAD rejection and actual loss. |
 | SW-V05 | Earlier DRM audio tests lacked positive before/after controls; they cannot establish suppression. Retry only with working controls. |
 | SW-V06 | Scoped live clipboard evidence passed: an ordinary fixed marker produced three positive rows, the password-phase secret marker produced zero rows, three clipboard UI events were present, and opaque clipboard restoration followed verified recorder stop. Arbitrary providers, applications, formats and race timing remain open. |
-| SW-V07 | Earlier audio-gap/UIA-drop/pending-status warnings need load and no-speech lifecycle diagnosis. They do not establish a broken microphone. |
+| SW-V07 | A day-to-day trial exposed an unconsumed lower-level UIA tree queue; the engine integration now disables only that orphan producer while retaining paired UIA capture and password/focus/input checks. Multi-monitor duplicate frame correlations are now deduplicated instead of expiring as false TTL loss. Full engine tests passed; post-fix live verification remains open. |
 | SW-V08 | Fixture focus/equality limitations addressed with OS identity and stimulus acknowledgements; continue using these guards. |
 | SW-V09 | Windows locked-state detection repaired and already-locked regression passed; later audio-disabled transition passed. Audio recovery remains open. |
 | SW-V10 | General event pressure/recovery/subscriber-loss reporting implemented; 28-event-suite tests passed. Real overload/soak remains open; delivery counts are not unique lost database rows. |
@@ -58,6 +58,9 @@ fixture commands, safe exception diagnostics and phase evidence checkpoints.
 | SW-V18 | Typed near-capacity, recovery, confirmed-loss and possible-loss reporting now covers device capture, recording, transcription-result, meeting-tap, meeting-provider, meeting-final and meeting-persistence queues. Fixed content-free notices reach local logs, the general activity timeline and `/capture-events`; deterministic event/audio/engine tests passed. Real overload/soak and the packaged visual timeline remain open. Counts describe queue deliveries, not unique lost database rows. |
 | SW-V19 | Audio privacy-transition compensation now covers raw chunk rows/files, combined chunk/transcript/overlap writes, live and reconciled diarization runs/segments, and meeting transcript segments while retaining the database write guard through the stale-generation check and exact cleanup. Deterministic durable-state tests and the full database/audio suites passed. This does not cover the separate speaker-identity mutation in SW-V20 or establish universal transition safety. |
 | SW-V20 | **Open, source-review finding:** speaker matching can create a speaker, add an embedding or update a shared speaker centroid while a privacy generation changes. Safely reversing a shared identity requires transactional before-images and ownership-aware compensation; deleting a pre-existing/shared speaker would be unsafe. |
+| SW-V21 | A day-to-day trial reported requested Parakeet as unavailable repeatedly even though the pinned files were later verified by the rebuilt exact executable. Model inspection now distinguishes missing, wrong-type and access failures; repeated refresh warnings are transition-deduplicated; `/health` marks requested-but-unavailable transcription; and the trial refuses to record unless `audio models` verifies the exact executable's full local audio pack. A live post-fix transcription run remains open. |
+| SW-V22 | The same trial had one post-capture privacy-evaluation failure; it persisted a visible safe placeholder and recovered on the next observed frame. No sensitive content was inspected and the generic failure stage does not identify the transient OS cause. Retain as an open reproducibility/observability warning; do not weaken the fail-closed behavior. |
+| SW-V23 | The optional smart text-PII model was absent and regex-only reconciliation remained active. Its published CC BY-NC 4.0 license is separate from this MIT repository, so it was not silently provisioned for this Digiwise-associated workflow. Reduced coverage is now explicit in the log and setup guide; neither regex nor AI redaction is a privacy guarantee. |
 
 ## Outstanding test plan
 

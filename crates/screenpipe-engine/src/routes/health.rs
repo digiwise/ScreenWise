@@ -161,6 +161,26 @@ pub struct PipelineHealthInfo {
     pub time_to_first_frame_ms: Option<f64>,
     pub pipeline_stall_count: u64,
     pub ocr_cache_hit_rate: f64,
+    pub frame_links_emitted: u64,
+    pub frame_link_updates_failed: u64,
+    pub frame_link_ttl_evictions: u64,
+    pub frame_link_dropped_drm: u64,
+    pub frame_link_dropped_paused: u64,
+    pub frame_link_dropped_lagged: u64,
+    pub frame_link_dropped_capture_error: u64,
+    pub frame_link_dropped_other: u64,
+}
+
+fn transcription_runtime_availability(
+    requested: &screenpipe_audio::core::engine::AudioTranscriptionEngine,
+    runtime: Option<&screenpipe_audio::core::engine::AudioTranscriptionEngine>,
+) -> (bool, Option<bool>, bool) {
+    use screenpipe_audio::core::engine::AudioTranscriptionEngine;
+
+    let requested = !matches!(requested, AudioTranscriptionEngine::Disabled);
+    let available = runtime.map(|engine| !matches!(engine, AudioTranscriptionEngine::Disabled));
+    let unavailable = requested && available == Some(false);
+    (requested, available, unavailable)
 }
 
 #[derive(Serialize, OaSchema, Deserialize, Clone)]
@@ -179,6 +199,12 @@ pub struct AudioPipelineHealthInfo {
     pub db_inserted: u64,
     pub total_words: u64,
     pub words_per_minute: f64,
+    /// Whether a non-disabled transcription engine was requested.
+    pub transcription_requested: bool,
+    /// `None` while engine initialization has not completed. `Some(false)`
+    /// means capture can continue but the requested local engine is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcription_available: Option<bool>,
     // Consumer stage diagnostics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunks_received: Option<u64>,
@@ -600,8 +626,22 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     // captures recovery attempts.
     let stream_hijacked = audio_snap.stream_timeouts > 0;
 
+    let requested_transcription = state.audio_manager.transcription_engine().await;
+    let runtime_transcription = state
+        .audio_manager
+        .transcription_engine_instance()
+        .await
+        .map(|engine| engine.config());
+    let (transcription_requested, transcription_available, transcription_unavailable) =
+        transcription_runtime_availability(
+            requested_transcription.as_ref(),
+            runtime_transcription.as_ref(),
+        );
+
     let audio_status = if state.audio_disabled {
         "disabled".to_string()
+    } else if transcription_unavailable {
+        "transcription_unavailable".to_string()
     } else if audio_never_captured {
         "not_started".to_string()
     } else if stream_hijacked && global_audio_active {
@@ -749,7 +789,13 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
                 ));
             }
         }
-        if audio_degraded || audio_status == "active_no_data" {
+        if audio_degraded || audio_status == "active_no_data" || transcription_unavailable {
+            if transcription_unavailable {
+                detail_parts.push(
+                    "the requested local transcription engine is unavailable; audio capture may continue without transcripts"
+                        .to_string(),
+                );
+            }
             if audio_status == "active_no_data" {
                 detail_parts.push(format!(
                     "audio device appears hijacked or silent (watchdog fired {} times) — automatic recovery in progress",
@@ -813,6 +859,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     // Build pipeline metrics from the snapshot already taken above
     let pipeline = if !state.vision_disabled {
         let total_ocr_ops = vision_snap.ocr_cache_hits + vision_snap.ocr_cache_misses;
+        let linker = crate::frame_linker_actor::linker_metrics_snapshot();
         Some(PipelineHealthInfo {
             uptime_secs: vision_snap.uptime_secs,
             frames_captured: vision_snap.frames_captured,
@@ -831,6 +878,14 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             } else {
                 0.0
             },
+            frame_links_emitted: linker.pairs_emitted,
+            frame_link_updates_failed: linker.updates_failed,
+            frame_link_ttl_evictions: linker.evicted_ttl,
+            frame_link_dropped_drm: linker.dropped_drm,
+            frame_link_dropped_paused: linker.dropped_paused,
+            frame_link_dropped_lagged: linker.dropped_lagged,
+            frame_link_dropped_capture_error: linker.dropped_capture_error,
+            frame_link_dropped_other: linker.dropped_other,
         })
     } else {
         None
@@ -900,6 +955,8 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
                 db_inserted: audio_snap.db_inserted,
                 total_words: audio_snap.total_words,
                 words_per_minute: audio_snap.words_per_minute,
+                transcription_requested,
+                transcription_available,
                 // Consumer stage diagnostics
                 chunks_received: Some(audio_snap.chunks_received),
                 process_errors: Some(audio_snap.process_errors),
@@ -1064,6 +1121,36 @@ pub async fn api_vision_status() -> JsonResponse<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use screenpipe_audio::core::engine::AudioTranscriptionEngine;
+
+    #[test]
+    fn requested_transcription_reports_initializing_unavailable_and_ready_distinctly() {
+        assert_eq!(
+            transcription_runtime_availability(&AudioTranscriptionEngine::Parakeet, None),
+            (true, None, false)
+        );
+        assert_eq!(
+            transcription_runtime_availability(
+                &AudioTranscriptionEngine::Parakeet,
+                Some(&AudioTranscriptionEngine::Disabled),
+            ),
+            (true, Some(false), true)
+        );
+        assert_eq!(
+            transcription_runtime_availability(
+                &AudioTranscriptionEngine::Parakeet,
+                Some(&AudioTranscriptionEngine::Parakeet),
+            ),
+            (true, Some(true), false)
+        );
+        assert_eq!(
+            transcription_runtime_availability(
+                &AudioTranscriptionEngine::Disabled,
+                Some(&AudioTranscriptionEngine::Disabled),
+            ),
+            (false, Some(false), false)
+        );
+    }
 
     fn dummy_response(status: &str) -> HealthCheckResponse {
         HealthCheckResponse {

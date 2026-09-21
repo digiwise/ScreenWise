@@ -67,6 +67,40 @@ clone's cold build, packaging and omitted-fixture tests are not claimed to pass.
 Source review identified the pre-existing audio privacy/persistence race recorded
 as SW-V19. This checkpoint preserves incomplete validation, not privacy certification.
 
+## Day-to-day trial repair checkpoint (2026-09-21)
+
+A private roughly nine-minute Windows trial produced 213 captured and 213 written
+frames, 138 UI events and 16 audio chunks, with zero reported frame drops, pipeline
+stalls, persistence degradation, event-delivery loss, near-capacity audio notices,
+audio-shutdown degradation, panics or owned processes after exit. All 16 audio
+chunks were rejected by VAD and no transcript was produced, so the run did not
+establish live transcription. Captured content was not inspected.
+
+The trial exposed an orphan low-level UIA tree producer (150 bounded-queue-full
+warnings), duplicate multi-monitor frame correlations recorded as 101 false TTL
+evictions, repeated Parakeet-unavailable warnings, ambiguous model file errors,
+and a null launcher exit code despite a logged clean shutdown. The engine now
+keeps UIA focus/password/input checks while disabling that unconsumed tree
+producer, deduplicates resolved frame correlations, exposes frame-link counters
+in `/health`, distinguishes requested-but-unavailable transcription, reports
+model access errors accurately, logs Parakeet availability transitions once,
+and requires the exact executable's non-recording model preflight before a
+Parakeet trial. The launcher infers exit 0 only from a new clean-shutdown marker.
+
+One post-capture privacy evaluation failed closed into a visible placeholder and
+recovered on the next observed frame. Ten unavailable password-state checks
+suppressed keyboard/clipboard content as designed. These are retained warnings,
+not proof of unsafe disclosure. The optional smart text-PII pack was absent, so
+regex-only reconciliation ran; the pack's separate noncommercial license was not
+silently accepted or provisioned.
+
+The repaired tree passed an offline release build. The exact release binary
+verified all provisioned audio models. Full locked offline library suites passed:
+screenpipe-engine 554 passed, 2 ignored; screenpipe-audio 179 passed, 1 ignored.
+The day-to-day launcher preflight then passed against the exact active firewall
+group with `AudioModelsReady=true` and recording disabled. No post-fix live
+capture or transcription run is claimed.
+
 ## Published-checkout build and initial run (2026-09-16)
 
 A clean `screenwise-public` target built offline from the published source at

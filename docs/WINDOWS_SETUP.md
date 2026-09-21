@@ -111,6 +111,24 @@ documented by [`screenpipe-redact`](../crates/screenpipe-redact/src/provisioning
 Record each model's source revision, checksum and applicable license; a checksum
 alone does not establish redistribution permission. Do not commit model caches.
 
+After provisioning the local audio files, verify the exact built executable
+without starting capture or downloading anything:
+
+```powershell
+.\target\release\screenpipe.exe audio models --output json
+```
+
+The command checks the pinned Parakeet hashes and initializes the local Silero,
+speaker-embedding and speaker-segmentation models. A nonzero exit means a
+requested audio/transcription trial should not start. Model access errors are
+reported separately from missing files so execution-identity and permission
+problems are not misdiagnosed as absent artifacts.
+
+The optional smart text-PII model has its own license, which may be narrower than
+this repository's MIT license. Review that license before provisioning or use.
+Without it, `--async-pii-redaction` logs a reduced-coverage warning and retains
+regex-only reconciliation. Neither mode is a privacy guarantee.
+
 Recording is an explicit action and may capture sensitive data. Use `--help`
 to choose devices, local engines and privacy settings before starting. Default
 data is `%USERPROFILE%\.screenpipe`; use a fresh `--data-dir` for tests.

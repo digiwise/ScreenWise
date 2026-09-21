@@ -874,7 +874,7 @@ pub fn run_uia_thread(
 
     // Capture the initial window only after the same lock/schedule/DRM
     // admission used by later UIA work.
-    if screenpipe_config::audio_privacy::visual_capture_allowed() {
+    if config.capture_tree && screenpipe_config::audio_privacy::visual_capture_allowed() {
         let initial_hwnd = unsafe { GetForegroundWindow() };
         if !initial_hwnd.is_invalid() {
             capture_and_send(

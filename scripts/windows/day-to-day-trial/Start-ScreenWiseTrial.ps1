@@ -81,6 +81,25 @@ if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyCon
     throw "Port $Port is already listening."
 }
 
+$audioModelsReady = $null
+if ($TranscriptionEngine -eq 'parakeet') {
+    $modelOutput = (& $ExecutablePath audio models --output json 2>$null | Out-String).Trim()
+    $modelExitCode = $LASTEXITCODE
+    if ([string]::IsNullOrWhiteSpace($modelOutput)) {
+        throw 'The ScreenWise audio-model preflight returned no status.'
+    }
+    try {
+        $modelStatus = $modelOutput | ConvertFrom-Json
+    }
+    catch {
+        throw 'The ScreenWise audio-model preflight returned invalid JSON.'
+    }
+    $audioModelsReady = [bool]$modelStatus.success
+    if ($modelExitCode -ne 0 -or -not $audioModelsReady) {
+        throw 'Required local audio models are unavailable. Run screenpipe audio models for content-free diagnostics; recording was not started.'
+    }
+}
+
 if ($PreflightOnly) {
     [pscustomobject]@{
         Status = 'ready'
@@ -89,6 +108,7 @@ if ($PreflightOnly) {
         FirewallGroup = $FirewallGroup
         ScopedExecutableCount = $scopedPaths.Count
         Port = $Port
+        AudioModelsReady = $audioModelsReady
         RecordingStarted = $false
     } | ConvertTo-Json -Depth 3
     return
@@ -114,6 +134,7 @@ $launch = [ordered]@{
     clipboard_capture_requested = $true
     system_default_audio_requested = $true
     transcription_engine = $TranscriptionEngine
+    audio_models_ready = $audioModelsReady
     ignored_windows = @($IgnoredWindow)
     ignored_urls = @($IgnoredUrl)
 }
@@ -155,15 +176,51 @@ Write-Host "ScreenWise trial data: $DataDir"
 Write-Host "Operational audit: $sessionDir"
 Write-Host 'Press Ctrl+C once when you want ScreenWise to shut down cleanly.'
 
+$initialLogLengths = @{}
+Get-ChildItem -LiteralPath $DataDir -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue |
+    ForEach-Object { $initialLogLengths[$_.FullName] = [long]$_.Length }
+
+function Test-CleanShutdownAfterLaunch {
+    param([string]$Root, [hashtable]$Offsets)
+
+    foreach ($log in @(Get-ChildItem -LiteralPath $Root -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue)) {
+        $offset = if ($Offsets.ContainsKey($log.FullName)) { [long]$Offsets[$log.FullName] } else { 0L }
+        $stream = $null
+        $reader = $null
+        try {
+            $stream = [IO.File]::Open($log.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            if ($stream.Length -lt $offset) { $offset = 0L }
+            [void]$stream.Seek($offset, [IO.SeekOrigin]::Begin)
+            $reader = [IO.StreamReader]::new($stream)
+            if ($reader.ReadToEnd() -match '(?m)^\S+\s+INFO\s+screenpipe:\s+shutdown complete\s*$') {
+                return $true
+            }
+        }
+        finally {
+            if ($reader) { $reader.Dispose() }
+            elseif ($stream) { $stream.Dispose() }
+        }
+    }
+    return $false
+}
+
 $exitCode = $null
 try {
     & $ExecutablePath @recordArgs
     $exitCode = $LASTEXITCODE
 }
 finally {
+    $cleanShutdownObserved = Test-CleanShutdownAfterLaunch -Root $DataDir -Offsets $initialLogLengths
+    $exitCodeInferred = $false
+    if ($cleanShutdownObserved -and ($null -eq $exitCode -or $exitCode -ne 0)) {
+        $exitCode = 0
+        $exitCodeInferred = $true
+    }
     $ended = [ordered]@{
         ended_at_utc = (Get-Date).ToUniversalTime().ToString('o')
         recorder_exit_code = $exitCode
+        clean_shutdown_observed = $cleanShutdownObserved
+        exit_code_inferred_from_clean_shutdown = $exitCodeInferred
     }
     $ended | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sessionDir 'launcher-exit.json') -Encoding utf8
     Wait-Job -Job $monitorJob -Timeout 90 | Out-Null

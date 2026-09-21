@@ -204,6 +204,15 @@ impl UiRecorderConfig {
         config.extraction_thread_priority = self.extraction_thread_priority;
         config.pause_extraction_on_input_ms = self.pause_extraction_on_input_ms;
 
+        // The engine's paired-capture path owns accessibility-tree acquisition
+        // and persistence. The lower-level UI recorder has no tree consumer in
+        // this integration, so producing periodic snapshots only fills its
+        // bounded channel and drops work. Keep UIA running for password-state,
+        // click-context, clipboard and focus checks without the orphan tree
+        // producer.
+        config.capture_tree = false;
+        config.enable_tree_walker = false;
+
         // Add excluded apps
         for app in &self.excluded_apps {
             config.excluded_apps.push(app.to_lowercase());
@@ -1567,6 +1576,18 @@ mod tests {
         };
 
         assert!(!config.to_ui_config().apply_pii_removal);
+    }
+
+    #[test]
+    fn paired_capture_disables_the_unconsumed_low_level_tree_queue() {
+        let config = UiRecorderConfig {
+            enable_tree_walker: true,
+            ..Default::default()
+        };
+
+        let ui_config = config.to_ui_config();
+        assert!(!ui_config.capture_tree);
+        assert!(!ui_config.enable_tree_walker);
     }
 
     #[test]

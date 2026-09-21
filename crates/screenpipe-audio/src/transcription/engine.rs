@@ -10,11 +10,16 @@ use crate::transcription::whisper::model::{
 use crate::transcription::{TranscriptionOutput, VocabularyEntry};
 use anyhow::{anyhow, Result};
 use screenpipe_core::Language;
+#[cfg(all(feature = "parakeet", not(feature = "parakeet-mlx")))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(any(feature = "qwen3-asr", feature = "parakeet", feature = "parakeet-mlx"))]
 use std::sync::Mutex as StdMutex;
 use tracing::{info, warn};
 use whisper_rs::{WhisperContext, WhisperState};
+
+#[cfg(all(feature = "parakeet", not(feature = "parakeet-mlx")))]
+static PARAKEET_UNAVAILABLE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// MLX Metal memory management — cap the GPU buffer cache to prevent unbounded growth.
 /// MLX's caching allocator keeps freed GPU buffers for reuse; without a limit the
@@ -181,15 +186,20 @@ impl TranscriptionEngine {
                     let load_result = tokio::task::spawn_blocking(|| -> Result<_> {
                         let status = crate::models::parakeet_model_status()?;
                         if !status.ready {
-                            for file in status.files.iter().filter(|file| !file.ready) {
-                                warn!(
-                                    "Parakeet transcription unavailable: {}; provision {} with SHA-256 {}",
-                                    file.error.as_deref().unwrap_or("unverified artifact"),
-                                    file.path.display(),
-                                    file.sha256,
-                                );
+                            if !PARAKEET_UNAVAILABLE_LOGGED.swap(true, Ordering::Relaxed) {
+                                for file in status.files.iter().filter(|file| !file.ready) {
+                                    warn!(
+                                        "Parakeet transcription unavailable: {}; provision {} with SHA-256 {}",
+                                        file.error.as_deref().unwrap_or("unverified artifact"),
+                                        file.path.display(),
+                                        file.sha256,
+                                    );
+                                }
                             }
                             return Ok(None);
+                        }
+                        if PARAKEET_UNAVAILABLE_LOGGED.swap(false, Ordering::Relaxed) {
+                            info!("Parakeet transcription became available after model refresh");
                         }
                         // The verified int8 pair is self-contained. audiopipe's
                         // local-directory loader prefers these exact filenames.

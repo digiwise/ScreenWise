@@ -1368,9 +1368,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(onnx_err) => {
                     tracing::warn!(
-                        "Smart text-PII unavailable ({onnx_err}); worker will run regex-only. \
-                         Provision every listed ONNX model file under ~/.screenpipe/models/ \
-                         and verify it before enabling Smart mode."
+                        "Smart text-PII unavailable ({onnx_err}); regex-only reconciliation is active. \
+                         This is reduced redaction coverage; review the model's license, provision every \
+                         listed file under ~/.screenpipe/models/, and verify it before relying on the AI step."
                     );
                     Pipeline::regex_only_with_policy(policy.clone())
                 }

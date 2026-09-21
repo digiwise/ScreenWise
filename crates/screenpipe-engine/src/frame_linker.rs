@@ -141,6 +141,11 @@ pub struct FrameLinker {
     /// Stored unkeyed because a frame may have N correlation ids; we
     /// scan on event arrival. N is bounded by `capacity`.
     pending_frames: Vec<PendingFrame>,
+    /// Recently completed correlation ids. Capture triggers are broadcast to
+    /// every monitor loop, so more than one monitor can report the same id.
+    /// Remembering terminal ids prevents those later, valid duplicates from
+    /// being mistaken for half-paired frames and expiring as false losses.
+    resolved: HashMap<CorrelationId, Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,23 +168,32 @@ impl FrameLinker {
             config,
             pending_events: HashMap::new(),
             pending_frames: Vec::new(),
+            resolved: HashMap::new(),
         }
     }
 
     /// Called by the recorder side after a `ui_events` row has been
     /// persisted. Returns any update that becomes possible.
     pub fn on_event_persisted(&mut self, e: EventPersisted, now: Instant) -> Option<LinkUpdate> {
+        if self.resolved.contains_key(&e.correlation_id) {
+            return None;
+        }
+
         // Fast path: is there a pending frame already waiting on this corr id?
+        let mut matched_frame_id = None;
         for pf in self.pending_frames.iter_mut() {
-            if let Some(pos) = pf.unmatched.iter().position(|c| *c == e.correlation_id) {
+            while let Some(pos) = pf.unmatched.iter().position(|c| *c == e.correlation_id) {
                 pf.unmatched.swap_remove(pos);
-                let frame_id = pf.frame_id;
-                self.compact_pending_frames();
-                return Some(LinkUpdate {
-                    row_id: e.row_id,
-                    frame_id,
-                });
+                matched_frame_id.get_or_insert(pf.frame_id);
             }
+        }
+        if let Some(frame_id) = matched_frame_id {
+            self.compact_pending_frames();
+            self.mark_resolved(e.correlation_id, now);
+            return Some(LinkUpdate {
+                row_id: e.row_id,
+                frame_id,
+            });
         }
         // No match yet — stash and wait for the frame.
         self.evict_if_full_events(now);
@@ -199,11 +213,21 @@ impl FrameLinker {
         let mut updates = Vec::new();
         let mut unmatched = Vec::new();
         for corr_id in c.correlation_ids {
+            if self.resolved.contains_key(&corr_id)
+                || unmatched.contains(&corr_id)
+                || self
+                    .pending_frames
+                    .iter()
+                    .any(|pending| pending.unmatched.contains(&corr_id))
+            {
+                continue;
+            }
             if let Some(pe) = self.pending_events.remove(&corr_id) {
                 updates.push(LinkUpdate {
                     row_id: pe.row_id,
                     frame_id: c.frame_id,
                 });
+                self.mark_resolved(corr_id, now);
             } else {
                 unmatched.push(corr_id);
             }
@@ -232,6 +256,8 @@ impl FrameLinker {
             let before_frames = self.pending_frames.len();
             self.pending_frames.retain(|pf| pf.inserted_at >= cutoff);
             evicted += before_frames - self.pending_frames.len();
+            self.resolved
+                .retain(|_, resolved_at| *resolved_at >= cutoff);
         }
         evicted
     }
@@ -274,6 +300,15 @@ impl FrameLinker {
 
     fn compact_pending_frames(&mut self) {
         self.pending_frames.retain(|pf| !pf.unmatched.is_empty());
+    }
+
+    fn mark_resolved(&mut self, correlation_id: CorrelationId, now: Instant) {
+        if self.resolved.len() >= self.config.capacity {
+            if let Some((&oldest_id, _)) = self.resolved.iter().min_by_key(|(_, at)| *at) {
+                self.resolved.remove(&oldest_id);
+            }
+        }
+        self.resolved.insert(correlation_id, now);
     }
 }
 
@@ -618,6 +653,55 @@ mod tests {
             t0,
         );
         assert!(second.is_empty());
+        assert_eq!(linker.pending_len(), (0, 0));
+        assert_eq!(linker.tick(t0 + Duration::from_secs(59)), 0);
+    }
+
+    #[test]
+    fn multi_monitor_frames_before_event_are_deduplicated() {
+        let mut linker = FrameLinker::new(cfg());
+        let t0 = Instant::now();
+
+        for frame_id in [900, 901, 902] {
+            assert!(linker
+                .on_frame_captured(
+                    FrameCaptured {
+                        frame_id,
+                        correlation_ids: vec![1],
+                    },
+                    t0,
+                )
+                .is_empty());
+        }
+        assert_eq!(linker.pending_len(), (0, 1));
+
+        let update = linker.on_event_persisted(
+            EventPersisted {
+                correlation_id: 1,
+                row_id: 100,
+            },
+            t0,
+        );
+        assert_eq!(
+            update,
+            Some(LinkUpdate {
+                row_id: 100,
+                frame_id: 900,
+            })
+        );
+        assert_eq!(linker.pending_len(), (0, 0));
+
+        assert!(linker
+            .on_frame_captured(
+                FrameCaptured {
+                    frame_id: 903,
+                    correlation_ids: vec![1],
+                },
+                t0,
+            )
+            .is_empty());
+        assert_eq!(linker.pending_len(), (0, 0));
+        assert_eq!(linker.tick(t0 + Duration::from_secs(59)), 0);
     }
 
     #[test]

@@ -1384,6 +1384,12 @@ pub enum AudioCommand {
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
     },
+    /// Verify explicitly provisioned local audio models without recording
+    Models {
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1439,6 +1445,20 @@ mod tests {
             "8.8.8.8:443"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn audio_models_is_a_non_recording_status_command() {
+        let cli =
+            Cli::try_parse_from(["screenpipe", "audio", "models", "--output", "json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Audio {
+                subcommand: AudioCommand::Models {
+                    output: OutputFormat::Json
+                }
+            }
+        ));
     }
 
     #[test]

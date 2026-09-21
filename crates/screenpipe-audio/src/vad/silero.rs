@@ -5,6 +5,7 @@
 use anyhow;
 use dirs;
 use std::collections::VecDeque;
+use std::fs;
 use std::path::PathBuf;
 use tracing::debug;
 use vad_rs::{Vad, VadStatus};
@@ -59,11 +60,28 @@ impl SileroVad {
         // Use v5 model filename to differentiate from old cached model
         let path = cache_dir.join("silero_vad_v5.onnx");
 
-        if path.exists() {
-            verify_file_sha256(&path, SILERO_V5_SHA256)?;
-            let mut cached = MODEL_PATH.lock().await;
-            *cached = Some(path.clone());
-            return Ok(path);
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                verify_file_sha256(&path, SILERO_V5_SHA256)?;
+                let mut cached = MODEL_PATH.lock().await;
+                *cached = Some(path.clone());
+                return Ok(path);
+            }
+            Ok(_) => {
+                return Err(anyhow::anyhow!(
+                    "required local Silero VAD model path is not a regular file at {}; replace it with silero_vad_v5.onnx with SHA-256 {} before starting screenpipe",
+                    path.display(),
+                    SILERO_V5_SHA256
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot inspect required local Silero VAD model at {}: {}; verify file permissions and the execution identity",
+                    path.display(),
+                    error
+                ));
+            }
         }
 
         Err(anyhow::anyhow!(
