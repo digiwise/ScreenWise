@@ -172,6 +172,17 @@ fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
     Ok(base_dir)
 }
 
+const FILE_LOG_TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.6fZ";
+
+fn file_log_event_format(
+) -> fmt::format::Format<fmt::format::Full, tracing_subscriber::fmt::time::ChronoUtc> {
+    fmt::format()
+        .with_timer(tracing_subscriber::fmt::time::ChronoUtc::new(
+            FILE_LOG_TIMESTAMP_FORMAT.to_string(),
+        ))
+        .with_ansi(false)
+}
+
 fn setup_logging(local_data_dir: &PathBuf, debug: bool) -> anyhow::Result<WorkerGuard> {
     let file_appender = screenpipe_engine::logging::SizedRollingWriter::builder()
         .directory(local_data_dir)
@@ -240,7 +251,8 @@ fn setup_logging(local_data_dir: &PathBuf, debug: bool) -> anyhow::Result<Worker
     // The suffix is `Z`, so the clock must actually be UTC. Using ChronoLocal
     // here produced Melbourne wall-clock values labelled as UTC and broke
     // correlation with the trial monitor's genuine UTC timestamps.
-    let timer = tracing_subscriber::fmt::time::ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
+    let timer =
+        tracing_subscriber::fmt::time::ChronoUtc::new(FILE_LOG_TIMESTAMP_FORMAT.to_string());
 
     let tracing_registry = tracing_subscriber::registry()
         .with(
@@ -252,10 +264,9 @@ fn setup_logging(local_data_dir: &PathBuf, debug: bool) -> anyhow::Result<Worker
         .with(
             fmt::layer()
                 .with_writer(file_writer)
-                .with_timer(timer)
-                // Rolling files are machine-readable operational evidence.
-                // ANSI escapes made timestamp and severity parsing unreliable.
-                .with_ansi(false)
+                // Rolling files are machine-readable operational evidence:
+                // actual UTC for the `Z` suffix and no ANSI escapes.
+                .event_format(file_log_event_format())
                 .with_filter(make_env_filter()),
         );
 
@@ -1534,4 +1545,57 @@ async fn main() -> anyhow::Result<()> {
     info!("shutdown complete");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod logging_regression_tests {
+    use super::*;
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("test log writer poisoned")
+                .write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rolling_file_format_is_plain_utc() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .with_writer(move || SharedBuffer(Arc::clone(&writer_output)))
+                .event_format(file_log_event_format()),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("screenwise-log-format-regression-marker");
+        });
+
+        let bytes = output.lock().expect("test log writer poisoned").clone();
+        let text = String::from_utf8(bytes).expect("file log must be UTF-8");
+        assert!(!text.contains('\u{1b}'), "file log must not contain ANSI");
+        assert!(text.contains("screenwise-log-format-regression-marker"));
+
+        let timestamp = text
+            .split_whitespace()
+            .next()
+            .expect("formatted event has a timestamp");
+        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .expect("file timestamp must be RFC3339 UTC");
+        assert_eq!(parsed.offset().local_minus_utc(), 0);
+        assert!(timestamp.ends_with('Z'));
+    }
 }

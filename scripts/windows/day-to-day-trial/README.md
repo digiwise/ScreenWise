@@ -76,6 +76,13 @@ frame-link TTL expiry direction (event without frame versus frame without event)
 An intentional lock/DRM/schedule audio pause remains healthy in `/health`; the
 audio-pipeline `transcription_paused` flag shows that acquisition is paused.
 
+Run the non-recording synthetic regression for log offsets, lock-interval
+reconstruction, ANSI shutdown parsing and content-free failure/loss counts with:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Test-ScreenWiseTrialStatus.ps1
+```
+
 Review can establish health counters, warnings, candidate capture gaps, fixed
 safe placeholders, lock intervals, transcription status and leftover processes.
 Current `/health` samples distinguish requested-but-unavailable transcription

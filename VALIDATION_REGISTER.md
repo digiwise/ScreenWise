@@ -68,11 +68,17 @@ existing bounded backlog-stall condition as degraded, keep known privacy pauses
 healthy while exposing `transcription_paused`, persist a content-free final trial
 summary and split future TTL expiries by direction. Per-frame Basic PII success
 and negative meeting scans moved to DEBUG; state changes and failures stay visible.
-The repaired tree passed 554 engine tests with two ignored, all 23 capture tests,
-Rust formatting, PowerShell parsing and a locked offline optimized build. The
-exact rebuilt executable passed its non-recording six-model check and the
-existing-rule trial preflight with recording disabled. A new live run has not
-yet verified the corrected health states, plain UTC logs or final-summary path.
+The repaired tree passed 556 engine tests with two ignored, the separate
+rolling-log regression, all 23 capture tests, Rust formatting, PowerShell
+parsing and a locked offline optimized build. Focused tests now cover fresh
+batch backlog, privacy-paused audio without hiding hard queue/database failures,
+actual UTC/plain file-log formatting, per-run log offsets, lock-interval counter
+plateaus, ANSI shutdown parsing, failure classification and loss counts. The
+non-recording synthetic trial-status regression passed. The exact rebuilt
+executable (`EA25F7618C3478C105C85EAA3FBD6895F975FB2D4E27ABAB1DEE9EF2DB13EDFB`)
+passed its six-model check and the existing-rule trial preflight with recording
+disabled. A new live run has not yet verified the corrected health states,
+plain UTC logs or final-summary path.
 
 ## Issue register
 
@@ -101,8 +107,8 @@ yet verified the corrected health states, plain UTC logs or final-summary path.
 | SW-V21 | Model inspection distinguishes missing, wrong-type and access failures; warnings are transition-deduplicated; `/health` marks requested-but-unavailable transcription; and the trial refuses to record unless the exact executable verifies the local pack. A live post-fix run completed and inserted 18 current-process transcriptions with zero transcription errors; content and accuracy were not inspected. |
 | SW-V22 | The same trial had one post-capture privacy-evaluation failure; it persisted a visible safe placeholder and recovered on the next observed frame. No sensitive content was inspected and the generic failure stage does not identify the transient OS cause. Retain as an open reproducibility/observability warning; do not weaken the fail-closed behavior. |
 | SW-V23 | The optional smart text-PII model was absent and regex-only reconciliation remained active. Its published CC BY-NC 4.0 license is separate from this MIT repository, so it was not silently provisioned for this Digiwise-associated workflow. Reduced coverage is now explicit in the log and setup guide; neither regex nor AI redaction is a privacy guarantee. |
-| SW-V24 | **Repaired and rebuilt; live check pending:** `/health` treated any fresh batch backlog and expected privacy-paused audio staleness as degradation. It now uses the existing bounded backlog-stall predicate, treats a known privacy pause like the vision gate and exposes `transcription_paused`. |
-| SW-V25 | **Repaired and rebuilt; live check pending:** rolling log timestamps now use UTC when suffixed `Z`, file logs omit ANSI, shutdown scanning uses per-run byte offsets, and the launcher writes a content-free final summary. Existing legacy runs remain readable. |
+| SW-V24 | **Repaired, regression-tested and rebuilt; live check pending:** `/health` treated any fresh batch backlog and expected privacy-paused audio staleness as degradation. It now uses the existing bounded backlog-stall predicate, treats a known privacy pause like the vision gate and exposes `transcription_paused`. Focused tests also ensure a pause cannot hide confirmed queue/database failures. |
+| SW-V25 | **Repaired, regression-tested and rebuilt; live check pending:** rolling log timestamps now use UTC when suffixed `Z`, file logs omit ANSI, shutdown scanning uses per-run byte offsets, and the launcher writes a content-free final summary. The Rust file-format test and non-recording synthetic status test cover the corrected parsing paths. Existing legacy runs remain readable. |
 
 ## Outstanding test plan
 

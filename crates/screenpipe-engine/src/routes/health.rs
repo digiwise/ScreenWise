@@ -62,6 +62,44 @@ fn audio_backlog_is_stalled(
             > (AUDIO_RECONCILIATION_FRESHNESS_DELAY_SECS as u64).saturating_mul(2)
 }
 
+#[derive(Clone, Copy)]
+struct AudioStatusSignals {
+    disabled: bool,
+    transcription_unavailable: bool,
+    privacy_paused: bool,
+    never_captured: bool,
+    stream_hijacked: bool,
+    globally_active: bool,
+    last_write_recent: bool,
+}
+
+fn classify_audio_status(signals: AudioStatusSignals) -> &'static str {
+    if signals.disabled {
+        "disabled"
+    } else if signals.transcription_unavailable {
+        "transcription_unavailable"
+    } else if signals.privacy_paused {
+        "ok"
+    } else if signals.never_captured {
+        "not_started"
+    } else if signals.stream_hijacked && signals.globally_active {
+        "active_no_data"
+    } else if signals.globally_active || signals.last_write_recent {
+        "ok"
+    } else {
+        "stale"
+    }
+}
+
+fn audio_pipeline_is_degraded(
+    disabled: bool,
+    uptime_secs: f64,
+    chunks_channel_full: u64,
+    database_write_stalled: bool,
+) -> bool {
+    !disabled && uptime_secs > 120.0 && (chunks_channel_full > 0 || database_write_stalled)
+}
+
 /// Describe the most likely cause of a DB-write stall from pool stats.
 /// Old message always said "pool exhaustion likely" which was wrong when the
 /// real cause was elsewhere (e.g. metrics gap on reconciliation path) and the
@@ -642,31 +680,20 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             runtime_transcription.as_ref(),
         );
 
-    let audio_status = if state.audio_disabled {
-        "disabled".to_string()
-    } else if transcription_unavailable {
-        "transcription_unavailable".to_string()
-    } else if audio_privacy_paused {
-        // A lock, DRM gate or schedule pause deliberately stops acquisition.
-        // Match the vision-side treatment: stale timestamps during a known
-        // privacy pause are expected and must not degrade /health.
-        "ok".to_string()
-    } else if audio_never_captured {
-        "not_started".to_string()
-    } else if stream_hijacked && global_audio_active {
-        // Device is active but the watchdog has fired — indicates hijack recovery
-        // in progress or recently completed. This is the "active_no_data" state
-        // the user requested in #3144.
-        "active_no_data".to_string()
-    } else if global_audio_active {
-        "ok".to_string()
-    } else if last_audio_ts == 0 {
-        "not_started".to_string()
-    } else if now.timestamp() as u64 - last_audio_ts < threshold_secs {
-        "ok".to_string()
-    } else {
-        "stale".to_string()
-    };
+    // A lock, DRM gate or schedule pause deliberately stops acquisition.
+    // Match the vision-side treatment: stale timestamps during a known privacy
+    // pause are expected and must not degrade /health.
+    let audio_status = classify_audio_status(AudioStatusSignals {
+        disabled: state.audio_disabled,
+        transcription_unavailable,
+        privacy_paused: audio_privacy_paused,
+        never_captured: audio_never_captured,
+        stream_hijacked,
+        globally_active: global_audio_active,
+        last_write_recent: last_audio_ts > 0
+            && now.timestamp() as u64 - last_audio_ts < threshold_secs,
+    })
+    .to_string();
 
     // Format device statuses as a string for a more detailed view
     let device_status_details = if !device_statuses.is_empty() {
@@ -734,18 +761,19 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     // deliberate freshness delay. Only the bounded stall test above may turn
     // that backlog into degradation; merely having pending chunks must not
     // produce a permanent 503 during ordinary recording.
-    let audio_degraded = if !state.audio_disabled && audio_snap.uptime_secs > 120.0 {
-        let channel_full = audio_snap.chunks_channel_full > 0;
-        if channel_full {
-            warn!(
-                "health_check: {} audio chunk(s) dropped (transcription engine too slow)",
-                audio_snap.chunks_channel_full
-            );
-        }
-        channel_full || audio_db_write_stalled
-    } else {
-        false
-    };
+    let audio_degraded = audio_pipeline_is_degraded(
+        state.audio_disabled,
+        audio_snap.uptime_secs,
+        audio_snap.chunks_channel_full,
+        audio_db_write_stalled,
+    );
+    if !state.audio_disabled && audio_snap.chunks_channel_full > 0 && audio_snap.uptime_secs > 120.0
+    {
+        warn!(
+            "health_check: {} audio chunk(s) dropped (transcription engine too slow)",
+            audio_snap.chunks_channel_full
+        );
+    }
 
     let (overall_status, message, verbose_instructions, status_code) = if (frame_status == "ok"
         || frame_status == "disabled")
@@ -1249,6 +1277,41 @@ mod tests {
 
         // Big count but young enough — not a stall yet.
         assert!(!audio_backlog_is_stalled(200, freshness, false));
+    }
+
+    #[test]
+    fn privacy_pause_is_healthy_without_hiding_hard_failures() {
+        let paused = AudioStatusSignals {
+            disabled: false,
+            transcription_unavailable: false,
+            privacy_paused: true,
+            never_captured: false,
+            stream_hijacked: false,
+            globally_active: false,
+            last_write_recent: false,
+        };
+        assert_eq!(classify_audio_status(paused), "ok");
+
+        assert_eq!(
+            classify_audio_status(AudioStatusSignals {
+                transcription_unavailable: true,
+                ..paused
+            }),
+            "transcription_unavailable"
+        );
+
+        // A current privacy pause must not erase an already observed queue
+        // overflow. Degradation is based on the hard failure counter rather
+        // than the current capture state.
+        assert!(audio_pipeline_is_degraded(false, 121.0, 1, false));
+        assert!(audio_pipeline_is_degraded(false, 121.0, 0, true));
+    }
+
+    #[test]
+    fn fresh_batch_backlog_does_not_degrade_pipeline() {
+        let freshness = AUDIO_RECONCILIATION_FRESHNESS_DELAY_SECS as u64;
+        assert!(!audio_backlog_is_stalled(2, freshness / 2, false));
+        assert!(!audio_pipeline_is_degraded(false, 121.0, 0, false));
     }
 
     #[test]
