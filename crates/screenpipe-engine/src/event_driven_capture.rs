@@ -724,6 +724,7 @@ pub async fn event_driven_capture_loop(
                     &mut last_windows_capture_outcome,
                     output.windows_outcome,
                     monitor_id,
+                    WindowsCaptureObservation::Persisted,
                 );
                 if let Some(ref mut comparer) = frame_comparer {
                     let _ = comparer.compare(&output.image);
@@ -903,6 +904,7 @@ pub async fn event_driven_capture_loop(
                             &mut last_windows_capture_outcome,
                             safe.outcome,
                             monitor_id,
+                            WindowsCaptureObservation::Probe,
                         );
                         let diff = comparer.compare(&safe.image);
                         if diff > visual_change_threshold {
@@ -1226,6 +1228,7 @@ pub async fn event_driven_capture_loop(
                         &mut last_windows_capture_outcome,
                         safe.outcome,
                         monitor_id,
+                        WindowsCaptureObservation::Probe,
                     );
                     let diff = comparer.compare(&safe.image);
                     if diff > visual_change_threshold {
@@ -1359,6 +1362,7 @@ pub async fn event_driven_capture_loop(
                             &mut last_windows_capture_outcome,
                             output.windows_outcome,
                             monitor_id,
+                            WindowsCaptureObservation::Persisted,
                         );
 
                         if consecutive_capture_errors > 0 {
@@ -1625,18 +1629,44 @@ struct CaptureOutput {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+enum WindowsCaptureObservation {
+    /// A cheap privacy-safe bitmap used only for visual-change comparison.
+    Probe,
+    /// The outcome returned by the capture path that may write a timeline row.
+    Persisted,
+}
+
+#[cfg(target_os = "windows")]
+fn take_windows_capture_transition(
+    previous: &mut Option<WindowsCaptureOutcome>,
+    current: WindowsCaptureOutcome,
+    observation: WindowsCaptureObservation,
+) -> Option<Option<WindowsCaptureOutcome>> {
+    if matches!(observation, WindowsCaptureObservation::Probe) || *previous == Some(current) {
+        return None;
+    }
+
+    let old = *previous;
+    *previous = Some(current);
+    Some(old)
+}
+
+#[cfg(target_os = "windows")]
 fn log_windows_capture_transition(
     previous: &mut Option<WindowsCaptureOutcome>,
     current: WindowsCaptureOutcome,
     monitor_id: u32,
+    observation: WindowsCaptureObservation,
 ) {
-    if *previous == Some(current) {
+    let Some(previous_outcome) = take_windows_capture_transition(previous, current, observation)
+    else {
         return;
-    }
+    };
 
     match current {
         WindowsCaptureOutcome::FullMonitor => {
-            if previous.is_some() {
+            if previous_outcome.is_some() {
                 info!(
                     "monitor {} Windows capture returned to an unredacted full-monitor frame",
                     monitor_id
@@ -1656,7 +1686,6 @@ fn log_windows_capture_transition(
             monitor_id, stage
         ),
     }
-    *previous = Some(current);
 }
 
 #[cfg(target_os = "windows")]
@@ -2493,6 +2522,56 @@ fn is_frame_mostly_black(image: &image::DynamicImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn visual_probe_does_not_repeat_persisted_privacy_transition() {
+        use screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason;
+
+        let redacted = WindowsCaptureOutcome::CaptureRedacted(
+            WindowsCaptureRedactionReason::ActiveWindowExcluded,
+        );
+        let mut previous = None;
+
+        assert_eq!(
+            take_windows_capture_transition(
+                &mut previous,
+                redacted,
+                WindowsCaptureObservation::Persisted,
+            ),
+            Some(None)
+        );
+        assert_eq!(previous, Some(redacted));
+
+        // A comparer-only full-monitor probe must not announce recovery or
+        // reset the state used by the next persisted redaction placeholder.
+        assert_eq!(
+            take_windows_capture_transition(
+                &mut previous,
+                WindowsCaptureOutcome::FullMonitor,
+                WindowsCaptureObservation::Probe,
+            ),
+            None
+        );
+        assert_eq!(previous, Some(redacted));
+        assert_eq!(
+            take_windows_capture_transition(
+                &mut previous,
+                redacted,
+                WindowsCaptureObservation::Persisted,
+            ),
+            None
+        );
+
+        assert_eq!(
+            take_windows_capture_transition(
+                &mut previous,
+                WindowsCaptureOutcome::FullMonitor,
+                WindowsCaptureObservation::Persisted,
+            ),
+            Some(Some(redacted))
+        );
+    }
 
     #[test]
     fn test_capture_trigger_as_str() {

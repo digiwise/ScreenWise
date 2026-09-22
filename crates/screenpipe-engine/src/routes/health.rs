@@ -70,7 +70,7 @@ struct AudioStatusSignals {
     never_captured: bool,
     stream_hijacked: bool,
     globally_active: bool,
-    last_write_recent: bool,
+    pipeline_activity_recent: bool,
 }
 
 fn classify_audio_status(signals: AudioStatusSignals) -> &'static str {
@@ -84,7 +84,7 @@ fn classify_audio_status(signals: AudioStatusSignals) -> &'static str {
         "not_started"
     } else if signals.stream_hijacked && signals.globally_active {
         "active_no_data"
-    } else if signals.globally_active || signals.last_write_recent {
+    } else if signals.globally_active || signals.pipeline_activity_recent {
         "ok"
     } else {
         "stale"
@@ -472,7 +472,12 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     } else {
         None
     };
-    let last_audio_ts = audio_snap.last_db_write_ts;
+    // A VAD-rejected silent chunk is still proof that capture and the consumer
+    // are alive. Use the consumer heartbeat as well as successful DB writes so
+    // a quiet room does not become a false stale-audio/503 result.
+    let last_audio_ts = audio_snap
+        .last_db_write_ts
+        .max(audio_snap.last_transcription_attempt_ts);
 
     let now = Utc::now();
     let now_ts = now.timestamp() as u64;
@@ -690,8 +695,8 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         never_captured: audio_never_captured,
         stream_hijacked,
         globally_active: global_audio_active,
-        last_write_recent: last_audio_ts > 0
-            && now.timestamp() as u64 - last_audio_ts < threshold_secs,
+        pipeline_activity_recent: last_audio_ts > 0
+            && now_ts.saturating_sub(last_audio_ts) < threshold_secs,
     })
     .to_string();
 
@@ -1288,7 +1293,7 @@ mod tests {
             never_captured: false,
             stream_hijacked: false,
             globally_active: false,
-            last_write_recent: false,
+            pipeline_activity_recent: false,
         };
         assert_eq!(classify_audio_status(paused), "ok");
 
@@ -1312,6 +1317,22 @@ mod tests {
         let freshness = AUDIO_RECONCILIATION_FRESHNESS_DELAY_SECS as u64;
         assert!(!audio_backlog_is_stalled(2, freshness / 2, false));
         assert!(!audio_pipeline_is_degraded(false, 121.0, 0, false));
+    }
+
+    #[test]
+    fn recent_silent_chunk_activity_keeps_audio_healthy() {
+        assert_eq!(
+            classify_audio_status(AudioStatusSignals {
+                disabled: false,
+                transcription_unavailable: false,
+                privacy_paused: false,
+                never_captured: false,
+                stream_hijacked: false,
+                globally_active: false,
+                pipeline_activity_recent: true,
+            }),
+            "ok"
+        );
     }
 
     #[test]

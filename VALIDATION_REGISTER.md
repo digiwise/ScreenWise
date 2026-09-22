@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-09-21. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-09-22. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -68,17 +68,59 @@ existing bounded backlog-stall condition as degraded, keep known privacy pauses
 healthy while exposing `transcription_paused`, persist a content-free final trial
 summary and split future TTL expiries by direction. Per-frame Basic PII success
 and negative meeting scans moved to DEBUG; state changes and failures stay visible.
-The repaired tree passed 556 engine tests with two ignored, the separate
-rolling-log regression, all 23 capture tests, Rust formatting, PowerShell
-parsing and a locked offline optimized build. Focused tests now cover fresh
+The repaired tree passed 558 engine tests with two ignored, all 181 audio tests,
+the separate rolling-log regression, all 23 capture tests, Rust formatting,
+PowerShell parsing and a locked offline optimized build. Focused tests now cover fresh
 batch backlog, privacy-paused audio without hiding hard queue/database failures,
 actual UTC/plain file-log formatting, per-run log offsets, lock-interval counter
 plateaus, ANSI shutdown parsing, failure classification and loss counts. The
 non-recording synthetic trial-status regression passed. The exact rebuilt
-executable (`EA25F7618C3478C105C85EAA3FBD6895F975FB2D4E27ABAB1DEE9EF2DB13EDFB`)
+executable (`D445B05CC5E8B5A5C06C765D9C0D81942D4D3BE2D0F3695D89B6322BE75E0AB3`)
 passed its six-model check and the existing-rule trial preflight with recording
-disabled. A new live run has not yet verified the corrected health states,
-plain UTC logs or final-summary path.
+disabled. The manual run below verified healthy privacy-paused audio, ordinary
+fresh backlogs, plain UTC logs and final-summary creation while exposing further
+fresh-directory and silent-audio diagnostic defects.
+
+## Manual day-to-day trial, 2026-09-22
+
+A fresh private 1,455.5-second run produced 47 content-free operational samples.
+The final sample reported healthy frame and audio states, 823 captured and 823
+database-written frames, zero frame drops/stalls/link expiries/update failures,
+44 audio chunks, four VAD-positive chunks and three completed/inserted
+transcriptions with zero transcription errors. Two pending transcription
+segments were reported by the last sample roughly 30 seconds before shutdown;
+no captured database content was inspected to infer their later disposition.
+Although the final sample was healthy, 32 of 47 samples were degraded and 31
+reported stale audio. Numeric correlation showed that chunks continued arriving
+about every 31 seconds and VAD rejected almost all of them as silence. The health
+clock incorrectly followed transcript database writes instead of this active
+consumer heartbeat.
+
+One 60.2-second lock interval had zero frame and audio-chunk counter advances
+inside its sampled window. Unlock rebuilt the selected audio streams and capture
+resumed. The launcher and corrected log scan both found clean shutdown, exit code
+zero, no panic file, no persistence/audio-shutdown degradation, no confirmed or
+possible delivery loss and no remaining recorder/media process.
+
+The run recorded no acquisition-failure placeholders or unclassified errors.
+All 829 warnings belonged to known fixed categories: 724 excluded-foreground,
+nine excluded-background, 23 no-safe-window, 53 fail-closed unavailable-password-
+state suppressions, 15 bounded audio timing gaps, four expected unlock audio
+recovery notices and one optional smart-PII reduced-coverage notice. No captured
+pixels, text, transcripts, audio, input values, titles, URLs or device names were
+read for this audit.
+
+This fresh directory exposed three diagnostics defects. An empty v2 log-offset map
+was mistaken for the legacy local-clock format, hiding the lock and shutdown
+lines from the generated summary. Version-based parsing and a fresh-directory
+regression now fix that case. Comparer-only visual probes also reset the logged
+capture state between persisted exclusion placeholders, causing hundreds of
+duplicate transition warnings. Probe observations no longer mutate the persisted
+transition tracker; a focused regression covers that sequence. A live rerun is
+still required to measure the resulting warning reduction. The audio consumer
+now advances its existing attempt heartbeat on every received chunk, and health
+uses that heartbeat as well as transcript writes. Focused metrics and health
+tests cover silent-but-active capture; live confirmation remains outstanding.
 
 ## Issue register
 
@@ -107,8 +149,11 @@ plain UTC logs or final-summary path.
 | SW-V21 | Model inspection distinguishes missing, wrong-type and access failures; warnings are transition-deduplicated; `/health` marks requested-but-unavailable transcription; and the trial refuses to record unless the exact executable verifies the local pack. A live post-fix run completed and inserted 18 current-process transcriptions with zero transcription errors; content and accuracy were not inspected. |
 | SW-V22 | The same trial had one post-capture privacy-evaluation failure; it persisted a visible safe placeholder and recovered on the next observed frame. No sensitive content was inspected and the generic failure stage does not identify the transient OS cause. Retain as an open reproducibility/observability warning; do not weaken the fail-closed behavior. |
 | SW-V23 | The optional smart text-PII model was absent and regex-only reconciliation remained active. Its published CC BY-NC 4.0 license is separate from this MIT repository, so it was not silently provisioned for this Digiwise-associated workflow. Reduced coverage is now explicit in the log and setup guide; neither regex nor AI redaction is a privacy guarantee. |
-| SW-V24 | **Repaired, regression-tested and rebuilt; live check pending:** `/health` treated any fresh batch backlog and expected privacy-paused audio staleness as degradation. It now uses the existing bounded backlog-stall predicate, treats a known privacy pause like the vision gate and exposes `transcription_paused`. Focused tests also ensure a pause cannot hide confirmed queue/database failures. |
-| SW-V25 | **Repaired, regression-tested and rebuilt; live check pending:** rolling log timestamps now use UTC when suffixed `Z`, file logs omit ANSI, shutdown scanning uses per-run byte offsets, and the launcher writes a content-free final summary. The Rust file-format test and non-recording synthetic status test cover the corrected parsing paths. Existing legacy runs remain readable. |
+| SW-V24 | **Repaired, regression-tested, rebuilt and live-checked:** `/health` treated any fresh batch backlog and expected privacy-paused audio staleness as degradation. It now uses the existing bounded backlog-stall predicate, treats a known privacy pause like the vision gate and exposes `transcription_paused`. Two samples during the 2026-09-22 lock pause remained healthy with unchanged frame/audio counters. Focused tests also ensure a pause cannot hide confirmed queue/database failures. |
+| SW-V25 | **Repaired, regression-tested and rebuilt; fresh-directory parser rerun pending:** rolling log timestamps now use UTC when suffixed `Z`, file logs omit ANSI, shutdown scanning uses per-run byte offsets, and the launcher writes a content-free final summary. The 2026-09-22 run verified plain UTC logs and summary creation but exposed SW-V26. The Rust file-format test and non-recording synthetic status test cover the corrected parsing paths. Existing legacy runs remain readable. |
+| SW-V26 | **Repaired, regression-tested and rebuilt; live check pending:** the fresh 2026-09-22 trial had an empty v2 offset map, which the status script misclassified as legacy and therefore omitted UTC lock/shutdown lines. Launch schema now selects legacy parsing, and the synthetic test covers both non-empty and empty v2 offset maps. |
+| SW-V27 | **Repaired, regression-tested and rebuilt; live check pending:** comparer-only visual probes repeatedly reset persisted Windows capture transition state, producing 724 excluded-foreground warnings in one 24-minute run. Probe results no longer mutate or log the persisted state; actual persisted privacy and failure transitions remain visible. |
+| SW-V28 | **Repaired, regression-tested and rebuilt; live check pending:** 31 samples reported stale audio while chunks continued arriving and were VAD-rejected as silence. Received chunks now advance the intended consumer/transcription-attempt heartbeat, and `/health` accepts a recent heartbeat without requiring recognized speech or a database insert. |
 
 ## Outstanding test plan
 

@@ -125,6 +125,10 @@ impl AudioPipelineMetrics {
 
     pub fn record_chunk_received(&self) {
         self.chunks_received.fetch_add(1, Ordering::Relaxed);
+        // Receipt is the consumer/transcription pipeline heartbeat even when
+        // VAD subsequently classifies the whole chunk as silence. Health must
+        // not mistake "nothing worth transcribing" for stopped acquisition.
+        self.record_transcription_attempt();
     }
 
     pub fn record_process_error(&self) {
@@ -363,4 +367,20 @@ pub struct AudioMetricsSnapshot {
     pub last_db_write_ts: u64,
     /// Unix timestamp (secs) of most recent transcription attempt (heartbeat)
     pub last_transcription_attempt_ts: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn received_chunk_advances_silence_safe_pipeline_heartbeat() {
+        let metrics = AudioPipelineMetrics::new();
+        assert_eq!(metrics.snapshot().last_transcription_attempt_ts, 0);
+
+        metrics.record_chunk_received();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.chunks_received, 1);
+        assert!(snapshot.last_transcription_attempt_ts > 0);
+    }
 }

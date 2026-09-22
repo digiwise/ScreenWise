@@ -141,6 +141,22 @@ try {
     Assert-Equal 1 $status.routine_negative_meeting_info_lines 'routine meeting count changed'
     Assert-Equal 0 $status.scoped_processes_remaining 'final process audit changed'
 
+    # A first run in a fresh v2 directory has no pre-existing logs, so its
+    # offset map is empty. It must still use UTC parsing and include every new
+    # log from byte zero; empty offsets do not imply the legacy local clock.
+    [IO.File]::WriteAllText($logPath, $currentLog + "`n", $utf8)
+    [ordered]@{
+        schema = 'screenwise.day-to-day-trial-launch.v2'
+        started_at_utc = '2026-01-01T00:00:00Z'
+        recorder_log_offsets = [ordered]@{}
+    } | ConvertTo-Json -Depth 6 |
+        Set-Content -LiteralPath (Join-Path $sessionDir 'launch.json') -Encoding utf8
+
+    $freshStatus = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) |
+        ConvertFrom-Json
+    Assert-Equal $true $freshStatus.clean_shutdown_in_scoped_log 'fresh v2 log was treated as legacy'
+    Assert-Equal 60 $freshStatus.lock_pause_seconds 'fresh v2 UTC lock interval changed'
+
     Write-Output 'ScreenWise trial-status synthetic regression: PASS'
 }
 finally {
