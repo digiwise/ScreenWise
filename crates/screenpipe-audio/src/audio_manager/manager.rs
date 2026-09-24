@@ -176,6 +176,7 @@ pub struct AudioManager {
     /// Handle to the reconciliation background task so we can abort it on shutdown.
     reconciliation_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     reconciliation_stop_requested: Arc<AtomicBool>,
+    reconciliation_wake: Arc<tokio::sync::Notify>,
     /// Output devices temporarily stopped due to DRM content detection.
     /// Stored so they can be restarted when DRM clears.
     drm_stopped_devices: Arc<RwLock<Vec<AudioDevice>>>,
@@ -228,6 +229,20 @@ async fn wait_for_stop_or_timeout(stop_requested: &AtomicBool, timeout: Duration
     }
 }
 
+/// Wait for the periodic reconciliation interval, an explicit backlog wake, or
+/// shutdown. Returns `true` only when shutdown was requested. `Notify` retains
+/// one permit, so a meeting-end wake that races the worker's wait is not lost.
+async fn wait_for_stop_or_wake(
+    stop_requested: &AtomicBool,
+    wake: &tokio::sync::Notify,
+    timeout: Duration,
+) -> bool {
+    tokio::select! {
+        stopped = wait_for_stop_or_timeout(stop_requested, timeout) => stopped,
+        _ = wake.notified() => stop_requested.load(Ordering::Acquire),
+    }
+}
+
 fn remaining_phase_budget(started: std::time::Instant, phase_limit: Duration) -> Duration {
     MANAGER_SHUTDOWN_TIMEOUT
         .saturating_sub(started.elapsed())
@@ -273,6 +288,49 @@ async fn finish_consumer(
             handle.abort();
             screenpipe_events::report_audio_shutdown_issue(
                 screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
+            );
+            ConsumerFinishOutcome::TimedOut
+        }
+    }
+}
+
+/// Stop the recoverable background transcription sweep without classifying
+/// unfinished inference as raw-audio delivery loss. Reconciliation only reads
+/// chunks that were already written to disk and SQLite; aborting its task leaves
+/// those rows eligible for the next sweep or process start.
+async fn finish_reconciliation_worker(
+    handle_slot: &RwLock<Option<JoinHandle<()>>>,
+    timeout: Duration,
+) -> ConsumerFinishOutcome {
+    let phase_started = std::time::Instant::now();
+    let Ok(mut slot) = tokio::time::timeout(timeout, handle_slot.write()).await else {
+        warn!(
+            reason_code = "audio_reconciliation_deferred",
+            "Background transcription reconciliation could not be joined during shutdown; durable pending chunks remain eligible for retry."
+        );
+        return ConsumerFinishOutcome::TimedOut;
+    };
+    let Some(mut handle) = slot.take() else {
+        return ConsumerFinishOutcome::Missing;
+    };
+    drop(slot);
+
+    match tokio::time::timeout(timeout.saturating_sub(phase_started.elapsed()), &mut handle).await {
+        Ok(Ok(())) => ConsumerFinishOutcome::Completed,
+        Ok(Err(error)) if error.is_cancelled() => ConsumerFinishOutcome::Completed,
+        Ok(Err(_)) => {
+            warn!(
+                reason_code = "audio_reconciliation_deferred",
+                "Background transcription reconciliation stopped unexpectedly; durable pending chunks remain eligible for retry."
+            );
+            ConsumerFinishOutcome::Failed
+        }
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            warn!(
+                reason_code = "audio_reconciliation_deferred",
+                "Background transcription reconciliation was deferred at shutdown; durable pending chunks remain eligible for retry."
             );
             ConsumerFinishOutcome::TimedOut
         }
@@ -371,6 +429,7 @@ impl AudioManager {
             engine: Arc::new(RwLock::new(None)),
             reconciliation_handle: Arc::new(RwLock::new(None)),
             reconciliation_stop_requested: Arc::new(AtomicBool::new(false)),
+            reconciliation_wake: Arc::new(tokio::sync::Notify::new()),
             drm_stopped_devices: Arc::new(RwLock::new(Vec::new())),
             user_disabled_devices: Arc::new(RwLock::new(HashSet::new())),
         };
@@ -479,9 +538,16 @@ impl AudioManager {
             let metrics_bg = self.metrics.clone();
             let meeting_detector_bg = self.meeting_detector().await;
             let stop_requested = self.reconciliation_stop_requested.clone();
+            let reconciliation_wake = self.reconciliation_wake.clone();
             let handle = tokio::spawn(async move {
                 // Wait for model to load + initial recordings
-                if wait_for_stop_or_timeout(&stop_requested, Duration::from_secs(120)).await {
+                if wait_for_stop_or_wake(
+                    &stop_requested,
+                    &reconciliation_wake,
+                    Duration::from_secs(120),
+                )
+                .await
+                {
                     return;
                 }
                 loop {
@@ -542,7 +608,13 @@ impl AudioManager {
                             reason
                         );
                     }
-                    if wait_for_stop_or_timeout(&stop_requested, Duration::from_secs(120)).await {
+                    if wait_for_stop_or_wake(
+                        &stop_requested,
+                        &reconciliation_wake,
+                        Duration::from_secs(120),
+                    )
+                    .await
+                    {
                         return;
                     }
                 }
@@ -605,7 +677,7 @@ impl AudioManager {
         // can install another reconciliation worker.
         self.reconciliation_stop_requested
             .store(true, Ordering::Release);
-        let _ = finish_consumer(
+        let _ = finish_reconciliation_worker(
             &self.reconciliation_handle,
             MANAGER_SHUTDOWN_TIMEOUT
                 .saturating_sub(shutdown_started.elapsed())
@@ -1085,7 +1157,6 @@ impl AudioManager {
         let vocabulary = options.vocabulary.clone();
         let is_batch_mode = options.transcription_mode == TranscriptionMode::Batch;
         let batch_max_duration_secs = options.batch_max_duration_secs;
-        let use_pii_removal = options.use_pii_removal;
         let filter_music = options.filter_music;
         let vad_engine = self.vad_engine.clone();
         let whisper_receiver = self.recording_receiver.clone();
@@ -1094,8 +1165,8 @@ impl AudioManager {
         let meeting_audio_tap = self.meeting_audio_tap.clone();
         let db = self.db.clone();
         let shared_engine = self.engine.clone();
-        let on_insert_session = self.on_transcription_insert.clone();
         let stop_requested = self.recording_receiver_stop_requested.clone();
+        let reconciliation_wake = self.reconciliation_wake.clone();
 
         // Build unified transcription engine — only loads the needed model
         let engine = TranscriptionEngine::new(
@@ -1346,29 +1417,19 @@ impl AudioManager {
                                 .is_some_and(|t| t.elapsed().as_secs() >= max_deferral_secs);
 
                         if session_just_ended {
-                            // Reconcile: session ended or deferral cap reached
+                            // Never reconcile the accumulated backlog on this ordered
+                            // persistence consumer. A large meeting backlog can take
+                            // minutes to transcribe; awaiting it here prevents newly
+                            // captured chunks from reaching disk/SQLite and makes clean
+                            // shutdown impossible. Wake the independently owned
+                            // reconciliation worker instead. Every deferred chunk,
+                            // including this one, was durably inserted above.
                             had_deferred_segments = false;
                             deferral_started = None;
                             info!(
-                                "batch mode: audio session ended, transcribing accumulated audio"
+                                "batch mode: audio session ended, queued accumulated audio for background transcription"
                             );
-                            let data_dir = output_path.as_deref();
-                            let count = super::reconciliation::reconcile_untranscribed(
-                                &db,
-                                &engine,
-                                on_insert_session.as_ref(),
-                                audio_transcription_engine.clone(),
-                                Some(segmentation_manager.clone()),
-                                data_dir,
-                                batch_max_duration_secs,
-                                use_pii_removal,
-                                Some(metrics.clone()),
-                            )
-                            .await;
-                            for _ in 0..count {
-                                metrics.record_segment_batch_processed();
-                            }
-                            info!("batch mode: transcribed {} chunks", count);
+                            reconciliation_wake.notify_one();
                         } else if now_in_session {
                             if deferral_started.is_none() {
                                 deferral_started = Some(std::time::Instant::now());
@@ -2099,6 +2160,42 @@ mod tests {
             .expect("consumer did not finish after in-flight work")
             .expect("consumer task failed");
         assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_wake_bypasses_periodic_delay_without_masking_stop() {
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(tokio::sync::Notify::new());
+
+        // Notify before the worker begins waiting. The retained permit must
+        // still wake it promptly rather than waiting for the periodic sweep.
+        wake.notify_one();
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_stop_or_wake(&stop_requested, &wake, Duration::from_secs(60)),
+        )
+        .await
+        .expect("stored reconciliation wake was lost");
+        assert!(!stopped);
+
+        stop_requested.store(true, Ordering::Release);
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_stop_or_wake(&stop_requested, &wake, Duration::from_secs(60)),
+        )
+        .await
+        .expect("shutdown polling did not finish");
+        assert!(stopped);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_timeout_aborts_recoverable_work_without_hiding_handle() {
+        let handle_slot = RwLock::new(Some(tokio::spawn(std::future::pending::<()>())));
+
+        let outcome = finish_reconciliation_worker(&handle_slot, Duration::from_millis(20)).await;
+
+        assert_eq!(outcome, ConsumerFinishOutcome::TimedOut);
+        assert!(handle_slot.read().await.is_none());
     }
 
     #[test]

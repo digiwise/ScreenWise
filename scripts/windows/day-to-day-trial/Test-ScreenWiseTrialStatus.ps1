@@ -157,6 +157,32 @@ try {
     Assert-Equal $true $freshStatus.clean_shutdown_in_scoped_log 'fresh v2 log was treated as legacy'
     Assert-Equal 60 $freshStatus.lock_pause_seconds 'fresh v2 UTC lock interval changed'
 
+    # Shutdown diagnostics are emitted after the monitor's last /health
+    # sample. The summary must merge those fixed notices rather than preserve
+    # the pre-shutdown zero values.
+    $failedShutdownLog = @(
+        '2026-01-01T00:00:00.000000Z INFO lock: Screen unlocked; other privacy and recording controls still apply. reason_code="wts_session_unlocked"'
+        '2026-01-01T00:01:58.000000Z WARN audio: Audio processing did not finish within the shutdown limit; some audio or transcripts may be missing. reason_code="audio_consumer_drain_timeout"'
+        '2026-01-01T00:01:59.000000Z WARN delivery: Audio processing queue could not verify 4 deliveries; some activity may be missing. reason_code="audio_recording_delivery_unconfirmed" count=4 total_possible_loss=4'
+    ) -join "`n"
+    [IO.File]::WriteAllText($logPath, $failedShutdownLog + "`n", $utf8)
+    [ordered]@{
+        ended_at_utc = '2026-01-01T00:02:00Z'
+        recorder_exit_code = 1
+        clean_shutdown_observed = $false
+        exit_code_inferred_from_clean_shutdown = $false
+        exit_code_inferred_from_failure = $true
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sessionDir 'launcher-exit.json') -Encoding utf8
+
+    $failedStatus = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) |
+        ConvertFrom-Json
+    Assert-Equal $true $failedStatus.audio_shutdown_degraded 'post-sample shutdown failure was ignored'
+    Assert-Equal 4 $failedStatus.possible_lost_deliveries 'post-sample possible loss was ignored'
+    Assert-Equal 1 $failedStatus.audio_shutdown_issue_codes.Count 'shutdown issue code count changed'
+    Assert-Equal 'audio_consumer_drain_timeout' $failedStatus.audio_shutdown_issue_codes[0] 'shutdown issue code changed'
+    Assert-Equal 1 $failedStatus.recorder_exit_code 'failed recorder exit code changed'
+    Assert-Equal $false $failedStatus.clean_shutdown_in_scoped_log 'failed shutdown was marked clean'
+
     Write-Output 'ScreenWise trial-status synthetic regression: PASS'
 }
 finally {

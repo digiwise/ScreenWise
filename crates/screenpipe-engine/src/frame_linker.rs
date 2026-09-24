@@ -83,6 +83,10 @@ pub struct LinkUpdate {
 pub struct FrameLinkerTtlEvictions {
     pub events_without_frames: usize,
     pub frames_without_events: usize,
+    /// Event rows whose capture loop reported a deterministic drop before the
+    /// TTL elapsed. These remain availability gaps, but they are explained
+    /// rather than an uninstrumented correlation loss.
+    pub known_capture_drops: usize,
 }
 
 impl FrameLinkerTtlEvictions {
@@ -160,6 +164,10 @@ pub struct FrameLinker {
     /// Remembering terminal ids prevents those later, valid duplicates from
     /// being mistaken for half-paired frames and expiring as false losses.
     resolved: HashMap<CorrelationId, Instant>,
+    /// Capture loops fan out across monitors. A drop hint cannot immediately
+    /// cancel an event because another monitor may still report a frame, but
+    /// it lets TTL diagnostics separate an explained skip from a lost path.
+    capture_drop_hints: HashMap<CorrelationId, Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,6 +191,7 @@ impl FrameLinker {
             pending_events: HashMap::new(),
             pending_frames: Vec::new(),
             resolved: HashMap::new(),
+            capture_drop_hints: HashMap::new(),
         }
     }
 
@@ -227,6 +236,7 @@ impl FrameLinker {
         let mut updates = Vec::new();
         let mut unmatched = Vec::new();
         for corr_id in c.correlation_ids {
+            self.capture_drop_hints.remove(&corr_id);
             if self.resolved.contains_key(&corr_id)
                 || unmatched.contains(&corr_id)
                 || self
@@ -257,6 +267,40 @@ impl FrameLinker {
         updates
     }
 
+    /// Resolve correlation ids whose UI rows were deliberately not persisted.
+    /// A capture may already have reported a frame before the recorder reaches
+    /// its privacy/DB admission decision. Without this terminal message those
+    /// safe, expected discards remain as `frames_without_events` until TTL.
+    pub fn on_events_discarded<I>(&mut self, correlation_ids: I, now: Instant)
+    where
+        I: IntoIterator<Item = CorrelationId>,
+    {
+        for correlation_id in correlation_ids {
+            self.capture_drop_hints.remove(&correlation_id);
+            self.pending_events.remove(&correlation_id);
+            for pending in &mut self.pending_frames {
+                pending
+                    .unmatched
+                    .retain(|candidate| *candidate != correlation_id);
+            }
+            self.mark_resolved(correlation_id, now);
+        }
+        self.compact_pending_frames();
+    }
+
+    /// Record that one capture loop deliberately skipped these triggers. The
+    /// event remains pending because another monitor may still capture it.
+    pub fn on_capture_dropped<I>(&mut self, correlation_ids: I, now: Instant)
+    where
+        I: IntoIterator<Item = CorrelationId>,
+    {
+        for correlation_id in correlation_ids {
+            if !self.resolved.contains_key(&correlation_id) {
+                self.capture_drop_hints.insert(correlation_id, now);
+            }
+        }
+    }
+
     /// Drop half-paired entries older than `ttl`. Call periodically
     /// from the host actor. Returns directional counts so diagnostics can
     /// distinguish events that never got a frame from frames whose event row
@@ -265,14 +309,27 @@ impl FrameLinker {
         let cutoff = now.checked_sub(self.config.ttl);
         let mut evicted = FrameLinkerTtlEvictions::default();
         if let Some(cutoff) = cutoff {
-            let before_events = self.pending_events.len();
-            self.pending_events.retain(|_, pe| pe.inserted_at >= cutoff);
-            evicted.events_without_frames = before_events - self.pending_events.len();
+            let expired_event_ids = self
+                .pending_events
+                .iter()
+                .filter_map(|(correlation_id, pending)| {
+                    (pending.inserted_at < cutoff).then_some(*correlation_id)
+                })
+                .collect::<Vec<_>>();
+            evicted.events_without_frames = expired_event_ids.len();
+            for correlation_id in expired_event_ids {
+                self.pending_events.remove(&correlation_id);
+                if self.capture_drop_hints.remove(&correlation_id).is_some() {
+                    evicted.known_capture_drops += 1;
+                }
+            }
             let before_frames = self.pending_frames.len();
             self.pending_frames.retain(|pf| pf.inserted_at >= cutoff);
             evicted.frames_without_events = before_frames - self.pending_frames.len();
             self.resolved
                 .retain(|_, resolved_at| *resolved_at >= cutoff);
+            self.capture_drop_hints
+                .retain(|_, reported_at| *reported_at >= cutoff);
         }
         evicted
     }
@@ -404,6 +461,40 @@ mod tests {
             })
         );
         assert_eq!(linker.pending_len(), (0, 0));
+    }
+
+    #[test]
+    fn discarded_event_resolves_an_early_frame_without_false_ttl_loss() {
+        let mut linker = FrameLinker::new(cfg());
+        let t0 = Instant::now();
+
+        linker.on_frame_captured(
+            FrameCaptured {
+                frame_id: 999,
+                correlation_ids: vec![1, 2],
+            },
+            t0,
+        );
+        assert_eq!(linker.pending_len(), (0, 1));
+
+        linker.on_events_discarded([1, 2], t0 + Duration::from_millis(1));
+        assert_eq!(linker.pending_len(), (0, 0));
+
+        // A late duplicate monitor frame is ignored after terminal discard.
+        assert!(linker
+            .on_frame_captured(
+                FrameCaptured {
+                    frame_id: 1000,
+                    correlation_ids: vec![1],
+                },
+                t0 + Duration::from_secs(1),
+            )
+            .is_empty());
+        assert_eq!(linker.pending_len(), (0, 0));
+        assert_eq!(
+            linker.tick(t0 + Duration::from_secs(61)),
+            FrameLinkerTtlEvictions::default()
+        );
     }
 
     #[test]
@@ -539,6 +630,7 @@ mod tests {
             FrameLinkerTtlEvictions {
                 events_without_frames: 1,
                 frames_without_events: 0,
+                known_capture_drops: 0,
             }
         );
         assert_eq!(linker.pending_len(), (0, 0));
@@ -552,6 +644,25 @@ mod tests {
             t1,
         );
         assert!(updates.is_empty(), "no row id available, nothing to update");
+    }
+
+    #[test]
+    fn ttl_classifies_an_instrumented_capture_drop() {
+        let mut linker = FrameLinker::new(cfg());
+        let t0 = Instant::now();
+        linker.on_event_persisted(
+            EventPersisted {
+                correlation_id: 1,
+                row_id: 100,
+            },
+            t0,
+        );
+        linker.on_capture_dropped([1], t0 + Duration::from_millis(1));
+
+        let evicted = linker.tick(t0 + Duration::from_secs(61));
+        assert_eq!(evicted.events_without_frames, 1);
+        assert_eq!(evicted.frames_without_events, 0);
+        assert_eq!(evicted.known_capture_drops, 1);
     }
 
     #[test]
@@ -575,6 +686,7 @@ mod tests {
             FrameLinkerTtlEvictions {
                 events_without_frames: 0,
                 frames_without_events: 1,
+                known_capture_drops: 0,
             }
         );
         assert_eq!(linker.pending_len(), (0, 0));

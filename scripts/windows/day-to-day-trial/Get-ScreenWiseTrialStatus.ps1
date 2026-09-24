@@ -121,7 +121,16 @@ $capture = $latest.capture_events
 $excludedBackground = Count-Matching 'active-window-only; excluded background pixels'
 $excludedForeground = Count-Matching 'visible redaction frame: active window is excluded'
 $noSafeWindow = Count-Matching 'visible redaction frame: no safe active window is available'
-$passwordSuppressions = Count-Matching 'keyboard/clipboard content is suppressed because UIA password state is unavailable'
+$legacyPasswordUnavailable = Count-Matching 'keyboard/clipboard content is suppressed because UIA password state is unavailable'
+$passwordUnavailableNotices = $legacyPasswordUnavailable +
+    (Count-Matching 'reason_code="uia_password_state_unavailable"')
+$passwordContentSuppressedEvents = 0L
+foreach ($line in $logLines) {
+    if ($line -match 'reason_code="uia_password_content_suppressed"' -and
+        $line -match 'suppressed_events=(?<count>\d+)') {
+        $passwordContentSuppressedEvents += [long]$Matches.count
+    }
+}
 $acquisitionInitial = Count-Matching 'visible failure frame: initial privacy evaluation failed'
 $acquisitionMonitor = Count-Matching 'visible failure frame: monitor acquisition failed'
 $acquisitionActive = Count-Matching 'visible failure frame: active-window acquisition failed'
@@ -130,11 +139,37 @@ $acquisitionFailures = $acquisitionInitial + $acquisitionMonitor + $acquisitionA
 $queueOrLossNotices = Count-Matching 'queue.*(full|capacity|loss)|possible.loss|confirmed.loss|persistence.*degraded'
 $audioTimingGaps = Count-Matching 'large gap on .* device:'
 $audioRecoveryNotices = Count-Matching 'stream rebuild required after screen unlock|detected stale recording handle'
+$audioReconciliationDeferred = Count-Matching 'reason_code="audio_reconciliation_deferred"'
 $healthTimeouts = Count-Matching 'health_check: inner computation exceeded'
 $smartPiiFallbacks = Count-Matching 'Smart text-PII unavailable'
 $basicPiiInfo = Count-Matching 'Basic PII redaction applied to captured frame text or metadata'
 $negativeMeetingInfo = Count-Matching 'meeting scanner: .* in_call=false'
 $cleanShutdownInLog = (Count-Matching 'screenpipe:\s+shutdown complete\s*$') -gt 0
+$audioShutdownIssueCodes = @(
+    $logLines | ForEach-Object {
+        if ($_ -match 'reason_code="(?<code>audio_(producer_stop_timeout|producer_stop_failed|consumer_drain_timeout|consumer_drain_failed|queued_work_discarded|worker_completion_unconfirmed))"') {
+            $Matches.code
+        }
+    } | Sort-Object -Unique
+)
+$postSamplePossibleLoss = @{}
+$postSampleConfirmedLoss = @{}
+foreach ($line in $logLines) {
+    if ($line -match 'reason_code="(?<code>(audio|meeting)_[a-z_]+_delivery_unconfirmed)".*total_possible_loss=(?<total>\d+)') {
+        $code = $Matches.code
+        $total = [long]$Matches.total
+        if (-not $postSamplePossibleLoss.ContainsKey($code) -or $total -gt $postSamplePossibleLoss[$code]) {
+            $postSamplePossibleLoss[$code] = $total
+        }
+    }
+    if ($line -match 'reason_code="(?<code>(audio|meeting)_[a-z_]+_delivery_lost)".*total_dropped=(?<total>\d+)') {
+        $code = $Matches.code
+        $total = [long]$Matches.total
+        if (-not $postSampleConfirmedLoss.ContainsKey($code) -or $total -gt $postSampleConfirmedLoss[$code]) {
+            $postSampleConfirmedLoss[$code] = $total
+        }
+    }
+}
 
 # Derive privacy-pause intervals only from fixed, content-free lock notices.
 $lockNotices = @()
@@ -194,6 +229,15 @@ foreach ($queue in @($capture.audio_delivery.queues)) {
     $confirmedDeliveryLoss += Number-OrZero $queue.dropped_deliveries
     $possibleDeliveryLoss += Number-OrZero $queue.possible_lost_deliveries
 }
+$confirmedDeliveryLoss = [math]::Max(
+    $confirmedDeliveryLoss,
+    [long](($postSampleConfirmedLoss.Values | Measure-Object -Sum).Sum)
+)
+$possibleDeliveryLoss = [math]::Max(
+    $possibleDeliveryLoss,
+    [long](($postSamplePossibleLoss.Values | Measure-Object -Sum).Sum)
+)
+$audioShutdownDegraded = [bool]$capture.audio_shutdown_degraded -or $audioShutdownIssueCodes.Count -gt 0
 $attentionRequired = $errorLines.Count -gt 0 -or
     (Number-OrZero $pipeline.frames_dropped) -gt 0 -or
     (Number-OrZero $pipeline.pipeline_stall_count) -gt 0 -or
@@ -201,7 +245,7 @@ $attentionRequired = $errorLines.Count -gt 0 -or
     (Number-OrZero $pipeline.frame_link_updates_failed) -gt 0 -or
     (Number-OrZero $audio.transcription_errors) -gt 0 -or
     [bool]$capture.persistence_degraded -or
-    [bool]$capture.audio_shutdown_degraded -or
+    $audioShutdownDegraded -or
     $acquisitionFailures -gt 0 -or
     $queueOrLossNotices -gt 0 -or
     $confirmedDeliveryLoss -gt 0 -or
@@ -243,6 +287,9 @@ $status = [ordered]@{
     frame_link_ttl_evictions = $pipeline.frame_link_ttl_evictions
     frame_link_ttl_events_without_frames = $pipeline.frame_link_ttl_events_without_frames
     frame_link_ttl_frames_without_events = $pipeline.frame_link_ttl_frames_without_events
+    frame_link_ttl_known_capture_drops = Number-OrZero $pipeline.frame_link_ttl_known_capture_drops
+    frame_link_ttl_unexplained = (Number-OrZero $pipeline.frame_link_ttl_evictions) -
+        (Number-OrZero $pipeline.frame_link_ttl_known_capture_drops)
     frame_link_update_failures = $pipeline.frame_link_updates_failed
     audio_chunks_received = $audio.chunks_received
     vad_passed = $audio.vad_passed
@@ -254,7 +301,8 @@ $status = [ordered]@{
     transcription_requested = $audio.transcription_requested
     transcription_available = $audio.transcription_available
     persistence_degraded = $capture.persistence_degraded
-    audio_shutdown_degraded = $capture.audio_shutdown_degraded
+    audio_shutdown_degraded = $audioShutdownDegraded
+    audio_shutdown_issue_codes = $audioShutdownIssueCodes
     confirmed_dropped_deliveries = $confirmedDeliveryLoss
     possible_lost_deliveries = $possibleDeliveryLoss
     lock_pause_count = $pauseIntervals.Count
@@ -275,7 +323,9 @@ $status = [ordered]@{
     excluded_background_transitions = $excludedBackground
     excluded_foreground_transitions = $excludedForeground
     no_safe_window_transitions = $noSafeWindow
-    password_state_unavailable_suppressions = $passwordSuppressions
+    password_state_unavailable_suppressions = $passwordUnavailableNotices
+    password_state_unavailable_notices = $passwordUnavailableNotices
+    password_content_suppressed_events = $passwordContentSuppressedEvents
     acquisition_failure_placeholders = $acquisitionFailures
     acquisition_failure_initial_privacy = $acquisitionInitial
     acquisition_failure_monitor = $acquisitionMonitor
@@ -284,6 +334,7 @@ $status = [ordered]@{
     queue_capacity_or_loss_notices = $queueOrLossNotices
     audio_timing_gap_notices = $audioTimingGaps
     expected_unlock_audio_recovery_notices = $audioRecoveryNotices
+    audio_reconciliation_deferred_notices = $audioReconciliationDeferred
     health_timeout_notices = $healthTimeouts
     smart_pii_reduced_coverage_notices = $smartPiiFallbacks
     routine_basic_pii_info_lines = $basicPiiInfo

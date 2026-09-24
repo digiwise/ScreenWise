@@ -1345,12 +1345,8 @@ pub fn plan_windows_monitor_capture(
     }
 }
 
-/// Capture a Windows monitor without ever returning raw pixels that failed the
-/// configured exclusion policy. The policy is evaluated before and after pixel
-/// acquisition. Privacy redactions and acquisition failures return explicit,
-/// monitor-sized disclosure frames instead of silently disappearing.
 #[cfg(target_os = "windows")]
-pub async fn capture_windows_monitor_privacy_safe(
+async fn capture_windows_monitor_privacy_safe_once(
     monitor: &SafeMonitor,
     window_filters: &WindowFilters,
 ) -> WindowsPrivacyCapture {
@@ -1458,6 +1454,32 @@ pub async fn capture_windows_monitor_privacy_safe(
             started_at,
         ),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn should_retry_windows_capture(outcome: WindowsCaptureOutcome, attempt: usize) -> bool {
+    attempt == 0 && matches!(outcome, WindowsCaptureOutcome::CaptureFailed(_))
+}
+
+/// Capture a Windows monitor without ever returning raw pixels that failed the
+/// configured exclusion policy. The policy is evaluated before and after pixel
+/// acquisition. A transient enumeration/WGC failure is retried once by running
+/// the complete privacy-safe operation again; redaction decisions are never
+/// retried or weakened. Persistent failures return an explicit monitor-sized
+/// disclosure frame instead of silently disappearing.
+#[cfg(target_os = "windows")]
+pub async fn capture_windows_monitor_privacy_safe(
+    monitor: &SafeMonitor,
+    window_filters: &WindowFilters,
+) -> WindowsPrivacyCapture {
+    for attempt in 0..2 {
+        let capture = capture_windows_monitor_privacy_safe_once(monitor, window_filters).await;
+        if !should_retry_windows_capture(capture.outcome, attempt) {
+            return capture;
+        }
+        tokio::task::yield_now().await;
+    }
+    unreachable!("bounded Windows capture retry always returns")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1971,6 +1993,26 @@ mod tests {
                 .pixels()
                 .any(|pixel| *pixel == image::Rgba([235, 235, 235, 255])));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_retries_only_a_first_acquisition_failure() {
+        let failure = WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::ActiveWindowAcquisition,
+        );
+        assert!(should_retry_windows_capture(failure, 0));
+        assert!(!should_retry_windows_capture(failure, 1));
+        assert!(!should_retry_windows_capture(
+            WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::NoSafeActiveWindow
+            ),
+            0
+        ));
+        assert!(!should_retry_windows_capture(
+            WindowsCaptureOutcome::BackgroundRedacted,
+            0
+        ));
     }
 
     // ==================== is_url_blocked tests ====================

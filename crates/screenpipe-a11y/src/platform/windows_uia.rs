@@ -44,6 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const LOCKED_SCREEN_UIA_BACKOFF: Duration = Duration::from_millis(1000);
 const KEYBOARD_PRIVACY_POLL_MS: u64 = 50;
 const KEYBOARD_PRIVACY_MAX_AGE: Duration = Duration::from_millis(75);
+const KEYBOARD_PRIVACY_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
 const KEYBOARD_PRIVACY_UNKNOWN: u8 = 0;
 const KEYBOARD_PRIVACY_ALLOWED: u8 = 1;
 const KEYBOARD_PRIVACY_PASSWORD: u8 = 2;
@@ -103,6 +104,12 @@ pub struct KeyboardPrivacy {
     generation: AtomicU64,
     decision: Mutex<Option<KeyboardPrivacyDecision>>,
     logged_state: AtomicU8,
+    unavailable_transitions: AtomicU64,
+    reported_unavailable_transitions: AtomicU64,
+    last_unavailable_notice: Mutex<Option<Instant>>,
+    content_suppressions: AtomicU64,
+    reported_content_suppressions: AtomicU64,
+    last_content_suppression_notice: Mutex<Option<Instant>>,
 }
 
 impl KeyboardPrivacy {
@@ -119,6 +126,62 @@ impl KeyboardPrivacy {
             && decision.checked_at.elapsed() <= KEYBOARD_PRIVACY_MAX_AGE
             && self.generation.load(Ordering::SeqCst) == generation)
             .then_some(generation)
+    }
+
+    /// Called by the low-level hook when fail-closed admission prevents a
+    /// configured keyboard/clipboard content event. Atomic-only so it cannot
+    /// delay the Windows input queue; the UIA worker emits bounded aggregate
+    /// diagnostics on its next poll.
+    pub(crate) fn note_content_suppressed(&self) {
+        self.content_suppressions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn report_unavailable_transition(&self, now: Instant) {
+        let total = self.unavailable_transitions.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut last = self.last_unavailable_notice.lock();
+        if last
+            .is_none_or(|at| now.saturating_duration_since(at) >= KEYBOARD_PRIVACY_NOTICE_INTERVAL)
+        {
+            let previous = self
+                .reported_unavailable_transitions
+                .swap(total, Ordering::Relaxed);
+            warn!(
+                reason_code = "uia_password_state_unavailable",
+                transitions = total.saturating_sub(previous),
+                total_transitions = total,
+                "UIA password state is unavailable; keyboard/clipboard content remains fail closed"
+            );
+            *last = Some(now);
+        } else {
+            debug!(
+                total_transitions = total,
+                "UIA password-state unavailable transition aggregated into the next diagnostic"
+            );
+        }
+    }
+
+    fn report_content_suppressions(&self, now: Instant, force: bool) {
+        let total = self.content_suppressions.load(Ordering::Relaxed);
+        let reported = self.reported_content_suppressions.load(Ordering::Relaxed);
+        if total == reported {
+            return;
+        }
+        let mut last = self.last_content_suppression_notice.lock();
+        if force
+            || last.is_none_or(|at| {
+                now.saturating_duration_since(at) >= KEYBOARD_PRIVACY_NOTICE_INTERVAL
+            })
+        {
+            self.reported_content_suppressions
+                .store(total, Ordering::Relaxed);
+            warn!(
+                reason_code = "uia_password_content_suppressed",
+                suppressed_events = total.saturating_sub(reported),
+                total_suppressed_events = total,
+                "keyboard/clipboard content events were suppressed by the password-field privacy gate"
+            );
+            *last = Some(now);
+        }
     }
 
     fn update(
@@ -142,9 +205,7 @@ impl KeyboardPrivacy {
                 KEYBOARD_PRIVACY_PASSWORD => info!(
                     "keyboard/clipboard content is suppressed while a password field is focused"
                 ),
-                KEYBOARD_PRIVACY_UNAVAILABLE => warn!(
-                    "keyboard/clipboard content is suppressed because UIA password state is unavailable"
-                ),
+                KEYBOARD_PRIVACY_UNAVAILABLE => self.report_unavailable_transition(checked_at),
                 KEYBOARD_PRIVACY_UNKNOWN => {}
                 _ => unreachable!(),
             }
@@ -162,6 +223,7 @@ impl KeyboardPrivacy {
             }
         };
         *self.decision.lock() = decision;
+        self.report_content_suppressions(checked_at, state != KEYBOARD_PRIVACY_UNAVAILABLE);
     }
 }
 
@@ -1418,6 +1480,52 @@ mod tests {
         let _guard = privacy.decision.lock();
         assert_eq!(privacy.permit(focus), None);
         privacy.invalidate(); // Also lock-free while the worker owns the lock.
+    }
+
+    #[test]
+    fn keyboard_privacy_aggregates_probe_flaps_but_counts_suppressed_content() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = Some(test_keyboard_focus());
+        let t0 = Instant::now();
+
+        privacy.update(0, focus, None, t0);
+        privacy.update(
+            privacy.generation.load(Ordering::SeqCst),
+            focus,
+            Some(false),
+            t0 + Duration::from_millis(1),
+        );
+        privacy.update(
+            privacy.generation.load(Ordering::SeqCst),
+            focus,
+            None,
+            t0 + Duration::from_millis(2),
+        );
+        assert_eq!(privacy.unavailable_transitions.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            privacy
+                .reported_unavailable_transitions
+                .load(Ordering::Relaxed),
+            1,
+            "second rapid probe flap should be aggregated"
+        );
+
+        privacy.note_content_suppressed();
+        privacy.note_content_suppressed();
+        privacy.update(
+            privacy.generation.load(Ordering::SeqCst),
+            focus,
+            Some(false),
+            t0 + Duration::from_millis(3),
+        );
+        assert_eq!(
+            privacy
+                .reported_content_suppressions
+                .load(Ordering::Relaxed),
+            2,
+            "recovery should flush the actual suppressed-event count"
+        );
+        assert!(privacy.permit(focus).is_some());
     }
 
     #[test]

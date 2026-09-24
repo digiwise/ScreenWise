@@ -248,15 +248,25 @@ try {
 finally {
     $cleanShutdownObserved = Test-CleanShutdownAfterLaunch -Root $DataDir -Offsets $initialLogLengths
     $exitCodeInferred = $false
+    $failureExitCodeInferred = $false
     if ($cleanShutdownObserved -and ($null -eq $exitCode -or $exitCode -ne 0)) {
         $exitCode = 0
         $exitCodeInferred = $true
+    }
+    elseif ($null -eq $exitCode) {
+        # Windows PowerShell can clear LASTEXITCODE when Ctrl+C interrupts a
+        # native command even though the recorder then returns an error from
+        # its cooperative shutdown path. Never serialize that failed outcome
+        # as an ambiguous null exit code.
+        $exitCode = 1
+        $failureExitCodeInferred = $true
     }
     $ended = [ordered]@{
         ended_at_utc = (Get-Date).ToUniversalTime().ToString('o')
         recorder_exit_code = $exitCode
         clean_shutdown_observed = $cleanShutdownObserved
         exit_code_inferred_from_clean_shutdown = $exitCodeInferred
+        exit_code_inferred_from_failure = $failureExitCodeInferred
     }
     $ended | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sessionDir 'launcher-exit.json') -Encoding utf8
     Wait-Job -Job $monitorJob -Timeout 90 | Out-Null

@@ -59,15 +59,35 @@ impl EventBatch {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    fn clear(&mut self) {
+    fn take_correlation_ids(&mut self) -> Vec<CorrelationId> {
+        self.correlation_ids.drain(..).flatten().collect::<Vec<_>>()
+    }
+    fn discard_all(&mut self) -> Vec<CorrelationId> {
+        let correlation_ids = self.take_correlation_ids();
         self.events.clear();
-        self.correlation_ids.clear();
+        correlation_ids
     }
     /// Drop oldest `n` entries from both vecs in lockstep. Used by the
     /// contention-storm guard.
-    fn drain_oldest(&mut self, n: usize) {
+    fn drain_oldest(&mut self, n: usize) -> Vec<CorrelationId> {
         self.events.drain(..n);
-        self.correlation_ids.drain(..n);
+        self.correlation_ids.drain(..n).flatten().collect()
+    }
+}
+
+fn report_events_discarded(linker_tx: Option<&LinkerSender>, correlation_ids: Vec<CorrelationId>) {
+    if correlation_ids.is_empty() {
+        return;
+    }
+    if let Some(linker) = linker_tx {
+        if linker
+            .try_send(LinkerMessage::EventsDiscarded { correlation_ids })
+            .is_err()
+        {
+            warn!(
+                "frame linker channel full or closed; discarded UI rows may remain as unpaired frame diagnostics"
+            );
+        }
     }
 }
 
@@ -635,7 +655,8 @@ pub async fn start_ui_recording(
                         "UI acquisition privacy gate active; discarding captured events and triggers"
                     );
                 }
-                batch.clear();
+                let discarded = batch.discard_all();
+                report_events_discarded(linker_tx.as_ref(), discarded);
                 scroll_burst.clear();
                 if handle
                     .recv_timeout(UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT)
@@ -671,7 +692,8 @@ pub async fn start_ui_recording(
                         privacy_discarded_events = privacy_discarded_events
                             .saturating_add(batch.len() as u64)
                             .saturating_add(1);
-                        batch.clear();
+                        let discarded = batch.discard_all();
+                        report_events_discarded(linker_tx.as_ref(), discarded);
                         scroll_burst.clear();
                         last_flush = std::time::Instant::now();
                         continue;
@@ -785,7 +807,8 @@ pub async fn start_ui_recording(
                             let old_len = batch.len();
                             // Keep only the most recent batch_size events
                             let drain_count = old_len.saturating_sub(batch_size);
-                            batch.drain_oldest(drain_count);
+                            let discarded = batch.drain_oldest(drain_count);
+                            report_events_discarded(linker_tx.as_ref(), discarded);
                             warn!(
                                 "UI recorder: dropped {} old events during DB contention (kept {})",
                                 drain_count,
@@ -825,7 +848,8 @@ pub async fn start_ui_recording(
                     "UI recorder: dropping {} stale events (last flush {}s ago, {} consecutive failures)",
                     batch.len(), last_flush.elapsed().as_secs(), consecutive_failures
                 );
-                batch.clear();
+                let discarded = batch.discard_all();
+                report_events_discarded(linker_tx.as_ref(), discarded);
                 last_flush = std::time::Instant::now();
             }
 
@@ -918,7 +942,8 @@ async fn flush_batch(
             discarded_events = batch.len(),
             "UI privacy state changed before database admission; discarded buffered events"
         );
-        batch.clear();
+        let discarded = batch.discard_all();
+        report_events_discarded(linker_tx, discarded);
         return;
     }
 
@@ -970,7 +995,14 @@ async fn flush_batch(
             }
         }
     }
-    batch.clear();
+    let discarded = if *consecutive_failures > 0 {
+        batch.discard_all()
+    } else {
+        batch.events.clear();
+        batch.correlation_ids.clear();
+        Vec::new()
+    };
+    report_events_discarded(linker_tx, discarded);
 }
 
 /// Marker for legacy trigger-side gates. Key and clipboard events are
@@ -1206,17 +1238,18 @@ mod event_batch_tests {
         b.push(evt(), Some(2));
         b.push(evt(), Some(3));
         b.push(evt(), Some(4));
-        b.drain_oldest(2);
+        assert_eq!(b.drain_oldest(2), vec![1, 2]);
         assert_eq!(b.len(), 2);
         assert_eq!(b.events.len(), b.correlation_ids.len());
         assert_eq!(b.correlation_ids, vec![Some(3), Some(4)]);
     }
 
     #[test]
-    fn clear_resets_both_vecs() {
+    fn discard_all_returns_correlations_and_resets_both_vecs() {
         let mut b = EventBatch::with_capacity(2);
         b.push(evt(), Some(1));
-        b.clear();
+        b.push(evt(), None);
+        assert_eq!(b.discard_all(), vec![1]);
         assert!(b.is_empty());
         assert_eq!(b.events.len(), 0);
         assert_eq!(b.correlation_ids.len(), 0);

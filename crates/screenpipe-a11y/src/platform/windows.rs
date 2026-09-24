@@ -813,6 +813,13 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
 
                 let privacy_generation = keyboard_capture_permit(s);
                 if privacy_generation.is_none()
+                    && (s.config.capture_text
+                        || s.config.capture_keystrokes
+                        || s.config.capture_clipboard_content)
+                {
+                    s.keyboard_privacy.note_content_suppressed();
+                }
+                if privacy_generation.is_none()
                     || (s.text_privacy_generation.is_some()
                         && s.text_privacy_generation != privacy_generation)
                 {

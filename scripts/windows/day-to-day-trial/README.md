@@ -83,6 +83,33 @@ reconstruction, ANSI shutdown parsing and content-free failure/loss counts with:
 .\scripts\windows\day-to-day-trial\Test-ScreenWiseTrialStatus.ps1
 ```
 
+## Next short live acceptance run
+
+The 2026-09-24 repairs need one fresh, explicitly authorized live run. Keep it
+short: a five-to-eight-minute run is enough. Use a new private `-DataDir`, the
+already reviewed executable-scoped firewall group and the existing compact
+synthetic fixture. Do not reuse historical captured data as evidence.
+
+The run should establish these content-free conditions:
+
+1. Start normally and confirm authenticated health plus advancing frame, UI and
+   audio counters.
+2. Play one brief local synthetic speech clip to create a small durable
+   transcription backlog. Stop during or immediately after session finalization.
+3. Require exit code zero, a fresh `shutdown complete` marker, no
+   `audio_shutdown_issue_codes`, and zero confirmed or possible delivery loss.
+4. Restart on the same fresh data directory and confirm pending durable segments
+   can reconcile and authenticated marker-count search succeeds.
+5. In a separate silent compact-fixture phase, exercise password and excluded
+   window transitions. Require bounded password-state notices, inspect only the
+   numeric `password_content_suppressed_events`, and require zero unexplained
+   frame-link TTL expiry and zero forbidden synthetic-marker hits.
+
+Preparation and preflight may run without recording. Playback, capture, window
+focus changes and recorder startup remain interactive and require fresh owner
+authorization. The controller must wait indefinitely with recording stopped and
+its fixture hidden until that authorization arrives.
+
 Review can establish health counters, warnings, candidate capture gaps, fixed
 safe placeholders, lock intervals, transcription status and leftover processes.
 Current `/health` samples distinguish requested-but-unavailable transcription

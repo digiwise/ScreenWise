@@ -67,6 +67,35 @@ clone's cold build, packaging and omitted-fixture tests are not claimed to pass.
 Source review identified the pre-existing audio privacy/persistence race recorded
 as SW-V19. This checkpoint preserves incomplete validation, not privacy certification.
 
+## Long-trial repair checkpoint (2026-09-24)
+
+A content-free audit of a 2h23m manual run exposed an audio shutdown timeout,
+four unconfirmed raw-audio deliveries, six safe acquisition placeholders, 13
+frame-link TTL expiries and excessive unavailable-password-state warnings. The
+ordered raw-audio consumer no longer performs durable-backlog transcription
+inline at session completion. A separate reconciliation worker is explicitly
+woken and independently bounded at shutdown. Windows capture makes one bounded
+retry only for an acquisition failure, frame linking classifies known capture
+drops and terminally resolves deliberately discarded UI batches, and UIA keeps
+fail-closed content suppression while aggregating probe-state warning noise.
+
+The day-to-day audit now merges fixed shutdown diagnostics written after its
+last health sample and infers a nonzero interrupted-native exit when no clean
+marker exists. Full locked offline library suites passed: engine 560 passed with
+two ignored, audio 182 passed with one ignored, screen 109 passed, and Windows
+accessibility 180 passed with 22 ignored. The synthetic trial-status regression,
+PowerShell parsing and Rust formatting also passed. Live confirmation of the
+repaired shutdown, acquisition/link diagnostics and password-warning aggregation
+remains pending and is not implied by these deterministic results.
+
+The exact optimized executable produced from this tree has SHA-256
+`6045423BF06302EBA57D0200DC1B6AB7CDF5A2C69B268D5059B4827260989EE1`.
+Its complete help output and non-recording six-model check returned exit zero.
+The ignored local controller configuration was repinned to that artifact. Its
+normal-user preflight deliberately refused under the Codex sandbox token because
+that token is not the configured recorder account; the same noninteractive
+preflight must pass from the owner's ordinary PowerShell before live execution.
+
 ## Day-to-day trial repair checkpoint (2026-09-21)
 
 A private roughly nine-minute Windows trial produced 213 captured and 213 written

@@ -40,6 +40,9 @@ pub struct LinkerMetrics {
     pub evicted_ttl_events_without_frames: u64,
     /// Captured frames whose matching persisted UI event row never arrived.
     pub evicted_ttl_frames_without_events: u64,
+    /// TTL-expired event rows for which at least one monitor capture loop had
+    /// already reported a deterministic privacy/debounce/capture drop.
+    pub evicted_ttl_known_capture_drops: u64,
     /// Triggers explicitly dropped by the capture loop, broken down by
     /// reason. Reported via [`LinkerMessage::TriggerDropped`]; these
     /// numbers should account for the bulk of NULL `frame_id` rows
@@ -56,6 +59,7 @@ static UPDATES_FAILED: AtomicU64 = AtomicU64::new(0);
 static EVICTED_TTL: AtomicU64 = AtomicU64::new(0);
 static EVICTED_TTL_EVENTS_WITHOUT_FRAMES: AtomicU64 = AtomicU64::new(0);
 static EVICTED_TTL_FRAMES_WITHOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
+static EVICTED_TTL_KNOWN_CAPTURE_DROPS: AtomicU64 = AtomicU64::new(0);
 static DROPPED_DRM: AtomicU64 = AtomicU64::new(0);
 static DROPPED_PAUSED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_LAGGED: AtomicU64 = AtomicU64::new(0);
@@ -73,6 +77,7 @@ pub fn linker_metrics_snapshot() -> LinkerMetrics {
             .load(Ordering::Relaxed),
         evicted_ttl_frames_without_events: EVICTED_TTL_FRAMES_WITHOUT_EVENTS
             .load(Ordering::Relaxed),
+        evicted_ttl_known_capture_drops: EVICTED_TTL_KNOWN_CAPTURE_DROPS.load(Ordering::Relaxed),
         dropped_drm: DROPPED_DRM.load(Ordering::Relaxed),
         dropped_paused: DROPPED_PAUSED.load(Ordering::Relaxed),
         dropped_lagged: DROPPED_LAGGED.load(Ordering::Relaxed),
@@ -98,6 +103,12 @@ fn drop_reason_counter(reason: DropReason) -> &'static AtomicU64 {
 #[derive(Debug)]
 pub enum LinkerMessage {
     EventPersisted(EventPersisted),
+    /// Recorder-side terminal outcome: the associated UI rows were not
+    /// admitted to the database, so any already-reported frames must stop
+    /// waiting for them.
+    EventsDiscarded {
+        correlation_ids: Vec<CorrelationId>,
+    },
     FrameCaptured(FrameCaptured),
     TriggerDropped {
         correlation_ids: Vec<CorrelationId>,
@@ -179,6 +190,11 @@ pub fn spawn_frame_linker(
                                 );
                             }
                         }
+                        Some(LinkerMessage::EventsDiscarded { correlation_ids }) => {
+                            let count = correlation_ids.len();
+                            linker.on_events_discarded(correlation_ids, Instant::now());
+                            debug!(count, "frame_linker: recorder discarded event rows");
+                        }
                         Some(LinkerMessage::FrameCaptured(c)) => {
                             let frame_id = c.frame_id;
                             let n_corr = c.correlation_ids.len();
@@ -219,6 +235,10 @@ pub fn spawn_frame_linker(
                             // periodic WARN gives the diagnostic visibility
                             // that motivated this message in the first place.
                             let n_corr = correlation_ids.len();
+                            linker.on_capture_dropped(
+                                correlation_ids.iter().copied(),
+                                Instant::now(),
+                            );
                             let bump = if n_corr == 0 { 1 } else { n_corr as u64 };
                             drop_reason_counter(reason).fetch_add(bump, Ordering::Relaxed);
                             debug!(
@@ -251,10 +271,18 @@ pub fn spawn_frame_linker(
                             evicted.frames_without_events as u64,
                             Ordering::Relaxed,
                         );
+                        EVICTED_TTL_KNOWN_CAPTURE_DROPS.fetch_add(
+                            evicted.known_capture_drops as u64,
+                            Ordering::Relaxed,
+                        );
                         warn!(
                             evicted = evicted_total,
                             events_without_frames = evicted.events_without_frames,
                             frames_without_events = evicted.frames_without_events,
+                            known_capture_drops = evicted.known_capture_drops,
+                            unexplained_events_without_frames = evicted
+                                .events_without_frames
+                                .saturating_sub(evicted.known_capture_drops),
                             pending_events = pe,
                             pending_frames = pf,
                             total_pairs,
@@ -265,7 +293,7 @@ pub fn spawn_frame_linker(
                             dropped_lagged,
                             dropped_capture_error,
                             dropped_other,
-                            "frame_linker: stale entries expired without pairing — these slipped past every instrumented drop site (DRM/paused/lagged/capture_error); investigate the residual"
+                            "frame_linker: stale entries expired without pairing; known capture drops are separated from unexplained event/frame halves"
                         );
                     } else {
                         debug!(
