@@ -16,10 +16,10 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 |---|---|---|
 | Windows screen/UI | WGC across three displays, UIA trees, Windows OCR and SQLite writes passed | Not every display/app/provider combination |
 | Local API | /health passed; missing/wrong/valid bearer requests gave 403/403/200; tested listener was IPv4 loopback | Protected localhost requests still require authentication |
-| Local transcription | Microphone and system-output capture, Parakeet transcription, known-phrase search and transcript persistence across restart passed; a fresh current-build run persisted and found both short selected-USB-output synthetic controls | Not a full-passage accuracy, diarization-quality, every-device or final-tail benchmark |
+| Local transcription | Microphone and system-output capture, Parakeet transcription, known-phrase search and transcript persistence across restart passed; a fresh current-build partial-buffer run retained its fixed final-tail marker and found it after process restart | Not a full-passage accuracy, diarization-quality, every-device or same-process restart benchmark |
 | Native privacy | Synthetic password markers absent in inspected text/log fields; foreground/background title exclusions and other-monitor fixture controls passed | Browser/custom UIA controls and race boundaries remain open |
 | Input switches | Disabled keyboard/clipboard switches produced no input-content rows during synthetic stimuli | Screen/UIA/OCR may still see ordinary displayed text |
-| Audio shutdown | One 13.798 s selected-output partial chunk retained both synthetic markers; authenticated search found it after a distinct process restart and found a new chunk | Active-meeting shutdown, same-process restart and every device are not covered |
+| Audio shutdown | A fresh 13.87 s selected-output partial chunk retained both fixed markers; authenticated search found them after a distinct process restart and found a separate control in a new chunk; both shutdowns were clean | Active-meeting shutdown, same-process restart and every device are not covered |
 | Lock/unlock | Audio-disabled real transition passed; a later audio-enabled day-to-day run recorded one 10,770.1 s privacy pause with zero frame or audio-chunk counter advances inside its sampled locked interval, then automatic WGC/audio recovery | Counters and fixed notices were inspected, not captured content; this is not every-pixel proof |
 | Safe lock notices | Fixed unlocked/desktop-unavailable/locked reasons persisted through timeline API and local logs; clean stop with no owned processes remaining | Packaged desktop timeline was not visually exercised in this run |
 | OS firewall | Exact recorder/media paths had outbound block rules; the fixed no-payload `screenpipe.exe` IPv4 TCP diagnostic was denied while an unscoped control handshake succeeded; helper IPv4/IPv6 localhost access worked | External IPv6 route unavailable; UDP/drop-trace coverage and closeout incomplete |
@@ -190,7 +190,7 @@ counter without examining content.
 | SW-V14 | Nested Windows UIA exclusion gap repaired; scoped silent native privacy retest passed. Broader exclusion variants remain open. |
 | SW-V15 | Harness capture-worker readiness race repaired; selected-output live retest passed. |
 | SW-V16 | Duplicate lock monitors prevented with one process worker and serialized probes; synthetic tests passed. Repeated live desktop server lifecycle remains open. |
-| SW-V17 | Partial audio buffer splitting/swallowed final-delivery failure repaired; synthetic tests and one complete live partial chunk passed. |
+| SW-V17 | **Repaired and live-checked:** partial audio buffer splitting/swallowed final-delivery failure passed deterministic tests and a fresh current-build stop/restart run. The final zero-overlap flush produced one 13.87-second chunk containing both fixed markers; both remained searchable after a distinct process restart. |
 | SW-V18 | Typed near-capacity, recovery, confirmed-loss and possible-loss reporting now covers device capture, recording, transcription-result, meeting-tap, meeting-provider, meeting-final and meeting-persistence queues. Fixed content-free notices reach local logs, the general activity timeline and `/capture-events`; deterministic event/audio/engine tests passed. Real overload/soak and the packaged visual timeline remain open. Counts describe queue deliveries, not unique lost database rows. |
 | SW-V19 | Audio privacy-transition compensation now covers raw chunk rows/files, combined chunk/transcript/overlap writes, live and reconciled diarization runs/segments, and meeting transcript segments while retaining the database write guard through the stale-generation check and exact cleanup. Deterministic durable-state tests and the full database/audio suites passed. This does not cover the separate speaker-identity mutation in SW-V20 or establish universal transition safety. |
 | SW-V20 | **Open, source-review finding:** speaker matching can create a speaker, add an embedding or update a shared speaker centroid while a privacy generation changes. Safely reversing a shared identity requires transactional before-images and ownership-aware compensation; deleting a pre-existing/shared speaker would be unsafe. |
@@ -250,11 +250,25 @@ suppression counter increased by 23. Missing, wrong and valid bearer credentials
 again returned 403/403/200, SQLite `quick_check` returned `ok`, and recorder stop,
 clipboard restoration, fixture closure and exact-process cleanup all passed.
 
-After both controllers exited, an independent normal-account exact-path
-inventory found no tested recorder, FFmpeg, FFprobe or fixture process, no TCP or
-UDP endpoint owned by those paths, and no listener on either configured test
-port. Captured screen, audio and transcript bodies were not inspected; only
-fixed synthetic-marker counts and content-free diagnostics were used.
+The final-tail controller then forced graceful stop while a selected-output
+partial buffer was still below its normal 62-second emission threshold. The
+pre-stop checkpoint contained zero chunks. Shutdown produced exactly one
+13.87-second chunk, and both fixed markers joined that chunk. A distinct process
+reopened the same fresh store, authenticated with the same 403/403/200 matrix,
+found both original markers, persisted a separate restart control in chunk 2 and
+shut down cleanly. Neither phase used force, reported unresolved workers or
+shutdown issues, recovered a device, or crossed a privacy transition. Fixed-
+pattern inspection found zero queued-work-discard, unconfirmed-worker, incomplete-
+shutdown, persistence-degradation, possible-loss or panic markers. An independent
+exact-path check found no tested process or listener after completion; only closed
+loopback connections in `TIME_WAIT` remained temporarily under PID 0.
+
+After the earlier audio and native-privacy controllers exited, an independent
+normal-account exact-path inventory found no tested recorder, FFmpeg, FFprobe or
+fixture process, no TCP or UDP endpoint owned by those paths, and no listener on
+either configured test port. Captured screen, audio and transcript bodies were
+not inspected; only fixed synthetic-marker counts and content-free diagnostics
+were used.
 
 ## Outstanding test plan
 
@@ -265,7 +279,7 @@ fixed synthetic-marker counts and content-free diagnostics were used.
 | SW-T03 | **Synthetic fixture prepared; live rerun pending:** the DRM fixture now claims a command before any action can re-enter the WinForms message loop, and its non-UI self-test covers pump re-entry and duplicate claims. The scoped synthetic pause/recovery controller is ready for a fresh gate. Sustained real protected playback remains a separate check and no DRM bypass is permitted. |
 | SW-T04 | App-only and App::Title exclusions, rapid transitions, enumeration failure and race stress. |
 | SW-T05 | **Scoped complete:** fixed ordinary clipboard text persisted, the password-phase secret marker remained at zero, recorder stop preceded opaque clipboard restoration, and cleanup passed. Live provider-failure, unknown-focus and non-text-format faults remain untested beyond deterministic checks. |
-| SW-T06 | **Prepared and pinned; live run pending:** three fixed local speech WAVs passed hash, PCM, level and duration checks without playback. The preferred 60-second collector and acceptance contract passed 77 offline tests and its separate 16-asset pin closure. A fresh gated run must still force the partial-buffer stop, require clean exit with no loss/degradation, restart on the same store, and prove the original tail plus a new control. Active-meeting shutdown, diarization quality and same-process restart remain separate checks. |
+| SW-T06 | **Scoped complete:** three pinned local speech WAVs and the preferred 60-second collector passed 77 offline tests and a 16-asset pin closure. The fresh gated live run stopped before normal emission, retained its baseline and final-tail markers together in one 13.87-second partial chunk, found both after a distinct process restart, persisted a new restart control and completed both shutdowns cleanly without loss/degradation markers. Active-meeting shutdown, diarization quality and same-process restart remain separate checks. |
 | SW-T07 | The long locked run covered combined WGC/UI/input/audio/STT counters, lock recovery and loss diagnostics. OCR output, unplug/replug, monitor changes, active overload and content accuracy still require controlled coverage. |
 | SW-T08 | Fixed no-payload `screenpipe.exe` IPv4 TCP attempt passed blocked-versus-unscoped control. Usable external IPv6 and UDP controls plus OS drop tracing remain open. |
 | SW-T09 | Desktop/WebView/MCP/optional executable scope: inventory relevant child processes before extending firewall claims. |

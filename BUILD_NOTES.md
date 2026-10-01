@@ -122,10 +122,10 @@ surfaces, rather than sustained repetition.
 
 A normal-account post-run inventory found no tested recorder/media/fixture
 process, no scoped TCP or UDP endpoint and no listener on the two configured test
-ports. These runs did not force a durable transcription backlog at shutdown or
-generate keyboard/clipboard input in the password phase. They therefore leave
-the shutdown-tail recovery and actual password-input suppression counters for a
-separate controlled run. No captured content was inspected.
+ports. At that checkpoint the runs had not forced a durable transcription backlog
+at shutdown or generated keyboard/clipboard input in the password phase. Both
+were subsequently exercised by the controlled runs below. No captured content
+was inspected.
 
 ## Remaining controlled-check preparation (2026-10-01)
 
@@ -151,8 +151,23 @@ directory with no playback. Independent validation confirmed their hashes,
 mono 16-bit 22.05 kHz PCM form, bounded levels and expected durations. The
 preferred stop/restart collector passed its 77 offline tests and a separate
 16-asset pin manifest now closes over the collector, evaluator, generator,
-validation metadata and speech assets. A live partial-buffer stop/restart is
-still required before claiming final-tail recovery.
+validation metadata and speech assets.
+
+The fresh live partial-buffer run then passed the scoped final-tail contract.
+Before stop, the 60-second configuration had written zero chunks. Graceful stop
+before its 62-second normal-emission threshold produced exactly one 13.87-second
+selected-output chunk, measured by `ffprobe`, and both fixed baseline and tail
+markers joined that chunk. A distinct recorder process reopened the same fresh
+store, found both markers through authenticated search, persisted and found a
+separate restart control in a new chunk, and shut down cleanly. Both processes
+exited zero without force, unresolved workers, shutdown issues, device recovery
+or privacy transitions; bearer checks were 403/403/200 before stop and after
+restart. Fixed-pattern inspection of five local log files found no queued-work
+discard, unconfirmed worker, incomplete audio shutdown, persistence degradation,
+possible-loss or panic marker. Post-run inspection found no tested process or
+listener; closed loopback connections remained briefly in `TIME_WAIT`. This is
+process-level partial-buffer recovery, not same-process `AudioManager::restart`,
+active-meeting shutdown, diarization quality or every-device coverage.
 
 The first live `input-privacy` attempt remained privacy-safe but was incomplete:
 the password-suppression aggregate increased by 23, both forbidden synthetic
