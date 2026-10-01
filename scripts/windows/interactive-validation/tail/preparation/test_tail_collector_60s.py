@@ -458,6 +458,35 @@ class CollectorTests(unittest.TestCase):
             fake_backend.processes_stopped.assert_called_once()
             saved = json.loads((path / "tail-result.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["reasons"], ["collector_execution_failed"])
+            self.assertEqual(saved["execution"], "live")
+            self.assertFalse(saved["collector_live_verified"])
+
+    def test_explicit_success_is_live_verified_only_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            waiting = {"schema": "screenwise.owner-paced.v1", "run_id": "gate-03", "mode": "audio-output",
+                       "nonce": "correct", "state": "waiting_for_owner"}
+            (path / "waiting.json").write_text(json.dumps(waiting), encoding="utf-8")
+            fake_backend = unittest.mock.Mock()
+            fake_backend.quiescent.return_value = True
+            fake_backend.recorder = None
+            fake_backend.stop_playback.return_value = True
+            fake_backend.close_fixture.return_value = True
+            fake_backend.processes_stopped.return_value = True
+            runner = unittest.mock.Mock()
+            runner.run.return_value = {"status": "pass", "reasons": [],
+                                       "collector_live_verified": False}
+            with patch.object(collector.coordinator, "session_path", return_value=path), \
+                 patch.object(collector, "TailWindowsBackend", return_value=fake_backend), \
+                 patch.object(collector.live, "require_runtime_configuration"), \
+                 patch.object(collector.live, "verify_prepared_pins", return_value={}), \
+                 patch.object(collector, "verify_collector_pins", return_value={}), \
+                 patch.object(collector, "TailCollector60s", return_value=runner):
+                self.assertEqual(collector.main(["--run-id", "gate-03", "--execute-interactive",
+                                                 "--owner-ready", "correct"]), 0)
+            saved = json.loads((path / "tail-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["execution"], "live")
+            self.assertTrue(saved["collector_live_verified"])
 
 
 if __name__ == "__main__":

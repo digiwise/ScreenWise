@@ -814,6 +814,11 @@ def main(argv: list[str] | None = None) -> int:
                 previous = []
             result = {"status": "incomplete", "reasons": list(dict.fromkeys(previous + cleanup_issues)),
                       "collector_live_verified": False}
+    # TailCollector60s.run() is also exercised with mocked backends, so it must
+    # never self-claim live verification. Only this explicit Windows execution
+    # path can add live provenance, and only after cleanup has completed.
+    result["execution"] = "live"
+    result["collector_live_verified"] = result.get("status") == "pass"
     coordinator.exclusive_json(path / "tail-result.json", result)
     print(json.dumps({"status": result["status"], "reasons": result["reasons"]}, indent=2))
     return 0 if result["status"] == "pass" else 2

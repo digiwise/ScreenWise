@@ -168,6 +168,12 @@ possible-loss or panic marker. Post-run inspection found no tested process or
 listener; closed loopback connections remained briefly in `TIME_WAIT`. This is
 process-level partial-buffer recovery, not same-process `AudioManager::restart`,
 active-meeting shutdown, diarization quality or every-device coverage.
+The preserved first live result still contains the preparation-era
+`collector_live_verified: false` value because the collector returned that value
+for mocked and real backends alike. A subsequent reporting-only correction marks
+only an explicit Windows execution as live, and only after all cleanup succeeds;
+failure and cleanup-degraded results remain unverified. The original evidence was
+not rewritten.
 
 The first live `input-privacy` attempt remained privacy-safe but was incomplete:
 the password-suppression aggregate increased by 23, both forbidden synthetic

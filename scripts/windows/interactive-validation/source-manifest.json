@@ -196,7 +196,7 @@
     {
       "archive_path": "tail/preparation/tail_collector_60s.py",
       "stage_path": "target/background-meeting-20260916-01a09e45/preparation/tail_collector_60s.py",
-      "sha256": "D8EC83574DEDBD2849E563A93CA2345E14CB58B0DCEFB44C24C0E5C264F47894",
+      "sha256": "E4AE23BEF297F11DBC27155E5FDAD5F952C2CA123445B77162ED5D38F2A91EFF",
       "original_sha256": "C3E62495358438E0EDBEAAA156B378F8F5CDBA3BFED86D3EE62EBC310E97A080"
     },
     {
@@ -214,7 +214,7 @@
     {
       "archive_path": "tail/preparation/test_tail_collector_60s.py",
       "stage_path": "target/background-meeting-20260916-01a09e45/preparation/test_tail_collector_60s.py",
-      "sha256": "86339DAB3A609789B1096515F4B5DEB6886F6C3C3916440882BD755DC3BBEA0C",
+      "sha256": "D7B1EFBE249B17DF3E5964E6C95B691395027973D795C747C8809E7835BD27DF",
       "original_sha256": "B8437C11A4F901669A14CFE040A13F2C696EF76412749ED1B5782BFA297BCA40"
     },
     {
