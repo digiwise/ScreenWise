@@ -1104,6 +1104,34 @@ mod pii_redaction_tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
 
+    fn rgb_distance(left: image::Rgb<u8>, right: image::Rgb<u8>) -> u16 {
+        left.0
+            .iter()
+            .zip(right.0.iter())
+            .map(|(a, b)| u16::from(a.abs_diff(*b)))
+            .sum()
+    }
+
+    fn mean_rgb_distance(
+        left: &image::RgbImage,
+        right: &image::RgbImage,
+        x: std::ops::Range<u32>,
+        y: std::ops::Range<u32>,
+    ) -> u32 {
+        let mut total = 0_u64;
+        let mut count = 0_u64;
+        for py in y {
+            for px in x.clone() {
+                total += u64::from(rgb_distance(
+                    *left.get_pixel(px, py),
+                    *right.get_pixel(px, py),
+                ));
+                count += 1;
+            }
+        }
+        (total / count.max(1)) as u32
+    }
+
     fn create_test_jpeg() -> Vec<u8> {
         // Create a 100x100 image with a checkerboard pattern so that
         // blurring a region actually changes pixel values (a uniform
@@ -1135,6 +1163,7 @@ mod pii_redaction_tests {
     #[test]
     fn test_redact_frame_pii_single_region() {
         let image_data = create_test_jpeg();
+        let original = image::load_from_memory(&image_data).unwrap().to_rgb8();
         let regions = vec![PiiRegion {
             x: 10,
             y: 10,
@@ -1147,7 +1176,12 @@ mod pii_redaction_tests {
         // Result should be different from original (blurred)
         assert_ne!(result, image_data);
         // Should still be a valid image
-        assert!(image::load_from_memory(&result).is_ok());
+        let redacted = image::load_from_memory(&result).unwrap().to_rgb8();
+        assert_eq!(redacted.dimensions(), original.dimensions());
+        assert!(mean_rgb_distance(&original, &redacted, 10..40, 10..30) > 25);
+        // Re-encoding at JPEG quality 85 introduces small changes outside
+        // the blur. Compare a distant ordinary control with a lossy tolerance.
+        assert!(rgb_distance(*original.get_pixel(80, 80), *redacted.get_pixel(80, 80)) <= 45);
 
         #[cfg(target_os = "windows")]
         {
@@ -1158,8 +1192,32 @@ mod pii_redaction_tests {
     }
 
     #[test]
+    fn ocr_coordinates_drive_only_the_detected_pii_region() {
+        let image_data = create_test_jpeg();
+        let original = image::load_from_memory(&image_data).unwrap().to_rgb8();
+        let text_json = vec![std::collections::HashMap::from([
+            ("text".to_string(), "fixture@example.invalid".to_string()),
+            ("left".to_string(), "20".to_string()),
+            ("top".to_string(), "20".to_string()),
+            ("width".to_string(), "20".to_string()),
+            ("height".to_string(), "20".to_string()),
+        ])];
+
+        let regions = screenpipe_core::pii_removal::detect_pii_regions(&text_json, 100, 100);
+        assert_eq!(regions.len(), 1);
+        assert_eq!((regions[0].x, regions[0].y), (15, 15));
+        assert_eq!((regions[0].width, regions[0].height), (30, 30));
+
+        let result = redact_frame_pii(&image_data, &regions).unwrap();
+        let redacted = image::load_from_memory(&result).unwrap().to_rgb8();
+        assert!(mean_rgb_distance(&original, &redacted, 15..45, 15..45) > 25);
+        assert!(rgb_distance(*original.get_pixel(80, 80), *redacted.get_pixel(80, 80)) <= 45);
+    }
+
+    #[test]
     fn pii_redaction_failure_frame_discards_source_pixels_and_preserves_dimensions() {
         let source = create_test_jpeg();
+        let original = image::load_from_memory(&source).unwrap().to_rgb8();
         let result = pii_redaction_failure_frame(Some(&source)).unwrap();
         let placeholder = image::load_from_memory(&result).unwrap().to_rgb8();
 
@@ -1167,6 +1225,14 @@ mod pii_redaction_tests {
         assert_ne!(result, source);
         let first = placeholder.get_pixel(0, 0);
         assert!(first[0] > first[1]);
+        // Sample below the notice banner: the placeholder must not retain
+        // the source checkerboard, while allowing its own fixed background.
+        for (x, y) in [(10, 55), (20, 55), (30, 65), (40, 75), (50, 85), (60, 95)] {
+            assert!(
+                rgb_distance(*original.get_pixel(x, y), *placeholder.get_pixel(x, y)) > 90,
+                "failure placeholder retained source-like sample at ({x}, {y})"
+            );
+        }
     }
 
     #[test]
@@ -1196,6 +1262,7 @@ mod pii_redaction_tests {
     #[test]
     fn test_redact_frame_pii_region_at_edge() {
         let image_data = create_test_jpeg();
+        let original = image::load_from_memory(&image_data).unwrap().to_rgb8();
         // Region that extends beyond image bounds
         let regions = vec![PiiRegion {
             x: 90,
@@ -1206,12 +1273,16 @@ mod pii_redaction_tests {
         }];
 
         let result = redact_frame_pii(&image_data, &regions).unwrap();
-        assert!(image::load_from_memory(&result).is_ok());
+        let redacted = image::load_from_memory(&result).unwrap().to_rgb8();
+        assert_eq!(redacted.dimensions(), original.dimensions());
+        assert!(mean_rgb_distance(&original, &redacted, 90..100, 90..100) > 15);
+        assert!(rgb_distance(*original.get_pixel(60, 60), *redacted.get_pixel(60, 60)) <= 45);
     }
 
     #[test]
     fn test_redact_frame_pii_region_outside_bounds() {
         let image_data = create_test_jpeg();
+        let original = image::load_from_memory(&image_data).unwrap().to_rgb8();
         // Region completely outside image
         let regions = vec![PiiRegion {
             x: 200,
@@ -1223,7 +1294,9 @@ mod pii_redaction_tests {
 
         let result = redact_frame_pii(&image_data, &regions).unwrap();
         // Should return valid image unchanged (region was skipped)
-        assert!(image::load_from_memory(&result).is_ok());
+        let redacted = image::load_from_memory(&result).unwrap().to_rgb8();
+        assert_eq!(redacted.dimensions(), original.dimensions());
+        assert!(rgb_distance(*original.get_pixel(80, 80), *redacted.get_pixel(80, 80)) <= 45);
     }
 
     #[test]

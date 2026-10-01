@@ -22,7 +22,7 @@
     {
       "archive_path": "prep/controller_v1/coordinator.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/coordinator.py",
-      "sha256": "8F39984E50A19633FFE8BD3D0BCBB9AD192BBAD1C06E40AE17022AA70749AE7F",
+      "sha256": "7F1CCDBF50E8013B0677C0A84106F583255F1FF90A77B19F45336ABA475F9BC5",
       "original_sha256": "05927DCC50CB3A4F3425858C00B50BED509B528679B411081DBB36CE41DEEEB3"
     },
     {
@@ -52,7 +52,7 @@
     {
       "archive_path": "prep/controller_v1/live.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/live.py",
-      "sha256": "9DBE45A3F3AC943DBD8579F10981CA4A2EDBDCE07F3369766761C6ABA6D5A75D",
+      "sha256": "7072159AD803418C0002BC1090A346C1C72A19BCA83613C2B0CFC095439860F0",
       "original_sha256": "028296E5FB6C68FF5D4A50BB996FCE497E2494B1C0713CF1B935107A38BF9CD9"
     },
     {
@@ -64,13 +64,13 @@
     {
       "archive_path": "prep/controller_v1/README.md",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/README.md",
-      "sha256": "4CCDDF8487C757976840089FE9929E770268B3014D4664A508141AC8B43238D8",
+      "sha256": "A34B2E196CBD821FB4C095C521BCCBA64C582FA08860CF04587683AF0C2BF137",
       "original_sha256": "53A4176BCD551E91EA1BF3587B9484C4C81CF2441CAC460B7E2D2805474473B5"
     },
     {
       "archive_path": "prep/controller_v1/test_coordinator.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_coordinator.py",
-      "sha256": "7DC70B6178AFDB414B3106F88273FEA33EE6B589EC98763ED026C10C40024644",
+      "sha256": "6838DA2DB5D3F63E5DCC9E1A36521C15528CBFF717042430528F752B733FA514",
       "original_sha256": "8B4109169A1B1CFC44D335BBED450B5E36BDE30756642FF1A1A3FE70AF47055F"
     },
     {
@@ -94,7 +94,7 @@
     {
       "archive_path": "prep/controller_v1/test_live.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_live.py",
-      "sha256": "6568950D63F338A2C386C21C1F228C28E8596B6D5BC88CA96EFCFE4F97313C39",
+      "sha256": "3C78DFE49B840633FFD762DC50A6FC99070A1EA8EDD8270F9156B9F182F233F2",
       "original_sha256": "9C9853B5646F8F30C8AFCFA21253F604490D485EC0FBAD6BB6992446840CFD15"
     },
     {
@@ -148,7 +148,7 @@
     {
       "archive_path": "prep/plan.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/plan.py",
-      "sha256": "0C935394997B5F5A50955166B7C9C584EC8583B6AFE5C06CF63F38D2BEAAA72B",
+      "sha256": "7AD7325FF71BCF97BA5CDF7A5EB4995BD13DE44AC7D4BA218E8B7CB6010F01BE",
       "original_sha256": "43DD77D95475E64FF770600AF38F8075F361663618CF669BD8B60EAEA0565785"
     },
     {
@@ -160,7 +160,7 @@
     {
       "archive_path": "prep/test_plan.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/test_plan.py",
-      "sha256": "4214A8D773DC2B201B1BFF7F253562B88FDB4A79D9D008CB493A7F55FEA8C0D4",
+      "sha256": "D838AB5170AE0AD6B3B760300791C608ABF9C38F328AC6BAE3DE0F00E745FB30",
       "original_sha256": "F71C0F0FA0D731532122896F44202872C3435A0E53D2C61954B5FE66296C3C80"
     },
     {
@@ -294,6 +294,18 @@
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_browser_runtime.py",
       "sha256": "B61B99A5B180D19B4BFD20B3EE44ED1712A86C54001D422EF3B199349E3AF331",
       "original_sha256": "B75A0A3C262A67C16839AC9F797C5078A5C3DEE80D53C2D5E994962FDF7C1B94"
+    },
+    {
+      "archive_path": "prep/pixel_redaction_eval.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/pixel_redaction_eval.py",
+      "sha256": "C27BD806DA4ADB49B732D47828EE003D783EEA11890F9348EA8263DBCD5EBC7C",
+      "original_sha256": "C27BD806DA4ADB49B732D47828EE003D783EEA11890F9348EA8263DBCD5EBC7C"
+    },
+    {
+      "archive_path": "prep/test_pixel_redaction_eval.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/test_pixel_redaction_eval.py",
+      "sha256": "9B3FF09F08058493DB1A09EC9B1D60410EABB3F25E0FDAF0097371293E8A72CF",
+      "original_sha256": "9B3FF09F08058493DB1A09EC9B1D60410EABB3F25E0FDAF0097371293E8A72CF"
     }
   ]
 }

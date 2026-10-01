@@ -45,6 +45,18 @@ class LivePreparationTests(unittest.TestCase):
             root=pathlib.Path(tmp);coordinator.prepare('lock','lock-1',root)
             with patch.object(live,'session_path',return_value=coordinator.session_path('lock-1',root)), patch.object(live,'WindowsBackend',side_effect=AssertionError('OS touched')):
                 with self.assertRaises(coordinator.ControlError):live.main(['--run-id','lock-1','--execute-interactive','--owner-ready','not-a-real-reply'])
+    def test_pixel_privacy_refuses_before_runtime_or_gate_consumption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=pathlib.Path(tmp)
+            record=coordinator.prepare('pixel-privacy','pixel-1',root)
+            path=coordinator.session_path('pixel-1',root)
+            with patch.object(live,'session_path',return_value=path), \
+                 patch.object(live,'WindowsBackend',side_effect=AssertionError('OS backend touched')):
+                with self.assertRaisesRegex(coordinator.ControlError,
+                                            live.PIXEL_PRIVACY_REFUSAL):
+                    live.main(['--run-id','pixel-1','--execute-interactive',
+                               '--owner-ready',record['nonce']])
+            self.assertFalse((path/'consumed.json').exists())
     def test_redirect_rejected_without_network(self):
         with self.assertRaises(coordinator.ControlError):live.NoRedirect().redirect_request(None,None,302,'',{},'https://example.invalid')
     def test_unauthorized_mode_cannot_play(self):

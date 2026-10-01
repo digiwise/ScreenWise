@@ -146,6 +146,31 @@ pixel-exact, bounding the black rectangle to the selected region. These are
 synthetic mechanics checks; they do not establish behavior for real protected
 media or detector accuracy.
 
+The separate JPEG response path now has a deterministic synthetic regression
+that feeds fixed OCR coordinates through PII-region detection, checks substantial
+decoded-pixel change inside the resulting padded region and allows only bounded
+JPEG drift at a distant ordinary control pixel. Edge clamping, outside-bounds
+handling and six samples from the source-free failure placeholder are also
+checked. In the documented Developer PowerShell environment, all 70 focused
+`screenpipe-core` PII tests and all eight focused engine image-redaction tests
+passed, as did 13 focused `screenpipe-redact` image/worker tests. This does not
+yet exercise a persisted live frame, OCR accuracy, the authenticated frame
+endpoint or the optional RF-DETR model.
+
+The portable harness now includes a pure fixed-region pixel evaluator. Its eight
+offline tests require a changed and obscured synthetic PII region, preserved
+ordinary/sentinel regions, a source-free failure result, a persisted positive
+control, the 403/403/200 bearer matrix and complete cleanup. The proposed
+`pixel-privacy` live mode deliberately refuses before runtime setup or readiness
+consumption because the current fixture has no deterministic OCR geometry and
+the application has no supported deterministic redaction-failure injection.
+This refusal prevents preparation from being reported as live evidence.
+
+The current synthetic DRM preparation remained runnable after these additions:
+the fixture self-test, 95 controller tests and a refreshed 71-check normal-user
+preflight passed. No readiness gate was created and no recording, fixture window,
+audio playback or interactive phase was started.
+
 Three fixed tail-test WAVs were generated directly to the ignored preparation
 directory with no playback. Independent validation confirmed their hashes,
 mono 16-bit 22.05 kHz PCM form, bounded levels and expected durations. The

@@ -48,6 +48,7 @@ API_PORT = int(os.environ.get('SCREENWISE_VALIDATION_API_PORT', '31479'))
 FIXTURE_PORT = int(os.environ.get('SCREENWISE_VALIDATION_FIXTURE_PORT', '31480'))
 API_URL = f'http://127.0.0.1:{API_PORT}'
 LIVE_MODES = ('privacy', 'input-privacy', 'audio-output', 'drm', 'browser')
+PIXEL_PRIVACY_REFUSAL = 'pixel_privacy_blocked_ocr_geometry_and_failure_injection_unverified'
 
 PASSWORD_SUPPRESSION_REASON = 'uia_password_content_suppressed'
 PASSWORD_SUPPRESSION_TOTAL = re.compile(r'\btotal_suppressed_events\s*[=:]\s*(\d+)\b')
@@ -84,6 +85,14 @@ def require_runtime_configuration(mode=None):
                      'SCREENWISE_VALIDATION_FIXTURE_PORT')
     if any(not os.environ.get(name) for name in required):
         raise ControlError('explicit_runtime_configuration_required')
+
+
+def require_live_mode_supported(mode):
+    """Keep pixel preparation fresh-gated but inert until proof inputs are reviewed."""
+    if mode == 'pixel-privacy':
+        raise ControlError(PIXEL_PRIVACY_REFUSAL)
+    if mode not in LIVE_MODES:
+        raise ControlError('mode_not_yet_wired_for_live_execution')
 
 
 def verify_prepared_pins():
@@ -652,8 +661,8 @@ def main(argv=None):
     if not args.execute_interactive:
         print(json.dumps({'state':'waiting_for_owner','recording_started':False,'mode':record['mode'],'prompt':record['prompt']}))
         return 0
+    require_live_mode_supported(record['mode'])
     require_runtime_configuration(record['mode'])
-    if record['mode'] not in LIVE_MODES:raise ControlError('mode_not_yet_wired_for_live_execution')
     verify_prepared_pins()
     backend=WindowsBackend(record,path)
     backend.quiescent()

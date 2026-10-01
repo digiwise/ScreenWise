@@ -50,6 +50,17 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(plan["phase_expectations"]["hooks_enabled"])
         self.assertTrue(plan["phase_expectations"]["actual_password_suppression_counter"])
 
+    def test_pixel_privacy_plan_is_synthetic_silent_and_explicitly_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = mod.make_plan("pixel-privacy", "pixel-1", Path(d))
+        self.assertIn("--disable-audio", plan["argv"])
+        self.assertTrue(plan["phase_expectations"]["image_pixels_required"])
+        self.assertTrue(plan["phase_expectations"]["ordinary_persisted_control_required"])
+        self.assertEqual(plan["phase_expectations"]["bearer_statuses"],
+                         {"missing": 403, "wrong": 403, "valid": 200})
+        self.assertEqual(plan["phase_expectations"]["live_execution"],
+                         "blocked_until_ocr_geometry_and_failure_case_are_reviewed")
+
     def test_reject_traversal_and_existing(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(ValueError): mod.make_plan("lock", "../escape", Path(d))

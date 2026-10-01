@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-MODES = ("audio-microphone", "audio-output", "lock", "drm", "privacy", "input-privacy", "browser", "uac")
+MODES = ("audio-microphone", "audio-output", "lock", "drm", "privacy", "input-privacy", "pixel-privacy", "browser", "uac")
 RELEASE = Path(os.environ.get("SCREENWISE_VALIDATION_RELEASE_DIR", Path(__file__).resolve().parent.parent / "release"))
 RECORDER = RELEASE / "screenpipe.exe"
 MIC = os.environ.get("SCREENWISE_VALIDATION_INPUT_DEVICE", "<input-device-not-configured>")
@@ -130,10 +130,21 @@ def make_plan(mode: str, run_id: str, prep_root: Path | None = None) -> dict[str
                  "Owner performs the pre-briefed protected playback transition only after explicit confirmation.",
                  "If focus or state is unexpected, stop recording and wait indefinitely for fresh readiness.",
                  "Owner verifies observed pause/resume and the after clip control; this does not by itself prove recovery."]
-    elif mode in ("privacy", "input-privacy"):
+    elif mode in ("privacy", "input-privacy", "pixel-privacy"):
         argv += ["--disable-audio", "--ignored-windows", "::SW EXCLUDED"]
         expectations.update(selected_devices=[], hooks_enabled=True, protected_absence_requires=["before", "after", "verified_focus", "verified_phase_ids"])
         cues += ["Use synthetic non-secret text only; record fixture phase id and independent foreground identity."]
+        if mode == "pixel-privacy":
+            expectations.update(
+                live_execution="blocked_until_ocr_geometry_and_failure_case_are_reviewed",
+                fixed_fixture="PrivacyFixture",
+                image_pixels_required=True,
+                ordinary_persisted_control_required=True,
+                bearer_statuses={"missing": 403, "wrong": 403, "valid": 200},
+                fail_closed_case_required=True,
+                audio_disabled=True,
+            )
+            cues += ["Preparation only: this mode currently refuses interactive execution."]
         if mode == "input-privacy":
             expectations.update(actual_password_suppression_counter=True,
                                 synthetic_keyboard_and_clipboard_stimuli=True)

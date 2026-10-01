@@ -68,6 +68,26 @@ batches instead of recording through an unverified state. No fullscreen UI is us
 
 ## Remaining integration and limits
 
+### Pixel privacy preparation is blocked
+
+`pixel-privacy` is now an explicit plan/waiting mode, but `live.py --execute-interactive`
+refuses it before runtime configuration, readiness consumption, or backend creation
+with `pixel_privacy_blocked_ocr_geometry_and_failure_injection_unverified`. Its
+plan disables audio and records the required image, positive-control, bearer and
+cleanup checks; the refusal means none of those are live evidence.
+
+The current `PrivacyFixture` has text/password controls but no rendered synthetic
+PII region. The existing `GET /frames/:frame_id?redact_pii=true` path derives
+redaction rectangles from persisted OCR text and coordinates; it is an on-demand
+OCR-based route, not the async image-redaction worker. Adding a visible test string
+would still depend on OCR recognition and geometry in a live desktop capture, so
+the fixed ROI evaluator cannot yet be tied to that route without an unreviewed,
+brittle coordinate assumption. The separate async image worker is disabled by
+default and requires an ONNX-enabled build and a locally provisioned RF-DETR model.
+No deterministic supported failure-injection hook exists in the controller or
+fixture. Do not claim or run this mode until those gaps have a reviewed, synthetic
+only solution and a fresh readiness response is obtained for that later run.
+
 Real Win+L/unlock, microphone reading and UAC sequences remain separately planned.
 `live.py` explicitly refuses those modes. The browser URL/password/clipboard
 sequence completed a scoped live run on 2026-09-18 after its exact configured
