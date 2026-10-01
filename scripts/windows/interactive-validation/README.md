@@ -70,6 +70,8 @@ The scripts do not discover or install a Visual Studio edition, Python runtime,
 native library, model, device, or firewall rule. Prepare those dependencies
 outside the kit, record their exact paths and identities, and review the pins.
 The preflight only checks the supplied configuration and existing machine state.
+It also hashes the shared launcher helper that the live controllers execute and
+fails before creating evidence if that file does not match the configured pin.
 It requires an enabled, enforced outbound block for each configured executable;
 it never weakens, bypasses, creates, or modifies a firewall rule. API
 authentication remains enabled and is tested with missing, wrong, and matching

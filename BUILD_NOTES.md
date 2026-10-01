@@ -96,6 +96,37 @@ normal-user preflight deliberately refused under the Codex sandbox token because
 that token is not the configured recorder account; the same noninteractive
 preflight must pass from the owner's ordinary PowerShell before live execution.
 
+## Automated repair validation checkpoint (2026-10-01)
+
+The owner reran the current preparation under the configured PowerShell 7 and
+normal Windows account. A stale staged launcher helper exposed a preflight gap:
+the configuration carried a reviewed helper SHA-256, but preflight did not hash
+the helper that live launchers would execute. Preflight now resolves and verifies
+that file before creating evidence and records the successful check. Its source
+regression test enforces the ordering. After source-only synchronization and
+local fixture rebuilding, the preparation passed 71 checks; the source manifest,
+staging, controller and plan suites passed 48, 14, 105 and 13 checks/tests
+respectively, with one expected symlink-privilege skip.
+
+The rebuilt release executable then passed two fresh gated runs. Selected USB
+output produced six audio chunks and eight transcription rows; both fixed speech
+controls persisted and were found through authenticated search. The separate
+five-phase native privacy run wrote 14 frames and five UI events while every
+forbidden marker remained absent. Both stores passed SQLite `quick_check`; both
+runs retained 403/403/200 missing/wrong/valid bearer behavior and stopped cleanly
+on their first attempt. Fixed-pattern log inspection found no panic,
+acquisition-failure placeholder, unexplained frame-link TTL warning, persistence
+degradation, audio-shutdown degradation or delivery-loss notice. Password-state
+unavailability was bounded to one logical warning represented on two log
+surfaces, rather than sustained repetition.
+
+A normal-account post-run inventory found no tested recorder/media/fixture
+process, no scoped TCP or UDP endpoint and no listener on the two configured test
+ports. These runs did not force a durable transcription backlog at shutdown or
+generate keyboard/clipboard input in the password phase. They therefore leave
+the shutdown-tail recovery and actual password-input suppression counters for a
+separate controlled run. No captured content was inspected.
+
 ## Day-to-day trial repair checkpoint (2026-09-21)
 
 A private roughly nine-minute Windows trial produced 213 captured and 213 written

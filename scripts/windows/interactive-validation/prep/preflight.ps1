@@ -22,6 +22,20 @@ if ($ExpectedConfigSha256 -and $actualConfigSha256 -ne $ExpectedConfigSha256) {
 }
 $config = Get-Content -LiteralPath $resolvedConfig -Raw | ConvertFrom-Json
 if ($config.schema -ne 'screenwise.interactive-validation-config.v1') { throw 'Unsupported validation configuration schema.' }
+$expectedLauncherHelperSha256 = Require-ConfiguredString $config 'launcher_helper_sha256'
+if ($expectedLauncherHelperSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+    throw 'Configured launcher helper SHA-256 is invalid.'
+}
+$launcherHelper = @(
+    (Join-Path $PSScriptRoot '..\interactive-validation\common\Invoke-ValidationController.ps1'),
+    (Join-Path $PSScriptRoot '..\..\scripts\windows\interactive-validation\common\Invoke-ValidationController.ps1')
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $launcherHelper) { throw 'Portable validation launcher helper was not found.' }
+$launcherHelper = (Resolve-Path -LiteralPath $launcherHelper).Path
+$actualLauncherHelperSha256 = (Get-FileHash -LiteralPath $launcherHelper -Algorithm SHA256).Hash
+if ($actualLauncherHelperSha256 -ne $expectedLauncherHelperSha256.ToUpperInvariant()) {
+    throw 'Portable validation launcher helper does not match its reviewed pin.'
+}
 $repo = Require-ConfiguredString $config 'repo_root'
 $python = Require-ConfiguredString $config 'python_exe'
 $developerShell = Require-ConfiguredString $config 'developer_shell'
@@ -93,6 +107,7 @@ function Check([string]$name, [bool]$pass, $details) {
 }
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 Check 'normal_unelevated_token' (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'Recorder tests require a normal, non-elevated user token.'
+Check 'launcher_helper_pinned' $true @{path = $launcherHelper; sha256 = $actualLauncherHelperSha256}
 $supportedAddresses = @('0.0.0.0-126.255.255.255', '128.0.0.0-255.255.255.255', '::', '::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
 $addresses = @($config.firewall.remote_addresses)
 Check 'firewall_remote_scope_supported' ($addresses.Count -eq $supportedAddresses.Count -and @(Compare-Object $supportedAddresses $addresses).Count -eq 0) $addresses

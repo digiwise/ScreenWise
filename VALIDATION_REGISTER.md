@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-09-24. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-01. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -16,14 +16,14 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 |---|---|---|
 | Windows screen/UI | WGC across three displays, UIA trees, Windows OCR and SQLite writes passed | Not every display/app/provider combination |
 | Local API | /health passed; missing/wrong/valid bearer requests gave 403/403/200; tested listener was IPv4 loopback | Protected localhost requests still require authentication |
-| Local transcription | Microphone and system-output capture, Parakeet transcription, known-phrase search and transcript persistence across restart passed; the current public-checkout build also persisted and found both short selected-USB-output synthetic controls | Not a full-passage accuracy, diarization-quality, every-device or final-tail benchmark |
+| Local transcription | Microphone and system-output capture, Parakeet transcription, known-phrase search and transcript persistence across restart passed; a fresh current-build run persisted and found both short selected-USB-output synthetic controls | Not a full-passage accuracy, diarization-quality, every-device or final-tail benchmark |
 | Native privacy | Synthetic password markers absent in inspected text/log fields; foreground/background title exclusions and other-monitor fixture controls passed | Browser/custom UIA controls and race boundaries remain open |
 | Input switches | Disabled keyboard/clipboard switches produced no input-content rows during synthetic stimuli | Screen/UIA/OCR may still see ordinary displayed text |
 | Audio shutdown | One 13.798 s selected-output partial chunk retained both synthetic markers; authenticated search found it after a distinct process restart and found a new chunk | Active-meeting shutdown, same-process restart and every device are not covered |
 | Lock/unlock | Audio-disabled real transition passed; a later audio-enabled day-to-day run recorded one 10,770.1 s privacy pause with zero frame or audio-chunk counter advances inside its sampled locked interval, then automatic WGC/audio recovery | Counters and fixed notices were inspected, not captured content; this is not every-pixel proof |
 | Safe lock notices | Fixed unlocked/desktop-unavailable/locked reasons persisted through timeline API and local logs; clean stop with no owned processes remaining | Packaged desktop timeline was not visually exercised in this run |
 | OS firewall | Exact recorder/media paths had outbound block rules; the fixed no-payload `screenpipe.exe` IPv4 TCP diagnostic was denied while an unscoped control handshake succeeded; helper IPv4/IPv6 localhost access worked | External IPv6 route unavailable; UDP/drop-trace coverage and closeout incomplete |
-| Published checkout | Clean offline release build, CLI help/doctor and nine event tests passed; fresh gated runs wrote 15 distinct snapshots, three accessibility-tree frames and Windows Native OCR text, persisted and found both selected-USB-output audio controls, and passed a scoped five-phase Chrome/password/excluded-host/clipboard run; SQLite checks and main capture/audio shutdowns passed | Image-pixel redaction, arbitrary browser/clipboard providers, real DRM, full audio accuracy and every-device behavior were not exercised; the separate vision-disabled OCR restart required forced shutdown after its watched-process signal |
+| Published checkout | Clean offline release build, CLI help/doctor and nine event tests passed; fresh gated runs wrote 15 distinct snapshots, three accessibility-tree frames and Windows Native OCR text, persisted and found both selected-USB-output audio controls, and passed scoped browser and native password/exclusion checks; SQLite checks and main capture/audio shutdowns passed | Image-pixel redaction, arbitrary browser/clipboard providers, real DRM, forced audio-backlog shutdown, full audio accuracy and every-device behavior were not exercised; the separate vision-disabled OCR restart required forced shutdown after its watched-process signal |
 
 The final lock result's SHA-256 was
 `A82FA50F5DD29402319997CEB75EAD9E70DC6FDC03CF663F86907B2CB1AE0F89`.
@@ -176,15 +176,15 @@ counter without examining content.
 |---|---|
 | SW-V01 | Native foreground DRM policy repaired in source; scoped synthetic Chrome allowed/password/excluded-host transitions passed. Sustained real DRM/audio recovery and broader background/other-monitor transitions remain incomplete. No protected playback bypass. |
 | SW-V02 | Explicit audio selection repaired; selected-output live regression passed. Broader fresh/persisted microphone-only, defaults, disable-audio and device changes still need coverage. |
-| SW-V03 | Earlier runs had two unexpected WGC acquisition failures. The 2026-09-23/24 run retained five active-window and one initial-privacy safe placeholder and later recovered. Windows capture now makes one bounded retry only after an acquisition failure; it never retries a redaction result. Deterministic coverage passes; live confirmation is pending. |
+| SW-V03 | **Repaired, regression-tested and scoped live-checked:** earlier runs had two unexpected WGC acquisition failures. The 2026-09-23/24 run retained five active-window and one initial-privacy safe placeholder and later recovered. Windows capture now makes one bounded retry only after an acquisition failure; it never retries a redaction result. The 2026-10-01 native privacy run completed with zero acquisition-failure placeholders. This single clean run does not reproduce the former OS failure. |
 | SW-V04 | Microphone transcript rows/phrase hits passed, complete passage accuracy and retention did not. Distinguish ASR substitutions, VAD rejection and actual loss. |
 | SW-V05 | Earlier DRM audio tests lacked positive before/after controls; they cannot establish suppression. Retry only with working controls. |
 | SW-V06 | Scoped live clipboard evidence passed: an ordinary fixed marker produced three positive rows, the password-phase secret marker produced zero rows, three clipboard UI events were present, and opaque clipboard restoration followed verified recorder stop. Arbitrary providers, applications, formats and race timing remain open. |
-| SW-V07 | The orphan lower-level UIA tree producer remains disabled while paired UIA capture and password/focus/input checks stay active. Multi-monitor duplicates are deduplicated. The 2026-09-23/24 run produced 13 TTL expiries. Capture drops now classify their linked event halves, and privacy/database-rejected UI batches terminally resolve their linked frames. Health separates known capture drops from unexplained TTLs; deterministic coverage passes and live confirmation is pending. |
+| SW-V07 | **Repaired, regression-tested and scoped live-checked:** the orphan lower-level UIA tree producer remains disabled while paired UIA capture and password/focus/input checks stay active. Multi-monitor duplicates are deduplicated. The 2026-09-23/24 run produced 13 TTL expiries. Capture drops now classify their linked event halves, and privacy/database-rejected UI batches terminally resolve their linked frames. The 2026-10-01 native privacy run logged zero unexplained frame-link TTL warnings. Real pressure and longer runs remain open. |
 | SW-V08 | Fixture focus/equality limitations addressed with OS identity and stimulus acknowledgements; continue using these guards. |
 | SW-V09 | Windows locked-state detection repaired and already-locked/audio-disabled transitions passed. A later audio-enabled run showed a roughly three-hour sampled frame/audio plateau and automatic WGC/input/output recovery after unlock. Broader repeated-lock, DRM and device-change recovery remain open. |
 | SW-V10 | General event pressure/recovery/subscriber-loss reporting implemented; 28-event-suite tests passed. Real overload/soak remains open; delivery counts are not unique lost database rows. |
-| SW-V11 | A 2026-09-23/24 shutdown timed out because session completion ran durable-backlog reconciliation inline on the ordered raw-audio consumer, leaving four raw-audio deliveries unconfirmed. Reconciliation now runs only on its separately bounded, explicitly woken worker; unfinished durable segments remain retryable and do not masquerade as raw-audio loss. Deterministic tests pass. A live backlog shutdown, pending recovery, active meeting and same-process restart remain required. |
+| SW-V11 | **Repaired, regression-tested and partially live-checked:** a 2026-09-23/24 shutdown timed out because session completion ran durable-backlog reconciliation inline on the ordered raw-audio consumer, leaving four raw-audio deliveries unconfirmed. Reconciliation now runs only on its separately bounded, explicitly woken worker. The 2026-10-01 selected-output run stopped cleanly on its first attempt with no shutdown degradation or delivery-loss notice, but it did not deliberately force a durable backlog. A live forced-backlog shutdown, pending recovery, active meeting and same-process restart remain required. |
 | SW-V12 | Short stimulus/first-chunk mismatch corrected in preparation; bounded later selected-output tests passed. |
 | SW-V13 | Deterministic broadcast-lag integration test repaired; all three locked offline Cargo tests passed. |
 | SW-V14 | Nested Windows UIA exclusion gap repaired; scoped silent native privacy retest passed. Broader exclusion variants remain open. |
@@ -203,7 +203,47 @@ counter without examining content.
 | SW-V27 | **Repaired, regression-tested and rebuilt; live check pending:** comparer-only visual probes repeatedly reset persisted Windows capture transition state, producing 724 excluded-foreground warnings in one 24-minute run. Probe results no longer mutate or log the persisted state; actual persisted privacy and failure transitions remain visible. |
 | SW-V28 | **Repaired, regression-tested and rebuilt; live check pending:** 31 samples reported stale audio while chunks continued arriving and were VAD-rejected as silence. Received chunks now advance the intended consumer/transcription-attempt heartbeat, and `/health` accepts a recent heartbeat without requiring recognized speech or a database insert. |
 | SW-V29 | **Repaired and regression-tested; live check pending:** the trial summary previously ignored shutdown failures and delivery-loss notices written after the final health sample. It now merges fixed post-sample diagnostics, reports the exact safe reason codes, and treats a missing clean marker plus null native exit status as failure. |
-| SW-V30 | **Repaired and regression-tested; live check pending:** UIA password-state probe flapping produced 333 repetitive warnings. Fail-closed suppression remains immediate, while state-unavailable warnings are bounded and aggregated. A separate fixed counter reports actual keyboard/clipboard content events suppressed by the password-field gate, whether from known password focus or fail-closed unknown state. |
+| SW-V30 | **Repaired, regression-tested and partially live-checked:** UIA password-state probe flapping produced 333 repetitive warnings. Fail-closed suppression remains immediate, while state-unavailable warnings are bounded and aggregated. The 2026-10-01 native privacy run had one logical unavailable-state notice represented on two log surfaces rather than sustained repetition. It generated no keyboard or clipboard stimulus, so the actual-suppression counter still needs a controlled live check. |
+
+## Automated interactive repair validation, 2026-10-01
+
+The exact rebuilt release executable identified in `BUILD_NOTES.md` passed a
+fresh 71-check normal-user preflight with the existing exact-path outbound block
+rules. Preparation first exposed stale staged controller sources: the preflight
+could validate a configured helper hash without verifying the helper file that
+the launchers would execute. Preflight now resolves that helper, checks its
+SHA-256 before creating an evidence directory, and records the successful pin
+check. Source staging tests cover this ordering. After source-only restaging and
+local fixture rebuilding, 48 manifest checks, 14 staging tests (one expected
+symlink-privilege skip), 105 controller tests and 13 plan tests passed.
+
+A fresh selected-output run wrote six audio chunks and eight transcription rows.
+Each of the two fixed local speech markers appeared once in persisted search
+results. Missing, wrong and valid bearer credentials produced 403/403/200,
+`/health` returned 200, SQLite `quick_check` returned `ok`, and shutdown completed
+on the first attempt. Fixed-pattern log inspection found no audio-shutdown
+degradation, consumer-drain timeout, delivery-loss/possible-loss, persistence
+degradation, acquisition-failure placeholder or frame-link TTL warning. This run
+did not force a durable transcription backlog at shutdown and is not a complete
+speech-accuracy or final-tail test.
+
+A separate silent native privacy run completed its allowed, password,
+excluded-foreground, excluded-background and final allowed phases. Allowed frame
+deltas were two before and one after the protected phases; protected phases had
+zero allowed-marker deltas, and every forbidden synthetic-marker delta remained
+zero. The store held 14 frames and five UI events and passed SQLite
+`quick_check`; authentication again produced 403/403/200 and shutdown was clean.
+Log inspection found zero acquisition-failure placeholders, unexplained
+frame-link TTL warnings, persistence degradation or panic files. One logical
+password-state-unavailable warning appeared on two log surfaces. Because the run
+was silent and input-free, it did not exercise the keyboard/clipboard
+actual-suppression counter, image-pixel redaction, real DRM or arbitrary providers.
+
+After both controllers exited, an independent normal-account exact-path
+inventory found no tested recorder, FFmpeg, FFprobe or fixture process, no TCP or
+UDP endpoint owned by those paths, and no listener on either configured test
+port. Captured screen, audio and transcript bodies were not inspected; only
+fixed synthetic-marker counts and content-free diagnostics were used.
 
 ## Outstanding test plan
 
@@ -221,7 +261,7 @@ counter without examining content.
 | SW-T10 | Owner-confirmed disposition/restoration of exact test rules, independent read-only final inspection and original milestone closeout. |
 | SW-T11 | Visual desktop status and broader safe-notice audit across acquisition/audio/input failures and independent queues. |
 | SW-T12 | Extend the passing deterministic privacy-generation tests with live transition timing and the SW-V20 speaker-identity path. Inspect durable state as well as returned results; do not generalize the fixed persistence paths to universal stale-generation suppression. |
-| SW-T13 | Run the compact password/exclusion fixture against the rebuilt binary. Require bounded unavailable-state notices, a numeric actual-suppression count, reduced log volume, no forbidden-marker hits, and no unexplained frame-link TTL expiry. This is interactive and needs fresh authorization. |
+| SW-T13 | **Scoped native fixture complete:** forbidden markers remained at zero, unavailable-state logging was bounded, and no unexplained frame-link TTL warning appeared. A separate controlled keyboard/clipboard stimulus is still required to make and verify the numeric actual-suppression counter; it needs fresh authorization. |
 
 ## Reuse and conduct
 
