@@ -171,6 +171,28 @@ the fixture self-test, 95 controller tests and a refreshed 71-check normal-user
 preflight passed. No readiness gate was created and no recording, fixture window,
 audio playback or interactive phase was started.
 
+A subsequent fresh gated synthetic DRM run passed the scoped pause/recovery
+contract. Its first launch refused before gate consumption or recording because
+the two freshly rebuilt fixture executables no longer matched their reviewed
+generated-asset pins. After those self-tested files were repinned and the
+71-check normal-user preflight passed again, the controller observed 28 protected-
+phase samples. The fixed before and after speech controls each persisted once;
+the protected speech marker, protected capture markers and their post-recovery
+recheck all remained zero. The selected output device was exact, `/health`
+returned 200, and four protected endpoint families each returned 403/403/200 for
+missing, wrong and valid bearer credentials.
+
+The fresh store recorded five audio chunks, six transcription rows, 11 frames
+and three UI events and passed SQLite `quick_check`. Recorder shutdown succeeded
+on its first attempt; playback, fixture and DRM cleanup, exact-path process
+quiescence and the clean-shutdown check all passed. Independent post-run inspection
+found no scoped process and no TCP or UDP endpoint on the API port. A log-only
+fixed-pattern scan found no panic, queued-work discard, unconfirmed worker,
+incomplete audio shutdown, persistence degradation, possible loss, acquisition
+failure or DRM pause/resume failure. Only fixed synthetic marker counts and
+content-free metadata were inspected. This does not exercise real protected
+media, DRM-provider diversity, continuous network observation or DRM bypass.
+
 Three fixed tail-test WAVs were generated directly to the ignored preparation
 directory with no playback. Independent validation confirmed their hashes,
 mono 16-bit 22.05 kHz PCM form, bounded levels and expected durations. The
