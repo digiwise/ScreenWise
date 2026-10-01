@@ -42,7 +42,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const LOCKED_SCREEN_UIA_BACKOFF: Duration = Duration::from_millis(1000);
-const KEYBOARD_PRIVACY_POLL_MS: u64 = 50;
+// Keep routine refresh well inside the 75 ms permit lifetime even when a
+// provider call and ordinary Windows scheduler jitter add measurable delay.
+const KEYBOARD_PRIVACY_POLL_MS: u64 = 25;
 const KEYBOARD_PRIVACY_MAX_AGE: Duration = Duration::from_millis(75);
 const KEYBOARD_PRIVACY_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
 const KEYBOARD_PRIVACY_UNKNOWN: u8 = 0;
@@ -107,6 +109,11 @@ impl NativeKeyboardFocus {
             })
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn matches_handles(self, foreground: HWND, control: HWND) -> bool {
+        self.foreground == foreground.0 as isize && self.control == control.0 as isize
+    }
 }
 
 struct KeyboardPrivacyDecision {
@@ -134,6 +141,31 @@ pub struct KeyboardPrivacy {
     content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
     reported_content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
     last_content_suppression_notice: Mutex<Option<Instant>>,
+    probes: AtomicU64,
+    last_probe_duration_us: AtomicU64,
+    max_probe_duration_us: AtomicU64,
+    last_probe_gap_us: AtomicU64,
+    max_probe_gap_us: AtomicU64,
+    last_probe_completed_at: Mutex<Option<Instant>>,
+    last_stale_age_us: AtomicU64,
+    max_stale_age_us: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct KeyboardPrivacyDiagnostics {
+    pub(crate) probes: u64,
+    pub(crate) last_probe_duration_us: u64,
+    pub(crate) max_probe_duration_us: u64,
+    pub(crate) last_probe_gap_us: u64,
+    pub(crate) max_probe_gap_us: u64,
+    pub(crate) last_stale_age_us: u64,
+    pub(crate) max_stale_age_us: u64,
+    pub(crate) suppressions: u64,
+    pub(crate) suppressions_by_reason: [u64; KEYBOARD_PRIVACY_DENIAL_REASONS],
+}
+
+fn duration_micros(value: Duration) -> u64 {
+    value.as_micros().min(u64::MAX as u128) as u64
 }
 
 impl KeyboardPrivacy {
@@ -163,7 +195,13 @@ impl KeyboardPrivacy {
         if Some(decision.focus) != focus {
             return Err(KeyboardPrivacyDenial::FocusMismatch);
         }
-        if decision.checked_at.elapsed() > KEYBOARD_PRIVACY_MAX_AGE {
+        let decision_age = decision.checked_at.elapsed();
+        if decision_age > KEYBOARD_PRIVACY_MAX_AGE {
+            let decision_age_us = duration_micros(decision_age);
+            self.last_stale_age_us
+                .store(decision_age_us, Ordering::Relaxed);
+            self.max_stale_age_us
+                .fetch_max(decision_age_us, Ordering::Relaxed);
             return Err(KeyboardPrivacyDenial::DecisionStale);
         }
         if self.generation.load(Ordering::SeqCst) != generation {
@@ -179,6 +217,41 @@ impl KeyboardPrivacy {
     pub(crate) fn note_content_suppressed(&self, reason: KeyboardPrivacyDenial) {
         self.content_suppressions.fetch_add(1, Ordering::Relaxed);
         self.content_suppressions_by_reason[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_probe_completed(&self, started_at: Instant, completed_at: Instant) {
+        let duration_us = duration_micros(completed_at.saturating_duration_since(started_at));
+        self.probes.fetch_add(1, Ordering::Relaxed);
+        self.last_probe_duration_us
+            .store(duration_us, Ordering::Relaxed);
+        self.max_probe_duration_us
+            .fetch_max(duration_us, Ordering::Relaxed);
+
+        let mut previous = self.last_probe_completed_at.lock();
+        if let Some(previous_at) = *previous {
+            let gap_us = duration_micros(completed_at.saturating_duration_since(previous_at));
+            self.last_probe_gap_us.store(gap_us, Ordering::Relaxed);
+            self.max_probe_gap_us.fetch_max(gap_us, Ordering::Relaxed);
+        }
+        *previous = Some(completed_at);
+    }
+
+    pub(crate) fn diagnostics(&self) -> KeyboardPrivacyDiagnostics {
+        let mut suppressions_by_reason = [0; KEYBOARD_PRIVACY_DENIAL_REASONS];
+        for (index, value) in suppressions_by_reason.iter_mut().enumerate() {
+            *value = self.content_suppressions_by_reason[index].load(Ordering::Relaxed);
+        }
+        KeyboardPrivacyDiagnostics {
+            probes: self.probes.load(Ordering::Relaxed),
+            last_probe_duration_us: self.last_probe_duration_us.load(Ordering::Relaxed),
+            max_probe_duration_us: self.max_probe_duration_us.load(Ordering::Relaxed),
+            last_probe_gap_us: self.last_probe_gap_us.load(Ordering::Relaxed),
+            max_probe_gap_us: self.max_probe_gap_us.load(Ordering::Relaxed),
+            last_stale_age_us: self.last_stale_age_us.load(Ordering::Relaxed),
+            max_stale_age_us: self.max_stale_age_us.load(Ordering::Relaxed),
+            suppressions: self.content_suppressions.load(Ordering::Relaxed),
+            suppressions_by_reason,
+        }
     }
 
     fn report_unavailable_transition(&self, now: Instant) {
@@ -348,6 +421,7 @@ impl UiaContext {
     /// the actual focused element, explicitly disallowing UIA default values:
     /// an unsupported IsPassword property must not become a false permission.
     fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy) {
+        let started_at = Instant::now();
         let generation = privacy.generation.load(Ordering::SeqCst);
         let focus = NativeKeyboardFocus::current();
         let (is_password, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
@@ -376,6 +450,7 @@ impl UiaContext {
         });
         // An event that invalidates focus while the COM query is in flight
         // changes the generation, so this result cannot grant permission.
+        privacy.note_probe_completed(started_at, checked_at);
         privacy.update(generation, focus, is_password, checked_at);
     }
 
@@ -855,7 +930,7 @@ fn redact_click_element_text(
 #[implement(IUIAutomationFocusChangedEventHandler)]
 struct FocusChangedHandler {
     pending: Arc<Mutex<Option<PendingFocus>>>,
-    keyboard_privacy: Arc<KeyboardPrivacy>,
+    keyboard_privacy: Option<Arc<KeyboardPrivacy>>,
 }
 
 impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
@@ -863,7 +938,9 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
         &self,
         _sender: Option<&IUIAutomationElement>,
     ) -> windows::core::Result<()> {
-        self.keyboard_privacy.invalidate();
+        if let Some(keyboard_privacy) = &self.keyboard_privacy {
+            keyboard_privacy.invalidate();
+        }
         // Record the time of focus change; the UIA thread will debounce and capture
         let hwnd = unsafe { GetForegroundWindow() };
         if !hwnd.is_invalid() {
@@ -879,6 +956,117 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
 // ============================================================================
 // UIA Worker Thread
 // ============================================================================
+
+fn keyboard_privacy_capture_enabled(config: &UiCaptureConfig) -> bool {
+    config.skip_password_fields
+        && (config.capture_text || config.capture_keystrokes || config.capture_clipboard_content)
+}
+
+/// Run the password-state probe on its own STA. Tree capture and element
+/// enrichment can spend longer than the deliberately short privacy permit in
+/// cross-process providers; sharing their worker made an otherwise valid
+/// ordinary-field decision expire before the low-level hook could use it.
+pub(crate) fn run_keyboard_privacy_thread(
+    keyboard_privacy: Arc<KeyboardPrivacy>,
+    stop: Arc<AtomicBool>,
+    config: UiCaptureConfig,
+) {
+    if !keyboard_privacy_capture_enabled(&config) {
+        return;
+    }
+    debug!("UIA keyboard privacy worker starting");
+
+    unsafe {
+        let result = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if result.is_err() {
+            error!(
+                "Failed to initialize COM for UIA keyboard privacy worker: {:?}",
+                result
+            );
+            keyboard_privacy.invalidate();
+            return;
+        }
+    }
+
+    let uia = 'outer: loop {
+        if stop.load(Ordering::Relaxed) {
+            unsafe { CoUninitialize() };
+            return;
+        }
+        let mut last_error = None;
+        for attempt in 0..4 {
+            if stop.load(Ordering::Relaxed) {
+                unsafe { CoUninitialize() };
+                return;
+            }
+            match UiaContext::new() {
+                Ok(context) => break 'outer context,
+                Err(error) => {
+                    let delay_secs = 1u64 << attempt.min(2);
+                    warn!(
+                        "UIA keyboard privacy init attempt {} failed: {:?}, retrying in {}s",
+                        attempt + 1,
+                        error,
+                        delay_secs
+                    );
+                    last_error = Some(error);
+                    std::thread::sleep(Duration::from_secs(delay_secs));
+                }
+            }
+        }
+        warn!(
+            "Failed to initialize UIA keyboard privacy worker after 4 attempts: {:?}. Will retry in 30s; keyboard/clipboard content remains fail closed.",
+            last_error
+        );
+        for _ in 0..30 {
+            if stop.load(Ordering::Relaxed) {
+                unsafe { CoUninitialize() };
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    };
+
+    let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
+    let handler = FocusChangedHandler {
+        pending: pending_focus,
+        keyboard_privacy: Some(keyboard_privacy.clone()),
+    };
+    let handler_interface: IUIAutomationFocusChangedEventHandler = handler.into();
+    if let Err(error) = uia.subscribe_focus_changes(&handler_interface) {
+        warn!(
+            "Failed to subscribe the UIA keyboard privacy worker to focus changes: {:?}; keyboard/clipboard content remains fail closed.",
+            error
+        );
+        keyboard_privacy.invalidate();
+        unsafe { CoUninitialize() };
+        return;
+    }
+
+    let mut msg = MSG::default();
+    while !stop.load(Ordering::Relaxed) {
+        unsafe {
+            while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+            keyboard_privacy.invalidate();
+            std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
+            continue;
+        }
+        uia.refresh_keyboard_privacy(&keyboard_privacy);
+        unsafe {
+            MsgWaitForMultipleObjects(None, false, KEYBOARD_PRIVACY_POLL_MS as u32, QS_ALLINPUT);
+        }
+    }
+
+    keyboard_privacy.invalidate();
+    let _ = uia.unsubscribe_focus_changes(&handler_interface);
+    unsafe { CoUninitialize() };
+    debug!("UIA keyboard privacy worker stopped");
+}
 
 /// Run the UI Automation worker thread.
 pub fn run_uia_thread(
@@ -973,23 +1161,21 @@ pub fn run_uia_thread(
     let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
     let handler = FocusChangedHandler {
         pending: pending_focus.clone(),
-        keyboard_privacy: keyboard_privacy.clone(),
+        keyboard_privacy: None,
     };
     let handler_interface: IUIAutomationFocusChangedEventHandler = handler.into();
 
-    let focus_events_available = match uia.subscribe_focus_changes(&handler_interface) {
+    match uia.subscribe_focus_changes(&handler_interface) {
         Err(e) => {
             warn!(
-                "Failed to subscribe to focus changes: {:?}. Trees will use polling; password-protected keyboard capture remains suppressed.",
+                "Failed to subscribe tree capture to focus changes: {:?}. Trees will use polling; the separate keyboard privacy worker is unaffected.",
                 e
             );
-            false
         }
         Ok(()) => {
             debug!("Subscribed to UIA focus change events");
-            true
         }
-    };
+    }
 
     // State for debouncing and periodic capture
     let mut last_captured_hwnd: isize = 0;
@@ -998,10 +1184,6 @@ pub fn run_uia_thread(
     let debounce_dur = Duration::from_millis(config.tree_debounce_ms);
     let interval_dur = Duration::from_millis(config.tree_capture_interval_ms);
     let mut was_lock_paused = false;
-    let check_keyboard_privacy = focus_events_available
-        && config.skip_password_fields
-        && (config.capture_text || config.capture_keystrokes || config.capture_clipboard_content);
-
     // Capture the initial window only after the same lock/schedule/DRM
     // admission used by later UIA work.
     if config.capture_tree && screenpipe_config::audio_privacy::visual_capture_allowed() {
@@ -1044,10 +1226,6 @@ pub fn run_uia_thread(
             was_lock_paused = true;
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
             continue;
-        }
-
-        if check_keyboard_privacy {
-            uia.refresh_keyboard_privacy(&keyboard_privacy);
         }
 
         if was_lock_paused && config.capture_tree {
@@ -1159,9 +1337,6 @@ pub fn run_uia_thread(
             interval_dur,
             &config,
         );
-        if check_keyboard_privacy {
-            wait_ms = wait_ms.min(KEYBOARD_PRIVACY_POLL_MS);
-        }
         // If we just skipped a capture due to recent input, cap the wait so we wake up
         // shortly after the input cooldown expires and can retry the capture.
         if skip_capture && input_pause_dur_ms > 0 {
@@ -1498,6 +1673,45 @@ mod tests {
         let focus = Some(test_keyboard_focus());
         privacy.update(0, focus, is_password, checked_at);
         assert_eq!(privacy.permit(focus), Some(0));
+    }
+
+    #[test]
+    fn keyboard_privacy_diagnostics_are_content_free_numeric_timings() {
+        let privacy = KeyboardPrivacy::default();
+        let first_started = Instant::now() - Duration::from_millis(4);
+        let first_completed = Instant::now();
+        privacy.note_probe_completed(first_started, first_completed);
+        std::thread::sleep(Duration::from_millis(2));
+        let second_started = Instant::now() - Duration::from_millis(3);
+        let second_completed = Instant::now();
+        privacy.note_probe_completed(second_started, second_completed);
+
+        let focus = Some(test_keyboard_focus());
+        privacy.update(
+            0,
+            focus,
+            Some(false),
+            Instant::now() - KEYBOARD_PRIVACY_MAX_AGE - Duration::from_millis(2),
+        );
+        assert_eq!(
+            privacy.permit_diagnosed(focus),
+            Err(KeyboardPrivacyDenial::DecisionStale)
+        );
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::DecisionStale);
+
+        let diagnostics = privacy.diagnostics();
+        assert_eq!(diagnostics.probes, 2);
+        assert!(diagnostics.last_probe_duration_us >= 2_000);
+        assert!(diagnostics.max_probe_duration_us >= diagnostics.last_probe_duration_us);
+        assert!(diagnostics.last_probe_gap_us >= 1_000);
+        assert!(diagnostics.max_probe_gap_us >= diagnostics.last_probe_gap_us);
+        assert!(diagnostics.last_stale_age_us > 75_000);
+        assert!(diagnostics.max_stale_age_us >= diagnostics.last_stale_age_us);
+        assert_eq!(diagnostics.suppressions, 1);
+        assert_eq!(
+            diagnostics.suppressions_by_reason[KeyboardPrivacyDenial::DecisionStale.index()],
+            1
+        );
     }
 
     #[test]

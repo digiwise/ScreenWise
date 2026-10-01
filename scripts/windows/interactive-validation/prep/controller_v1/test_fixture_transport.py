@@ -124,8 +124,13 @@ class FixtureTransportTests(unittest.TestCase):
                       text.index("private bool PasteWithKeys")]
         self.assertIn("GetForegroundWindow() != Handle || !target.Focused", method)
         self.assertNotIn("FocusControl(target)", method)
+        self.assertNotIn("SendKeys.SendWait(syntheticValue)", method)
         self.assertLess(method.index("stable_focus_not_verified"),
-                        method.index("SendKeys.SendWait(syntheticValue)"))
+                        method.index("RunWorkerWhilePumping"))
+        self.assertIn("delegate { SendSyntheticText(syntheticValue); }", method)
+        self.assertIn("delegate { Application.DoEvents(); }", method)
+        self.assertIn("[FieldOffset(0)] internal MOUSEINPUT Mouse;", text)
+        self.assertIn("IntPtr.Size == 8 ? 40 : 28", text)
 
     def test_drm_reuses_fixed_startup_ready_for_each_command(self):
         with tempfile.TemporaryDirectory() as tmp:

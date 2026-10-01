@@ -179,7 +179,45 @@ the sole live cause on this machine. The suppression warning now includes only
 bounded numeric counts for five fixed admission-denial classes: unavailable
 decision, worker-lock contention, generation change, native-focus mismatch and
 stale decision. No key, clipboard value, UIA string, title or identifier enters
-that diagnostic. A fresh gated diagnostic run is required before another fix.
+that diagnostic.
+
+The narrow Windows live regression then reproduced the remaining defect inside
+`screenpipe-a11y` without starting the recorder or creating a capture store. The
+real low-level keyboard hook and UIA worker used compact fixed ordinary/password
+controls. Before repair, UIA property calls took at most 5.6 ms but completed
+probe gaps reached 94.9 ms because the same STA also performed accessibility-tree
+work; an ordinary character was denied as stale while password input remained
+fully suppressed. Password-state polling now runs on a dedicated STA, while the
+75 ms fail-closed permit lifetime and native-focus/generation checks remain
+unchanged. Its target interval was reduced from 50 to 25 ms after the first
+passing run left only 7.5 ms of observed scheduling margin.
+
+The final gated two-cycle regression delivered both fixed ordinary markers,
+delivered zero fixed password markers, and counted all 14 characters in each
+password phase as unavailable-decision suppressions. It recorded no stale or
+other ordinary denial; maximum probe duration was 14.5 ms and maximum completed-
+probe gap was 46.8 ms. The complete locked offline `screenpipe-a11y` library
+suite passed 183 tests with 23 ignored. One documented Developer PowerShell
+release build completed in 5m00s; the resulting executable has SHA-256
+`5652BB3E297B43259B6293BE8DBB5821FA168C91E3A2637A7010401524280A2E`.
+After repinning only that ignored local artifact, normal-account preparation
+passed 71 checks. The first full-application retry failed safely before accepting
+synthetic input because the fixture's managed `INPUT` union omitted the larger
+native `MOUSEINPUT` member required for the 64-bit ABI. It persisted no forbidden
+marker, restored the clipboard and completed clean process cleanup. The fixture
+now models the complete native union and self-tests the required 40-byte x64
+layout; archive and controller regression tests cover the background-input and
+UI-thread-pump path.
+
+The corrected fresh `input-privacy` run passed the scoped full-application check.
+One fixed ordinary keyboard marker reached `ui_events`; fixed password typing and
+password clipboard markers both remained at zero; and the safe password-gate
+aggregate increased by 23. Missing, wrong and valid bearer credentials returned
+403/403/200, SQLite `quick_check` returned `ok`, and six frames and five UI events
+were retained. Recorder stop succeeded on the first attempt, the clipboard was
+restored, the fixture closed, clean shutdown passed and no owned process remained.
+This validates only the fixed native synthetic controls, not arbitrary providers
+or all race timings.
 
 ## Day-to-day trial repair checkpoint (2026-09-21)
 

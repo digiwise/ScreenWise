@@ -9,25 +9,267 @@
 #![cfg(test)]
 
 use crate::config::UiCaptureConfig;
-use crate::events::{AccessibilityNode, WindowTreeSnapshot};
-use crate::platform::windows_uia::{self, ClickElementRequest, UiaContext};
+use crate::events::{AccessibilityNode, EventData, WindowTreeSnapshot};
+use crate::platform::windows::UiRecorder;
+use crate::platform::windows_uia::{
+    self, ClickElementRequest, KeyboardPrivacy, KeyboardPrivacyDiagnostics, NativeKeyboardFocus,
+    UiaContext,
+};
 
 use crossbeam_channel::bounded;
 use parking_lot::Mutex;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
+use windows::core::w;
+use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY,
+    SendInput, SetActiveWindow, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
+    BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    EnumWindows, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW, ES_AUTOHSCROLL,
+    ES_PASSWORD, HMENU, HWND_TOPMOST, MSG, SWP_SHOWWINDOW, SW_SHOW, WINDOW_STYLE, WM_APP, WM_CLOSE,
+    WM_CREATE, WM_DESTROY, WNDCLASSW, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
+
+const LIVE_PRIVACY_FOCUS_ORDINARY: u32 = WM_APP + 1;
+const LIVE_PRIVACY_FOCUS_PASSWORD: u32 = WM_APP + 2;
+const LIVE_ORDINARY_MARKER: &str = "swordinary7f31";
+const LIVE_PASSWORD_MARKER: &str = "swpassword8a42";
+static LIVE_ORDINARY_HWND: AtomicIsize = AtomicIsize::new(0);
+static LIVE_PASSWORD_HWND: AtomicIsize = AtomicIsize::new(0);
+
+unsafe fn activate_live_privacy_control(window: HWND, control: HWND) {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = if foreground.is_invalid() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let fixture_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != fixture_thread
+            && AttachThreadInput(fixture_thread, foreground_thread, true).as_bool();
+        let _ = ShowWindow(window, SW_SHOW);
+        let _ = BringWindowToTop(window);
+        let _ = SetActiveWindow(window);
+        let _ = SetForegroundWindow(window);
+        let _ = SetFocus(control);
+        if attached {
+            let _ = AttachThreadInput(fixture_thread, foreground_thread, false);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LivePrivacyHandles {
+    window: HWND,
+    ordinary: HWND,
+    password: HWND,
+}
+
+struct LivePrivacyFixture {
+    handles: LivePrivacyHandles,
+    thread: Option<JoinHandle<()>>,
+}
+
+unsafe extern "system" fn live_privacy_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match message {
+            WM_CREATE => {
+                let create = &*(lparam.0 as *const CREATESTRUCTW);
+                let instance = HINSTANCE(create.hInstance.0);
+                let ordinary = CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    w!("EDIT"),
+                    w!(""),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                    20,
+                    20,
+                    340,
+                    28,
+                    hwnd,
+                    HMENU(101usize as *mut _),
+                    instance,
+                    None,
+                )
+                .unwrap_or_default();
+                let password = CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    w!("EDIT"),
+                    w!(""),
+                    WS_CHILD
+                        | WS_VISIBLE
+                        | WS_TABSTOP
+                        | WINDOW_STYLE((ES_AUTOHSCROLL | ES_PASSWORD) as u32),
+                    20,
+                    65,
+                    340,
+                    28,
+                    hwnd,
+                    HMENU(102usize as *mut _),
+                    instance,
+                    None,
+                )
+                .unwrap_or_default();
+                LIVE_ORDINARY_HWND.store(ordinary.0 as isize, Ordering::SeqCst);
+                LIVE_PASSWORD_HWND.store(password.0 as isize, Ordering::SeqCst);
+                LRESULT(0)
+            }
+            LIVE_PRIVACY_FOCUS_ORDINARY => {
+                activate_live_privacy_control(
+                    hwnd,
+                    HWND(LIVE_ORDINARY_HWND.load(Ordering::SeqCst) as *mut _),
+                );
+                LRESULT(0)
+            }
+            LIVE_PRIVACY_FOCUS_PASSWORD => {
+                activate_live_privacy_control(
+                    hwnd,
+                    HWND(LIVE_PASSWORD_HWND.load(Ordering::SeqCst) as *mut _),
+                );
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                LIVE_ORDINARY_HWND.store(0, Ordering::SeqCst);
+                LIVE_PASSWORD_HWND.store(0, Ordering::SeqCst);
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+}
+
+impl LivePrivacyFixture {
+    fn launch() -> Self {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || unsafe {
+            let module = GetModuleHandleW(None).expect("get fixture module");
+            let instance = HINSTANCE(module.0);
+            let class_name = w!("ScreenWiseA11yPrivacyFixtureClass");
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(live_privacy_window_proc),
+                hInstance: instance,
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&class), 0, "register fixture window class");
+            let window = CreateWindowExW(
+                WS_EX_APPWINDOW | WS_EX_TOPMOST,
+                class_name,
+                w!("ScreenWise keyboard privacy test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                100,
+                400,
+                150,
+                None,
+                None,
+                instance,
+                None,
+            )
+            .expect("create fixture window");
+            let _ = ShowWindow(window, SW_SHOW);
+            SetWindowPos(window, HWND_TOPMOST, 100, 100, 400, 150, SWP_SHOWWINDOW)
+                .expect("place fixture window");
+            assert!(UpdateWindow(window).as_bool(), "update fixture window");
+            let mut rectangle = RECT::default();
+            GetWindowRect(window, &mut rectangle).expect("read fixture rectangle");
+            println!(
+                "privacy_fixture_ready visible={} left={} top={} width={} height={}",
+                IsWindowVisible(window).as_bool(),
+                rectangle.left,
+                rectangle.top,
+                rectangle.right - rectangle.left,
+                rectangle.bottom - rectangle.top,
+            );
+            let ordinary = HWND(LIVE_ORDINARY_HWND.load(Ordering::SeqCst) as *mut _);
+            let password = HWND(LIVE_PASSWORD_HWND.load(Ordering::SeqCst) as *mut _);
+            ready_tx
+                .send((window.0 as isize, ordinary.0 as isize, password.0 as isize))
+                .expect("report fixture handles");
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        });
+        let (window, ordinary, password) = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fixture should become ready");
+        let handles = LivePrivacyHandles {
+            window: HWND(window as *mut _),
+            ordinary: HWND(ordinary as *mut _),
+            password: HWND(password as *mut _),
+        };
+        Self {
+            handles,
+            thread: Some(thread),
+        }
+    }
+
+    fn focus(&self, control: HWND, command: u32) {
+        unsafe {
+            PostMessageW(self.handles.window, command, WPARAM(0), LPARAM(0))
+                .expect("post fixture focus command");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if NativeKeyboardFocus::current()
+                .is_some_and(|focus| focus.matches_handles(self.handles.window, control))
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("fixture did not acquire the requested focus");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn focus_ordinary(&self) {
+        self.focus(self.handles.ordinary, LIVE_PRIVACY_FOCUS_ORDINARY);
+    }
+
+    fn focus_password(&self) {
+        self.focus(self.handles.password, LIVE_PRIVACY_FOCUS_PASSWORD);
+    }
+}
+
+impl Drop for LivePrivacyFixture {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = PostMessageW(self.handles.window, WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 // ============================================================================
 // Test App Fixture — launch and auto-cleanup
@@ -201,6 +443,175 @@ fn type_text(text: &str) {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
     std::thread::sleep(Duration::from_millis(300));
+}
+
+fn type_text_slowly(text: &str, interval: Duration) {
+    for ch in text.chars() {
+        let virtual_key = match ch {
+            'a'..='z' => ch.to_ascii_uppercase() as u16,
+            '0'..='9' => ch as u16,
+            _ => panic!("live privacy markers must remain lowercase ASCII alphanumeric"),
+        };
+        let inputs = [
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(virtual_key),
+                        wScan: 0,
+                        dwFlags: KEYBD_EVENT_FLAGS(0),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(virtual_key),
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        unsafe {
+            assert_eq!(SendInput(&inputs, std::mem::size_of::<INPUT>() as i32), 2);
+        }
+        std::thread::sleep(interval);
+    }
+    std::thread::sleep(Duration::from_millis(400));
+}
+
+fn print_privacy_diagnostics(label: &str, diagnostics: KeyboardPrivacyDiagnostics) {
+    println!(
+        "privacy_timing phase={label} probes={} probe_last_us={} probe_max_us={} gap_last_us={} gap_max_us={} stale_age_last_us={} stale_age_max_us={} suppressions={} unavailable={} lock_contended={} generation_changed={} focus_mismatch={} stale={}",
+        diagnostics.probes,
+        diagnostics.last_probe_duration_us,
+        diagnostics.max_probe_duration_us,
+        diagnostics.last_probe_gap_us,
+        diagnostics.max_probe_gap_us,
+        diagnostics.last_stale_age_us,
+        diagnostics.max_stale_age_us,
+        diagnostics.suppressions,
+        diagnostics.suppressions_by_reason[0],
+        diagnostics.suppressions_by_reason[1],
+        diagnostics.suppressions_by_reason[2],
+        diagnostics.suppressions_by_reason[3],
+        diagnostics.suppressions_by_reason[4],
+    );
+}
+
+fn wait_for_privacy_permit(privacy: &KeyboardPrivacy) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if privacy.permit(NativeKeyboardFocus::current()).is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("ordinary control never received a current UIA privacy permit");
+}
+
+fn wait_for_next_privacy_probe(privacy: &KeyboardPrivacy, previous_probes: u64) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if privacy.diagnostics().probes > previous_probes {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("UIA privacy worker did not probe after focus transition");
+}
+
+/// Exercise the production Windows UIA privacy worker and low-level keyboard
+/// hook against fixed synthetic ordinary/password controls. Output is limited
+/// to fixed-marker counts and numeric timing/denial aggregates.
+///
+/// Run only after the interactive readiness gate:
+/// cargo test -p screenpipe-a11y --lib --locked --offline platform::windows_uia_tests::test_live_keyboard_privacy_pipeline -- --exact --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn test_live_keyboard_privacy_pipeline() {
+    let fixture = LivePrivacyFixture::launch();
+    fixture.focus_ordinary();
+
+    let mut config = UiCaptureConfig::new();
+    config.capture_text = true;
+    config.capture_keystrokes = true;
+    config.capture_clipboard = false;
+    config.capture_clipboard_content = false;
+    config.capture_tree = true;
+    config.apply_pii_removal = false;
+    let recorder = UiRecorder::new(config);
+    let (handle, privacy) = recorder
+        .start_with_privacy_diagnostics()
+        .expect("start production UI recorder");
+
+    wait_for_privacy_permit(&privacy);
+    print_privacy_diagnostics("ordinary_before", privacy.diagnostics());
+
+    type_text_slowly(LIVE_ORDINARY_MARKER, Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(500));
+    let ordinary_after_first = privacy.diagnostics();
+    print_privacy_diagnostics("ordinary_after_first", ordinary_after_first);
+
+    fixture.focus_password();
+    wait_for_next_privacy_probe(&privacy, ordinary_after_first.probes);
+    type_text_slowly(LIVE_PASSWORD_MARKER, Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(500));
+    let password_after_first = privacy.diagnostics();
+    print_privacy_diagnostics("password_after_first", password_after_first);
+
+    fixture.focus_ordinary();
+    wait_for_privacy_permit(&privacy);
+    type_text_slowly(LIVE_ORDINARY_MARKER, Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(500));
+    let ordinary_after_second = privacy.diagnostics();
+    print_privacy_diagnostics("ordinary_after_second", ordinary_after_second);
+
+    fixture.focus_password();
+    wait_for_next_privacy_probe(&privacy, ordinary_after_second.probes);
+    type_text_slowly(LIVE_PASSWORD_MARKER, Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(500));
+    let password_after_second = privacy.diagnostics();
+    print_privacy_diagnostics("password_after_second", password_after_second);
+
+    let mut ordinary_markers = 0usize;
+    let mut password_markers = 0usize;
+    while let Some(event) = handle.try_recv() {
+        if let EventData::Text { content, .. } = event.data {
+            ordinary_markers += content.matches(LIVE_ORDINARY_MARKER).count();
+            password_markers += content.matches(LIVE_PASSWORD_MARKER).count();
+        }
+    }
+    println!(
+        "privacy_result ordinary_markers={ordinary_markers} password_markers={password_markers} password_suppression_delta={}",
+        password_after_second
+            .suppressions
+            .saturating_sub(ordinary_after_second.suppressions)
+    );
+
+    handle.stop();
+    assert!(
+        ordinary_markers >= 2,
+        "both fixed ordinary markers were not delivered by the production hook pipeline"
+    );
+    assert_eq!(
+        password_markers, 0,
+        "fixed password marker escaped the privacy gate"
+    );
+    assert!(
+        password_after_first.suppressions > ordinary_after_first.suppressions,
+        "first password phase did not increment the content-suppression aggregate"
+    );
+    assert!(
+        password_after_second.suppressions > ordinary_after_second.suppressions,
+        "second password phase did not increment the content-suppression aggregate"
+    );
 }
 
 /// Press a virtual key (e.g., VK_RETURN, VK_ESCAPE).

@@ -202,6 +202,14 @@ impl UiRecorder {
         Ok((handle, activity_feed))
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_with_privacy_diagnostics(
+        &self,
+    ) -> Result<(RecordingHandle, Arc<KeyboardPrivacy>)> {
+        let (handle, _, keyboard_privacy) = self.start_internal_with_privacy(None)?;
+        Ok((handle, keyboard_privacy))
+    }
+
     /// Start activity feed only (minimal hooks, no full event capture)
     pub fn start_activity_only(&self) -> Result<ActivityFeed> {
         let activity_feed = ActivityFeed::new();
@@ -222,6 +230,14 @@ impl UiRecorder {
         &self,
         activity_feed: Option<ActivityFeed>,
     ) -> Result<(RecordingHandle, Option<ActivityFeed>)> {
+        let (handle, activity_feed, _) = self.start_internal_with_privacy(activity_feed)?;
+        Ok((handle, activity_feed))
+    }
+
+    fn start_internal_with_privacy(
+        &self,
+        activity_feed: Option<ActivityFeed>,
+    ) -> Result<(RecordingHandle, Option<ActivityFeed>, Arc<KeyboardPrivacy>)> {
         let (tx, rx) = bounded::<UiEvent>(self.config.max_buffer_size);
         let (tree_tx, tree_rx) = bounded::<WindowTreeSnapshot>(32);
         let stop = Arc::new(AtomicBool::new(false));
@@ -237,6 +253,7 @@ impl UiRecorder {
         let click_queue = Arc::new(Mutex::new(Vec::<ClickElementRequest>::new()));
         let focused_element = Arc::new(Mutex::new(None::<ElementContext>));
         let keyboard_privacy = Arc::new(KeyboardPrivacy::default());
+        let keyboard_privacy_diagnostics = keyboard_privacy.clone();
 
         // Most recent input timestamp (ms since start), used by the UIA worker to skip
         // tree captures during/just after user input when prioritize_input_latency is on.
@@ -289,33 +306,44 @@ impl UiRecorder {
             );
         }));
 
-        // Thread 3: UI Automation worker (tree capture, element context, clipboard)
-        let (element_tx, element_rx) = bounded::<(ClickElementRequest, ElementContext)>(100);
+        // Thread 3: Lightweight UIA password-state worker. This must remain
+        // independent of tree/provider traversal so ordinary input does not
+        // lose its short privacy permit while unrelated extraction is busy.
         let stop3 = stop.clone();
         let config3 = self.config.clone();
-        let click_queue3 = click_queue.clone();
-        let focused_element3 = focused_element.clone();
-        let last_input_at_ms3 = last_input_at_ms.clone();
+        let keyboard_privacy3 = keyboard_privacy.clone();
+        threads.push(thread::spawn(move || {
+            windows_uia::run_keyboard_privacy_thread(keyboard_privacy3, stop3, config3);
+        }));
+
+        // Thread 4: UI Automation worker (tree capture, element context, clipboard)
+        let (element_tx, element_rx) = bounded::<(ClickElementRequest, ElementContext)>(100);
+        let stop4 = stop.clone();
+        let config4 = self.config.clone();
+        let click_queue4 = click_queue.clone();
+        let focused_element4 = focused_element.clone();
+        let keyboard_privacy4 = keyboard_privacy.clone();
+        let last_input_at_ms4 = last_input_at_ms.clone();
         threads.push(thread::spawn(move || {
             windows_uia::run_uia_thread(
                 tree_tx,
                 element_tx,
-                click_queue3,
-                focused_element3,
-                keyboard_privacy,
-                stop3,
-                config3,
+                click_queue4,
+                focused_element4,
+                keyboard_privacy4,
+                stop4,
+                config4,
                 start_time,
-                last_input_at_ms3,
+                last_input_at_ms4,
             );
         }));
 
-        // Thread 4: Element context enrichment (sends enriched click events)
-        let tx4 = tx.clone();
-        let stop4 = stop.clone();
+        // Thread 5: Element context enrichment (sends enriched click events)
+        let tx5 = tx.clone();
+        let stop5 = stop.clone();
         threads.push(thread::spawn(move || {
             while let Ok((req, ctx)) = element_rx.recv() {
-                if stop4.load(Ordering::Relaxed) {
+                if stop5.load(Ordering::Relaxed) {
                     break;
                 }
                 if !screenpipe_config::audio_privacy::visual_capture_allowed() {
@@ -340,7 +368,7 @@ impl UiRecorder {
                     element: Some(ctx),
                     frame_id: None,
                 };
-                try_send_ui_event(&tx4, event);
+                try_send_ui_event(&tx5, event);
             }
         }));
 
@@ -352,6 +380,7 @@ impl UiRecorder {
                 threads,
             },
             activity_feed,
+            keyboard_privacy_diagnostics,
         ))
     }
 }

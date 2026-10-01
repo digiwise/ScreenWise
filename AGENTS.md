@@ -58,6 +58,15 @@ permission to inspect captured data. Public documents contain sanitized summarie
 
 - Do not run `cargo update`; use `--locked`. Use `--offline` only after required
   locked dependencies and native tools have been explicitly provisioned.
+- During iterative diagnosis, use the narrowest crate, test target and profile
+  that exercises the affected behavior. Do not rebuild the complete release
+  application after every hypothesis. For Windows UIA, keyboard hooks and
+  privacy admission, first use `screenpipe-a11y` unit tests and use or add a
+  narrowly scoped Windows-only live integration test. Build the locked release
+  executable for an evidence-backed candidate before its end-to-end validation;
+  if that validation fails, gather new evidence before another full rebuild.
+  Any focused live test that takes focus or generates input still requires the
+  interactive-validation readiness gate.
 - Do not casually change dependency versions or either Rust lockfile. Earlier
   hardening intentionally changed lockfile graphs; compare against pre-task HEAD,
   not the obsolete claim that they still equal the upstream baseline.
@@ -112,6 +121,15 @@ windows hidden/closed while waiting. Old gates/evidence never imply current cons
 Use compact synthetic fixtures, no real credentials, and minimal owner time.
 Spoken fixed cues are opt-in per run and must not contaminate audio measurements.
 
+Launch Windows GUI fixtures on the owner's active interactive desktop; an OS
+`IsWindowVisible` result does not prove that the owner can see the window. Keep
+the fixture UI thread pumping while UIA inspects it, verify the exact foreground
+window and focused control before synthetic input, and make native input ABI
+layout and return-count checks part of the fixture self-test. Never treat absence
+of a protected marker as a pass unless a fixed ordinary positive control was
+successfully injected and observed. Classify fixture launch, focus, provider and
+input-injection failures separately from ScreenWise behavior.
+
 Do not infer a firewall pass from application logs or socket sampling alone.
 Inventory exact executable paths and relevant children. Never reset the firewall,
 alter unrelated rules/services/profiles, or weaken authentication. Rule creation
@@ -121,8 +139,10 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
 ## Before committing or publishing
 
 1. Run `cargo fmt --all -- --check` for Rust changes and appropriate targeted tests.
-2. For meaningful runtime/build changes, run `cargo build --release --locked`
-   in Developer PowerShell and an appropriately scoped smoke test.
+2. Before committing meaningful runtime/build changes or claiming full-app
+   validation, run `cargo build --release --locked` in Developer PowerShell and
+   an appropriately scoped smoke test. During diagnosis, defer this full build
+   until narrow tests establish a concrete candidate fix.
 3. Inspect the full diff and `git diff --check`; check both Rust lockfiles.
 4. Update concise setup/validation documentation, including failures and limits.
 5. Inspect the exact staged paths; never include private notes, captures, logs,

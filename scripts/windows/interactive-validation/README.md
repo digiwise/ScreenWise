@@ -162,6 +162,49 @@ archived readiness file, test result, or old evidence never authorizes a new
 run. Readiness waits have no timeout and must keep recording stopped and fixtures
 hidden. Unexpected state requires safe stop and a new gate.
 
+## Reliable Windows GUI fixtures
+
+A fixture used as live privacy evidence must run on the owner's active
+interactive desktop. `IsWindowVisible` can be true for a window created in a
+background or otherwise inaccessible desktop, so it is only a diagnostic. After
+the readiness gate is consumed, create the compact fixture with explicit app,
+visible and topmost styles, show and position it, and then verify both the
+foreground top-level HWND and the intended focused control. Use a short bounded
+focus timeout after launch. If Windows refuses activation, stop safely and use a
+new readiness gate for a deliberate owner-click fallback; do not leave an active
+recording waiting indefinitely behind another window.
+
+Keep the fixture's UI message pump responsive throughout UIA inspection. In
+particular, do not call `SendKeys.SendWait` or perform a complete synthetic input
+burst on the target UI thread: doing so can block the UIA provider, expire a
+valid privacy decision and create a false application failure. Generate input
+from a background worker while the UI thread continues to dispatch messages,
+and confirm the intended control still owns focus before the first input.
+
+Native `SendInput` declarations must match the Windows ABI. The `INPUT` union
+must accommodate its largest member, including `MOUSEINPUT`; on 64-bit Windows
+the complete `INPUT` structure is 40 bytes. Fixture self-tests must assert the
+native structure size, require `SendInput` to report every submitted entry, and
+record a content-free Windows error when it returns zero or a partial count. An
+input-injection failure ends the fixture phase before ScreenWise results are
+interpreted.
+
+Use short fixed non-sensitive ASCII markers and deterministic pacing. A valid
+privacy result requires all of the following: successful injection, persistence
+of an ordinary-field positive-control marker, no protected marker, and the
+expected positive suppression-counter delta. Absence of a protected marker by
+itself is inconclusive. Prefer two ordinary/password focus cycles so the test
+also exercises recovery after leaving a protected field. Keep timing evidence
+content-free: probe duration, completed-probe gap, decision age and categorized
+suppression counts are sufficient to distinguish target-provider stalls,
+scheduler delays and ScreenWise admission failures.
+
+Compile and self-test fixtures before refreshing manifest hashes and prepared
+pins. Run the offline controller/archive suites and normal-session preflight
+before requesting readiness. Treat desktop launch, focus acquisition, target UI
+thread stalls, ABI/input injection and positive-control failures as harness
+failures, distinct from a verified ScreenWise privacy failure.
+
 ## Optional spoken lock cues
 
 `say-status.ps1` accepts only `lock-now`, `unlock-now`, `finished`, or `aborted`.

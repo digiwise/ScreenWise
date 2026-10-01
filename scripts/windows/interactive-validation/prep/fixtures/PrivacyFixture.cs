@@ -12,6 +12,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 
 internal sealed class Options
@@ -60,6 +61,48 @@ internal sealed class PrivacyFixture : Form
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        internal uint Type;
+        internal INPUTUNION Data;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION
+    {
+        [FieldOffset(0)] internal KEYBDINPUT Keyboard;
+        // INPUT's native union is sized by MOUSEINPUT on 64-bit Windows. Keeping
+        // that member here makes Marshal.SizeOf(INPUT) match WinUser.h even
+        // though this fixture sends keyboard events only.
+        [FieldOffset(0)] internal MOUSEINPUT Mouse;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        internal ushort VirtualKey;
+        internal ushort ScanCode;
+        internal uint Flags;
+        internal uint Time;
+        internal UIntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        internal int X;
+        internal int Y;
+        internal uint MouseData;
+        internal uint Flags;
+        internal uint Time;
+        internal UIntPtr ExtraInfo;
+    }
+
+    private const uint InputKeyboard = 1;
+    private const uint KeyEventKeyUp = 2;
 
     private static readonly HashSet<string> AllowedErrorCodes = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -68,7 +111,7 @@ internal sealed class PrivacyFixture : Form
         "run_id_mismatch", "invalid_phase_id", "recorder_not_confirmed_stopped", "unsupported_action",
         "focus_not_verified", "clipboard_copy_not_observed", "clipboard_not_fixture_owned",
         "clipboard_changed_external_preserved", "clipboard_restore_required", "output_exists",
-        "invalid_diagnostic_code"
+        "invalid_diagnostic_code", "synthetic_input_failed"
     };
     private static readonly HashSet<string> AllowedActions = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -86,7 +129,7 @@ internal sealed class PrivacyFixture : Form
     private readonly Label phaseLabel = new Label();
     private readonly TextBox plain = new TextBox();
     private readonly TextBox password = new TextBox();
-    private readonly Timer timer = new Timer();
+    private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private Form excluded;
     private IDataObject savedClipboard;
     private bool clipboardSnapshotTaken;
@@ -317,9 +360,61 @@ internal sealed class PrivacyFixture : Form
         // look like a fail-closed suppression race instead of a positive test.
         if (GetForegroundWindow() != Handle || !target.Focused)
             throw new InvalidDataException("stable_focus_not_verified");
-        SendKeys.SendWait(syntheticValue);
-        Application.DoEvents();
+        try
+        {
+            RunWorkerWhilePumping(
+                delegate { SendSyntheticText(syntheticValue); },
+                delegate { Application.DoEvents(); });
+        }
+        catch
+        {
+            throw new InvalidDataException("synthetic_input_failed");
+        }
         return GetForegroundWindow() == Handle && target.Focused;
+    }
+
+    private static ushort VirtualKeyForSyntheticChar(char value)
+    {
+        if (value >= 'a' && value <= 'z') return (ushort)Char.ToUpperInvariant(value);
+        if (value >= '0' && value <= '9') return (ushort)value;
+        if (value == ' ') return 0x20;
+        throw new ArgumentException("unsupported_synthetic_character");
+    }
+
+    private static void SendSyntheticText(string value)
+    {
+        foreach (char character in value)
+        {
+            ushort virtualKey = VirtualKeyForSyntheticChar(character);
+            INPUT[] inputs = new INPUT[2];
+            inputs[0].Type = InputKeyboard;
+            inputs[0].Data.Keyboard.VirtualKey = virtualKey;
+            inputs[1].Type = InputKeyboard;
+            inputs[1].Data.Keyboard.VirtualKey = virtualKey;
+            inputs[1].Data.Keyboard.Flags = KeyEventKeyUp;
+            if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))) != (uint)inputs.Length)
+                throw new InvalidOperationException("send_input_failed");
+            Thread.Sleep(30);
+        }
+    }
+
+    private static void RunWorkerWhilePumping(Action work, Action pump)
+    {
+        Exception failure = null;
+        using (ManualResetEvent completed = new ManualResetEvent(false))
+        {
+            Thread worker = new Thread(delegate()
+            {
+                try { work(); }
+                catch (Exception ex) { failure = ex; }
+                finally { completed.Set(); }
+            });
+            worker.IsBackground = true;
+            worker.Start();
+            while (!completed.WaitOne(10)) pump();
+            worker.Join();
+        }
+        if (failure != null) throw new InvalidOperationException("synthetic_worker_failed", failure);
     }
 
     private bool PasteWithKeys(TextBox target)
@@ -531,6 +626,20 @@ internal sealed class PrivacyFixture : Form
                     throw new InvalidOperationException("self_test_diagnostic_redaction");
                 if (SafeError(new ArgumentException("private-framework-message")) != "invalid_argument")
                     throw new InvalidOperationException("self_test_framework_message_redaction");
+                if (VirtualKeyForSyntheticChar('a') != 0x41 || VirtualKeyForSyntheticChar('7') != 0x37 ||
+                    VirtualKeyForSyntheticChar(' ') != 0x20)
+                    throw new InvalidOperationException("self_test_virtual_key_mapping");
+                int expectedInputSize = IntPtr.Size == 8 ? 40 : 28;
+                if (Marshal.SizeOf(typeof(INPUT)) != expectedInputSize)
+                    throw new InvalidOperationException("self_test_native_input_layout");
+                int ownerThread = Thread.CurrentThread.ManagedThreadId;
+                int workerThread = ownerThread;
+                int pumpCalls = 0;
+                RunWorkerWhilePumping(
+                    delegate { workerThread = Thread.CurrentThread.ManagedThreadId; Thread.Sleep(35); },
+                    delegate { pumpCalls++; });
+                if (workerThread == ownerThread || pumpCalls == 0)
+                    throw new InvalidOperationException("self_test_background_input_pump");
                 string atomicRoot = Path.Combine(Path.GetTempPath(), "screenwise-privacy-atomic-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(atomicRoot);
                 try

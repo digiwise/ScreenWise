@@ -224,6 +224,19 @@ class CueSourceTests(unittest.TestCase):
         self.assertNotIn("[string]$Phrase", text)
 
 
+class PrivacyFixtureSourceTests(unittest.TestCase):
+    def test_synthetic_typing_keeps_the_uia_provider_thread_pumping(self) -> None:
+        text = (Path(__file__).parent / "prep" / "fixtures" / "PrivacyFixture.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("SendKeys.SendWait(syntheticValue)", text)
+        self.assertIn("delegate { SendSyntheticText(syntheticValue); }", text)
+        self.assertIn("while (!completed.WaitOne(10)) pump();", text)
+        self.assertIn("delegate { Application.DoEvents(); }", text)
+        self.assertIn("[FieldOffset(0)] internal MOUSEINPUT Mouse;", text)
+        self.assertIn("IntPtr.Size == 8 ? 40 : 28", text)
+
+
 class PreflightSourceTests(unittest.TestCase):
     def test_preflight_checks_the_launcher_helper_pin_before_creating_evidence(self) -> None:
         text = (Path(__file__).parent / "prep" / "preflight.ps1").read_text(encoding="utf-8")

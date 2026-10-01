@@ -203,7 +203,7 @@ counter without examining content.
 | SW-V27 | **Repaired, regression-tested and rebuilt; live check pending:** comparer-only visual probes repeatedly reset persisted Windows capture transition state, producing 724 excluded-foreground warnings in one 24-minute run. Probe results no longer mutate or log the persisted state; actual persisted privacy and failure transitions remain visible. |
 | SW-V28 | **Repaired, regression-tested and rebuilt; live check pending:** 31 samples reported stale audio while chunks continued arriving and were VAD-rejected as silence. Received chunks now advance the intended consumer/transcription-attempt heartbeat, and `/health` accepts a recent heartbeat without requiring recognized speech or a database insert. |
 | SW-V29 | **Repaired and regression-tested; live check pending:** the trial summary previously ignored shutdown failures and delivery-loss notices written after the final health sample. It now merges fixed post-sample diagnostics, reports the exact safe reason codes, and treats a missing clean marker plus null native exit status as failure. |
-| SW-V30 | **Repaired, regression-tested and partially live-checked:** UIA password-state probe flapping produced 333 repetitive warnings. Fail-closed suppression remains immediate, while state-unavailable warnings are bounded and aggregated. The 2026-10-01 native privacy run had one logical unavailable-state notice represented on two log surfaces rather than sustained repetition. It generated no keyboard or clipboard stimulus, so the actual-suppression counter still needs a controlled live check. |
+| SW-V30 | **Repaired, regression-tested and full-application live-checked:** UIA password-state probe flapping produced 333 repetitive warnings. Fail-closed suppression remains immediate, while state-unavailable warnings are bounded and aggregated. A real-hook/real-UIA crate regression exercised two fixed ordinary/password cycles: both ordinary markers were delivered, both password markers remained absent, and all 14 characters in each password phase incremented the unavailable-decision suppression count. The corrected full-application run persisted one ordinary keyboard control, zero password typing or password clipboard markers, and 23 safe suppression notices; authentication, SQLite integrity, clipboard restoration and clean process shutdown passed. Arbitrary providers and all race timings remain untested. |
 
 ## Automated interactive repair validation, 2026-10-01
 
@@ -214,8 +214,8 @@ could validate a configured helper hash without verifying the helper file that
 the launchers would execute. Preflight now resolves that helper, checks its
 SHA-256 before creating an evidence directory, and records the successful pin
 check. Source staging tests cover this ordering. After source-only restaging and
-local fixture rebuilding, 48 manifest checks, 14 staging tests (one expected
-symlink-privilege skip), 105 controller tests and 13 plan tests passed.
+local fixture rebuilding, 48 manifest checks, 15 staging tests (one expected
+symlink-privilege skip), 112 controller tests and 14 plan tests passed.
 
 A fresh selected-output run wrote six audio chunks and eight transcription rows.
 Each of the two fixed local speech markers appeared once in persisted search
@@ -239,6 +239,17 @@ password-state-unavailable warning appeared on two log surfaces. Because the run
 was silent and input-free, it did not exercise the keyboard/clipboard
 actual-suppression counter, image-pixel redaction, real DRM or arbitrary providers.
 
+A subsequent native input run initially failed safely because the synthetic
+fixture's managed `SendInput` structure did not match the 64-bit Windows ABI. No
+forbidden marker persisted, cleanup passed, and the controller reported the run
+as incomplete. The fixture now includes the native union's larger `MOUSEINPUT`
+member and self-tests the expected 40-byte x64 layout. In the corrected fresh run,
+one fixed ordinary keyboard marker persisted in `ui_events`, both fixed password
+typing and password clipboard marker deltas were zero, and the safe password-
+suppression counter increased by 23. Missing, wrong and valid bearer credentials
+again returned 403/403/200, SQLite `quick_check` returned `ok`, and recorder stop,
+clipboard restoration, fixture closure and exact-process cleanup all passed.
+
 After both controllers exited, an independent normal-account exact-path
 inventory found no tested recorder, FFmpeg, FFprobe or fixture process, no TCP or
 UDP endpoint owned by those paths, and no listener on either configured test
@@ -261,7 +272,7 @@ fixed synthetic-marker counts and content-free diagnostics were used.
 | SW-T10 | Owner-confirmed disposition/restoration of exact test rules, independent read-only final inspection and original milestone closeout. |
 | SW-T11 | Visual desktop status and broader safe-notice audit across acquisition/audio/input failures and independent queues. |
 | SW-T12 | Extend the passing deterministic privacy-generation tests with live transition timing and the SW-V20 speaker-identity path. Inspect durable state as well as returned results; do not generalize the fixed persistence paths to universal stale-generation suppression. |
-| SW-T13 | **Three privacy-safe live attempts incomplete; bounded diagnostic pending:** each attempt increased the numeric password-suppression aggregate, kept both forbidden markers absent and passed cleanup, but the ordinary marker reached only a frame. Removing the fixture's redundant focus call and rebuilding the UIA completion-timestamp fix did not restore the positive control, so neither was the sole live cause. The suppression warning now reports only bounded numeric counts for fixed admission-denial classes, with no captured values or identifiers. Its unit tests pass; a rebuilt, freshly gated run must identify the remaining denial before another fix. |
+| SW-T13 | **Scoped complete:** diagnostic evidence showed every ordinary denial in the failing full-app run was stale. A narrower real-hook/real-UIA test separated provider-call duration from completed-probe gaps and reproduced tree work delaying the shared STA beyond the 75 ms permit. Password polling now has a dedicated STA and 25 ms target interval; the permit lifetime and fail-closed checks are unchanged. Two automatic ordinary/password cycles delivered 2/2 ordinary markers, 0 password markers and 14 suppressions per password phase, with zero ordinary denials and a 46.8 ms maximum probe gap. The corrected full-app controller then persisted one ordinary UI-event control, zero fixed password markers and 23 suppression notices, with authentication, SQLite integrity, clipboard restoration and clean shutdown passing. Arbitrary controls/providers and all race timings remain outside this scoped result. |
 
 ## Reuse and conduct
 
