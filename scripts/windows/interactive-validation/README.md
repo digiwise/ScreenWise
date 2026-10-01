@@ -184,3 +184,11 @@ not prove a current build, machine, firewall, privacy path, meeting, audio route
 or lock recovery. A source-only stage has no compiled fixtures, media, runtime
 pins, or current consent. Live results remain scoped to the selected mode and
 the evidence the evaluator actually checked.
+
+The prepared native `input-privacy` mode uses only fixed synthetic typing and
+clipboard values. It requires a positive ordinary-field UI-event marker, zero
+password-marker persistence, and a positive numeric
+`uia_password_content_suppressed` counter delta. Log parsing returns only that
+fixed reason's aggregate number. The prepared tail controller uses three locally
+generated, hash-pinned WAVs and a separate 16-asset pin manifest. Neither mode
+may run without a fresh gate and normal-user preflight.

@@ -384,6 +384,11 @@ mod tests {
                 assert_eq!(img.get_pixel(px, py), &Rgb([0, 0, 0]));
             }
         }
+        // A filtered region and an unrelated sentinel must retain their exact
+        // lossless PNG pixels. This bounds the geometry check to the selected
+        // rectangle instead of accepting an accidentally over-redacted frame.
+        assert_eq!(img.get_pixel(55, 35), &Rgb([200, 180, 160]));
+        assert_eq!(img.get_pixel(90, 70), &Rgb([200, 180, 160]));
         let banner = img.get_pixel(0, 0);
         assert!(banner[0] > 100 && banner[1] < 100 && banner[2] < 100);
     }

@@ -33,6 +33,7 @@ time or the PC being unlocked. Gate files have no expiry.
 | Batch | Owner involvement after Ready | Intended evidence |
 |---|---|---|
 | privacy | Leave compact synthetic window foreground for about 90 seconds | Plain-text positive controls; password and foreground/background exclusion marker absence; API auth; WTS/focus; DB and endpoint metadata |
+| input-privacy | Leave the compact native fixture foreground for about 30 seconds | Fixed ordinary typing positive control; fixed password typing/paste absence; numeric password-gate suppression delta; clipboard-safe cleanup |
 | audio-output | Allow local speech through the selected USB headphones for roughly two minutes | Five-second chunks; before/after local transcription, persistence and authenticated search |
 | drm | Allow compact synthetic Netflix-identity window and speech for roughly two minutes | Observed DRM pause and recovery; forbidden marker absence through final persistence; before/after positive controls |
 | browser | Leave the compact synthetic Chrome and native fixture windows foreground while the automatic 25-second sequence runs | Allowed browser positive controls; browser-password, excluded-host and password-paste marker absence; clipboard-safe cleanup |
@@ -99,9 +100,12 @@ offline behavior. Native marker absence does not prove redacted image pixels or
 every monitor.
 Synthetic Netflix identity does not exercise actual DRM media. Device enumeration
 does not prove audio routing; persisted positive controls are mandatory. SW-V11
-partial-buffer/in-flight shutdown loss remains unresolved, so audio checks require
-persistence before stopping and cannot certify final-tail retention. No new model,
-dependency, firewall rule or production binary was introduced here.
+partial-buffer/in-flight shutdown repair has deterministic coverage and a separately
+pinned 60-second tail collector, but its live stop/restart run remains outstanding.
+Ordinary audio checks still cannot certify final-tail retention. The DRM fixture now
+claims each command before any `Application.DoEvents` call and its non-UI self-test
+covers re-entry and duplicate-command guards; real protected media remains a separate
+check. No new model, dependency or firewall rule was introduced here.
 
 pins.json records the final controller and synthetic asset hashes. Rebuilds or
 source edits require review and fresh pins before execution. Do not use older

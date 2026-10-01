@@ -127,6 +127,33 @@ generate keyboard/clipboard input in the password phase. They therefore leave
 the shutdown-tail recovery and actual password-input suppression counters for a
 separate controlled run. No captured content was inspected.
 
+## Remaining controlled-check preparation (2026-10-01)
+
+Background-only preparation made the three follow-up checks repeatable without
+starting capture or displaying a test window. A new `input-privacy` controller
+mode uses fixed synthetic ordinary typing, password typing and password paste.
+It requires a positive ordinary UI-event marker, zero password-marker persistence
+and a positive numeric `uia_password_content_suppressed` delta. Its log reader
+returns only the fixed aggregate counter and fails closed on a malformed matching
+line. Clipboard restoration remains gated on verified recorder stop.
+
+The DRM fixture now claims every command before an action can call
+`Application.DoEvents`, preventing its timer from executing the same command
+again during message-loop re-entry. The fixture's non-UI self-test covers pump
+re-entry and duplicate claims. The existing synthetic image-redaction unit check
+now also proves that a filtered region and an unrelated PNG sentinel remain
+pixel-exact, bounding the black rectangle to the selected region. These are
+synthetic mechanics checks; they do not establish behavior for real protected
+media or detector accuracy.
+
+Three fixed tail-test WAVs were generated directly to the ignored preparation
+directory with no playback. Independent validation confirmed their hashes,
+mono 16-bit 22.05 kHz PCM form, bounded levels and expected durations. The
+preferred stop/restart collector passed its 77 offline tests and a separate
+16-asset pin manifest now closes over the collector, evaluator, generator,
+validation metadata and speech assets. A live partial-buffer stop/restart is
+still required before claiming final-tail recovery.
+
 ## Day-to-day trial repair checkpoint (2026-09-21)
 
 A private roughly nine-minute Windows trial produced 213 captured and 213 written

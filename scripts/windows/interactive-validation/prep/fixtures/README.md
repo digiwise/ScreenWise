@@ -37,6 +37,8 @@ Supported actions:
 - `password`: restore and focus the masked fake value `hidden tulip waterfall`.
 - `plain-clipboard-target`: clear and focus the ordinary target without touching the clipboard.
 - `password-clipboard-target`: clear and focus the password target without touching the clipboard.
+- `plain-type`: clear the ordinary field and type the fixed synthetic value `public input meadow` through `SendKeys`.
+- `password-type`: clear the masked field and type the fixed synthetic value `masked indigo lantern` through `SendKeys`.
 - `plain-copy`: reset the source to the known synthetic marker, verify plain-field focus, preserve the prior clipboard in memory, and issue real Ctrl+C through `SendKeys`.
 - `password-copy`: reset the source to the known synthetic marker, verify password-field focus, and issue real Ctrl+C. Windows normally rejects password copying; this is acknowledged as `clipboard_copy_not_observed` and does not establish fixture ownership.
 - `plain-paste`: verify plain-field focus and issue real Ctrl+V only when the clipboard sequence still matches a successful fixture-owned synthetic copy. It never reads the clipboard contents.
@@ -66,7 +68,7 @@ The output filename `Netflix.exe` exists solely to exercise application-name det
 
 It remains open until Escape, normal window close, or an explicit command. It has no duration, readiness timeout, or run-number behavior. On showing, it creates `drm-ready-PHASE_ID.json` with the IDs, process ID, UTC timestamp, immediate `verifiedForeground`, numeric `foregroundHwnd`, `visible`, and its command directory names. `foregroundHwnd` is `0` unless foreground verification succeeded. An existing ready file for that phase is rejected and never overwritten.
 
-DRM commands use the same JSON shape under `drm-commands`, with actions `hide`, `release-focus`, `show`, or `close`. Acknowledgements appear under `drm-acks` and include `verifiedForeground`, numeric `foregroundHwnd`, and `visible`, using the same zero-on-unverified rule. Duplicate phase IDs are rejected before action. Before asking an owner-readiness question, the coordinator must send `release-focus` and use a bounded wait for a successful acknowledgement with `visible:false`; failure requires safe recorder stop and an incomplete result. These commands affect only this fixture's own window.
+DRM commands use the same JSON shape under `drm-commands`, with actions `hide`, `release-focus`, `show`, or `close`. Acknowledgements appear under `drm-acks` and include `verifiedForeground`, numeric `foregroundHwnd`, and `visible`, using the same zero-on-unverified rule. The command pump claims each file before an action can call `Application.DoEvents`, preventing timer re-entry from executing the same command twice. Duplicate phase IDs are rejected before action. Before asking an owner-readiness question, the coordinator must send `release-focus` and use a bounded wait for a successful acknowledgement with `visible:false`; failure requires safe recorder stop and an incomplete result. These commands affect only this fixture's own window.
 
 ## Browser fixture contract
 
