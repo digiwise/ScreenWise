@@ -311,7 +311,12 @@ internal sealed class PrivacyFixture : Form
     private bool TypeWithKeys(TextBox target, string syntheticValue)
     {
         target.Clear();
-        if (!FocusControl(target)) throw new InvalidDataException("focus_not_verified");
+        // The controller establishes and holds focus before this action. Do not
+        // call Focus() again here: a fresh UIA focus event invalidates the
+        // short-lived password-state permit, making an ordinary-field control
+        // look like a fail-closed suppression race instead of a positive test.
+        if (GetForegroundWindow() != Handle || !target.Focused)
+            throw new InvalidDataException("stable_focus_not_verified");
         SendKeys.SendWait(syntheticValue);
         Application.DoEvents();
         return GetForegroundWindow() == Handle && target.Focused;

@@ -88,7 +88,7 @@
     {
       "archive_path": "prep/controller_v1/test_fixture_transport.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_fixture_transport.py",
-      "sha256": "2B3B1F5C6FD5F4B0A3F0EEC0D0B5DF82BA4AA0435806FDFF1DE85D9BBF339648",
+      "sha256": "FAFF416563CF8B3C970C9052D925DDAF463D8391D9F130C28CA69EE4D795CCD6",
       "original_sha256": "79A55E945B7C3607D5EF4788F57595AAF0618DA1D11E176CC55023DA754CB021"
     },
     {
@@ -130,7 +130,7 @@
     {
       "archive_path": "prep/fixtures/PrivacyFixture.cs",
       "stage_path": "target/interactive-prep-20260915-01a09e45/fixtures/PrivacyFixture.cs",
-      "sha256": "FEAB57CAC50322ACFDB322B057BD63E9F7D55DDD461E620CBF5A03E98E47E4ED",
+      "sha256": "DEDD7B29E046354FBF861C2056671F3589C6B2FE8FA327FCC46839C95926C2CD",
       "original_sha256": "F5ABC6A1AFF9D1B30A1544BC5ECAD11F7EC95AB24CDCE084E5723141F9E462CD"
     },
     {

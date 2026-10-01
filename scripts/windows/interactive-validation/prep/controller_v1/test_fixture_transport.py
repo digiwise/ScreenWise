@@ -117,6 +117,16 @@ class FixtureTransportTests(unittest.TestCase):
                         command_loop.index('if (action == "hide"'))
         self.assertIn("if (!commandPump.TryEnter()) return", text)
 
+    def test_typing_action_requires_stable_focus_without_reinvalidating_uia(self):
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "PrivacyFixture.cs"
+        text = fixture.read_text(encoding="utf-8")
+        method = text[text.index("private bool TypeWithKeys"):
+                      text.index("private bool PasteWithKeys")]
+        self.assertIn("GetForegroundWindow() != Handle || !target.Focused", method)
+        self.assertNotIn("FocusControl(target)", method)
+        self.assertLess(method.index("stable_focus_not_verified"),
+                        method.index("SendKeys.SendWait(syntheticValue)"))
+
     def test_drm_reuses_fixed_startup_ready_for_each_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); clock = Clock()

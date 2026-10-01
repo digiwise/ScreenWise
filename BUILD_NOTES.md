@@ -154,6 +154,15 @@ preferred stop/restart collector passed its 77 offline tests and a separate
 validation metadata and speech assets. A live partial-buffer stop/restart is
 still required before claiming final-tail recovery.
 
+The first live `input-privacy` attempt remained privacy-safe but was incomplete:
+the password-suppression aggregate increased by 23, both forbidden synthetic
+markers remained absent and cleanup passed, while the ordinary typing marker
+appeared only in a frame and not in `ui_events`. The fixture had re-focused the
+ordinary control immediately before `SendKeys`, invalidating the deliberately
+short UIA privacy permit and causing a fail-closed race. The typing action now
+requires the controller's already verified stable focus and does not re-focus;
+a source regression check enforces that ordering. A fresh live rerun is required.
+
 ## Day-to-day trial repair checkpoint (2026-09-21)
 
 A private roughly nine-minute Windows trial produced 213 captured and 213 written
