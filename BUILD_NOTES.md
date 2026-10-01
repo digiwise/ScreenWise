@@ -173,7 +173,13 @@ changes during or after the probe still fail closed. A regression test simulates
 a probe longer than the maximum age and requires a fresh permit at completion.
 All 203 `screenpipe-a11y` library tests completed with 181 passing and 22 ignored;
 the locked offline release build and 71-check normal-session preflight passed.
-The affected live check still requires a fresh gated rerun.
+The affected live rerun remained privacy-safe but produced the same missing
+ordinary UI-event control, so the completion timestamp defect was real but not
+the sole live cause on this machine. The suppression warning now includes only
+bounded numeric counts for five fixed admission-denial classes: unavailable
+decision, worker-lock contention, generation change, native-focus mismatch and
+stale decision. No key, clipboard value, UIA string, title or identifier enters
+that diagnostic. A fresh gated diagnostic run is required before another fix.
 
 ## Day-to-day trial repair checkpoint (2026-09-21)
 

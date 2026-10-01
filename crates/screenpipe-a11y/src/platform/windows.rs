@@ -21,7 +21,8 @@ use std::time::Instant;
 use tracing::{debug, error, warn};
 
 use super::windows_uia::{
-    self, ClickElementRequest, ClipboardReadFailure, KeyboardPrivacy, NativeKeyboardFocus,
+    self, ClickElementRequest, ClipboardReadFailure, KeyboardPrivacy, KeyboardPrivacyDenial,
+    NativeKeyboardFocus,
 };
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -718,6 +719,18 @@ fn keyboard_capture_permit(state: &HookState) -> Option<u64> {
         .permit(NativeKeyboardFocus::current())
 }
 
+fn diagnosed_keyboard_capture_permit(state: &HookState) -> Result<u64, KeyboardPrivacyDenial> {
+    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+        return Err(KeyboardPrivacyDenial::DecisionUnavailable);
+    }
+    if !state.config.skip_password_fields {
+        return Ok(0);
+    }
+    state
+        .keyboard_privacy
+        .permit_diagnosed(NativeKeyboardFocus::current())
+}
+
 fn invalidate_keyboard_focus(state: &mut HookState) {
     if state.config.skip_password_fields {
         // Preserve text that is still permitted in the source field before a
@@ -811,13 +824,15 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     return;
                 }
 
-                let privacy_generation = keyboard_capture_permit(s);
-                if privacy_generation.is_none()
-                    && (s.config.capture_text
-                        || s.config.capture_keystrokes
-                        || s.config.capture_clipboard_content)
+                let privacy_admission = diagnosed_keyboard_capture_permit(s);
+                let privacy_generation = privacy_admission.as_ref().ok().copied();
+                if s.config.capture_text
+                    || s.config.capture_keystrokes
+                    || s.config.capture_clipboard_content
                 {
-                    s.keyboard_privacy.note_content_suppressed();
+                    if let Err(reason) = privacy_admission {
+                        s.keyboard_privacy.note_content_suppressed(reason);
+                    }
                 }
                 if privacy_generation.is_none()
                     || (s.text_privacy_generation.is_some()

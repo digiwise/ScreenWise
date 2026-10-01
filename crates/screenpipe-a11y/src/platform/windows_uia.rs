@@ -49,8 +49,30 @@ const KEYBOARD_PRIVACY_UNKNOWN: u8 = 0;
 const KEYBOARD_PRIVACY_ALLOWED: u8 = 1;
 const KEYBOARD_PRIVACY_PASSWORD: u8 = 2;
 const KEYBOARD_PRIVACY_UNAVAILABLE: u8 = 3;
+const KEYBOARD_PRIVACY_DENIAL_REASONS: usize = 5;
 const PASSWORD_FIELD_MARKER: &str = "[REDACTED: password field]";
 const UNVERIFIED_FIELD_MARKER: &str = "[REDACTED: UIA password state unavailable]";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyboardPrivacyDenial {
+    DecisionUnavailable,
+    WorkerLockContended,
+    GenerationChanged,
+    FocusMismatch,
+    DecisionStale,
+}
+
+impl KeyboardPrivacyDenial {
+    fn index(self) -> usize {
+        match self {
+            Self::DecisionUnavailable => 0,
+            Self::WorkerLockContended => 1,
+            Self::GenerationChanged => 2,
+            Self::FocusMismatch => 3,
+            Self::DecisionStale => 4,
+        }
+    }
+}
 
 /// Native focus identity is cheap to check inside a low-level input hook. UIA
 /// calls must stay on the worker: an unresponsive provider must not block input.
@@ -109,6 +131,8 @@ pub struct KeyboardPrivacy {
     last_unavailable_notice: Mutex<Option<Instant>>,
     content_suppressions: AtomicU64,
     reported_content_suppressions: AtomicU64,
+    content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
+    reported_content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
     last_content_suppression_notice: Mutex<Option<Instant>>,
 }
 
@@ -118,22 +142,43 @@ impl KeyboardPrivacy {
     }
 
     pub(crate) fn permit(&self, focus: Option<NativeKeyboardFocus>) -> Option<u64> {
+        self.permit_diagnosed(focus).ok()
+    }
+
+    pub(crate) fn permit_diagnosed(
+        &self,
+        focus: Option<NativeKeyboardFocus>,
+    ) -> Result<u64, KeyboardPrivacyDenial> {
         let generation = self.generation.load(Ordering::SeqCst);
-        let decision = self.decision.try_lock()?;
-        let decision = decision.as_ref()?;
-        (decision.generation == generation
-            && Some(decision.focus) == focus
-            && decision.checked_at.elapsed() <= KEYBOARD_PRIVACY_MAX_AGE
-            && self.generation.load(Ordering::SeqCst) == generation)
-            .then_some(generation)
+        let decision = self
+            .decision
+            .try_lock()
+            .ok_or(KeyboardPrivacyDenial::WorkerLockContended)?;
+        let decision = decision
+            .as_ref()
+            .ok_or(KeyboardPrivacyDenial::DecisionUnavailable)?;
+        if decision.generation != generation {
+            return Err(KeyboardPrivacyDenial::GenerationChanged);
+        }
+        if Some(decision.focus) != focus {
+            return Err(KeyboardPrivacyDenial::FocusMismatch);
+        }
+        if decision.checked_at.elapsed() > KEYBOARD_PRIVACY_MAX_AGE {
+            return Err(KeyboardPrivacyDenial::DecisionStale);
+        }
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err(KeyboardPrivacyDenial::GenerationChanged);
+        }
+        Ok(generation)
     }
 
     /// Called by the low-level hook when fail-closed admission prevents a
     /// configured keyboard/clipboard content event. Atomic-only so it cannot
     /// delay the Windows input queue; the UIA worker emits bounded aggregate
     /// diagnostics on its next poll.
-    pub(crate) fn note_content_suppressed(&self) {
+    pub(crate) fn note_content_suppressed(&self, reason: KeyboardPrivacyDenial) {
         self.content_suppressions.fetch_add(1, Ordering::Relaxed);
+        self.content_suppressions_by_reason[reason.index()].fetch_add(1, Ordering::Relaxed);
     }
 
     fn report_unavailable_transition(&self, now: Instant) {
@@ -174,10 +219,23 @@ impl KeyboardPrivacy {
         {
             self.reported_content_suppressions
                 .store(total, Ordering::Relaxed);
+            let mut reason_deltas = [0u64; KEYBOARD_PRIVACY_DENIAL_REASONS];
+            for (index, delta) in reason_deltas.iter_mut().enumerate() {
+                let reason_total =
+                    self.content_suppressions_by_reason[index].load(Ordering::Relaxed);
+                let previous = self.reported_content_suppressions_by_reason[index]
+                    .swap(reason_total, Ordering::Relaxed);
+                *delta = reason_total.saturating_sub(previous);
+            }
             warn!(
                 reason_code = "uia_password_content_suppressed",
                 suppressed_events = total.saturating_sub(reported),
                 total_suppressed_events = total,
+                decision_unavailable = reason_deltas[KeyboardPrivacyDenial::DecisionUnavailable.index()],
+                worker_lock_contended = reason_deltas[KeyboardPrivacyDenial::WorkerLockContended.index()],
+                generation_changed = reason_deltas[KeyboardPrivacyDenial::GenerationChanged.index()],
+                focus_mismatch = reason_deltas[KeyboardPrivacyDenial::FocusMismatch.index()],
+                decision_stale = reason_deltas[KeyboardPrivacyDenial::DecisionStale.index()],
                 "keyboard/clipboard content events were suppressed by the password-field privacy gate"
             );
             *last = Some(now);
@@ -1507,6 +1565,47 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_privacy_classifies_content_free_denial_reasons() {
+        let focus = Some(test_keyboard_focus());
+        let privacy = KeyboardPrivacy::default();
+        assert_eq!(
+            privacy.permit_diagnosed(focus),
+            Err(KeyboardPrivacyDenial::DecisionUnavailable)
+        );
+
+        privacy.update(0, focus, Some(false), Instant::now());
+        assert_eq!(
+            privacy.permit_diagnosed(None),
+            Err(KeyboardPrivacyDenial::FocusMismatch)
+        );
+        privacy.invalidate();
+        assert_eq!(
+            privacy.permit_diagnosed(focus),
+            Err(KeyboardPrivacyDenial::GenerationChanged)
+        );
+
+        let stale = KeyboardPrivacy::default();
+        stale.update(
+            0,
+            focus,
+            Some(false),
+            Instant::now() - KEYBOARD_PRIVACY_MAX_AGE - Duration::from_millis(1),
+        );
+        assert_eq!(
+            stale.permit_diagnosed(focus),
+            Err(KeyboardPrivacyDenial::DecisionStale)
+        );
+
+        let contended = KeyboardPrivacy::default();
+        contended.update(0, focus, Some(false), Instant::now());
+        let _guard = contended.decision.lock();
+        assert_eq!(
+            contended.permit_diagnosed(focus),
+            Err(KeyboardPrivacyDenial::WorkerLockContended)
+        );
+    }
+
+    #[test]
     fn keyboard_privacy_aggregates_probe_flaps_but_counts_suppressed_content() {
         let privacy = KeyboardPrivacy::default();
         let focus = Some(test_keyboard_focus());
@@ -1534,8 +1633,8 @@ mod tests {
             "second rapid probe flap should be aggregated"
         );
 
-        privacy.note_content_suppressed();
-        privacy.note_content_suppressed();
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::DecisionUnavailable);
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::DecisionStale);
         privacy.update(
             privacy.generation.load(Ordering::SeqCst),
             focus,
@@ -1548,6 +1647,17 @@ mod tests {
                 .load(Ordering::Relaxed),
             2,
             "recovery should flush the actual suppressed-event count"
+        );
+        assert_eq!(
+            privacy.content_suppressions_by_reason
+                [KeyboardPrivacyDenial::DecisionUnavailable.index()]
+            .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            privacy.content_suppressions_by_reason[KeyboardPrivacyDenial::DecisionStale.index()]
+                .load(Ordering::Relaxed),
+            1
         );
         assert!(privacy.permit(focus).is_some());
     }
