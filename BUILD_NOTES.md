@@ -154,17 +154,36 @@ handling and six samples from the source-free failure placeholder are also
 checked. In the documented Developer PowerShell environment, all 70 focused
 `screenpipe-core` PII tests and all eight focused engine image-redaction tests
 passed, as did 13 focused `screenpipe-redact` image/worker tests. This does not
-yet exercise a persisted live frame, OCR accuracy, the authenticated frame
-endpoint or the optional RF-DETR model.
+exercise OCR recognition accuracy or the optional RF-DETR model.
 
-The portable harness now includes a pure fixed-region pixel evaluator. Its eight
-offline tests require a changed and obscured synthetic PII region, preserved
-ordinary/sentinel regions, a source-free failure result, a persisted positive
-control, the 403/403/200 bearer matrix and complete cleanup. The proposed
-`pixel-privacy` live mode deliberately refuses before runtime setup or readiness
-consumption because the current fixture has no deterministic OCR geometry and
-the application has no supported deterministic redaction-failure injection.
-This refusal prevents preparation from being reported as live evidence.
+The portable harness now includes a pure fixed-region pixel evaluator and a
+fresh-gated headless live sequence. Its tests require a changed, strongly blurred
+synthetic PII region, preserved ordinary/sentinel regions, a source-free failure
+result, a persisted positive control, the 403/403/200 bearer matrix and complete
+cleanup. The controller inserts fixed synthetic JPEG and OCR rows into only its
+fresh store, so the live route does not depend on OCR recognition. A separately
+verified missing-OCR row exercises the application's normal fail-closed response
+without adding a production failure-injection hook. Audio, desktop, keyboard and
+clipboard capture are disabled; the normal UI recorder can still persist focus,
+app-switch and fixed privacy-status metadata.
+
+The fresh run `pixel-20261001-0753` passed after a 71-check normal-user preflight.
+The authenticated frame route reported one redacted region: every pixel in the
+fixed PII ROI changed, retained luminance contrast fell to 2.78%, the ordinary ROI
+had zero above-tolerance changes and the distant sentinel changed by 0.04%. The
+verified missing-OCR case replaced 99.20% of the whole source image and 98.21% of
+the PII ROI with the safe failure placeholder. A byte-identical ordinary clear
+frame supplied the positive control. Missing, wrong and valid bearer requests
+returned 403/403/200; `/health` and all four standard protected endpoint checks
+passed. The fresh store held only the three synthetic frame rows, zero audio rows
+and three UI metadata/status rows, and SQLite `quick_check` returned `ok`.
+
+Recorder shutdown, listener closure and exact-path process quiescence all passed.
+Independent inspection found no scoped process and no TCP or UDP endpoint on the
+API port; the fixed failure/degradation log scan had zero hits. No UI-event body
+was inspected. This validates only fixed persisted geometry through the live
+on-demand frame route. It does not establish OCR recognition accuracy, async
+RF-DETR worker behavior, real-screen privacy or general PII coverage.
 
 The current synthetic DRM preparation remained runnable after these additions:
 the fixture self-test, 95 controller tests and a refreshed 71-check normal-user

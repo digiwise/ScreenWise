@@ -104,12 +104,13 @@ class CoordinatorTests(unittest.TestCase):
             self.assertFalse(result['recording_started'])
             with self.assertRaises(FileExistsError):
                 consume_confirmation('run-1',record['nonce'],recorder_stopped=True,fixtures_hidden=True,root=root)
-    def test_pixel_privacy_preparation_is_clear_about_inert_scope(self):
+    def test_pixel_privacy_preparation_is_clear_about_headless_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             record = prepare('pixel-privacy', 'pixel-run', pathlib.Path(tmp))
             self.assertEqual(record['state'], 'waiting_for_owner')
             self.assertFalse(record['recording_started'])
-            self.assertIn('execution is currently blocked', record['prompt'])
+            self.assertIn('headless fixed synthetic', record['prompt'])
+            self.assertIn('opens no test window', record['prompt'])
     def test_stale_reply_focus_and_path_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=pathlib.Path(tmp); record=prepare('privacy','a',root)

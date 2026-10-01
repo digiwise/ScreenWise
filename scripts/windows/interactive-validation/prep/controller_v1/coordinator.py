@@ -64,7 +64,7 @@ def prompt_for(mode: str) -> str:
     details = {
         'privacy': 'Ready for a compact synthetic privacy batch (about 90 seconds), with no audio or further actions from you?',
         'input-privacy': 'Ready for a compact synthetic password keyboard/clipboard suppression batch (about 30 seconds), with no action from you?',
-        'pixel-privacy': 'Ready for preparation review of a fixed synthetic pixel-privacy check? Interactive execution is currently blocked; no recording or window will start.',
+        'pixel-privacy': 'Ready for a headless fixed synthetic pixel-redaction API check (about one minute)? It does not capture the desktop, audio, keyboard or clipboard, and opens no test window.',
         'audio-output': 'Ready for local speech clips through your selected USB headphones (about two minutes), with no speaking required?',
         'audio-microphone': 'Ready to read the displayed synthetic passage once, for about 45 seconds after the start cue?',
         'lock': 'Ready for one pre-briefed lock, hold, unlock and synthetic recovery sequence? You control locking and unlocking.',

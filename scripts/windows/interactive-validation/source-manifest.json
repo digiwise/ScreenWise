@@ -22,7 +22,7 @@
     {
       "archive_path": "prep/controller_v1/coordinator.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/coordinator.py",
-      "sha256": "7F1CCDBF50E8013B0677C0A84106F583255F1FF90A77B19F45336ABA475F9BC5",
+      "sha256": "DDB009BDA801A90BA395BC10C4E1A9A157332CEFDC3B7E4D50C66E3366E26CEE",
       "original_sha256": "05927DCC50CB3A4F3425858C00B50BED509B528679B411081DBB36CE41DEEEB3"
     },
     {
@@ -52,25 +52,25 @@
     {
       "archive_path": "prep/controller_v1/live.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/live.py",
-      "sha256": "7072159AD803418C0002BC1090A346C1C72A19BCA83613C2B0CFC095439860F0",
+      "sha256": "787B00AC6D753BA04EF432343AF9E58F5708A736AB420E0A2CDC495E278EA8B7",
       "original_sha256": "028296E5FB6C68FF5D4A50BB996FCE497E2494B1C0713CF1B935107A38BF9CD9"
     },
     {
       "archive_path": "prep/controller_v1/package_preparation.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/package_preparation.py",
-      "sha256": "C705B8C723CE835BA6BD38730BF07FCE2118E56BB7D6AFAE07F0C346E538AF5B",
+      "sha256": "66A0B804368DC638D3A8DF5A742E5F4FE15522390AAA49E6FA9C742C4BDBF452",
       "original_sha256": "0D72C5DEEA550796EF7DD0B118B79BDBBFF31EE3106AF2F44B966F58EBDA873F"
     },
     {
       "archive_path": "prep/controller_v1/README.md",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/README.md",
-      "sha256": "A34B2E196CBD821FB4C095C521BCCBA64C582FA08860CF04587683AF0C2BF137",
+      "sha256": "A3F305242F010199AD70DE168BABCC2EDCA9BF2D6A71D295E776DE94159639A6",
       "original_sha256": "53A4176BCD551E91EA1BF3587B9484C4C81CF2441CAC460B7E2D2805474473B5"
     },
     {
       "archive_path": "prep/controller_v1/test_coordinator.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_coordinator.py",
-      "sha256": "6838DA2DB5D3F63E5DCC9E1A36521C15528CBFF717042430528F752B733FA514",
+      "sha256": "40E3EE17D41DE766EDE6977D7170104BFD176C23BB0F134C50AE346DAEB43683",
       "original_sha256": "8B4109169A1B1CFC44D335BBED450B5E36BDE30756642FF1A1A3FE70AF47055F"
     },
     {
@@ -94,7 +94,7 @@
     {
       "archive_path": "prep/controller_v1/test_live.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_live.py",
-      "sha256": "3C78DFE49B840633FFD762DC50A6FC99070A1EA8EDD8270F9156B9F182F233F2",
+      "sha256": "DA84E675855C65385157277E9262308D03CBE7B30BD4F9317980C7F44DABEF98",
       "original_sha256": "9C9853B5646F8F30C8AFCFA21253F604490D485EC0FBAD6BB6992446840CFD15"
     },
     {
@@ -148,7 +148,7 @@
     {
       "archive_path": "prep/plan.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/plan.py",
-      "sha256": "7AD7325FF71BCF97BA5CDF7A5EB4995BD13DE44AC7D4BA218E8B7CB6010F01BE",
+      "sha256": "F7693271221EB81994476339C4244FAB8955658AF12202754D0FC745BA03AAD1",
       "original_sha256": "43DD77D95475E64FF770600AF38F8075F361663618CF669BD8B60EAEA0565785"
     },
     {
@@ -160,7 +160,7 @@
     {
       "archive_path": "prep/test_plan.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/test_plan.py",
-      "sha256": "D838AB5170AE0AD6B3B760300791C608ABF9C38F328AC6BAE3DE0F00E745FB30",
+      "sha256": "C85AAE33E5DFE41BFD15C919BBE0DA84F09DEBDCEE292C70B1A40C761F979670",
       "original_sha256": "F71C0F0FA0D731532122896F44202872C3435A0E53D2C61954B5FE66296C3C80"
     },
     {
@@ -298,14 +298,26 @@
     {
       "archive_path": "prep/pixel_redaction_eval.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/pixel_redaction_eval.py",
-      "sha256": "C27BD806DA4ADB49B732D47828EE003D783EEA11890F9348EA8263DBCD5EBC7C",
+      "sha256": "47A248E9E62A8CF30BB507BDDCEBC8683CDE53D4B87F63CD0F5BCB887FBE0677",
       "original_sha256": "C27BD806DA4ADB49B732D47828EE003D783EEA11890F9348EA8263DBCD5EBC7C"
     },
     {
       "archive_path": "prep/test_pixel_redaction_eval.py",
       "stage_path": "target/interactive-prep-20260915-01a09e45/test_pixel_redaction_eval.py",
-      "sha256": "9B3FF09F08058493DB1A09EC9B1D60410EABB3F25E0FDAF0097371293E8A72CF",
+      "sha256": "F894CE5D30CE99699A3630517C00428AA58FFC3D5588C9567A35A84B461E3D5A",
       "original_sha256": "9B3FF09F08058493DB1A09EC9B1D60410EABB3F25E0FDAF0097371293E8A72CF"
+    },
+    {
+      "archive_path": "prep/controller_v1/pixel_sequence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/pixel_sequence.py",
+      "sha256": "09388EF7C4F895C06224AF6F60EFE40536AFBAEA253F8CB1D7C2B916561379AC",
+      "original_sha256": "09388EF7C4F895C06224AF6F60EFE40536AFBAEA253F8CB1D7C2B916561379AC"
+    },
+    {
+      "archive_path": "prep/controller_v1/test_pixel_sequence.py",
+      "stage_path": "target/interactive-prep-20260915-01a09e45/controller_v1/test_pixel_sequence.py",
+      "sha256": "A535596A899D3D02AFDF103C6F92A09831F0C4FA83DF10043CE2AF511DB4BA06",
+      "original_sha256": "A535596A899D3D02AFDF103C6F92A09831F0C4FA83DF10043CE2AF511DB4BA06"
     }
   ]
 }

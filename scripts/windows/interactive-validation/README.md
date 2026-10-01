@@ -133,11 +133,12 @@ Pop-Location
 
 ### Synthetic pixel-redaction evaluator
 
-`prep/pixel_redaction_eval.py` is a pure evaluator for a future fixed-fixture
-image check. It compares a baseline and result image at caller-supplied,
+`prep/pixel_redaction_eval.py` is the pure evaluator used by the fixed synthetic
+pixel API check. It compares a baseline and result image at caller-supplied,
 disjoint PII, ordinary-control and unrelated-sentinel rectangles. A pass needs
-the PII rectangle to change and become dark, while the ordinary and sentinel
-rectangles stay within a per-pixel compression tolerance. Its separate failure
+the high-contrast PII rectangle to change and lose most of its local contrast,
+while the ordinary and sentinel rectangles stay within a per-pixel compression
+tolerance. Its separate failure
 comparison requires a source-free replacement across the frame and within the
 PII rectangle. Output contains only fixed statuses, booleans and aggregate
 fractions; it never emits pixel values or image data. It requires Pillow in the
@@ -151,13 +152,20 @@ python -W error -m unittest -v test_pixel_redaction_eval.py
 Pop-Location
 ```
 
-This is preparation only. No live controller currently fetches or correlates
-authenticated frame images, verifies the ordinary marker against persisted
-data, induces and independently identifies a redaction failure, or supplies
-the final cleanup evidence. Those connections must be reviewed and added before
-a live run. A later run still needs the normal preflight and a new phase-specific
-readiness response. The evaluator does not establish detector/OCR accuracy,
-general PII coverage, or privacy guarantees.
+The fresh-gated `pixel-privacy` controller starts the current release with audio,
+vision, keyboard and clipboard capture disabled, inserts only fixed synthetic
+JPEG and OCR geometry into its new controller-owned database, and fetches the
+three cases through the authenticated loopback `/frames/:id?redact_pii=true`
+route. The cases are an ordinary clear-frame control, one fixed redaction box,
+and a second frame with deliberately absent OCR metadata that exercises the
+normal source-free failure response. It checks missing/wrong/valid bearer status,
+allowlisted redaction headers, aggregate pixel metrics, clean shutdown, listener
+closure and exact-path process quiescence. It opens no test window and requires
+no owner action after the fresh readiness response. The normal UI recorder can
+still write focus, app-switch and fixed privacy-status metadata; do not inspect
+those row bodies. This establishes neither OCR
+recognition accuracy, async model-worker behavior, general PII coverage nor a
+privacy guarantee.
 
 ## Prepare and authorize a live run
 

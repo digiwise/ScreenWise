@@ -50,7 +50,7 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(plan["phase_expectations"]["hooks_enabled"])
         self.assertTrue(plan["phase_expectations"]["actual_password_suppression_counter"])
 
-    def test_pixel_privacy_plan_is_synthetic_silent_and_explicitly_blocked(self):
+    def test_pixel_privacy_plan_is_synthetic_silent_and_headless(self):
         with tempfile.TemporaryDirectory() as d:
             plan = mod.make_plan("pixel-privacy", "pixel-1", Path(d))
         self.assertIn("--disable-audio", plan["argv"])
@@ -59,7 +59,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan["phase_expectations"]["bearer_statuses"],
                          {"missing": 403, "wrong": 403, "valid": 200})
         self.assertEqual(plan["phase_expectations"]["live_execution"],
-                         "blocked_until_ocr_geometry_and_failure_case_are_reviewed")
+                         "fresh_gated_headless_synthetic_api_check")
 
     def test_reject_traversal_and_existing(self):
         with tempfile.TemporaryDirectory() as d:

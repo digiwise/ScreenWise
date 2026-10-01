@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 from coordinator import BatchRunner, ControlError, ROOT, consume_confirmation, session_path
@@ -47,8 +47,7 @@ OUTPUT = os.environ.get('SCREENWISE_VALIDATION_OUTPUT_DEVICE', '<output-device-n
 API_PORT = int(os.environ.get('SCREENWISE_VALIDATION_API_PORT', '31479'))
 FIXTURE_PORT = int(os.environ.get('SCREENWISE_VALIDATION_FIXTURE_PORT', '31480'))
 API_URL = f'http://127.0.0.1:{API_PORT}'
-LIVE_MODES = ('privacy', 'input-privacy', 'audio-output', 'drm', 'browser')
-PIXEL_PRIVACY_REFUSAL = 'pixel_privacy_blocked_ocr_geometry_and_failure_injection_unverified'
+LIVE_MODES = ('privacy', 'input-privacy', 'pixel-privacy', 'audio-output', 'drm', 'browser')
 
 PASSWORD_SUPPRESSION_REASON = 'uia_password_content_suppressed'
 PASSWORD_SUPPRESSION_TOTAL = re.compile(r'\btotal_suppressed_events\s*[=:]\s*(\d+)\b')
@@ -88,9 +87,6 @@ def require_runtime_configuration(mode=None):
 
 
 def require_live_mode_supported(mode):
-    """Keep pixel preparation fresh-gated but inert until proof inputs are reviewed."""
-    if mode == 'pixel-privacy':
-        raise ControlError(PIXEL_PRIVACY_REFUSAL)
     if mode not in LIVE_MODES:
         raise ControlError('mode_not_yet_wired_for_live_execution')
 
@@ -228,6 +224,9 @@ class WindowsBackend:
             args += ['--idle-capture-interval-ms','1000', '--min-capture-interval-ms','500',
                      '--included-windows','ScreenWise Synthetic Privacy Fixture',
                      '--included-windows','::SW EXCLUDED Synthetic Fixture']
+        elif self.record['mode'] == 'pixel-privacy':
+            args += ['--disable-vision', '--disable-keyboard-capture',
+                     '--disable-clipboard-capture']
         elif self.record['mode'] == 'drm':
             args += ['--disable-keyboard-capture','--disable-clipboard-capture',
                      '--included-windows','ScreenWise Synthetic Privacy Fixture',
@@ -264,6 +263,45 @@ class WindowsBackend:
             code = error.code
             error.close()
             return code, b''
+
+    def frame_request(self, path: str, credential: str):
+        """Fetch one synthetic frame and retain only allowlisted response headers."""
+        if not path.startswith('/frames/') or not path.endswith('redact_pii=true'):
+            raise ControlError('invalid_synthetic_frame_route')
+        if credential not in ('missing', 'wrong', 'valid'):
+            raise ControlError('invalid_frame_credential_case')
+        headers = {}
+        if credential == 'wrong':
+            headers['Authorization'] = 'Bearer wrong-token'
+        elif credential == 'valid':
+            if not self.token:
+                raise ControlError('matching_auth_token_unavailable')
+            headers['Authorization'] = 'Bearer ' + self.token
+        try:
+            with self.opener.open(Request(API_URL + path, headers=headers), timeout=3) as response:
+                body = response.read(1024 * 1024 + 1)
+                if len(body) > 1024 * 1024:
+                    raise ControlError('synthetic_frame_response_too_large')
+                allowed = {
+                    name.lower(): response.headers.get(name)
+                    for name in ('Content-Type', 'Cache-Control', 'X-Pii-Redacted',
+                                 'X-Pii-Redaction-Status', 'X-Pii-Regions-Count')
+                    if response.headers.get(name) is not None
+                }
+                return int(response.status), body, allowed
+        except HTTPError as error:
+            code = int(error.code)
+            error.close()
+            return code, b'', {}
+
+    def api_listener_closed(self):
+        try:
+            with self.opener.open(Request(API_URL + '/health'), timeout=.75):
+                return False
+        except HTTPError:
+            return False
+        except (OSError, URLError):
+            return True
 
     def await_api(self):
         until = time.monotonic()+45
@@ -676,6 +714,9 @@ def main(argv=None):
         result=runner.run_browser_clipboard(confirmed=True)
     elif record['mode']=='input-privacy':
         result=runner.run_input_privacy(confirmed=True)
+    elif record['mode']=='pixel-privacy':
+        from pixel_sequence import PixelRunner
+        result=PixelRunner(backend).run(confirmed=True)
     else:
         result=(runner.run_privacy(confirmed=True) if record['mode']=='privacy' else runner.run_audio_output(confirmed=True))
     (path/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')

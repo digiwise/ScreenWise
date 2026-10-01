@@ -136,15 +136,15 @@ def make_plan(mode: str, run_id: str, prep_root: Path | None = None) -> dict[str
         cues += ["Use synthetic non-secret text only; record fixture phase id and independent foreground identity."]
         if mode == "pixel-privacy":
             expectations.update(
-                live_execution="blocked_until_ocr_geometry_and_failure_case_are_reviewed",
-                fixed_fixture="PrivacyFixture",
+                live_execution="fresh_gated_headless_synthetic_api_check",
+                fixed_fixture="controller_generated_jpeg_and_persisted_ocr_geometry",
                 image_pixels_required=True,
                 ordinary_persisted_control_required=True,
                 bearer_statuses={"missing": 403, "wrong": 403, "valid": 200},
                 fail_closed_case_required=True,
                 audio_disabled=True,
             )
-            cues += ["Preparation only: this mode currently refuses interactive execution."]
+            cues += ["No owner input or visible fixture is required after the fresh readiness response."]
         if mode == "input-privacy":
             expectations.update(actual_password_suppression_counter=True,
                                 synthetic_keyboard_and_clipboard_stimuli=True)

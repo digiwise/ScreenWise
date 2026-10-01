@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from pixel_redaction_eval import (
     Box,
@@ -32,9 +32,13 @@ class PixelRedactionEvaluationTests(unittest.TestCase):
 
         image = Image.new("RGB", (320, 180), "white")
         draw = ImageDraw.Draw(image)
-        draw.rectangle((self.pii.left, self.pii.top, self.pii.right - 1,
-                        self.pii.bottom - 1), fill=(20, 175, 230))
-        draw.text((42, 50), "SYNTHETIC PII REGION", fill=(10, 25, 80))
+        for y in range(self.pii.top, self.pii.bottom):
+            for x in range(self.pii.left, self.pii.right):
+                color = ((245, 245, 245) if
+                         ((x - self.pii.left) // 4 +
+                          (y - self.pii.top) // 4) % 2
+                         else (20, 80, 220))
+                image.putpixel((x, y), color)
         draw.rectangle((self.ordinary.left, self.ordinary.top,
                         self.ordinary.right - 1, self.ordinary.bottom - 1),
                        fill=(225, 240, 190))
@@ -48,9 +52,12 @@ class PixelRedactionEvaluationTests(unittest.TestCase):
 
         with Image.open(self.source_path) as original:
             redacted = original.convert("RGB")
-        ImageDraw.Draw(redacted).rectangle(
-            (self.pii.left, self.pii.top, self.pii.right - 1, self.pii.bottom - 1),
-            fill="black")
+        redacted.paste(
+            redacted.crop((self.pii.left, self.pii.top,
+                           self.pii.right, self.pii.bottom)).filter(
+                               ImageFilter.GaussianBlur(radius=10)),
+            (self.pii.left, self.pii.top),
+        )
         redacted.save(self.redacted_path, "JPEG", quality=91)
 
         failure = Image.new("RGB", (320, 180), (18, 18, 20))
@@ -66,7 +73,8 @@ class PixelRedactionEvaluationTests(unittest.TestCase):
         self.assertTrue(result["checks"]["pii_region_obscured"])
         self.assertTrue(result["checks"]["ordinary_region_preserved"])
         self.assertTrue(result["checks"]["sentinel_region_preserved"])
-        self.assertNotIn("SYNTHETIC PII REGION", str(result))
+        self.assertLess(result["metrics"]["pii_retained_contrast_fraction"], 0.35)
+        self.assertNotIn("fixture@example.invalid", str(result))
 
     def test_missing_redaction_fails_without_exposing_image_data(self):
         result = evaluate_pixel_pair(self.source_path, self.source_path, self.plan)

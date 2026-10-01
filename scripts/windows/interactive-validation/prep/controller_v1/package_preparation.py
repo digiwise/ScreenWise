@@ -14,7 +14,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     prep = ROOT.parent
     files = list(ROOT.glob('*.py')) + list(ROOT.glob('*.ps1')) + [ROOT/'README.md']
-    files += [prep/name for name in ('plan.py','test_plan.py','preflight.ps1','lock_probe.py')]
+    files += [prep/name for name in (
+        'plan.py', 'test_plan.py', 'preflight.ps1', 'lock_probe.py',
+        'pixel_redaction_eval.py', 'test_pixel_redaction_eval.py',
+    )]
     groups = [('fixtures', ('*.cs','*.html','*.ps1','*.md')),
               ('audio', ('*.json','*.ps1'))]
     if args.include_generated:

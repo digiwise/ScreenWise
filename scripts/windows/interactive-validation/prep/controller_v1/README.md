@@ -37,6 +37,7 @@ time or the PC being unlocked. Gate files have no expiry.
 | audio-output | Allow local speech through the selected USB headphones for roughly two minutes | Five-second chunks; before/after local transcription, persistence and authenticated search |
 | drm | Allow compact synthetic Netflix-identity window and speech for roughly two minutes | Observed DRM pause and recovery; forbidden marker absence through final persistence; before/after positive controls |
 | browser | Leave the compact synthetic Chrome and native fixture windows foreground while the automatic 25-second sequence runs | Allowed browser positive controls; browser-password, excluded-host and password-paste marker absence; clipboard-safe cleanup |
+| pixel-privacy | No action after Ready; no test window opens | Fixed persisted OCR geometry drives one redaction box; clear-frame positive control; missing-OCR source-free failure response; bearer auth and cleanup |
 
 These durations are estimates. Active execution has bounded waits and a safety
 watchdog (at most 240 seconds of recording before shutdown is attempted). Readiness
@@ -68,25 +69,25 @@ batches instead of recording through an unverified state. No fullscreen UI is us
 
 ## Remaining integration and limits
 
-### Pixel privacy preparation is blocked
+### Pixel privacy scope
 
-`pixel-privacy` is now an explicit plan/waiting mode, but `live.py --execute-interactive`
-refuses it before runtime configuration, readiness consumption, or backend creation
-with `pixel_privacy_blocked_ocr_geometry_and_failure_injection_unverified`. Its
-plan disables audio and records the required image, positive-control, bearer and
-cleanup checks; the refusal means none of those are live evidence.
+`pixel-privacy` is a fresh-gated headless live mode. It starts the current release
+against a new controller-owned database with desktop, audio, keyboard and clipboard
+capture disabled. The controller creates one fixed synthetic JPEG, inserts three
+snapshot rows, and supplies exact persisted OCR geometry for only the clear and PII
+cases. It then checks the authenticated `GET /frames/:frame_id?redact_pii=true`
+route: a clear-frame byte-identical positive control, one Gaussian-blurred PII
+rectangle with distant controls preserved, and the normal source-free placeholder
+when the third frame has no OCR row. The absent row is independently verified before
+the request; no production failure-injection hook is added.
 
-The current `PrivacyFixture` has text/password controls but no rendered synthetic
-PII region. The existing `GET /frames/:frame_id?redact_pii=true` path derives
-redaction rectangles from persisted OCR text and coordinates; it is an on-demand
-OCR-based route, not the async image-redaction worker. Adding a visible test string
-would still depend on OCR recognition and geometry in a live desktop capture, so
-the fixed ROI evaluator cannot yet be tied to that route without an unreviewed,
-brittle coordinate assumption. The separate async image worker is disabled by
-default and requires an ONNX-enabled build and a locally provisioned RF-DETR model.
-No deterministic supported failure-injection hook exists in the controller or
-fixture. Do not claim or run this mode until those gaps have a reviewed, synthetic
-only solution and a fresh readiness response is obtained for that later run.
+This test validates fixed synthetic persistence-to-route plumbing and pixel effects.
+It does not exercise live OCR recognition, the separately disabled async image
+worker, its RF-DETR model, real desktop content or general PII accuracy. It still
+requires normal preflight, reviewed hashes and a new readiness response. No visible
+fixture or owner input is required after readiness. The normal UI recorder may
+still persist focus, app-switch and fixed privacy-status metadata; evidence review
+must use counts only and must not inspect those row bodies.
 
 Real Win+L/unlock, microphone reading and UAC sequences remain separately planned.
 `live.py` explicitly refuses those modes. The browser URL/password/clipboard

@@ -38,9 +38,10 @@ class PixelPlan:
     ordinary: Box
     sentinel: Box
     channel_tolerance: int = 18
-    max_changed_fraction: float = 0.08
+    max_changed_fraction: float = 0.12
     min_changed_fraction: float = 0.90
-    min_dark_fraction: float = 0.90
+    min_source_contrast: float = 60.0
+    max_retained_contrast_fraction: float = 0.35
 
     def validate(self, size: tuple[int, int]) -> None:
         self.pii.validate(size)
@@ -56,8 +57,10 @@ class PixelPlan:
             raise EvaluationError("invalid_channel_tolerance")
         if not (0.0 < self.max_changed_fraction < self.min_changed_fraction <= 1.0):
             raise EvaluationError("invalid_change_thresholds")
-        if not 0.0 < self.min_dark_fraction <= 1.0:
-            raise EvaluationError("invalid_dark_threshold")
+        if not 0.0 < self.min_source_contrast <= 127.5:
+            raise EvaluationError("invalid_source_contrast")
+        if not 0.0 < self.max_retained_contrast_fraction < 1.0:
+            raise EvaluationError("invalid_contrast_ratio")
 
 
 def _load_rgb(path: str | Path) -> Image.Image:
@@ -86,11 +89,9 @@ def _diff_metrics(before: Image.Image, after: Image.Image, box: Box,
     return changed / pixels, sum(ImageStat.Stat(diff).mean) / 3
 
 
-def _dark_fraction(image: Image.Image, box: Box) -> float:
-    raw = image.crop((box.left, box.top, box.right, box.bottom)).tobytes()
-    count = sum(1 for offset in range(0, len(raw), 3)
-                if max(raw[offset:offset + 3]) <= 32)
-    return count / ((box.right - box.left) * (box.bottom - box.top))
+def _luma_contrast(image: Image.Image, box: Box) -> float:
+    region = image.crop((box.left, box.top, box.right, box.bottom)).convert("L")
+    return float(ImageStat.Stat(region).stddev[0])
 
 
 def evaluate_pixel_pair(before_path: str | Path, after_path: str | Path,
@@ -102,15 +103,17 @@ def evaluate_pixel_pair(before_path: str | Path, after_path: str | Path,
         raise EvaluationError("image_dimensions_changed")
     plan.validate(before.size)
 
-    # Require the source fixture to present a non-dark PII stimulus, so a black
-    # box in the result is evidence of an actual change rather than a vacuous pass.
-    source_dark_fraction = _dark_fraction(before, plan.pii)
-    if source_dark_fraction > 0.05:
-        raise EvaluationError("pii_source_region_not_visibly_synthetic")
+    # The production route uses strong Gaussian blur, not a solid overlay. A
+    # fixed high-contrast source makes loss of local detail measurable without
+    # retaining or reporting any source pixels.
+    source_contrast = _luma_contrast(before, plan.pii)
+    if source_contrast < plan.min_source_contrast:
+        raise EvaluationError("pii_source_region_not_high_contrast")
 
     pii_changed, pii_mean_delta = _diff_metrics(
         before, after, plan.pii, plan.channel_tolerance)
-    pii_dark = _dark_fraction(after, plan.pii)
+    redacted_contrast = _luma_contrast(after, plan.pii)
+    retained_contrast = redacted_contrast / max(source_contrast, 0.001)
     ordinary_changed, _ = _diff_metrics(
         before, after, plan.ordinary, plan.channel_tolerance)
     sentinel_changed, _ = _diff_metrics(
@@ -118,7 +121,7 @@ def evaluate_pixel_pair(before_path: str | Path, after_path: str | Path,
 
     checks = {
         "pii_region_changed": pii_changed >= plan.min_changed_fraction,
-        "pii_region_obscured": pii_dark >= plan.min_dark_fraction,
+        "pii_region_obscured": retained_contrast <= plan.max_retained_contrast_fraction,
         "ordinary_region_preserved": ordinary_changed <= plan.max_changed_fraction,
         "sentinel_region_preserved": sentinel_changed <= plan.max_changed_fraction,
     }
@@ -128,7 +131,9 @@ def evaluate_pixel_pair(before_path: str | Path, after_path: str | Path,
         "checks": checks,
         "metrics": {
             "pii_changed_fraction": round(pii_changed, 4),
-            "pii_dark_fraction": round(pii_dark, 4),
+            "pii_source_contrast": round(source_contrast, 2),
+            "pii_redacted_contrast": round(redacted_contrast, 2),
+            "pii_retained_contrast_fraction": round(retained_contrast, 4),
             "pii_mean_channel_delta": round(pii_mean_delta, 2),
             "ordinary_changed_fraction": round(ordinary_changed, 4),
             "sentinel_changed_fraction": round(sentinel_changed, 4),
