@@ -161,7 +161,19 @@ appeared only in a frame and not in `ui_events`. The fixture had re-focused the
 ordinary control immediately before `SendKeys`, invalidating the deliberately
 short UIA privacy permit and causing a fail-closed race. The typing action now
 requires the controller's already verified stable focus and does not re-focus;
-a source regression check enforces that ordering. A fresh live rerun is required.
+a source regression check enforces that ordering. A corrected fixture rerun
+produced the same safe result and ruled that race out as the full cause.
+
+A production defect consistent with the remaining failure was in the UIA probe:
+it timestamped the decision before several cross-process provider calls. A probe taking longer than the
+75 ms maximum age therefore stored an already-expired ordinary-field permit.
+The completion timestamp is now taken only after all UIA calls and focus checks
+finish. Generation and native-focus comparisons remain unchanged, so focus
+changes during or after the probe still fail closed. A regression test simulates
+a probe longer than the maximum age and requires a fresh permit at completion.
+All 203 `screenpipe-a11y` library tests completed with 181 passing and 22 ignored;
+the locked offline release build and 71-check normal-session preflight passed.
+The affected live check still requires a fresh gated rerun.
 
 ## Day-to-day trial repair checkpoint (2026-09-21)
 

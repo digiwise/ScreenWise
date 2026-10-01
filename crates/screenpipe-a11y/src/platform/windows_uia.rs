@@ -291,9 +291,8 @@ impl UiaContext {
     /// an unsupported IsPassword property must not become a false permission.
     fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy) {
         let generation = privacy.generation.load(Ordering::SeqCst);
-        let checked_at = Instant::now();
         let focus = NativeKeyboardFocus::current();
-        let is_password = (|| unsafe {
+        let (is_password, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
             let focus = focus?;
             let element = self.automation.GetFocusedElement().ok()?;
             if !element.CurrentHasKeyboardFocus().ok()?.as_bool()
@@ -316,7 +315,7 @@ impl UiaContext {
                 return None;
             }
             Some(is_password)
-        })();
+        });
         // An event that invalidates focus while the COM query is in flight
         // changes the generation, so this result cannot grant permission.
         privacy.update(generation, focus, is_password, checked_at);
@@ -751,6 +750,17 @@ impl UiaContext {
     ) -> windows::core::Result<()> {
         unsafe { self.automation.RemoveFocusChangedEventHandler(handler) }
     }
+}
+
+/// Timestamp a UIA privacy result only after the provider calls complete.
+///
+/// Some cross-process providers take longer than the permit's maximum age. A
+/// timestamp captured before those calls would make a freshly validated result
+/// stale as soon as it was stored. Generation and native-focus checks still
+/// reject any focus transition that occurs while the probe is in flight.
+fn complete_keyboard_privacy_probe<T>(probe: impl FnOnce() -> T) -> (T, Instant) {
+    let result = probe();
+    (result, Instant::now())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1416,6 +1426,20 @@ mod tests {
             privacy.update(generation, focus, is_password, Instant::now());
             assert_eq!(privacy.permit(focus).is_some(), is_password == Some(false));
         }
+    }
+
+    #[test]
+    fn keyboard_privacy_ages_from_probe_completion_not_probe_start() {
+        let started = Instant::now();
+        let (is_password, checked_at) = complete_keyboard_privacy_probe(|| {
+            std::thread::sleep(KEYBOARD_PRIVACY_MAX_AGE + Duration::from_millis(10));
+            Some(false)
+        });
+        assert!(started.elapsed() > KEYBOARD_PRIVACY_MAX_AGE);
+        let privacy = KeyboardPrivacy::default();
+        let focus = Some(test_keyboard_focus());
+        privacy.update(0, focus, is_password, checked_at);
+        assert_eq!(privacy.permit(focus), Some(0));
     }
 
     #[test]
