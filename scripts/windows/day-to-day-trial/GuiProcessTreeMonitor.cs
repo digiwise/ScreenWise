@@ -19,7 +19,11 @@ internal static class GuiProcessTreeMonitor
     private const uint SnapshotProcesses = 0x00000002;
     private static readonly IntPtr InvalidHandle = new IntPtr(-1);
     private static readonly HashSet<string> UnexpectedShells = new HashSet<string>(
-        new[] { "powershell.exe", "pwsh.exe", "conhost.exe", "cmd.exe", "wscript.exe", "cscript.exe" },
+        new[]
+        {
+            "powershell.exe", "pwsh.exe", "conhost.exe", "cmd.exe", "wscript.exe", "cscript.exe",
+            "setx.exe", "where.exe"
+        },
         StringComparer.OrdinalIgnoreCase);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -182,7 +186,8 @@ internal static class GuiProcessTreeMonitor
         try
         {
             if (args.Length == 1 && args[0] == "--self-test")
-                return IsUnexpectedShell("PowerShell.exe") && !IsUnexpectedShell("screenpipe-app.exe") ? 0 : 3;
+                return IsUnexpectedShell("PowerShell.exe") && IsUnexpectedShell("setx.exe") &&
+                    IsUnexpectedShell("where.exe") && !IsUnexpectedShell("screenpipe-app.exe") ? 0 : 3;
             int rootProcessId = 0;
             int durationMilliseconds = 0;
             string outputDirectory = null;

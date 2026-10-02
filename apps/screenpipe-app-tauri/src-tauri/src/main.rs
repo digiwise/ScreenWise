@@ -102,6 +102,7 @@ mod notifications;
 mod safe_icon;
 mod shortcuts;
 mod skills;
+#[cfg(any(debug_assertions, test))]
 mod specta_bindings;
 mod vault;
 mod viewer;
@@ -252,6 +253,7 @@ async fn is_server_running(app: AppHandle) -> Result<bool, String> {
 }
 
 /// Shared tauri-specta registry body.
+#[cfg(any(debug_assertions, test))]
 macro_rules! define_specta_builder {
     () => {{
         use crate::store::{OnboardingStore, SettingsStore};
@@ -464,35 +466,6 @@ async fn main() {
         // Call the default hook (prints backtrace etc.)
         default_hook(info);
     }));
-
-    // Set permanent OLLAMA_ORIGINS env var on Windows if not present
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        if env::var("OLLAMA_ORIGINS").is_err() {
-            match std::process::Command::new("setx")
-                .args(&["OLLAMA_ORIGINS", "*"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-            {
-                Ok(output) => {
-                    if !output.status.success() {
-                        error!(
-                            "failed to set OLLAMA_ORIGINS: {}",
-                            String::from_utf8_lossy(&output.stderr)
-                        );
-                    } else {
-                        info!("permanently set OLLAMA_ORIGINS=* for user");
-                    }
-                }
-                Err(e) => {
-                    warn!("setx not available, skipping OLLAMA_ORIGINS setup: {}", e);
-                }
-            }
-        }
-    }
 
     // Generate TypeScript bindings in debug mode (also via `cargo test` — see
     // specta_bindings.rs).

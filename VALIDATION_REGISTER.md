@@ -230,6 +230,29 @@ between API samples because it repeated expensive CIM and endpoint enumeration
 deadline; its PowerShell and synthetic report regressions pass, but live cadence
 confirmation remains open.
 
+The next short GUI attempt passed the fixed acquisition checks before its UI was
+stopped: 40 WGC frames reached SQLite, the fixed UIA and OCR controls were each
+observed twice, bearer checks returned 403/403/200, and the API listener and
+sampled endpoints stayed loopback-only. The timeline later became unresponsive.
+Source/evidence correlation found that the reused WebView2 profile had loaded
+cached media references from an earlier data store; asset-scope rejection then
+produced a high-volume error loop. The process tree also contained short-lived
+`setx.exe`, `where.exe` and `conhost.exe` helpers. No endpoint was observed for
+those helpers. The owner directed a forced stop, so this attempt did not pass
+clean shutdown and cannot close GUI acceptance.
+
+The repaired candidate namespaces timeline caches with an opaque digest of the
+active canonical data directory, waits for active API configuration before cache
+access and uses a fresh WebView2 profile for each trial. It removes startup
+`setx` and replaces `where.exe` path lookup with in-process `PATH` enumeration.
+The optimized frontend build, TypeScript validation, 408 Vitest tests, 150 Bun
+tests, the content-free GUI harness regression, process-monitor self-test, Rust
+formatting and a warning-free locked/offline `release-dev` desktop build passed.
+Focused new Rust port/opener tests remain unlinked because the configured shared
+test cache was read-only to the sandbox and its escalated rebuild was cold and
+stopped by the owner. A fresh interactive run remains required; no recording or
+firewall change was made for this repaired candidate.
+
 ## Issue register
 
 | ID | Current state / next check |
@@ -264,9 +287,10 @@ confirmation remains open.
 | SW-V28 | **Repaired, regression-tested and rebuilt; live check pending:** 31 samples reported stale audio while chunks continued arriving and were VAD-rejected as silence. Received chunks now advance the intended consumer/transcription-attempt heartbeat, and `/health` accepts a recent heartbeat without requiring recognized speech or a database insert. |
 | SW-V29 | **Repaired and regression-tested; live check pending:** the trial summary previously ignored shutdown failures and delivery-loss notices written after the final health sample. It now merges fixed post-sample diagnostics, reports the exact safe reason codes, and treats a missing clean marker plus null native exit status as failure. |
 | SW-V30 | **Repaired, regression-tested and full-application live-checked:** UIA password-state probe flapping produced 333 repetitive warnings. Fail-closed suppression remains immediate, while state-unavailable warnings are bounded and aggregated. A real-hook/real-UIA crate regression exercised two fixed ordinary/password cycles: both ordinary markers were delivered, both password markers remained absent, and all 14 characters in each password phase incremented the unavailable-decision suppression count. The corrected full-application run persisted one ordinary keyboard control, zero password typing or password clipboard markers, and 23 safe suppression notices; authentication, SQLite integrity, clipboard restoration and clean process shutdown passed. Arbitrary providers and all race timings remain untested. |
-| SW-V31 | **Repaired and background-validated; short GUI confirmation pending:** active IPC now remains authoritative over cold/late persisted port hydration; the native cold-start fallback retains a configured or environment-overridden port. Vision writers no longer append a second `data` directory, and Tauri grants recursive asset access only to the active run's media tree. Focused frontend/native tests, the full frontend suites, 134 desktop tests plus a focused rerun of the repaired binding guard, the locked release build and unsigned package passed. A fresh visible GUI run must still confirm first-load timeline behavior and readable media from a non-default-port, custom-data-directory run. |
-| SW-V32 | **Repaired and background-validated; fixed-marker capture pending:** asynchronous text reconciliation had deleted already-sanitized accessibility structure even when it made no text change. It now preserves that structure only for byte-identical output and still clears derivatives fail-closed when stronger redaction changes text. The complete redaction suite passed. A reusable fixed public-marker UIA/OCR fixture and count-only evaluator pass Windows PowerShell 5.1 self-tests; a short authorized capture must establish both markers in the rebuilt application. |
-| SW-V33 | **Repaired and background-validated; live process-tree confirmation pending:** Windows icon lookup no longer launches PowerShell/Appx/file-enumeration commands. Registry, Start Menu shortcut and bounded in-process path discovery replace those helpers; the desktop unit test and release package pass, and static inspection finds no process-spawn path in `icons.rs`. The rebuilt five-executable GUI scope passed the fixed outbound block/control preflight without recording. One short GUI run must confirm icon activity creates no PowerShell/conhost descendants and no unexpected network-capable child. |
+| SW-V31 | **Repaired twice and background-validated; short GUI confirmation pending:** active IPC now remains authoritative over persisted port hydration; media uses the configured final directory and active recursive asset scope. A follow-up run passed WGC/SQLite and fixed UIA/OCR controls but reused browser state loaded stale media paths from another store, after which the timeline became unresponsive. Cache keys now include an opaque active-data-directory namespace, cache loading waits for active API configuration and every trial gets a fresh WebView2 profile. The complete frontend suites and warning-free `release-dev` build pass. A fresh visible GUI run must confirm first-load timeline behavior and readable media from a non-default-port, custom-data-directory run. |
+| SW-V32 | **Repaired, regression-tested and scoped live-checked:** asynchronous text reconciliation preserves sanitized accessibility structure only for byte-identical output and still clears derivatives fail-closed when stronger redaction changes text. In the short GUI follow-up, both fixed public UIA and OCR controls were observed twice while 40 WGC frames reached SQLite. This establishes the allowlisted fixture on that build, not general OCR recognition or accessibility-provider coverage. |
+| SW-V33 | **Repaired again and background-validated; live process-tree confirmation pending:** icon discovery no longer launches PowerShell. The follow-up run exposed separate startup `setx.exe` and Pi/FFprobe `where.exe` helpers with `conhost.exe` descendants; no endpoint was observed for them. Startup no longer invokes `setx`, and path lookup now enumerates `PATH` in-process. The harness rejects all three removed spawn paths and the optimized build passes. A fresh GUI run must confirm no unexpected helper or network-capable descendant remains. |
+| SW-V34 | **Production hardening repaired and built; focused linked tests pending:** full startup no longer shell-discovers or forcibly terminates a process that owns the configured API port; an in-process loopback bind waits only for the app's prior socket release and otherwise fails with a safe diagnostic. Windows path/URI opening no longer uses `cmd.exe`; it requires an absolute local path or explicitly allowlisted `shell:AppsFolder`/`ms-settings` URI and uses the native opener. Source-level harness regressions, formatting and a warning-free optimized build passed. The focused occupied-port and opener-classification Rust tests are authored but remain unlinked pending a warm writable desktop test cache. |
 
 ## Automated interactive repair validation, 2026-10-01
 

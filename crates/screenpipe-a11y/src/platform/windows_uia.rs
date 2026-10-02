@@ -152,6 +152,7 @@ pub struct KeyboardPrivacy {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg(test)]
 pub(crate) struct KeyboardPrivacyDiagnostics {
     pub(crate) probes: u64,
     pub(crate) last_probe_duration_us: u64,
@@ -236,6 +237,7 @@ impl KeyboardPrivacy {
         *previous = Some(completed_at);
     }
 
+    #[cfg(test)]
     pub(crate) fn diagnostics(&self) -> KeyboardPrivacyDiagnostics {
         let mut suppressions_by_reason = [0; KEYBOARD_PRIVACY_DENIAL_REASONS];
         for (index, value) in suppressions_by_reason.iter_mut().enumerate() {

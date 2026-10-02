@@ -11,6 +11,7 @@ import {
 	appendAuthToken,
 	ensureApiReady,
 	getApiBaseUrl,
+	getApiCacheNamespace,
 	redactApiUrlForLogs,
 } from "@/lib/api";
 import { mergeTimelineFrames } from "./timeline-frame-merge";
@@ -137,7 +138,8 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 	// Load cached frames for instant display
 	loadFromCache: async () => {
 		try {
-			const cached = await loadCachedFrames();
+			await ensureApiReady();
+			const cached = await loadCachedFrames(getApiCacheNamespace());
 			if (cached && cached.frames.length > 0) {
 				const cachedDate = new Date(cached.date);
 				const today = new Date();
@@ -229,7 +231,11 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 				if (cacheSaveTimer) clearTimeout(cacheSaveTimer);
 				cacheSaveTimer = setTimeout(() => {
 					cacheSaveTimer = null;
-					saveFramesToCache(merged.frames, state.currentDate);
+					saveFramesToCache(
+						merged.frames,
+						state.currentDate,
+						getApiCacheNamespace(),
+					);
 				}, CACHE_SAVE_DEBOUNCE_MS);
 
 				return {
@@ -270,7 +276,11 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 			}
 			cacheSaveTimer = setTimeout(() => {
 				cacheSaveTimer = null;
-				saveFramesToCache(merged.frames, state.currentDate);
+				saveFramesToCache(
+					merged.frames,
+					state.currentDate,
+					getApiCacheNamespace(),
+				);
 			}, CACHE_SAVE_DEBOUNCE_MS);
 
 			return {

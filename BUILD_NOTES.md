@@ -564,3 +564,58 @@ readable new media, positive UIA and OCR marker counts, and absence of transient
 PowerShell/conhost or other unexpected network-capable children. No arbitrary
 captured content needs review. These live behaviors are not claimed by the
 background results above.
+
+## GUI cache and process-scope repair candidate (2026-10-02)
+
+The short GUI follow-up wrote 40 WGC frames and observed both fixed UIA and OCR
+controls twice. SQLite writes, 403/403/200 bearer behavior, the loopback-only
+listener and sampled absence of non-loopback endpoints passed. The timeline then
+became unresponsive while a shared WebView2 profile replayed cached media paths
+from an earlier data store. The process monitor also observed `setx.exe` and
+`where.exe` helpers (with `conhost.exe` descendants), although none had an
+observed network endpoint. The GUI was force-stopped at the owner's direction,
+so clean shutdown did not pass and the run is not acceptance evidence for the
+repaired candidate.
+
+Frontend timeline cache keys now include an opaque SHA-256 namespace derived
+from the active canonical data directory. Cache loading waits for the native API
+configuration and refuses to use a cache without that namespace. Each GUI trial
+also receives a new WebView2 user-data directory. Startup no longer persists an
+Ollama origin with `setx`, and Pi/FFprobe discovery enumerates `PATH` in-process
+instead of launching `where.exe`. Routine successful PII-redaction messages were
+reduced to debug level while privacy, failure and possible-loss notices retain
+their existing warning/status paths.
+
+The same audit removed two broader shell risks. A busy configured API port is
+now checked by an in-process loopback bind and fails safely; ScreenWise no longer
+uses `netstat`/`taskkill` (or the Unix equivalents) to terminate an unknown port
+owner. Windows note and shell targets use the native Tauri opener, require an
+absolute local path or an explicitly allowlisted `shell:AppsFolder`/
+`ms-settings` URI, and never pass user data through `cmd.exe`.
+
+Background validation completed without starting recording:
+
+- The optimized Next export and TypeScript validation passed. The complete
+  frontend suites passed 40 Vitest files/408 tests and 13 Bun files/150 tests.
+  The pre-existing `unpdf` direct-`import.meta` webpack warning remains.
+- The content-free GUI harness regression and rebuilt process-monitor self-test
+  passed. They enforce the isolated WebView profile and reject the removed
+  `setx`, `where`, shell port-cleanup and `cmd.exe` opener paths.
+- Rust formatting passed. The documented locked/offline Visual Studio native
+  environment produced a warning-free `release-dev` desktop build. Its exact
+  executable SHA-256 is
+  `3F39E62CE8D6201ED0C28D978A90085F56566D501BC5DBC6706A2577775A1A8E`.
+- The private runtime manifest was refreshed for that exact `release-dev`
+  executable, its adjacent Bun sidecar, the release FFmpeg/FFprobe support files
+  and an isolated private WebView2 runtime. No firewall rule was created or
+  changed.
+
+The newly added Rust unit tests for occupied/released port handling and Windows
+opener classification were not linked in this checkpoint. The configured shared
+desktop test cache was read-only to the sandbox identity; an attempted escalated
+run proved cold and the owner stopped it rather than rebuilding unchanged
+dependencies. The warning-free optimized build and source-level harness cover
+compilation and forbidden-command absence, but the two focused unit-test modules
+remain a required noninteractive check when a warm writable cache is available.
+A fresh short GUI run also remains required for timeline/media behavior, helper
+absence and clean shutdown.

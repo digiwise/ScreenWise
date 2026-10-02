@@ -25,6 +25,7 @@
 let _port = 3030;
 let _apiKey: string | null = null;
 let _authEnabled = false;
+let _cacheNamespace: string | null = null;
 let _initialized = false;
 let _initPromise: Promise<void> | null = null;
 let _fetchPatched = false;
@@ -33,12 +34,17 @@ type LocalApiConfig = {
   key: string | null;
   port: number;
   auth_enabled: boolean;
+  cache_namespace?: string;
 };
 
 function applyApiConfig(config: LocalApiConfig): void {
   _port = config.port;
   _apiKey = config.key;
   _authEnabled = config.auth_enabled;
+  _cacheNamespace =
+    typeof config.cache_namespace === "string" && config.cache_namespace.length > 0
+      ? config.cache_namespace
+      : null;
 
   if (_authEnabled && _apiKey && typeof document !== "undefined") {
     document.cookie = `screenpipe_auth=${_apiKey}; path=/; SameSite=Strict`;
@@ -190,6 +196,14 @@ export function getApiBaseUrl(): string {
  */
 export function getApiPort(): number {
   return _port;
+}
+
+/**
+ * Return the opaque active-store identity used to isolate browser-side caches.
+ * A missing identity disables those caches rather than risking cross-store data.
+ */
+export function getApiCacheNamespace(): string | null {
+  return _cacheNamespace;
 }
 
 /**

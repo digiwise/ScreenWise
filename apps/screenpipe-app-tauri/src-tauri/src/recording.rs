@@ -719,29 +719,21 @@ pub async fn spawn_screenpipe(
         }
     }
 
-    // Kill orphaned processes
-    kill_process_on_port(port).await;
-
-    // Wait for port release
+    // A previous in-process server may need a short time to release its socket.
+    // Never discover or terminate a different process merely because it owns the
+    // configured port: ownership cannot be proven from a port number alone.
     let max_poll_iters = if cfg!(windows) { 40 } else { 20 };
-    for i in 0..max_poll_iters {
-        match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await {
-            Ok(_) => {
-                debug!("Port {} is free after {}ms", port, i * 250);
-                break;
-            }
-            Err(_) => {
-                if i == max_poll_iters - 1 {
-                    warn!(
-                        "Port {} still in use after {}s, will attempt start anyway",
-                        port,
-                        max_poll_iters * 250 / 1000
-                    );
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-            }
-        }
+    if let Err(error) = wait_for_loopback_port_release(
+        port,
+        max_poll_iters,
+        std::time::Duration::from_millis(250),
+    )
+    .await
+    {
+        state.is_starting.store(false, Ordering::SeqCst);
+        state.is_starting_capture.store(false, Ordering::SeqCst);
+        crate::health::set_boot_error(&error);
+        return Err(error);
     }
 
     // Permissions check
@@ -956,116 +948,66 @@ async fn start_capture_internal(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Port cleanup (unchanged)
-// ---------------------------------------------------------------------------
-
-async fn kill_process_on_port(port: u16) {
-    #[allow(unused_variables)]
-    let my_pid = std::process::id().to_string();
-
-    #[cfg(unix)]
-    {
-        let child = match tokio::process::Command::new("lsof")
-            .args(["-nP", "-ti", &format!(":{}", port)])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let child_id = child.id();
-        let output =
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-                .await
-            {
-                Ok(Ok(o)) => o,
-                _ => {
-                    if let Some(pid) = child_id {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .output();
-                    }
-                    warn!("lsof timed out checking port {}, killed", port);
-                    return;
-                }
-            };
-
-        if output.status.success() {
-            let pids_str = String::from_utf8_lossy(&output.stdout);
-            let pids: Vec<&str> = pids_str
-                .trim()
-                .split('\n')
-                .filter(|s| !s.is_empty() && *s != my_pid)
-                .collect();
-            if pids.is_empty() {
-                debug!("No orphaned processes on port {} (only our own PID)", port);
-                return;
+async fn wait_for_loopback_port_release(
+    port: u16,
+    max_attempts: usize,
+    retry_delay: std::time::Duration,
+) -> Result<(), String> {
+    let attempts = max_attempts.max(1);
+    for attempt in 0..attempts {
+        match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+            Ok(listener) => {
+                drop(listener);
+                debug!(
+                    "Local API port {} is free after {} attempt(s)",
+                    port,
+                    attempt + 1
+                );
+                return Ok(());
             }
-            warn!(
-                "Found {} orphaned process(es) on port {}: {:?}. Killing to free port (our pid: {}).",
-                pids.len(), port, pids, my_pid
-            );
-            for pid in &pids {
-                let _ = tokio::process::Command::new("kill")
-                    .args(["-9", pid])
-                    .output()
-                    .await;
+            Err(error) if attempt + 1 == attempts => {
+                return Err(format!(
+                    "Local API port {port} is already in use ({error}). ScreenWise will not terminate the owning process automatically; close the conflicting ScreenWise instance or choose another port."
+                ));
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            info!("Killed orphaned process(es) on port {}", port);
+            Err(_) => tokio::time::sleep(retry_delay).await,
         }
     }
 
-    #[cfg(windows)]
-    {
-        let my_pid_num: u32 = std::process::id();
-        let mut netstat_cmd = tokio::process::Command::new("cmd");
-        netstat_cmd.args(["/C", &format!("netstat -ano | findstr :{}", port)]);
-        {
-            #[allow(unused_imports)]
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            netstat_cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        match netstat_cmd.output().await {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut pids = std::collections::HashSet::new();
-                for line in text.lines() {
-                    if let Some(pid) = line.split_whitespace().last() {
-                        if let Ok(pid_num) = pid.parse::<u32>() {
-                            if pid_num > 0 && pid_num != my_pid_num {
-                                pids.insert(pid_num);
-                            }
-                        }
-                    }
-                }
-                if pids.is_empty() {
-                    debug!("No orphaned processes on port {} (only our own PID)", port);
-                    return;
-                }
-                warn!(
-                    "Found {} orphaned process(es) on port {}: {:?}. Killing to free port (our pid: {}).",
-                    pids.len(), port, pids, my_pid_num
-                );
-                for pid in &pids {
-                    let mut kill_cmd = tokio::process::Command::new("taskkill");
-                    kill_cmd.args(["/F", "/PID", &pid.to_string()]);
-                    {
-                        #[allow(unused_imports)]
-                        use std::os::windows::process::CommandExt;
-                        const CREATE_NO_WINDOW: u32 = 0x08000000;
-                        kill_cmd.creation_flags(CREATE_NO_WINDOW);
-                    }
-                    let _ = kill_cmd.output().await;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                info!("Killed orphaned process(es) on port {}", port);
-            }
-            _ => {}
-        }
+    unreachable!("the bounded port-release loop always returns")
+}
+
+#[cfg(test)]
+mod port_release_tests {
+    use super::wait_for_loopback_port_release;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn occupied_port_fails_without_terminating_the_owner() {
+        let owner = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test owner");
+        let port = owner.local_addr().expect("test owner address").port();
+
+        let error = wait_for_loopback_port_release(port, 1, Duration::ZERO)
+            .await
+            .expect_err("an occupied port must fail closed");
+
+        assert!(error.contains(&format!("port {port}")));
+        assert!(error.contains("will not terminate the owning process"));
+        assert!(owner.local_addr().is_ok(), "the port owner must remain alive");
+    }
+
+    #[tokio::test]
+    async fn released_port_becomes_available_without_external_commands() {
+        let owner = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test owner");
+        let port = owner.local_addr().expect("test owner address").port();
+        drop(owner);
+
+        wait_for_loopback_port_release(port, 1, Duration::ZERO)
+            .await
+            .expect("released port should be reusable");
     }
 }

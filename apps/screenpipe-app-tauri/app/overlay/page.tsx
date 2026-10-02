@@ -11,7 +11,7 @@ import NotificationHandler from "@/components/notification-handler";
 import { useToast } from "@/components/ui/use-toast";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { checkFirstRunNotification } from "@/lib/notifications";
-import { localFetch } from "@/lib/api";
+import { ensureApiReady, getApiCacheNamespace, localFetch } from "@/lib/api";
 
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
 
@@ -109,7 +109,8 @@ export default function OverlayPage() {
   // Check for cached data on mount
   useEffect(() => {
     const checkCache = async () => {
-      const hasCached = await hasCachedData();
+      await ensureApiReady();
+      const hasCached = await hasCachedData(getApiCacheNamespace());
       setHasAnyData(hasCached);
       if (hasCached) {
         // Load cached frames immediately for instant display

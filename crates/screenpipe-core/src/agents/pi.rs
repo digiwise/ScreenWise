@@ -282,6 +282,29 @@ fn find_local_pi_entrypoint() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
+fn find_windows_path_entry_in_dirs(
+    directories: impl IntoIterator<Item = PathBuf>,
+    names: &[&str],
+) -> Option<String> {
+    let directories: Vec<PathBuf> = directories.into_iter().collect();
+    for name in names {
+        for directory in &directories {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_windows_path_entry(names: &[&str]) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    find_windows_path_entry_in_dirs(std::env::split_paths(&path), names)
+}
+
 pub fn find_pi_executable() -> Option<String> {
     // 1. Check screenpipe-managed local install first (preferred — we control the deps)
     if let Some(js) = find_local_pi_entrypoint() {
@@ -330,31 +353,8 @@ pub fn find_pi_executable() -> Option<String> {
     }
 
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        if let Ok(output) = std::process::Command::new("where")
-            .arg("pi")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // Prefer .cmd on Windows
-                for line in stdout.lines() {
-                    let p = line.trim();
-                    if p.ends_with(".cmd") {
-                        return Some(p.to_string());
-                    }
-                }
-                if let Some(first) = stdout.lines().next() {
-                    let p = first.trim().to_string();
-                    if !p.is_empty() {
-                        return Some(p);
-                    }
-                }
-            }
-        }
+    if let Some(path) = find_windows_path_entry(&["pi.cmd", "pi.exe", "pi.bat", "pi"]) {
+        return Some(path);
     }
 
     None
@@ -379,26 +379,9 @@ pub fn find_bash_executable() -> Option<String> {
         }
     }
 
-    // Try `where bash` on PATH.
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        if let Ok(output) = std::process::Command::new("where")
-            .arg("bash")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(line) = stdout.lines().next() {
-                    let path = line.trim().to_string();
-                    if !path.is_empty() && Path::new(&path).exists() {
-                        info!("Found bash on PATH: {}", path);
-                        return Some(path);
-                    }
-                }
-            }
-        }
+    if let Some(path) = find_windows_path_entry(&["bash.exe", "bash.cmd", "bash.bat", "bash"]) {
+        info!("Found bash on PATH: {}", path);
+        return Some(path);
     }
 
     debug!("No bash executable found on Windows");
@@ -420,6 +403,27 @@ pub fn ensure_bash_available() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_lookup_is_in_process_and_honors_name_preference() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("pi.exe"), b"").unwrap();
+        std::fs::write(second.join("pi.cmd"), b"").unwrap();
+
+        let found = find_windows_path_entry_in_dirs(
+            [first, second.clone()],
+            &["pi.cmd", "pi.exe", "pi.bat", "pi"],
+        );
+        assert_eq!(
+            found.as_deref(),
+            Some(second.join("pi.cmd").to_string_lossy().as_ref())
+        );
+    }
 
     /// `sync_user_skills_from` mirrors store skills into a session's
     /// `.pi/skills/`, leaves baseline/hand-authored skills alone, and removes

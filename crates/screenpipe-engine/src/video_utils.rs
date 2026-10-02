@@ -27,8 +27,33 @@ use uuid::Uuid;
 static VIDEO_METADATA_CACHE: LazyLock<RwLock<HashMap<String, (f64, f64)>>> =
     LazyLock::new(|| RwLock::new(HashMap::with_capacity(100)));
 
+fn find_named_file_in_path(
+    directories: impl IntoIterator<Item = PathBuf>,
+    names: &[&str],
+) -> Option<PathBuf> {
+    let directories: Vec<PathBuf> = directories.into_iter().collect();
+    for name in names {
+        for directory in &directories {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn find_ffprobe_on_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let names = ["ffprobe.exe", "ffprobe"];
+    #[cfg(not(windows))]
+    let names = ["ffprobe"];
+    find_named_file_in_path(std::env::split_paths(&path), &names)
+}
+
 /// Get ffprobe path from ffmpeg path, handling Windows .exe extension.
-/// Falls back to searching PATH via `which` if ffprobe isn't alongside ffmpeg.
+/// Falls back to an in-process PATH search if ffprobe isn't alongside ffmpeg.
 pub fn get_ffprobe_path(ffmpeg_path: &Path) -> PathBuf {
     #[cfg(windows)]
     let candidates = [
@@ -44,32 +69,9 @@ pub fn get_ffprobe_path(ffmpeg_path: &Path) -> PathBuf {
         }
     }
 
-    // ffprobe not alongside ffmpeg — try PATH
-    #[cfg(unix)]
-    if let Ok(output) = std::process::Command::new("which").arg("ffprobe").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return PathBuf::from(path_str);
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new("where");
-        cmd.arg("ffprobe");
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if let Ok(output) = cmd.output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Some(first_line) = path_str.lines().next() {
-                    if !first_line.is_empty() {
-                        return PathBuf::from(first_line);
-                    }
-                }
-            }
-        }
+    // ffprobe not alongside ffmpeg — try PATH without spawning a shared shell helper.
+    if let Some(path) = find_ffprobe_on_path() {
+        return path;
     }
 
     warn!(
@@ -78,6 +80,25 @@ pub fn get_ffprobe_path(ffmpeg_path: &Path) -> PathBuf {
     );
     // Return the default path so callers get a clear "not found" error
     candidates[0].clone()
+}
+
+#[cfg(test)]
+mod ffprobe_path_tests {
+    use super::find_named_file_in_path;
+
+    #[test]
+    fn path_lookup_prefers_requested_name_without_spawning_a_helper() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("ffprobe"), b"").unwrap();
+        std::fs::write(second.join("ffprobe.exe"), b"").unwrap();
+
+        let found = find_named_file_in_path([first, second.clone()], &["ffprobe.exe", "ffprobe"]);
+        assert_eq!(found, Some(second.join("ffprobe.exe")));
+    }
 }
 
 #[derive(Debug, Deserialize)]

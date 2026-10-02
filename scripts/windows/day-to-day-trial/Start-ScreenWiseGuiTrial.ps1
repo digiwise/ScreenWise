@@ -24,6 +24,8 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Pat
 if ([string]::IsNullOrWhiteSpace($RuntimeManifestPath)) {
     $RuntimeManifestPath = Join-Path $repoRoot '.local\gui-trial-runtime\runtime.json'
 }
+$RuntimeManifestPath = (Resolve-Path -LiteralPath $RuntimeManifestPath).Path
+$runtimeRoot = Split-Path -Parent $RuntimeManifestPath
 $runtime = Get-Content -Raw -LiteralPath $RuntimeManifestPath | ConvertFrom-Json
 if ("$($runtime.schema)" -ne 'screenwise.gui-trial-runtime.v1') {
     throw 'The GUI trial runtime manifest has an unsupported schema.'
@@ -38,7 +40,7 @@ $ffmpegExecutable = (Resolve-Path -LiteralPath ([string]$runtime.ffmpeg_executab
 $ffprobeExecutable = (Resolve-Path -LiteralPath ([string]$runtime.ffprobe_executable)).Path
 $bunExecutable = (Resolve-Path -LiteralPath ([string]$runtime.bun_executable)).Path
 $scopedPaths = @($GuiExecutablePath, $ffmpegExecutable, $ffprobeExecutable, $bunExecutable, $webViewExecutable)
-$processMonitorManifestPath = Join-Path $repoRoot '.local\gui-trial-runtime\tools\gui-process-tree-monitor.json'
+$processMonitorManifestPath = Join-Path $runtimeRoot 'tools\gui-process-tree-monitor.json'
 if (-not (Test-Path -LiteralPath $processMonitorManifestPath -PathType Leaf)) {
     throw 'The GUI process monitor is not prepared; run Build-ScreenWiseGuiProcessMonitor.ps1.'
 }
@@ -53,7 +55,11 @@ if ((Get-FileHash -Algorithm SHA256 -LiteralPath $processMonitorSource).Hash -ne
     throw 'The GUI process monitor no longer matches its prepared, self-tested manifest.'
 }
 
-$privateRuntimeRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.local\gui-trial-runtime'))
+$privateRuntimeRoot = [IO.Path]::GetFullPath($runtimeRoot)
+$allowedPrivateRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.local'))
+if (-not $privateRuntimeRoot.StartsWith($allowedPrivateRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing a GUI trial runtime outside $allowedPrivateRoot."
+}
 if (-not $webViewExecutable.StartsWith($privateRuntimeRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Refusing a shared WebView2 runtime path; prepare the private trial runtime first.'
 }
@@ -195,6 +201,8 @@ if (Test-Path -LiteralPath $DataDir) {
     }
 }
 [IO.Directory]::CreateDirectory($DataDir) | Out-Null
+$webViewUserDataDir = Join-Path $DataDir '.webview2-profile'
+[IO.Directory]::CreateDirectory($webViewUserDataDir) | Out-Null
 
 $defaultIgnoredWindows = @(
     'bit', 'VPN', 'Trash', 'Private', 'Incognito', 'Wallpaper', 'Settings',
@@ -253,6 +261,7 @@ $psi.UseShellExecute = $false
 $psi.EnvironmentVariables['SCREENPIPE_DATA_DIR'] = $DataDir
 $psi.EnvironmentVariables['SCREENPIPE_PORT'] = "$Port"
 $psi.EnvironmentVariables['WEBVIEW2_BROWSER_EXECUTABLE_FOLDER'] = $webViewDirectory
+$psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $webViewUserDataDir
 $psi.EnvironmentVariables['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = '--disable-background-networking --disable-component-update --disable-domain-reliability --disable-sync --no-first-run'
 $psi.EnvironmentVariables['PATH'] = "$(Split-Path -Parent $ffmpegExecutable);$(Split-Path -Parent $GuiExecutablePath);$($psi.EnvironmentVariables['PATH'])"
 $guiProcess = [Diagnostics.Process]::new()
@@ -268,6 +277,7 @@ $launch = [ordered]@{
     gui_process_id = $guiProcess.Id
     cli_executable_path = $CliExecutablePath
     data_dir = $DataDir
+    webview_user_data_dir = $webViewUserDataDir
     port = $Port
     firewall_group = $FirewallGroup
     scoped_executable_paths = $scopedPaths

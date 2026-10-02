@@ -73,9 +73,11 @@ const READY_EVENT: &str = "owned-browser:ready";
 /// Emitted when the owned browser is about to copy cookies from the
 /// user's real browser. The sidebar answers through the
 /// `owned_browser_resolve_session_access` command.
+#[cfg(not(target_os = "windows"))]
 const SESSION_ACCESS_REQUEST_EVENT: &str = "owned-browser:session-access-request";
 #[cfg(target_os = "windows")]
 const V20_COOKIE_BLOCK_EVENT: &str = "owned-browser:v20-cookie-blocked";
+#[cfg(not(target_os = "windows"))]
 const SESSION_ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Marker prefix for `document.title`-based result delivery. The bridge JS
@@ -154,6 +156,7 @@ enum BrowserSessionDecision {
     ContinueLoggedOut,
 }
 
+#[cfg(not(target_os = "windows"))]
 #[derive(serde::Serialize, Clone)]
 struct BrowserSessionAccessRequestPayload {
     request_id: String,
@@ -195,6 +198,7 @@ static GLOBAL_SESSION_ACCESS_GRANTED: AtomicBool = AtomicBool::new(false);
 static GLOBAL_SESSION_ACCESS_DISABLED: AtomicBool = AtomicBool::new(false);
 /// Guards against showing duplicate prompt cards when multiple
 /// navigations fire before the user answers the first one.
+#[cfg(not(target_os = "windows"))]
 static SESSION_ACCESS_PROMPT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// macOS-only UX guard: after app launch, even if global cookie access is
 /// already persisted, show Screenpipe's own warning before the first Keychain
@@ -1463,14 +1467,18 @@ async fn browser_session_decision_for_url(
         return BrowserSessionDecision::ContinueLoggedOut;
     }
 
-    let already_granted = GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst);
-
     // On Windows there is no OS-level permission dialog (unlike macOS Keychain),
     // so we don't need an explicit consent step. DPAPI cookies inject silently;
     // if they are v20-encrypted inject_cookies_for_url will show the single
     // "Browser login is protected" card which already acts as consent + setup.
     #[cfg(target_os = "windows")]
-    return BrowserSessionDecision::UseBrowserSession;
+    {
+        return BrowserSessionDecision::UseBrowserSession;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let already_granted = GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst);
 
     // macOS: a persisted app-level grant is not enough to avoid surprise.
     // The first Safe Storage read after app launch can still trigger a macOS
@@ -1587,7 +1595,8 @@ async fn browser_session_decision_for_url(
         GLOBAL_SESSION_ACCESS_GRANTED.store(false, Ordering::SeqCst);
         GLOBAL_SESSION_ACCESS_DISABLED.store(true, Ordering::SeqCst);
     }
-    decision
+        decision
+    }
 }
 
 /// macOS only: push a batch of cookies (read from the user's real

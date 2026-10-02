@@ -17,6 +17,10 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
     if ($Expected -ne $Actual) { throw "$Message (expected=$Expected actual=$Actual)" }
 }
 
+function Assert-Match([string]$Text, [string]$Pattern, [string]$Message) {
+    if ($Text -notmatch $Pattern) { throw $Message }
+}
+
 try {
     [IO.Directory]::CreateDirectory($sessionDir) | Out-Null
     $log = @(
@@ -131,6 +135,42 @@ try {
     $finalAudit | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'final-process-audit.json') -Encoding utf8
     $shellObserved = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) | ConvertFrom-Json
     Assert-Equal $true $shellObserved.attention_required 'unexpected shell descendant did not require attention'
+
+    $launcherSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Start-ScreenWiseGuiTrial.ps1')
+    Assert-Match $launcherSource "EnvironmentVariables\['WEBVIEW2_USER_DATA_FOLDER'\]\s*=\s*\`$webViewUserDataDir" 'GUI launcher did not isolate the WebView2 user-data profile'
+    Assert-Match $launcherSource 'webview_user_data_dir\s*=\s*\$webViewUserDataDir' 'GUI launcher did not record the isolated WebView2 profile'
+    Assert-Match $launcherSource "\`$runtimeRoot\s*=\s*Split-Path -Parent \`$RuntimeManifestPath" 'GUI launcher did not derive its private runtime root from the selected manifest'
+    Assert-Match $launcherSource "Join-Path \`$runtimeRoot 'tools\\gui-process-tree-monitor.json'" 'GUI launcher did not select the process monitor beside the runtime manifest'
+
+    $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
+    $desktopMain = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\src\main.rs')
+    if ($desktopMain -match 'Command::new\("setx"\)') {
+        throw 'Desktop startup must not mutate the user environment through setx.exe'
+    }
+    foreach ($sourcePath in @(
+        'crates\screenpipe-core\src\agents\pi.rs',
+        'crates\screenpipe-engine\src\video_utils.rs'
+    )) {
+        $sourceText = Get-Content -Raw -LiteralPath (Join-Path $repoRoot $sourcePath)
+        if ($sourceText -match 'Command::new\("where"\)') {
+            throw "Runtime path lookup must not spawn where.exe: $sourcePath"
+        }
+    }
+
+    $recordingSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\src\recording.rs')
+    foreach ($forbiddenPortCleanup in @('netstat -ano', 'Command::new("taskkill")', 'kill_process_on_port')) {
+        if ($recordingSource.Contains($forbiddenPortCleanup)) {
+            throw "Desktop startup must not terminate or shell-discover a configured port owner: $forbiddenPortCleanup"
+        }
+    }
+    Assert-Match $recordingSource 'will not terminate the owning process automatically' 'Occupied local API ports must fail with a safe diagnostic'
+
+    $commandsSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\src\commands.rs')
+    if ($commandsSource -match 'Command::new\("cmd"\)') {
+        throw 'Desktop path/URI opening must not invoke cmd.exe'
+    }
+    Assert-Match $commandsSource 'tauri_plugin_opener::open_path' 'Desktop local paths must use the native opener'
+    Assert-Match $commandsSource 'shell:AppsFolder\\' 'Windows shell targets must use an explicit URI allowlist'
 
     foreach ($scriptName in @('Start-ScreenWiseGuiTrial.ps1', 'Watch-ScreenWiseGuiTrial.ps1', 'Prepare-ScreenWiseGuiTrialRuntime.ps1', 'Build-ScreenWiseGuiProcessMonitor.ps1')) {
         [void][scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $scriptName)))

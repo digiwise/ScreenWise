@@ -896,7 +896,7 @@ impl UiEvent {
             frame_id: self.frame_id,
         };
         if redacted_fields.get() > 0 {
-            tracing::info!(
+            tracing::debug!(
                 event_type = self.event_type(),
                 redacted_fields = redacted_fields.get(),
                 "Basic PII redaction applied before UI-event persistence"

@@ -3433,7 +3433,7 @@ fn sanitize_meeting_text(value: Option<&str>, use_pii_removal: bool) -> Option<S
         if use_pii_removal {
             let sanitized = remove_pii(text);
             if sanitized != text {
-                info!("Basic PII redaction applied to detected meeting metadata");
+                debug!("Basic PII redaction applied to detected meeting metadata");
             }
             sanitized
         } else {

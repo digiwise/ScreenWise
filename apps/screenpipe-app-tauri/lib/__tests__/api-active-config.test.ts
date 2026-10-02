@@ -16,6 +16,7 @@ vi.mock("@/lib/utils/tauri", () => ({
         key: "sp-active-config-test",
         port: 31579,
         auth_enabled: true,
+        cache_namespace: "store-active",
       };
     }),
   },
@@ -25,6 +26,7 @@ import {
   configureApi,
   ensureApiReady,
   getApiBaseUrl,
+  getApiCacheNamespace,
   getApiPort,
 } from "@/lib/api";
 
@@ -36,6 +38,7 @@ describe("active local API configuration", () => {
 
     expect(getApiPort()).toBe(31579);
     expect(getApiBaseUrl()).toBe("http://localhost:31579");
+    expect(getApiCacheNamespace()).toBe("store-active");
 
     configureApi({ port: 3030, authEnabled: true });
     expect(getApiPort()).toBe(31579);

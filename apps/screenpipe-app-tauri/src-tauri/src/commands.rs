@@ -315,18 +315,24 @@ mod tests {
 
     #[test]
     fn fallback_emits_seeded_key_with_auth_enabled() {
-        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 31579);
+        let v = fallback_local_api_config(
+            Some("sp-cold-spawn-test".to_string()),
+            31579,
+            "store-cold".to_string(),
+        );
         assert_eq!(v["key"].as_str(), Some("sp-cold-spawn-test"));
         assert_eq!(v["port"], 31579);
         assert_eq!(v["auth_enabled"], true);
+        assert_eq!(v["cache_namespace"], "store-cold");
     }
 
     #[test]
     fn fallback_emits_null_key_but_keeps_auth_required_when_unseeded() {
-        let v = fallback_local_api_config(None, 3030);
+        let v = fallback_local_api_config(None, 3030, "store-empty".to_string());
         assert!(v["key"].is_null());
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], true);
+        assert_eq!(v["cache_namespace"], "store-empty");
     }
 }
 
@@ -482,6 +488,7 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
                 "key": core.local_api_key.clone(),
                 "port": core.port,
                 "auth_enabled": true,
+                "cache_namespace": local_api_cache_namespace(&core.data_dir),
             });
         }
     }
@@ -491,17 +498,27 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
+    let settings = crate::store::SettingsStore::get(&app_handle)
+        .ok()
+        .flatten();
     let fallback_port = std::env::var("SCREENPIPE_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .or_else(|| {
-            crate::store::SettingsStore::get(&app_handle)
-                .ok()
-                .flatten()
-                .map(|store| store.recording.port)
-        })
+        .or_else(|| settings.as_ref().map(|store| store.recording.port))
         .unwrap_or(3030);
-    fallback_local_api_config(crate::store::resolved_api_auth_key(), fallback_port)
+    let fallback_data_dir = std::env::var_os("SCREENPIPE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            settings
+                .as_ref()
+                .map(|store| crate::config::resolve_data_dir(&store.data_dir).0)
+        })
+        .unwrap_or_else(screenpipe_core::paths::default_screenpipe_data_dir);
+    fallback_local_api_config(
+        crate::store::resolved_api_auth_key(),
+        fallback_port,
+        local_api_cache_namespace(&fallback_data_dir),
+    )
 }
 
 /// Resolve a native application icon without exposing a local HTTP listener.
@@ -588,24 +605,60 @@ pub fn dismiss_notification(id: String) -> bool {
 /// is covered by a unit test without needing a tauri::AppHandle. The caller
 /// resolves the configured/environment-overridden port because the server may
 /// not yet have registered itself in `RecordingState`.
-fn fallback_local_api_config(cached_key: Option<String>, port: u16) -> serde_json::Value {
+fn local_api_cache_namespace(data_dir: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let resolved = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let mut identity = resolved.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    identity.make_ascii_lowercase();
+    let digest = Sha256::digest(identity.as_bytes());
+    format!("{digest:x}")
+}
+
+fn fallback_local_api_config(
+    cached_key: Option<String>,
+    port: u16,
+    cache_namespace: String,
+) -> serde_json::Value {
     serde_json::json!({
         "key": cached_key,
         "port": port,
         "auth_enabled": true,
+        "cache_namespace": cache_namespace,
     })
 }
 
 #[cfg(test)]
 mod local_api_fallback_tests {
-    use super::fallback_local_api_config;
+    use super::{fallback_local_api_config, local_api_cache_namespace};
 
     #[test]
     fn cold_start_fallback_preserves_non_default_active_port() {
-        let value = fallback_local_api_config(Some("sp-test".to_string()), 31579);
+        let value = fallback_local_api_config(
+            Some("sp-test".to_string()),
+            31579,
+            "store-a".to_string(),
+        );
         assert_eq!(value["key"], "sp-test");
         assert_eq!(value["port"], 31579);
         assert_eq!(value["auth_enabled"], true);
+        assert_eq!(value["cache_namespace"], "store-a");
+    }
+
+    #[test]
+    fn timeline_cache_namespace_is_stable_per_store_and_separates_stores() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+
+        let first_id = local_api_cache_namespace(&first);
+        assert_eq!(first_id, local_api_cache_namespace(&first));
+        assert_ne!(first_id, local_api_cache_namespace(&second));
+        assert_eq!(first_id.len(), 64);
+        assert!(first_id.chars().all(|character| character.is_ascii_hexdigit()));
     }
 }
 
@@ -2771,16 +2824,11 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
+        let local_path = validate_absolute_local_path(&path)?;
         let obsidian_uri = format!("obsidian://open?path={}", urlencoding::encode(&path));
-        let mut a = Command::new("cmd");
-        a.args(["/C", "start", "", &obsidian_uri]);
-        a.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let mut b = Command::new("cmd");
-        b.args(["/C", "start", "", &path]);
-        b.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if a.spawn().is_ok() || b.spawn().is_ok() {
+        if tauri_plugin_opener::open_url(&obsidian_uri, None::<&str>).is_ok()
+            || tauri_plugin_opener::open_path(&local_path, None::<&str>).is_ok()
+        {
             Ok(())
         } else {
             Err(format!("failed to open note path: {}", path))
@@ -2802,23 +2850,13 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
 pub fn open_windows_shell_target(target: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &target])
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW
-
-        match cmd.status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, status
-            )),
-            Err(e) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, e
-            )),
+        match classify_windows_open_target(&target)? {
+            WindowsOpenTarget::LocalPath(path) => {
+                tauri_plugin_opener::open_path(path, None::<&str>)
+                    .map_err(|error| format!("failed to open local Windows path: {error}"))
+            }
+            WindowsOpenTarget::Uri(uri) => tauri_plugin_opener::open_url(uri, None::<&str>)
+                .map_err(|error| format!("failed to open allowlisted Windows URI: {error}")),
         }
     }
 
@@ -2826,6 +2864,107 @@ pub fn open_windows_shell_target(target: String) -> Result<(), String> {
     {
         let _ = target;
         Err("Windows shell targets are only supported on Windows".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq)]
+enum WindowsOpenTarget {
+    LocalPath(std::path::PathBuf),
+    Uri(String),
+}
+
+#[cfg(target_os = "windows")]
+fn validate_absolute_local_path(path: &str) -> Result<std::path::PathBuf, String> {
+    if path.is_empty() || path.contains('\0') {
+        return Err("local path is empty or contains a NUL byte".to_string());
+    }
+
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("local path must be absolute".to_string());
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "windows")]
+fn classify_windows_open_target(target: &str) -> Result<WindowsOpenTarget, String> {
+    if std::path::Path::new(target).is_absolute() {
+        return validate_absolute_local_path(target).map(WindowsOpenTarget::LocalPath);
+    }
+
+    if let Some(app_id) = target.strip_prefix("shell:AppsFolder\\") {
+        let valid_app_id = !app_id.is_empty()
+            && app_id.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '.' | '_' | '-' | '!')
+            });
+        if valid_app_id {
+            return Ok(WindowsOpenTarget::Uri(target.to_string()));
+        }
+        return Err("Windows AppsFolder target contains unsupported characters".to_string());
+    }
+
+    if target.starts_with("ms-settings:") {
+        let parsed = url::Url::parse(target)
+            .map_err(|_| "Windows settings target is not a valid URI".to_string())?;
+        if parsed.scheme() == "ms-settings" {
+            return Ok(WindowsOpenTarget::Uri(target.to_string()));
+        }
+    }
+
+    Err("Windows target must be an absolute local path or an allowlisted shell/settings URI"
+        .to_string())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_open_target_tests {
+    use super::{
+        classify_windows_open_target, validate_absolute_local_path, WindowsOpenTarget,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn absolute_paths_preserve_spaces_and_shell_metacharacters_as_data() {
+        let path = r"C:\ScreenWise Notes\draft & review (final).md";
+        assert_eq!(
+            validate_absolute_local_path(path).unwrap(),
+            PathBuf::from(path)
+        );
+        assert_eq!(
+            classify_windows_open_target(path).unwrap(),
+            WindowsOpenTarget::LocalPath(PathBuf::from(path))
+        );
+    }
+
+    #[test]
+    fn allows_only_explicit_windows_uri_families() {
+        assert!(matches!(
+            classify_windows_open_target(
+                r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"
+            ),
+            Ok(WindowsOpenTarget::Uri(_))
+        ));
+        assert!(matches!(
+            classify_windows_open_target("ms-settings:privacy-microphone"),
+            Ok(WindowsOpenTarget::Uri(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_commands_relative_paths_and_shell_metacharacters_in_uris() {
+        for target in [
+            "cursor",
+            r"notes\today.md",
+            r"shell:AppsFolder\Example!App & calc.exe",
+            "https://example.com",
+            "cmd.exe /C whoami",
+        ] {
+            assert!(
+                classify_windows_open_target(target).is_err(),
+                "unexpectedly accepted {target:?}"
+            );
+        }
     }
 }
 

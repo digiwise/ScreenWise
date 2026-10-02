@@ -80,7 +80,7 @@ fn sanitize_meeting_text(value: Option<&str>, use_pii_removal: bool) -> Option<S
         if use_pii_removal {
             let sanitized = remove_pii(text);
             if sanitized != text {
-                tracing::info!("Basic PII redaction applied to meeting metadata");
+                tracing::debug!("Basic PII redaction applied to meeting metadata");
             }
             sanitized
         } else {

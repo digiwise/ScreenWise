@@ -115,6 +115,7 @@ pub fn get_boot_phase_snapshot() -> BootPhaseSnapshot {
 /// Used as a gate before actions that race process teardown against
 /// still-initializing native sessions — see #3622 (onnxruntime SIGSEGV during
 /// auto-updater restart while `AudioManager::new` is mid-`create_session`).
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootReadiness {
     /// Phase is still pre-ready (`starting`, `migrating_database`,
@@ -127,6 +128,7 @@ pub enum BootReadiness {
     Errored,
 }
 
+#[cfg(test)]
 fn read_boot_phase() -> String {
     // Match existing pattern in this file: recover from poisoning rather than
     // silently returning a wrong answer (which would cause wait loops to spin
@@ -138,6 +140,7 @@ fn read_boot_phase() -> String {
         .clone()
 }
 
+#[cfg(test)]
 pub fn boot_readiness() -> BootReadiness {
     match read_boot_phase().as_str() {
         "ready" => BootReadiness::Ready,
@@ -149,6 +152,7 @@ pub fn boot_readiness() -> BootReadiness {
 /// Block until boot reaches a terminal state (`Ready` or `Errored`) or `timeout`
 /// elapses, then return the final readiness. Callers decide what to do with
 /// `Errored` and timed-out `Pending`.
+#[cfg(test)]
 pub async fn wait_for_boot_ready(timeout: Duration) -> BootReadiness {
     let deadline = Instant::now() + timeout;
     loop {
