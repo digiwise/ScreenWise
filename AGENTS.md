@@ -54,6 +54,25 @@ Detailed pre-publication maintainer notes may exist under ignored `.local/`.
 They are not needed by a fresh clone and are not current instructions or renewed
 permission to inspect captured data. Public documents contain sanitized summaries.
 
+## Resource-aware work
+
+For this policy, expensive work means an operation likely to consume meaningful
+wall time, compute, storage, network traffic, tokens, paid quota, user attention
+or UI control, or to create enough state that repeating it would be costly. This
+classification requires inspection and monitoring, not owner approval.
+
+- Before expensive work, inspect existing processes, caches, outputs and
+  repository conventions. Reuse the canonical path and configuration.
+- Do not silently cross an established resource boundary to bypass capacity,
+  permission or tooling problems. Diagnose first; reclaim only clearly
+  disposable generated state. Ask the owner before crossing the boundary.
+- Treat path, profile, toolchain, features and environment as cache identity.
+  Never move or clean active state, and choose the final location before rebuilding.
+- Watch expensive operations as they start. Stop and diagnose unexpected broad
+  rebuilds, downloads or retries.
+- Use the cheapest validation that proves the required behavior and reuse valid
+  results. Proceed autonomously when the convention is clear and reversible.
+
 ## Build and dependency discipline
 
 - Do not run `cargo update`; use `--locked`. Use `--offline` only after required
@@ -62,11 +81,37 @@ permission to inspect captured data. Public documents contain sanitized summarie
   that exercises the affected behavior. Do not rebuild the complete release
   application after every hypothesis. For Windows UIA, keyboard hooks and
   privacy admission, first use `screenpipe-a11y` unit tests and use or add a
-  narrowly scoped Windows-only live integration test. Build the locked release
-  executable for an evidence-backed candidate before its end-to-end validation;
-  if that validation fails, gather new evidence before another full rebuild.
+  narrowly scoped Windows-only live integration test. Use the incremental
+  `release-dev` profile for intermediate optimized builds and ordinary
+  interactive/manual trial iterations: `cargo build --profile release-dev
+  --locked`. A `release-dev` run may support a clearly labelled, scoped
+  full-application behavior claim, but it does not validate the production
+  release artifact or release-profile performance. Ensure executable paths,
+  runtime manifests, hashes, sidecars and firewall rules match the exact profile.
   Any focused live test that takes focus or generates input still requires the
   interactive-validation readiness gate.
+- Before an expensive Rust or native build, finish and format all planned edits
+  to the affected crate, including delegated edits. Do not compile a crate while
+  another worker may still modify it. A Cargo test-name filter limits execution,
+  not compilation; avoid running both a dependency's broad suite and a dependent
+  crate's suite unless they provide distinct required evidence. Reuse one stable
+  Developer PowerShell environment, and do not repeat a successful suite unless
+  relevant source, features, profile, toolchain or native configuration changed.
+  For intermediate desktop Rust edits, run `cargo check -p screenpipe-app --tests
+  --locked` before paying for a linked test binary; it does not replace the
+  focused tests required for a settled candidate. Reuse a stable, locally chosen
+  `CARGO_TARGET_DIR` for desktop tests across turns instead of creating a fresh
+  target directory per run. Keep this machine-local cache outside tracked source,
+  allow for several gigabytes, and never clear it while a build is active.
+- Run `cargo build --release --locked` only for a settled candidate when preparing
+  a public push, package, distribution, tag or release; validating behavior
+  specifically attributed to the production release artifact; changing Cargo
+  profiles, release-only configuration, build scripts, native linkage, packaging,
+  sidecar layout, signing or installer behavior; or when the owner explicitly
+  requests it. Meaningful runtime changes may be committed after appropriate
+  targeted tests and a successful `release-dev` build. Batch related commits and
+  perform one full release build at the final applicable milestone; do not repeat
+  it unless relevant source or production-build inputs changed.
 - Do not casually change dependency versions or either Rust lockfile. Earlier
   hardening intentionally changed lockfile graphs; compare against pre-task HEAD,
   not the obsolete claim that they still equal the upstream baseline.
@@ -139,10 +184,11 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
 ## Before committing or publishing
 
 1. Run `cargo fmt --all -- --check` for Rust changes and appropriate targeted tests.
-2. Before committing meaningful runtime/build changes or claiming full-app
-   validation, run `cargo build --release --locked` in Developer PowerShell and
-   an appropriately scoped smoke test. During diagnosis, defer this full build
-   until narrow tests establish a concrete candidate fix.
+2. Before committing meaningful runtime changes, run an appropriately scoped
+   smoke test and `cargo build --profile release-dev --locked` in Developer
+   PowerShell. Apply the full-release milestone rules above to build-system
+   changes and production-artifact claims; ordinary commits and clearly labelled
+   `release-dev` validation do not require full LTO.
 3. Inspect the full diff and `git diff --check`; check both Rust lockfiles.
 4. Update concise setup/validation documentation, including failures and limits.
 5. Inspect the exact staged paths; never include private notes, captures, logs,

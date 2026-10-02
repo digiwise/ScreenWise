@@ -71,6 +71,81 @@ reason to run old bootstrap scripts or installers. Check applicable tool scripts
 before installing optional dependencies. Do not run broad `clean` scripts: some
 inherited commands remove provisioned sidecars and unrelated build inputs.
 
+## Build profiles and iteration time
+
+Cargo keeps test/debug and release outputs separately under `target\debug` and
+`target\release`; switching profiles does not overwrite the other profile's
+artifacts. It also cannot reuse a release object as a test object. Cache reuse is
+specific to the compiler, target, profile, enabled features, Rust flags and
+relevant build-script environment. Keep the same Developer PowerShell variables
+for related runs, and avoid changing features between otherwise equivalent tests.
+
+A test-name filter controls which tests execute after compilation. It does not
+make a small test binary: for example, a filtered `screenpipe-engine --lib` run
+still compiles and links the complete Engine library test target. Finish and
+format all related edits before starting that build, and avoid separately running
+a dependency's broad suite when the higher-level focused regression already gives
+the required evidence.
+
+The desktop application is a separate Cargo workspace and its test binary pulls
+in the full Tauri, capture and audio graph. Reuse one persistent repository-local
+target directory for its checks and tests; a fresh directory turns even a
+filtered test into a cold build. The ignored location below follows Cargo's
+normal target-tree convention and can be overridden explicitly for a constrained
+machine:
+
+```powershell
+$repoRoot = (Get-Location).Path
+if ([string]::IsNullOrWhiteSpace($env:SCREENWISE_DESKTOP_CARGO_TARGET_DIR)) {
+    $env:SCREENWISE_DESKTOP_CARGO_TARGET_DIR = Join-Path `
+        $repoRoot 'target\desktop-tests'
+}
+$env:CARGO_TARGET_DIR = $env:SCREENWISE_DESKTOP_CARGO_TARGET_DIR
+```
+
+Keep the same toolchain, features and native environment when reusing that
+cache. Keep it at the short repository-level path shown above: putting it below
+the desktop workspace's own `target` tree can exceed CMake/MSVC object-path
+limits while compiling libsamplerate. It may consume several gigabytes; clear
+it only deliberately when no build is active. During intermediate editing,
+catch type and integration errors without the expensive final test link:
+
+```powershell
+cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' check `
+  -p screenpipe-app `
+  --manifest-path apps\screenpipe-app-tauri\src-tauri\Cargo.toml `
+  --tests --locked --offline
+```
+
+After related edits settle, run the required focused linked tests once against
+the same target directory. `cargo check` does not establish runtime behavior,
+and a test-name filter reduces execution rather than first-build compilation.
+
+The root development profile optimizes dependencies at level 2 without their
+debug symbols. This improves runtime and limits artifact size, but makes an
+uncached test dependency graph more expensive to compile. The full `release`
+profile uses full LTO and one code-generation unit and is intentionally slow.
+Use it for a settled evidence candidate. For intermediate optimized executable
+checks, the incremental `release-dev` profile is available:
+
+```powershell
+cargo build --profile release-dev --locked
+```
+
+The workspace permits 16 parallel build jobs. That can be counterproductive on
+a machine that begins paging. If compilation creates sustained memory pressure,
+retry a comparable cleanly identified build with a lower per-command limit and
+record which setting is faster on that machine, for example:
+
+```powershell
+cargo test -j 8 -p <affected-crate> --lib <focused-filter> --locked
+```
+
+Do not treat eight jobs as a repository requirement; available memory and native
+compiler load determine the useful value. Avoid a workspace-wide `cargo clean`
+to address ordinary slowness. If a native package genuinely has incompatible
+cached configuration, clean only that exact package as described below.
+
 ## Native tests
 
 For builds and tests that link libsamplerate, use Ninja Multi-Config. If that
