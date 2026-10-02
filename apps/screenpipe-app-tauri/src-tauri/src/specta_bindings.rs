@@ -128,8 +128,12 @@ mod tests {
         let generated = temp_bindings_path();
         export_typescript_bindings_to(&generated).expect("failed to export tauri-specta bindings");
 
-        let checked_in_content = std::fs::read(&checked_in).expect("read checked-in bindings");
-        let generated_content = std::fs::read(&generated).expect("read generated bindings");
+        let checked_in_content = std::fs::read_to_string(&checked_in)
+            .expect("read checked-in bindings")
+            .replace("\r\n", "\n");
+        let generated_content = std::fs::read_to_string(&generated)
+            .expect("read generated bindings")
+            .replace("\r\n", "\n");
 
         assert_eq!(
             checked_in_content, generated_content,

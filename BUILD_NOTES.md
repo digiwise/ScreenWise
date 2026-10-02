@@ -514,3 +514,53 @@ and both content-free PowerShell trial regressions also passed. Existing
 warnings remained for `unpdf` `import.meta` bundling and unused/dead Rust paths;
 neither stopped the build. See `VALIDATION_REGISTER.md` for the bounded GUI live
 result and its unresolved timeline, UIA/screen-text and transient-helper limits.
+
+## GUI trial follow-up candidate (2026-10-02)
+
+The first GUI trial's three bounded findings were traced to concrete local
+paths. Persisted/default settings could overwrite the active non-default API
+port during frontend initialization. Vision output appended `data` to an
+already-final data directory, while Tauri's static asset scope did not include a
+custom trial directory. Async text reconciliation also cleared sanitized UIA
+tree JSON and accessibility elements even when its output was byte-identical.
+Finally, Windows icon discovery launched PowerShell for Appx and recursive file
+enumeration, creating unscoped shared-system descendants.
+
+The candidate makes active IPC authoritative after initialization, retains the
+configured/environment port in the native cold fallback, writes media directly
+to the configured final directory and grants the asset protocol only that
+run's recursive media tree. Unchanged async-redaction results now retain the
+already-sanitized structure; changed results still clear structured derivatives
+fail-closed. Icon discovery now uses the registry, Start Menu shortcuts and
+in-process bounded directory inspection without spawning a shell.
+
+Background validation completed without starting recording:
+
+- 39 Vitest files/406 tests, 13 Bun files/150 tests and `tsc --noEmit` passed.
+- The desktop suite executed 134 passing tests with four ignored; its sole
+  failure was a bytewise CRLF mismatch in the generated-binding guard. The guard
+  now normalizes line endings and its focused rerun passed. This included the
+  active-port fallback and no-shell nested-shortcut regressions.
+- The redaction crate passed 101 unit and three integration tests; one doc test
+  remained intentionally ignored. The engine final-media-directory regression
+  passed in the documented native environment.
+- The fixed public-marker GUI capture fixture and count-only evaluator passed
+  their native Windows PowerShell 5.1 self-tests. They access no clipboard,
+  keyboard hook, audio device, recorder data or network during preparation.
+- The locked offline root release build passed in 10m36s. A standalone desktop
+  `cargo build --release` reached link but failed with a Tauri/MSVC CRT link
+  mismatch; it is not claimed as a pass. The documented Tauri path,
+  using the already-built frontend through the direct installed Node entry point,
+  then produced the unsigned executable and NSIS bundle successfully. The GUI
+  SHA-256 is `837620145F897D8D59B24E1D1F3CC316B7362618C7769A6ECEBFF5DC586A72BE`.
+- The private runtime manifest was refreshed. Its five exact executable paths
+  passed firewall-rule inspection and the fixed scoped-blocked/unscoped-control
+  TCP preflight on port 31579; local audio-model preflight also passed. The
+  preflight explicitly reported `recording_started: false`.
+
+One short interactive GUI run remains. It should use a fresh data directory and
+the fixed-marker fixture to confirm initial non-default-port timeline loading,
+readable new media, positive UIA and OCR marker counts, and absence of transient
+PowerShell/conhost or other unexpected network-capable children. No arbitrary
+captured content needs review. These live behaviors are not claimed by the
+background results above.

@@ -62,6 +62,10 @@ pub struct VisionManagerConfig {
     pub capture_on_clipboard: Option<bool>,
 }
 
+fn media_output_directory(output_path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(output_path)
+}
+
 /// Status of the VisionManager
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisionManagerStatus {
@@ -409,7 +413,9 @@ impl VisionManager {
         let output_path = self.config.output_path.clone();
         let device_name = format!("monitor_{}", monitor_id);
 
-        // Create snapshot writer for this monitor's data directory.
+        // `VisionManagerConfig::output_path` is already the final media data
+        // directory. Appending another `data` produced .../data/data paths and
+        // made snapshots unreadable through the desktop asset protocol.
         //
         // Both knobs (JPEG quality + max width) are derived from the user's
         // single `videoQuality` setting via `screenpipe_core::video` — that
@@ -427,7 +433,7 @@ impl VisionManager {
             .unwrap_or(baseline_q);
         let max_snapshot_width = video_quality_to_max_snapshot_width(&self.config.video_quality);
         let snapshot_writer = Arc::new(SnapshotWriter::new(
-            format!("{}/data", output_path),
+            media_output_directory(&output_path),
             initial_jpeg_quality,
             max_snapshot_width,
         ));
@@ -523,7 +529,7 @@ impl VisionManager {
                     monitor.clone(),
                     monitor_id,
                     device_name.clone(),
-                    std::path::PathBuf::from(format!("{}/data", output_path)),
+                    media_output_directory(&output_path),
                     hd_config,
                     Arc::new(AtomicBool::new(false)),
                     high_fps_controller.clone(),
@@ -663,6 +669,15 @@ mod tests {
     use screenpipe_core::Language;
     use screenpipe_db::DatabaseManager;
     use screenpipe_screen::PipelineMetrics;
+
+    #[test]
+    fn configured_media_directory_is_not_nested_under_another_data_directory() {
+        let configured = std::path::PathBuf::from("recording-root").join("data");
+        assert_eq!(
+            media_output_directory(configured.to_str().unwrap()),
+            configured
+        );
+    }
 
     async fn make_vm_with_monitor_ids(monitor_ids: Vec<String>) -> VisionManager {
         let db = Arc::new(

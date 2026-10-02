@@ -570,8 +570,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 		await settingsStore.set(updates);
 		// Settings will be updated via the listener
 
-		// Only update the port in the API module immediately. A replacement API
-		// key takes effect after the recorder restarts.
+		// Record the pending preference without overriding the port of the active
+		// server. get_local_api_config remains authoritative after restart.
 		if ("port" in updates) {
 			const { configureApi } = await import("@/lib/api");
 			const merged = { ...settings, ...updates };

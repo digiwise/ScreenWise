@@ -68,16 +68,6 @@ pub async fn get_app_icon(
 #[cfg(target_os = "windows")]
 use lazy_static::lazy_static;
 #[cfg(target_os = "windows")]
-use std::sync::Arc;
-#[cfg(target_os = "windows")]
-use tokio::sync::Semaphore;
-
-#[cfg(target_os = "windows")]
-lazy_static! {
-    static ref SEMAPHORE: Arc<Semaphore> = Arc::new(Semaphore::new(5));
-}
-
-#[cfg(target_os = "windows")]
 pub async fn get_app_icon(
     app_name: &str,
     app_path: Option<String>,
@@ -91,10 +81,10 @@ pub async fn get_app_icon(
         if let Some(path) = get_exe_by_reg_key(app_name) {
             return Some(path);
         }
-        if let Some(path) = get_exe_by_appx(app_name).await {
+        if let Some(path) = get_start_menu_shortcut(app_name) {
             return Some(path);
         }
-        if let Some(path) = get_exe_from_potential_path(app_name).await {
+        if let Some(path) = get_exe_from_potential_path(app_name) {
             return Some(path);
         }
         None
@@ -228,16 +218,6 @@ fn get_exe_by_reg_key(app_name: &str) -> Option<String> {
     None
 }
 
-#[cfg(target_os = "windows")]
-fn powershell_exe() -> std::path::PathBuf {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    std::path::PathBuf::from(system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe")
-}
-
 /// Strip dots, dashes, underscores and spaces so "screenpi.pe" matches "screenpipe",
 /// "wezterm-gui" matches "wezterm", etc.
 #[cfg(target_os = "windows")]
@@ -263,8 +243,57 @@ fn names_match(folder: &str, search: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-async fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
+fn get_start_menu_shortcut(app_name: &str) -> Option<String> {
+    let mut roots = Vec::new();
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        roots.push(
+            std::path::PathBuf::from(program_data).join("Microsoft\\Windows\\Start Menu\\Programs"),
+        );
+    }
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        roots.push(
+            std::path::PathBuf::from(app_data).join("Microsoft\\Windows\\Start Menu\\Programs"),
+        );
+    }
+    roots
+        .iter()
+        .find_map(|root| find_start_menu_shortcut_in_root(root, app_name, 0))
+}
+
+#[cfg(target_os = "windows")]
+fn find_start_menu_shortcut_in_root(
+    root: &std::path::Path,
+    app_name: &str,
+    depth: usize,
+) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_start_menu_shortcut_in_root(&path, app_name, depth + 1) {
+                return Some(found);
+            }
+            continue;
+        }
+        let is_shortcut = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("lnk"));
+        let matches = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| names_match(value, app_name));
+        if is_shortcut && matches {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
     let app_name = app_name.strip_suffix(".exe").unwrap_or(&app_name);
 
     let app_lower = app_name.to_lowercase();
@@ -354,135 +383,6 @@ async fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
         }
     }
 
-    let potential_paths = [
-        (
-            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
-            true,
-        ),
-        (r"C:\Windows\", false),
-    ];
-    for (path, recursive) in &potential_paths {
-        let command = if *recursive {
-            format!(
-                r#"
-                    Get-ChildItem -Path "{}" -Filter "*{}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}
-                    "#,
-                path, app_name
-            )
-        } else {
-            format!(
-                r#"
-                    Get-ChildItem -Path "{}" -Filter "*{}*.exe" | ForEach-Object {{ $_.FullName }}
-                    "#,
-                path, app_name
-            )
-        };
-
-        let _permit = SEMAPHORE.acquire().await.unwrap();
-
-        let output = tokio::process::Command::new(powershell_exe())
-            .arg("-NoProfile")
-            .arg("-WindowStyle")
-            .arg("hidden")
-            .arg("-Command")
-            .arg(command)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .await
-            .ok()?;
-
-        if output.status.success() {
-            let stdout = std::str::from_utf8(&output.stdout).ok()?;
-            if !stdout.is_empty() {
-                return stdout.lines().next().map(str::to_string);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "windows")]
-async fn get_exe_by_appx(app_name: &str) -> Option<String> {
-    use std::str;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let app_name = app_name.strip_suffix(".exe").unwrap_or(&app_name);
-    let app_name_withoutspace = app_name.replace(" ", "");
-
-    let _permit = SEMAPHORE.acquire().await.unwrap();
-
-    let output = tokio::process::Command::new(powershell_exe())
-        .arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("hidden")
-        .arg("-Command")
-        .arg(format!(
-            r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{}*" }}"#,
-            app_name_withoutspace
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = str::from_utf8(&output.stdout).ok()?;
-    let package_name = stdout
-        .lines()
-        .find(|line| line.contains("PackageFullName"))
-        .and_then(|line| line.split(':').nth(1))
-        .map(str::trim)?;
-
-    let exe_output = tokio::process::Command::new(powershell_exe())
-        .arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("hidden")
-        .arg("-Command")
-        .arg(format!(
-            r#"
-                        Get-ChildItem -Path "C:\Program Files\WindowsApps\{}\*" -Filter "*{}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}
-                    "#,
-            package_name,
-            app_name_withoutspace
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
-
-    if exe_output.status.success() {
-        let exe_stdout = str::from_utf8(&exe_output.stdout).ok()?;
-        if !exe_stdout.is_empty() {
-            return exe_stdout.lines().next().map(str::to_string);
-        }
-    }
-    // second attempt with space if the first attempt couldn't find exe
-    let exe_output = tokio::process::Command::new(powershell_exe())
-        .arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("hidden")
-        .arg("-Command")
-        .arg(format!(
-            r#"
-                        Get-ChildItem -Path "C:\Program Files\WindowsApps\{}\*" -Filter "*{}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}
-                    "#,
-            package_name,
-            app_name
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
-
-    if exe_output.status.success() {
-        let exe_stdout = str::from_utf8(&exe_output.stdout).ok()?;
-        if !exe_stdout.is_empty() {
-            return exe_stdout.lines().next().map(str::to_string);
-        }
-    }
     None
 }
 
@@ -751,6 +651,28 @@ pub fn list_installed_apps() -> Vec<String> {
     }
 
     names.into_iter().collect()
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn finds_nested_start_menu_shortcut_without_spawning_a_shell() {
+        let root = std::env::temp_dir().join(format!(
+            "screenwise-icon-shortcut-test-{}",
+            std::process::id()
+        ));
+        let nested = root.join("Utilities");
+        std::fs::create_dir_all(&nested).unwrap();
+        let shortcut = nested.join("Synthetic Cedar App.lnk");
+        std::fs::write(&shortcut, b"synthetic shortcut test").unwrap();
+
+        let found = find_start_menu_shortcut_in_root(&root, "synthetic-cedar-app", 0);
+
+        assert_eq!(found.as_deref(), shortcut.to_str());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(target_os = "windows")]

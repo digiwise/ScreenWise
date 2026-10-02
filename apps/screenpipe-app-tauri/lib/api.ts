@@ -145,23 +145,27 @@ export function redactApiUrlForLogs(url: string): string {
 }
 
 /**
- * Configure the API module explicitly. Called by SettingsProvider when
- * settings change (port, auth key). Overrides the IPC-loaded values.
+ * Configure the API module from persisted settings. Called by SettingsProvider
+ * when settings change. Before active IPC initialization it provides the cold
+ * fallback; after initialization, the running server's port remains authoritative.
  */
 export function configureApi(opts: {
   port?: number;
   apiKey?: string | null;
   authEnabled?: boolean;
 }) {
-  if (opts.port !== undefined) _port = opts.port;
+  // The active server IPC is authoritative once initialization completes.
+  // Persisted settings can differ from the running server during cold start,
+  // environment-overridden validation, or a pending restart. Applying a late
+  // settings value here previously sent WebSockets back to the default :3030
+  // even though get_local_api_config had reported the real active port.
+  if (opts.port !== undefined && !_initialized) _port = opts.port;
   // Only overwrite the cached key when the caller has a real value to set.
   // settings.apiKey is empty for users on the auto-generated server key, and
   // wiping _apiKey to null here would race with `ensureInitialized` and break
   // every WS connection (cookie auth + ?token= both come from this same var).
   if (opts.apiKey) _apiKey = opts.apiKey;
   if (opts.authEnabled !== undefined) _authEnabled = opts.authEnabled;
-  _initialized = true;
-
   // Update auth cookie. Only clear when auth is explicitly disabled — if it's
   // enabled but _apiKey is momentarily null (init not finished), leave any
   // existing cookie alone so ensureInitialized can rewrite it once the IPC

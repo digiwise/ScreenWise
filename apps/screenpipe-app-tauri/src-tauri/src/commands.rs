@@ -315,15 +315,15 @@ mod tests {
 
     #[test]
     fn fallback_emits_seeded_key_with_auth_enabled() {
-        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()));
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 31579);
         assert_eq!(v["key"].as_str(), Some("sp-cold-spawn-test"));
-        assert_eq!(v["port"], 3030);
+        assert_eq!(v["port"], 31579);
         assert_eq!(v["auth_enabled"], true);
     }
 
     #[test]
     fn fallback_emits_null_key_but_keeps_auth_required_when_unseeded() {
-        let v = fallback_local_api_config(None);
+        let v = fallback_local_api_config(None, 3030);
         assert!(v["key"].is_null());
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], true);
@@ -491,7 +491,17 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
-    fallback_local_api_config(crate::store::resolved_api_auth_key())
+    let fallback_port = std::env::var("SCREENPIPE_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .or_else(|| {
+            crate::store::SettingsStore::get(&app_handle)
+                .ok()
+                .flatten()
+                .map(|store| store.recording.port)
+        })
+        .unwrap_or(3030);
+    fallback_local_api_config(crate::store::resolved_api_auth_key(), fallback_port)
 }
 
 /// Resolve a native application icon without exposing a local HTTP listener.
@@ -575,15 +585,28 @@ pub fn dismiss_notification(id: String) -> bool {
 }
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
-/// is covered by a unit test without needing a tauri::AppHandle. Port is the
-/// well-known default because the server hasn't bound yet — the UI will refresh
-/// once the server registers itself in `RecordingState`.
-fn fallback_local_api_config(cached_key: Option<String>) -> serde_json::Value {
+/// is covered by a unit test without needing a tauri::AppHandle. The caller
+/// resolves the configured/environment-overridden port because the server may
+/// not yet have registered itself in `RecordingState`.
+fn fallback_local_api_config(cached_key: Option<String>, port: u16) -> serde_json::Value {
     serde_json::json!({
         "key": cached_key,
-        "port": 3030,
+        "port": port,
         "auth_enabled": true,
     })
+}
+
+#[cfg(test)]
+mod local_api_fallback_tests {
+    use super::fallback_local_api_config;
+
+    #[test]
+    fn cold_start_fallback_preserves_non_default_active_port() {
+        let value = fallback_local_api_config(Some("sp-test".to_string()), 31579);
+        assert_eq!(value["key"], "sp-test");
+        assert_eq!(value["port"], 31579);
+        assert_eq!(value["auth_enabled"], true);
+    }
 }
 
 /// Wipe the persisted API auth key and write a fresh `sp-<uuid8>` to the

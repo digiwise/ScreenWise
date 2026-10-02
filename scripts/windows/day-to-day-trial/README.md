@@ -96,6 +96,39 @@ The final report requires the expected active configuration, a 403/403/200
 bearer-authentication matrix, a loopback-only listener, no observed non-loopback
 endpoint, a fixed clean-shutdown marker, and no scoped process left behind.
 
+### Short GUI capture acceptance
+
+Use the dedicated fixture to check UI Automation persistence and OCR fallback
+without reviewing ordinary captured content. Preparation is non-recording:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Build-ScreenWiseGuiCaptureFixture.ps1
+```
+
+After fresh owner authorization starts a GUI trial, launch the fixture with a
+new private output directory and leave it visible briefly:
+
+```powershell
+$fixtureRun = 'gui-capture-' + [Guid]::NewGuid().ToString('N')
+$fixtureOut = Join-Path $env:TEMP $fixtureRun
+& .\scripts\windows\day-to-day-trial\GuiCaptureFixture.exe `
+  --run-id $fixtureRun --out-dir $fixtureOut
+```
+
+The standard label exposes one fixed UIA marker. A separate custom-painted
+surface exposes one fixed OCR marker while the window title selects the existing
+hybrid canvas path. The fixture does not read input, clipboard, audio, network,
+or captured data. While the recorder is running, evaluate only those fixed
+markers:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Test-ScreenWiseGuiCaptureEvidence.ps1 `
+  -DataDir '<fresh GUI trial data directory>' -Port '<active API port>'
+```
+
+This live phase still requires fresh owner readiness because it starts a visible
+window during an active capture. The evaluator emits counts and booleans only.
+
 The default private data directory is `.local/day-to-day-trial`. Supply
 `-DataDir` to use another private directory. Supply multiple exclusions as a
 PowerShell array, as shown above.

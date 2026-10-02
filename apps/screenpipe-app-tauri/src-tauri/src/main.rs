@@ -731,6 +731,13 @@ async fn main() {
                     screenpipe_core::paths::default_screenpipe_data_dir()
                 });
 
+            // Timeline media is served through Tauri's asset protocol. The
+            // recording directory can be overridden for isolated trials and
+            // developer runs, so the static $HOME/.screenpipe scope is not
+            // sufficient. Restrict the dynamic grant to this run's media tree.
+            app.asset_protocol_scope()
+                .allow_directory(base_dir.join("data"), true)?;
+
             // Set up rolling file appender
             let log_dir = get_screenpipe_data_dir(app.handle())
                 .unwrap_or_else(|_| screenpipe_core::paths::default_screenpipe_data_dir());

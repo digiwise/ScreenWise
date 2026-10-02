@@ -200,6 +200,21 @@ pub async fn write_redacted(
     redacted: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let previous_text: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT {src} FROM {tbl} WHERE {pk} = ?",
+        src = table.source_col(),
+        tbl = table.table(),
+        pk = table.pk_col(),
+    ))
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    // Structured nodes are already sanitized by the synchronous capture path.
+    // Preserve them when the reconciliation pass makes no additional change;
+    // if the stronger redactor changes flat text, delete structured derivatives
+    // fail-closed because they may still contain the newly detected value.
+    let text_changed = previous_text.as_deref() != Some(redacted);
     let q = format!(
         "UPDATE {tbl} SET \
             {src} = ?, \
@@ -217,15 +232,17 @@ pub async fn write_redacted(
         .await?;
 
     match table {
-        TargetTable::Ocr => {
+        TargetTable::Ocr if text_changed => {
             clear_ocr_derivatives(&mut tx, id).await?;
             rebuild_frame_full_text(&mut tx, id).await?;
         }
-        TargetTable::Accessibility => {
+        TargetTable::Accessibility if text_changed => {
             clear_accessibility_derivatives(&mut tx, id).await?;
             rebuild_frame_full_text(&mut tx, id).await?;
         }
-        TargetTable::AudioTranscription
+        TargetTable::Ocr
+        | TargetTable::Accessibility
+        | TargetTable::AudioTranscription
         | TargetTable::MeetingTranscript
         | TargetTable::UiEventsKeyboard
         | TargetTable::UiEventsClipboard => {}
@@ -685,6 +702,54 @@ mod tests {
         assert_eq!(source, "[SECRET]");
         assert_eq!(structured_count, 0);
         assert_eq!(element_count, 0);
+    }
+
+    #[tokio::test]
+    async fn unchanged_accessibility_text_preserves_sanitized_structure() {
+        let pool = setup().await;
+        sqlx::query(
+            "INSERT INTO frames
+                (id, accessibility_text, accessibility_tree_json, full_text)
+             VALUES (1, 'ordinary safe text', '[{\"text\":\"ordinary safe text\"}]', 'ordinary safe text')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO elements (frame_id, source, text)
+             VALUES (1, 'accessibility', 'ordinary safe text')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        write_redacted(&pool, TargetTable::Accessibility, 1, "ordinary safe text")
+            .await
+            .unwrap();
+
+        let structured_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM frames
+             WHERE id = 1 AND accessibility_tree_json IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let element_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM elements
+             WHERE frame_id = 1 AND source = 'accessibility'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let redacted_at: Option<i64> =
+            sqlx::query_scalar("SELECT accessibility_redacted_at FROM frames WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(structured_count, 1);
+        assert_eq!(element_count, 1);
+        assert!(redacted_at.is_some());
     }
 
     #[tokio::test]
