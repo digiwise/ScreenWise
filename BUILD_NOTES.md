@@ -618,3 +618,35 @@ offline Visual Studio environment completed the linked desktop test build. Both
 occupied/released port tests and all three Windows opener-classification tests
 passed. A fresh short GUI run still remains required for timeline/media
 behavior, helper absence and clean shutdown.
+
+## GUI diagnostic and Pi provisioning candidate (2026-10-02)
+
+The next short GUI trial completed its fixed UIA/OCR control, authenticated
+loopback, SQLite-write, process-scope and clean-shutdown checks, but exposed two
+usability gaps. Privacy placeholders displayed only a generic redaction/failure
+label, and attempting AI Chat with no Pi runtime produced a brief message with
+no directly runnable recovery command.
+
+Windows placeholder records now carry one of eight fixed, content-free policy or
+failure markers. Timeline maps only exact allowlisted markers to explanatory
+copy; it never renders arbitrary frame/OCR text as a diagnostic. The messages
+distinguish active-window-only masking, an excluded active window, unavailable or
+inconsistent focus, monitor/active-window acquisition failure, and initial or
+follow-up privacy-check failure. This reveals a safe reason category, not a
+window title, URL, captured value or claim that a particular item was sensitive.
+
+Missing or invalid Pi provisioning now reports the exact repository PowerShell
+command with the active ScreenWise data directory. The explicit provisioner
+installs `@earendil-works/pi-coding-agent@0.75.4` into a fresh staging directory,
+checks its entrypoint/version/runtime dependencies, refuses to replace unexpected
+existing content, and promotes the directory only after validation. ScreenWise
+still performs no implicit download. AI-provider setup remains separate.
+
+Background checks performed without starting recording passed: the focused Pi
+desktop Rust test, the Windows capture-marker Rust test, two exact-allowlist
+Vitest cases, TypeScript checking, PowerShell parsing and the synthetic Pi
+provisioning regression. The documented locked/offline Visual Studio environment
+also produced the `release-dev` desktop executable in 8m48s; its SHA-256 is
+`DB5D90E01A16D3C6D17A6F8008A4E86F13CA1766959405225B0E3C461EC5A5D9`.
+Live visual confirmation of the new Timeline wording and a real explicitly
+authorized Pi download/start remain outstanding.

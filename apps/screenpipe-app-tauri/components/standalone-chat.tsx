@@ -5414,11 +5414,15 @@ export function StandaloneChat({
               setRunningConfigFromProviderConfig(providerConfig);
             }
           } else {
-            toast({ title: "failed to start AI assistant", description: result.status === "error" ? result.error : "Unknown error", variant: "destructive" });
+            const detail = result.status === "error" ? result.error : "Unknown error";
+            console.error("[Pi] Failed to start AI assistant:", detail);
+            toast({ title: "failed to start AI assistant", description: detail, variant: "destructive" });
             return;
           }
         } catch (e) {
-          toast({ title: "failed to start AI assistant", description: String(e), variant: "destructive" });
+          const detail = String(e);
+          console.error("[Pi] Failed to start AI assistant:", detail);
+          toast({ title: "failed to start AI assistant", description: detail, variant: "destructive" });
           return;
         } finally {
           setPiStarting(false);

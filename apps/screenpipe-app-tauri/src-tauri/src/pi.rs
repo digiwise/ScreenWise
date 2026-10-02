@@ -287,6 +287,7 @@ fn check_package_bin(pkg_dir: std::path::PathBuf, bin_name: &str) -> Option<Stri
 
 const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.75.4";
 const PI_NAMESPACE_DIR: &str = "@earendil-works";
+const PI_WINDOWS_PROVISION_SCRIPT: &str = r".\scripts\windows\Provision-ScreenWisePi.ps1";
 const LOCAL_OLLAMA_URL: &str = "http://localhost:11434/v1";
 const LOCAL_OLLAMA_MODEL: &str = "ministral-3:latest";
 
@@ -474,6 +475,32 @@ fn get_pi_config_dir() -> Result<PathBuf, String> {
 /// Returns the screenpipe-managed pi install directory (`~/.screenpipe/pi-agent/`).
 fn pi_local_install_dir() -> Option<PathBuf> {
     Some(screenpipe_core::paths::default_screenpipe_data_dir().join("pi-agent"))
+}
+
+fn pi_provisioning_instructions(install_dir: &Path, problem: Option<&str>) -> String {
+    let data_dir = install_dir.parent().unwrap_or(install_dir);
+    let detail = problem
+        .map(|value| format!(" ({value})"))
+        .unwrap_or_default();
+
+    #[cfg(windows)]
+    {
+        format!(
+            "Pi is not provisioned{detail}. Close ScreenWise, open PowerShell in the ScreenWise repository, and run:\n& {} -DataDir \"{}\"\nThis explicitly downloads the pinned {} runtime and dependencies. Restart ScreenWise after the command succeeds; ScreenWise will not download Pi automatically.",
+            PI_WINDOWS_PROVISION_SCRIPT,
+            data_dir.display(),
+            PI_PACKAGE
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        format!(
+            "Pi is not provisioned{detail}. Install the pinned {} runtime and dependencies under {}; ScreenWise will not download Pi automatically.",
+            PI_PACKAGE,
+            install_dir.display()
+        )
+    }
 }
 
 fn pi_package_dir(install_dir: &Path) -> PathBuf {
@@ -933,8 +960,14 @@ pub async fn pi_start_inner(
             find_pi_executable()
                 .ok_or_else(|| {
                     take_pi_install_error().unwrap_or_else(|| {
-                        "Pi is not provisioned. Install the pinned Pi runtime and dependencies under <data-dir>/pi-agent; ScreenWise will not download it."
-                            .to_string()
+                        pi_local_install_dir()
+                            .map(|dir| pi_provisioning_instructions(&dir, None))
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "Pi is not provisioned. Install the pinned {} runtime and dependencies under <data-dir>/pi-agent; ScreenWise will not download Pi automatically.",
+                                    PI_PACKAGE
+                                )
+                            })
                     })
                 })?
         }
@@ -1996,11 +2029,11 @@ pub fn validate_pi_provisioning() {
 
     match pi_local_install_dir() {
         Some(dir) => match local_pi_install_integrity_error(&dir) {
-            None => info!("validated explicitly provisioned Pi runtime at {}", dir.display()),
-            Some(error) => set_pi_install_error(format!(
-                "Pi runtime is not provisioned correctly ({}). Install the pinned {} runtime and its required dependencies under <data-dir>/pi-agent; ScreenWise will not download it.",
-                error, PI_PACKAGE
-            )),
+            None => info!(
+                "validated explicitly provisioned Pi runtime at {}",
+                dir.display()
+            ),
+            Some(error) => set_pi_install_error(pi_provisioning_instructions(&dir, Some(&error))),
         },
         None => set_pi_install_error(
             "Pi runtime is not provisioned: ScreenWise could not determine <data-dir>/pi-agent"
@@ -2041,6 +2074,22 @@ mod tests {
         let dist = pi_dir.join("dist");
         std::fs::create_dir_all(&dist).expect("create dist");
         std::fs::write(dist.join("cli.js"), "console.log('pi')").expect("write cli");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn missing_pi_message_gives_an_exact_recovery_command() {
+        let install_dir = std::path::PathBuf::from(r"C:\ScreenWise Test Data\pi-agent");
+        let message =
+            super::pi_provisioning_instructions(&install_dir, Some("missing Pi entrypoint"));
+
+        assert!(message.contains("Close ScreenWise"));
+        assert!(message.contains(super::PI_WINDOWS_PROVISION_SCRIPT));
+        assert!(message.contains("-DataDir \"C:\\ScreenWise Test Data\""));
+        assert!(message.contains(super::PI_PACKAGE));
+        assert!(message.contains("Restart ScreenWise"));
+        assert!(message.contains("will not download Pi automatically"));
+        assert!(!message.contains("<data-dir>"));
     }
 
     #[test]

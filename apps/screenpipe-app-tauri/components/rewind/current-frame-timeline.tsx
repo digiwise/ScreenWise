@@ -16,6 +16,7 @@ import { useFrameLoading } from "@/components/rewind/hooks/use-frame-loading";
 import { useLiveText } from "@/components/rewind/hooks/use-live-text";
 import { useFrameActions } from "@/components/rewind/hooks/use-frame-actions";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { getFrameCaptureNotice } from "@/components/rewind/frame-capture-notice";
 
 export interface DetectedUrl {
 	normalized: string;
@@ -284,6 +285,7 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 		adjacentFrames,
 		disabled: settings?.disableTimeline === true,
 	});
+	const frameCaptureNotice = getFrameCaptureNotice(frameContext?.text);
 
 	if (!frameId) {
 		return (
@@ -465,6 +467,16 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 					alt="Current frame"
 					draggable={false}
 				/>
+			)}
+
+			{frameCaptureNotice && (
+				<div
+					className="absolute left-1/2 top-4 z-20 max-w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 border border-amber-400/50 bg-background/95 px-4 py-2 text-center text-sm text-foreground shadow"
+					role="status"
+					data-testid="frame-capture-notice"
+				>
+					{frameCaptureNotice}
+				</div>
 			)}
 
 			{/* Browser URL bar moved to parent timeline.tsx at z-[45] so it's clickable above controls */}

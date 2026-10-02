@@ -914,7 +914,35 @@ impl WindowsCaptureOutcome {
     }
 
     pub fn marker_text(self) -> Option<&'static str> {
-        self.notice().map(WindowsCaptureNotice::label)
+        match self {
+            Self::FullMonitor => None,
+            Self::BackgroundRedacted => Some("BACKGROUND REDACTED — ACTIVE-WINDOW-ONLY"),
+            Self::CaptureRedacted(reason) => Some(match reason {
+                WindowsCaptureRedactionReason::ActiveWindowExcluded => {
+                    "CAPTURE REDACTED — ACTIVE WINDOW EXCLUDED"
+                }
+                WindowsCaptureRedactionReason::NoSafeActiveWindow => {
+                    "CAPTURE REDACTED — NO SAFE ACTIVE WINDOW"
+                }
+                WindowsCaptureRedactionReason::InconsistentFocus => {
+                    "CAPTURE REDACTED — INCONSISTENT FOCUS"
+                }
+            }),
+            Self::CaptureFailed(stage) => Some(match stage {
+                WindowsCaptureFailureStage::InitialPrivacyEvaluation => {
+                    "CAPTURE FAILED — INITIAL PRIVACY EVALUATION"
+                }
+                WindowsCaptureFailureStage::MonitorAcquisition => {
+                    "CAPTURE FAILED — MONITOR ACQUISITION"
+                }
+                WindowsCaptureFailureStage::ActiveWindowAcquisition => {
+                    "CAPTURE FAILED — ACTIVE-WINDOW ACQUISITION"
+                }
+                WindowsCaptureFailureStage::PostCapturePrivacyEvaluation => {
+                    "CAPTURE FAILED — POST-CAPTURE PRIVACY EVALUATION"
+                }
+            }),
+        }
     }
 
     pub fn is_placeholder(self) -> bool {
@@ -2013,6 +2041,60 @@ mod tests {
             WindowsCaptureOutcome::BackgroundRedacted,
             0
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_markers_distinguish_policy_from_safe_failures() {
+        assert_eq!(
+            WindowsCaptureOutcome::BackgroundRedacted.marker_text(),
+            Some("BACKGROUND REDACTED — ACTIVE-WINDOW-ONLY")
+        );
+        assert_eq!(
+            WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::ActiveWindowExcluded
+            )
+            .marker_text(),
+            Some("CAPTURE REDACTED — ACTIVE WINDOW EXCLUDED")
+        );
+        assert_eq!(
+            WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::NoSafeActiveWindow
+            )
+            .marker_text(),
+            Some("CAPTURE REDACTED — NO SAFE ACTIVE WINDOW")
+        );
+        assert_eq!(
+            WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::InconsistentFocus
+            )
+            .marker_text(),
+            Some("CAPTURE REDACTED — INCONSISTENT FOCUS")
+        );
+        for (stage, expected) in [
+            (
+                WindowsCaptureFailureStage::InitialPrivacyEvaluation,
+                "CAPTURE FAILED — INITIAL PRIVACY EVALUATION",
+            ),
+            (
+                WindowsCaptureFailureStage::MonitorAcquisition,
+                "CAPTURE FAILED — MONITOR ACQUISITION",
+            ),
+            (
+                WindowsCaptureFailureStage::ActiveWindowAcquisition,
+                "CAPTURE FAILED — ACTIVE-WINDOW ACQUISITION",
+            ),
+            (
+                WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                "CAPTURE FAILED — POST-CAPTURE PRIVACY EVALUATION",
+            ),
+        ] {
+            assert_eq!(
+                WindowsCaptureOutcome::CaptureFailed(stage).marker_text(),
+                Some(expected)
+            );
+        }
+        assert_eq!(WindowsCaptureOutcome::FullMonitor.marker_text(), None);
     }
 
     // ==================== is_url_blocked tests ====================

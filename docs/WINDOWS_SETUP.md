@@ -146,6 +146,26 @@ compiler load determine the useful value. Avoid a workspace-wide `cargo clean`
 to address ordinary slowness. If a native package genuinely has incompatible
 cached configuration, clean only that exact package as described below.
 
+## Optional local AI chat
+
+AI Chat requires the pinned Pi runtime in the same ScreenWise data directory
+used by the application. ScreenWise never downloads or repairs this runtime in
+the background. Close ScreenWise, open PowerShell in the repository and run:
+
+```powershell
+.\scripts\windows\Provision-ScreenWisePi.ps1 `
+  -DataDir '<the ScreenWise data directory shown by the app>'
+```
+
+The explicit provisioning command downloads
+`@earendil-works/pi-coding-agent@0.75.4` and its dependencies into
+`<data-dir>\pi-agent`, verifies the expected entrypoint, version and required
+runtime dependencies, and then promotes the completed staging directory. It
+refuses to overwrite an existing incomplete or unexpected `pi-agent` directory;
+review and move that directory aside manually before retrying. Restart
+ScreenWise after provisioning succeeds. A selected local AI provider such as
+Ollama must also be provisioned and running separately.
+
 ## Native tests
 
 For builds and tests that link libsamplerate, use Ninja Multi-Config. If that
