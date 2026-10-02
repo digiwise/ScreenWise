@@ -248,10 +248,12 @@ access and uses a fresh WebView2 profile for each trial. It removes startup
 The optimized frontend build, TypeScript validation, 408 Vitest tests, 150 Bun
 tests, the content-free GUI harness regression, process-monitor self-test, Rust
 formatting and a warning-free locked/offline `release-dev` desktop build passed.
-Focused new Rust port/opener tests remain unlinked because the configured shared
-test cache was read-only to the sandbox and its escalated rebuild was cold and
-stopped by the owner. A fresh interactive run remains required; no recording or
-firewall change was made for this repaired candidate.
+The desktop test cache was moved to the ignored repository-level
+`target\desktop-tests` directory and stale moved-cache build-script state was
+regenerated. The locked/offline Visual Studio environment then completed the
+linked build: both occupied/released port tests and all three Windows
+opener-classification tests passed. A fresh interactive run remains required; no
+recording or firewall change was made for this repaired candidate.
 
 ## Issue register
 
@@ -290,7 +292,7 @@ firewall change was made for this repaired candidate.
 | SW-V31 | **Repaired twice and background-validated; short GUI confirmation pending:** active IPC now remains authoritative over persisted port hydration; media uses the configured final directory and active recursive asset scope. A follow-up run passed WGC/SQLite and fixed UIA/OCR controls but reused browser state loaded stale media paths from another store, after which the timeline became unresponsive. Cache keys now include an opaque active-data-directory namespace, cache loading waits for active API configuration and every trial gets a fresh WebView2 profile. The complete frontend suites and warning-free `release-dev` build pass. A fresh visible GUI run must confirm first-load timeline behavior and readable media from a non-default-port, custom-data-directory run. |
 | SW-V32 | **Repaired, regression-tested and scoped live-checked:** asynchronous text reconciliation preserves sanitized accessibility structure only for byte-identical output and still clears derivatives fail-closed when stronger redaction changes text. In the short GUI follow-up, both fixed public UIA and OCR controls were observed twice while 40 WGC frames reached SQLite. This establishes the allowlisted fixture on that build, not general OCR recognition or accessibility-provider coverage. |
 | SW-V33 | **Repaired again and background-validated; live process-tree confirmation pending:** icon discovery no longer launches PowerShell. The follow-up run exposed separate startup `setx.exe` and Pi/FFprobe `where.exe` helpers with `conhost.exe` descendants; no endpoint was observed for them. Startup no longer invokes `setx`, and path lookup now enumerates `PATH` in-process. The harness rejects all three removed spawn paths and the optimized build passes. A fresh GUI run must confirm no unexpected helper or network-capable descendant remains. |
-| SW-V34 | **Production hardening repaired and built; focused linked tests pending:** full startup no longer shell-discovers or forcibly terminates a process that owns the configured API port; an in-process loopback bind waits only for the app's prior socket release and otherwise fails with a safe diagnostic. Windows path/URI opening no longer uses `cmd.exe`; it requires an absolute local path or explicitly allowlisted `shell:AppsFolder`/`ms-settings` URI and uses the native opener. Source-level harness regressions, formatting and a warning-free optimized build passed. The focused occupied-port and opener-classification Rust tests are authored but remain unlinked pending a warm writable desktop test cache. |
+| SW-V34 | **Production hardening repaired, built and regression-tested:** full startup no longer shell-discovers or forcibly terminates a process that owns the configured API port; an in-process loopback bind waits only for the app's prior socket release and otherwise fails with a safe diagnostic. Windows path/URI opening no longer uses `cmd.exe`; it requires an absolute local path or explicitly allowlisted `shell:AppsFolder`/`ms-settings` URI and uses the native opener. Source-level harness regressions, formatting and a warning-free optimized build passed. Both linked occupied/released port tests and all three linked opener-classification tests passed in the locked/offline Visual Studio environment using the repository-local desktop test cache. |
 
 ## Automated interactive repair validation, 2026-10-01
 

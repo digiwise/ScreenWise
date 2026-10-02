@@ -610,12 +610,11 @@ Background validation completed without starting recording:
   and an isolated private WebView2 runtime. No firewall rule was created or
   changed.
 
-The newly added Rust unit tests for occupied/released port handling and Windows
-opener classification were not linked in this checkpoint. The configured shared
-desktop test cache was read-only to the sandbox identity; an attempted escalated
-run proved cold and the owner stopped it rather than rebuilding unchanged
-dependencies. The warning-free optimized build and source-level harness cover
-compilation and forbidden-command absence, but the two focused unit-test modules
-remain a required noninteractive check when a warm writable cache is available.
-A fresh short GUI run also remains required for timeline/media behavior, helper
-absence and clean shutdown.
+The desktop test cache was moved to the ignored repository-level
+`target\desktop-tests` directory. This avoids the sandbox identity restriction
+of the former per-user cache and keeps native CMake/MSVC paths short enough for
+libsamplerate. After discarding only moved-cache build-script state, the locked,
+offline Visual Studio environment completed the linked desktop test build. Both
+occupied/released port tests and all three Windows opener-classification tests
+passed. A fresh short GUI run still remains required for timeline/media
+behavior, helper absence and clean shutdown.
