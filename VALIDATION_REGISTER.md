@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-01. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-02. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -172,6 +172,64 @@ password-field gate, including known password focus and fail-closed unknown stat
 The next live run must confirm the reduced warning rate and the new suppression
 counter without examining content.
 
+## Unsigned desktop GUI acceptance, 2026-10-02
+
+An unsigned Windows desktop build ran for 858.1 seconds against a fresh private
+store, an authenticated loopback server on a non-default port and five exact-path
+outbound firewall rules. A private WebView2 runtime avoided applying the trial
+rule to the machine-wide WebView2 installation. Before capture, one fixed
+no-payload TCP attempt from the exact GUI executable was blocked while an
+unscoped control reached the same IPv4 endpoint. During the run the GUI process
+tree had zero observed established non-loopback TCP connections, zero bound
+non-loopback UDP endpoints and one IPv4 loopback API listener. The final
+read-only inspection found no tested GUI/media/WebView2 process and no endpoint
+on the trial port. This is bounded OS endpoint and one-attempt IPv4 evidence,
+not packet-drop tracing, routed IPv6 or UDP proof.
+
+The active recorder configuration matched all expected booleans and exclusion
+counts: basic and asynchronous text redaction, DRM pause, keyboard and clipboard
+capture, event triggers, all monitors and system-default audio were active.
+Missing, wrong and valid bearer credentials returned 403/403/200. The final
+content-free sample reported 257 captured and database-written frames, zero
+drops, stalls, frame-link expiry or update failures, and 163 linked UI events.
+A controlled ordinary input marker persisted once, three clipboard events were
+present, and 160 UI events had been inserted at the controlled checkpoint. Five
+OCR rows existed, but the controlled screen-text marker had zero OCR matches and
+the unified elements table had zero UIA/OCR rows. This run therefore passed WGC,
+input and SQLite persistence but did not establish current-GUI UIA/screen-text
+capture. No arbitrary captured content was inspected.
+
+Both default audio directions started, local Parakeet loaded, and one fixed
+spoken phrase passed VAD, completed transcription, was inserted and matched the
+allowlisted phrase query. There were zero transcription errors. The run also
+included one 89-second lock interval with zero sampled frame or audio advances;
+capture and both audio directions recovered automatically after unlock. Shutdown
+returned zero, emitted the fixed completion marker and reported clean vision,
+UI-event, redaction and audio-worker completion with no confirmed or possible
+delivery loss. The last pre-shutdown sample still reported three durable pending
+segments, so this run is not a separate final-tail recovery proof.
+
+The packaged timeline first displayed a connection error against the fresh
+store, then loaded when retried several minutes later. Logs showed repeated
+WebSocket failures using port 3030 while the test server used its configured
+non-default port, followed later by rejected duplicated `data/data` media asset
+paths and high-volume frame-navigation errors. An empty or still-populating
+timeline may also contribute to the first message; cause is not yet established.
+Reproduce the startup timing, dynamic-port WebSocket selection and media asset
+path/scope independently before changing product behavior.
+
+The process inventory also observed short-lived Windows PowerShell and conhost
+descendants. Source review ties these to local installed-application/icon lookup
+commands; their commands enumerate files and Appx packages and do not request
+network access. They were not firewall-scoped because those shared system paths
+would affect unrelated processes. No endpoint was observed for them, but the
+sampling cannot exclude every transient packet; strict all-descendant firewall
+proof remains incomplete. The first monitor revision also took 131-159 seconds
+between API samples because it repeated expensive CIM and endpoint enumeration
+30 times. It now uses process-scoped endpoint queries and a 30-second wall-clock
+deadline; its PowerShell and synthetic report regressions pass, but live cadence
+confirmation remains open.
+
 ## Issue register
 
 | ID | Current state / next check |
@@ -206,6 +264,9 @@ counter without examining content.
 | SW-V28 | **Repaired, regression-tested and rebuilt; live check pending:** 31 samples reported stale audio while chunks continued arriving and were VAD-rejected as silence. Received chunks now advance the intended consumer/transcription-attempt heartbeat, and `/health` accepts a recent heartbeat without requiring recognized speech or a database insert. |
 | SW-V29 | **Repaired and regression-tested; live check pending:** the trial summary previously ignored shutdown failures and delivery-loss notices written after the final health sample. It now merges fixed post-sample diagnostics, reports the exact safe reason codes, and treats a missing clean marker plus null native exit status as failure. |
 | SW-V30 | **Repaired, regression-tested and full-application live-checked:** UIA password-state probe flapping produced 333 repetitive warnings. Fail-closed suppression remains immediate, while state-unavailable warnings are bounded and aggregated. A real-hook/real-UIA crate regression exercised two fixed ordinary/password cycles: both ordinary markers were delivered, both password markers remained absent, and all 14 characters in each password phase incremented the unavailable-decision suppression count. The corrected full-application run persisted one ordinary keyboard control, zero password typing or password clipboard markers, and 23 safe suppression notices; authentication, SQLite integrity, clipboard restoration and clean process shutdown passed. Arbitrary providers and all race timings remain untested. |
+| SW-V31 | **Open, desktop GUI:** a fresh-store timeline initially reported that it could not reach Screenpipe data, then loaded on a retry several minutes later. Logs showed non-default-port WebSocket failures plus later duplicated media paths rejected by Tauri asset scope. Reproduce empty-store timing, dynamic-port selection and media-path construction separately; do not assume the first empty-state message has one cause. |
+| SW-V32 | **Open, current GUI acceptance gap:** WGC, OCR-row creation, input events and SQLite writes advanced, but the controlled visible marker had zero OCR matches and `elements` had zero UIA/OCR rows. Use a fixed nonsensitive fixture to distinguish UIA production, OCR scheduling, privacy/exclusion decisions and marker timing without reading arbitrary content. |
+| SW-V33 | **Open, firewall scope limit:** the GUI/private-WebView2/media executables were scoped and had zero observed non-loopback endpoints, but local icon resolution spawned shared Windows PowerShell/conhost helpers. Their fixed local enumeration commands were reviewed and no endpoint was observed; exact shared-system-executable scoping would affect unrelated processes, so strict transient-child coverage remains incomplete. |
 
 ## Automated interactive repair validation, 2026-10-01
 

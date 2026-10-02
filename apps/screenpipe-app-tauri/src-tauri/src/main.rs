@@ -9,9 +9,11 @@
 use commands::show_main_window;
 use serde_json::json;
 use std::env;
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
@@ -267,8 +269,42 @@ macro_rules! define_specta_builder {
     }};
 }
 
+const OUTBOUND_TCP_PROBE_ARG: &str = "--screenwise-outbound-tcp-probe";
+const OUTBOUND_TCP_PROBE_ADDRESS: &str = "1.1.1.1:443";
+
+fn outbound_tcp_probe_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == OUTBOUND_TCP_PROBE_ARG)
+}
+
+/// Make exactly one fixed TCP connection attempt without sending application
+/// data. This early-exit developer diagnostic lets Windows validation prove
+/// that a firewall rule applies to this exact GUI executable before capture or
+/// WebView2 startup. Exit 0 means the connection unexpectedly succeeded; exit
+/// 2 means it was blocked or otherwise could not connect within five seconds.
+fn run_outbound_tcp_probe() -> i32 {
+    let address: SocketAddr = OUTBOUND_TCP_PROBE_ADDRESS
+        .parse()
+        .expect("fixed outbound probe address must remain valid");
+    match TcpStream::connect_timeout(&address, StdDuration::from_secs(5)) {
+        Ok(stream) => {
+            let _ = stream.shutdown(Shutdown::Both);
+            0
+        }
+        Err(_) => 2,
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    if outbound_tcp_probe_requested(std::env::args()) {
+        std::process::exit(run_outbound_tcp_probe());
+    }
+
     let _ = fix_path_env::fix();
 
     #[cfg(target_os = "windows")]
@@ -985,6 +1021,7 @@ async fn main() {
                                 Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
                             }
                             let config = store_clone.to_recording_config(data_dir_clone.clone());
+                            crate::recording::log_active_capture_config(&config);
 
                             // Check if server already running
                             let server_running = tokio::time::timeout(
@@ -1290,6 +1327,12 @@ async fn main() {
                     })
                     .join();
 
+                    // Fixed, content-free marker consumed by the Windows GUI
+                    // trial monitor. It is emitted only after the embedded
+                    // capture session and authenticated loopback server have
+                    // completed their synchronous shutdown path.
+                    info!("screenpipe-app: shutdown complete");
+
                     // Cleanup Pi sidecar
                     let app_handle_pi = app_handle.app_handle().clone();
                     tauri::async_runtime::spawn(async move {
@@ -1340,4 +1383,21 @@ async fn main() {
 #[cfg(test)]
 pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     define_specta_builder!()
+}
+
+#[cfg(test)]
+mod outbound_probe_tests {
+    use super::{outbound_tcp_probe_requested, OUTBOUND_TCP_PROBE_ARG};
+
+    #[test]
+    fn fixed_probe_requires_the_exact_developer_argument() {
+        assert!(outbound_tcp_probe_requested([
+            "screenpipe-app.exe",
+            OUTBOUND_TCP_PROBE_ARG,
+        ]));
+        assert!(!outbound_tcp_probe_requested([
+            "screenpipe-app.exe",
+            "--screenwise-outbound-tcp-probe-extra",
+        ]));
+    }
 }

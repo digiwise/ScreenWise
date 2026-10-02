@@ -80,14 +80,21 @@ else {
 # A fresh v2 data directory legitimately has no pre-existing log files and
 # therefore an empty offset map. Version, rather than offset count, identifies
 # the old local-clock format.
-$legacyLocalClock = "$($launch.schema)" -ne 'screenwise.day-to-day-trial-launch.v2'
+$currentLaunchSchemas = @('screenwise.day-to-day-trial-launch.v2', 'screenwise.day-to-day-trial-launch.v3')
+$legacyLocalClock = "$($launch.schema)" -notin $currentLaunchSchemas
+$logPatterns = if ($null -ne $launch.log_patterns) { @($launch.log_patterns) } else { @('screenpipe*.log') }
 if (-not $legacyLocalClock) {
     foreach ($property in $offsetProperties) {
         if (Test-Path -LiteralPath $property.Name -PathType Leaf) {
             $logText += Read-LogAfterOffset -Path $property.Name -Offset ([long]$property.Value)
         }
     }
-    Get-ChildItem -LiteralPath $DataDir -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue |
+    $newLogs = @{}
+    foreach ($pattern in $logPatterns) {
+        Get-ChildItem -LiteralPath $DataDir -Filter $pattern -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $newLogs[$_.FullName.ToLowerInvariant()] = $_ }
+    }
+    $newLogs.Values |
         Where-Object { $_.FullName -notin @($offsetProperties.Name) } |
         ForEach-Object { $logText += Read-LogAfterOffset -Path $_.FullName -Offset 0 }
 }
@@ -144,7 +151,52 @@ $healthTimeouts = Count-Matching 'health_check: inner computation exceeded'
 $smartPiiFallbacks = Count-Matching 'Smart text-PII unavailable'
 $basicPiiInfo = Count-Matching 'Basic PII redaction applied to captured frame text or metadata'
 $negativeMeetingInfo = Count-Matching 'meeting scanner: .* in_call=false'
-$cleanShutdownInLog = (Count-Matching 'screenpipe:\s+shutdown complete\s*$') -gt 0
+$cleanShutdownPattern = if ("$($launch.mode)" -eq 'gui') {
+    'screenpipe-app:\s+shutdown complete\s*$'
+}
+else {
+    'screenpipe:\s+shutdown complete\s*$'
+}
+$cleanShutdownInLog = (Count-Matching $cleanShutdownPattern) -gt 0
+$activeConfigurationLine = @($logLines | Where-Object { $_ -match 'capture configuration active' } | Select-Object -Last 1)
+$activeConfiguration = $null
+if ($activeConfigurationLine.Count -eq 1) {
+    $line = [string]$activeConfigurationLine[0]
+    $activeConfiguration = [ordered]@{}
+    foreach ($name in @(
+        'use_pii_removal', 'async_pii_redaction', 'pause_on_drm_content',
+        'keyboard_content_capture', 'clipboard_content_capture', 'use_all_monitors',
+        'use_system_default_audio'
+    )) {
+        if ($line -match ("\b" + [regex]::Escape($name) + '=(?<value>true|false)\b')) {
+            $activeConfiguration[$name] = $Matches.value -eq 'true'
+        }
+    }
+    foreach ($name in @('capture_on_keystroke', 'capture_on_clipboard')) {
+        if ($line -match ("\b" + [regex]::Escape($name) + '=(?:Some\()?\s*(?<value>true|false)\)?')) {
+            $activeConfiguration[$name] = $Matches.value -eq 'true'
+        }
+    }
+    foreach ($name in @('ignored_window_pattern_count', 'ignored_url_pattern_count')) {
+        if ($line -match ("\b" + [regex]::Escape($name) + '=(?<value>\d+)\b')) {
+            $activeConfiguration[$name] = [long]$Matches.value
+        }
+    }
+}
+$configurationMismatches = @()
+if ($null -ne $launch.expected_privacy_config) {
+    if ($null -eq $activeConfiguration) {
+        $configurationMismatches += 'configuration_not_observed'
+    }
+    else {
+        foreach ($property in $launch.expected_privacy_config.PSObject.Properties) {
+            if (-not $activeConfiguration.Contains($property.Name) -or
+                $activeConfiguration[$property.Name] -ne $property.Value) {
+                $configurationMismatches += $property.Name
+            }
+        }
+    }
+}
 $audioShutdownIssueCodes = @(
     $logLines | ForEach-Object {
         if ($_ -match 'reason_code="(?<code>audio_(producer_stop_timeout|producer_stop_failed|consumer_drain_timeout|consumer_drain_failed|queued_work_discarded|worker_completion_unconfirmed))"') {
@@ -238,6 +290,26 @@ $possibleDeliveryLoss = [math]::Max(
     [long](($postSamplePossibleLoss.Values | Measure-Object -Sum).Sum)
 )
 $audioShutdownDegraded = [bool]$capture.audio_shutdown_degraded -or $audioShutdownIssueCodes.Count -gt 0
+$maxNonLoopbackTcp = [math]::Max(
+    (Number-OrZero (($samples | ForEach-Object { Number-OrZero $_.network.established_non_loopback_tcp_count } | Measure-Object -Maximum).Maximum)),
+    (Number-OrZero $finalAudit.max_established_non_loopback_tcp_count)
+)
+$maxNonLoopbackUdp = [math]::Max(
+    (Number-OrZero (($samples | ForEach-Object { Number-OrZero $_.network.bound_non_loopback_udp_count } | Measure-Object -Maximum).Maximum)),
+    (Number-OrZero $finalAudit.max_bound_non_loopback_udp_count)
+)
+$maxNonLoopbackListener = [math]::Max(
+    (Number-OrZero (($samples | ForEach-Object { Number-OrZero $_.network.api_non_loopback_listener_count } | Measure-Object -Maximum).Maximum)),
+    (Number-OrZero $finalAudit.max_api_non_loopback_listener_count)
+)
+$authMatrix = if ($finalAudit -and $finalAudit.auth_matrix) { $finalAudit.auth_matrix } else { $latest.api.auth_matrix }
+$authMatrixPassed = if ($null -ne $authMatrix) {
+    (Number-OrZero $authMatrix.missing) -eq 403 -and
+    (Number-OrZero $authMatrix.wrong) -eq 403 -and
+    (Number-OrZero $authMatrix.valid) -eq 200
+}
+else { $false }
+$guiTrial = "$($launch.mode)" -eq 'gui'
 $attentionRequired = $errorLines.Count -gt 0 -or
     (Number-OrZero $pipeline.frames_dropped) -gt 0 -or
     (Number-OrZero $pipeline.pipeline_stall_count) -gt 0 -or
@@ -250,7 +322,14 @@ $attentionRequired = $errorLines.Count -gt 0 -or
     $queueOrLossNotices -gt 0 -or
     $confirmedDeliveryLoss -gt 0 -or
     $possibleDeliveryLoss -gt 0 -or
-    ($finalAudit -and (Number-OrZero $finalAudit.scoped_process_count) -gt 0)
+    ($finalAudit -and (Number-OrZero $finalAudit.scoped_process_count) -gt 0) -or
+    ($guiTrial -and $configurationMismatches.Count -gt 0) -or
+    ($guiTrial -and -not $authMatrixPassed) -or
+    $maxNonLoopbackTcp -gt 0 -or $maxNonLoopbackUdp -gt 0 -or
+    $maxNonLoopbackListener -gt 0 -or
+    ($finalAudit -and (Number-OrZero $finalAudit.unscoped_observed_executable_count) -gt 0) -or
+    ($finalAudit -and ((Number-OrZero $finalAudit.api_tcp_endpoint_count) -gt 0 -or
+        (Number-OrZero $finalAudit.api_udp_endpoint_count) -gt 0))
 $assessment = if ($attentionRequired) {
     'attention required: one or more failure, expiry or loss counters are nonzero'
 }
@@ -315,7 +394,21 @@ $status = [ordered]@{
     launcher_clean_shutdown_observed = if ($launcherExit) { [bool]$launcherExit.clean_shutdown_observed } else { $null }
     recorder_exit_code = if ($launcherExit) { $launcherExit.recorder_exit_code } else { $null }
     scoped_processes_remaining = if ($finalAudit) { $finalAudit.scoped_process_count } else { $null }
+    unscoped_observed_executables = if ($finalAudit) { $finalAudit.unscoped_observed_executable_count } else { $null }
+    api_endpoints_remaining = if ($finalAudit) {
+        (Number-OrZero $finalAudit.api_tcp_endpoint_count) + (Number-OrZero $finalAudit.api_udp_endpoint_count)
+    } else { $null }
     panic_log_file_count = if ($finalAudit) { $finalAudit.panic_log_file_count } else { $null }
+    auth_missing_status = if ($authMatrix) { $authMatrix.missing } else { $null }
+    auth_wrong_status = if ($authMatrix) { $authMatrix.wrong } else { $null }
+    auth_valid_status = if ($authMatrix) { $authMatrix.valid } else { $null }
+    auth_matrix_passed = $authMatrixPassed
+    active_privacy_configuration_observed = $null -ne $activeConfiguration
+    active_privacy_configuration = $activeConfiguration
+    active_privacy_configuration_mismatches = $configurationMismatches
+    max_established_non_loopback_tcp = $maxNonLoopbackTcp
+    max_bound_non_loopback_udp = $maxNonLoopbackUdp
+    max_api_non_loopback_listeners = $maxNonLoopbackListener
     attention_required = $attentionRequired
     assessment = $assessment
     log_errors = $errorLines.Count

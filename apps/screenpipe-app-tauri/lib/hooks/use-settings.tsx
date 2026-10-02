@@ -312,7 +312,10 @@ let DEFAULT_SETTINGS: Settings = {
 			monitorIds: ["default"],
 			audioDevices: ["default"],
 			useSystemDefaultAudio: true,
-			usePiiRemoval: false,
+			// Match the Rust SettingsStore first-run default. The renderer can be
+			// mounted before the native store finishes loading, so its fallback must
+			// not briefly present or persist weaker basic-PII behavior.
+			usePiiRemoval: true,
 			port: 3030,
 			dataDir: "default",
 			disableAudio: false,

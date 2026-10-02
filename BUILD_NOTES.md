@@ -496,3 +496,21 @@ offline Python tests passed. It does not start a listener or browser and does
 not read or modify the clipboard. Live execution stays disabled until the
 controller can own and verify the browser process tree and the exact browser
 executable receives a separately reviewed firewall scope.
+
+## Unsigned Windows desktop build (2026-10-02)
+
+The documented Visual Studio 2026 Developer PowerShell, OpenBLAS, ONNX Runtime,
+Ninja and locked/offline Cargo environment produced the unsigned release desktop
+executable and NSIS bundle. The executable SHA-256 was
+`9BF38535F717F6F3FE9D16D6B4165507CF94B93284F66692D2A5451E87F9EA29`.
+Tauri was invoked through its installed JavaScript entry point because the local
+Bun-generated `.bin` launcher was corrupt; dependencies and `bun.lock` were not
+reinstalled or changed. The frontend now uses its configured local/system
+monospace stack instead of fetching Google Inter during the build.
+
+The optimized Next static export, TypeScript check, release Rust compile and
+unsigned NSIS packaging passed. The focused privacy-default Vitest regression
+and both content-free PowerShell trial regressions also passed. Existing
+warnings remained for `unpdf` `import.meta` bundling and unused/dead Rust paths;
+neither stopped the build. See `VALIDATION_REGISTER.md` for the bounded GUI live
+result and its unresolved timeline, UIA/screen-text and transient-helper limits.

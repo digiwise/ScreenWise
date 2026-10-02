@@ -109,6 +109,27 @@ pub fn local_api_context_from_app(app: &tauri::AppHandle) -> LocalApiContext {
         .unwrap_or_default()
 }
 
+/// Emit only fixed configuration flags and pattern counts. The Windows GUI
+/// trial monitor uses this to prove that the persisted privacy profile reached
+/// the embedded recorder without logging excluded titles, URLs, device names,
+/// captured content, or the bearer token.
+pub fn log_active_capture_config(config: &RecordingConfig) {
+    info!(
+        use_pii_removal = config.use_pii_removal,
+        async_pii_redaction = config.async_pii_redaction,
+        pause_on_drm_content = config.pause_on_drm_content,
+        keyboard_content_capture = !config.disable_keyboard_capture,
+        clipboard_content_capture = !config.disable_clipboard_capture,
+        capture_on_keystroke = ?config.capture_on_keystroke,
+        capture_on_clipboard = ?config.capture_on_clipboard,
+        use_all_monitors = config.use_all_monitors,
+        use_system_default_audio = config.use_system_default_audio,
+        ignored_window_pattern_count = config.ignored_windows.len(),
+        ignored_url_pattern_count = config.ignored_urls.len(),
+        "capture configuration active"
+    );
+}
+
 /// Minimum seconds between consecutive stop→spawn cycles.
 const RESTART_COOLDOWN_SECS: u64 = 30;
 const CAPTURE_RESTART_MEETING_REATTACH_WINDOW: Duration = Duration::from_secs(120);
@@ -775,11 +796,8 @@ pub async fn spawn_screenpipe(
     } else {
         Some(store.recording.api_key.clone())
     };
-    match screenpipe_engine::auth_key::resolve_api_auth_key(
-        &data_dir,
-        settings_key_opt.as_deref(),
-    )
-    .await
+    match screenpipe_engine::auth_key::resolve_api_auth_key(&data_dir, settings_key_opt.as_deref())
+        .await
     {
         Ok(key) => crate::store::seed_api_auth_key(key),
         Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
@@ -787,6 +805,7 @@ pub async fn spawn_screenpipe(
 
     notify_audio_engine_fallback(&store);
     let recording_config = store.to_recording_config(data_dir);
+    log_active_capture_config(&recording_config);
 
     let server_arc = state.server.clone();
     let capture_arc = state.capture.clone();

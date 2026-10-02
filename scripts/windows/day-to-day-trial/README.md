@@ -47,6 +47,55 @@ installed:
   -IgnoredUrl @('accounts.example.test', 'vault.example.test')
 ```
 
+## Desktop GUI trial
+
+The GUI trial uses the same content-free audit format while running the desktop
+application in the way an owner would normally use it. Build the unsigned GUI,
+then prepare its private runtime once:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Prepare-ScreenWiseGuiTrialRuntime.ps1
+```
+
+The private WebView2 copy is required because firewall-scoping the machine-wide
+WebView2 runtime would also affect unrelated applications. The prepared runtime
+manifest records exact GUI/WebView2 hashes and the exact FFmpeg, FFprobe and Bun
+paths. It is private ignored state under `.local/gui-trial-runtime`; do not
+publish it.
+
+After installing a uniquely named outbound block rule for every path in that
+manifest, run the non-recording preflight from ordinary PowerShell:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Start-ScreenWiseGuiTrial.ps1 `
+  -FirewallGroup '<exact-reviewed-GUI-rule-group>' `
+  -PreflightOnly
+```
+
+Preflight verifies exact hashes and rules, checks local audio models, and makes
+one fixed TCP attempt from `screenpipe-app.exe` without sending application
+data. It accepts the firewall result only when that scoped attempt fails while
+an unscoped PowerShell control reaches the same fixed address. It does not start
+recording or WebView2.
+
+Start a freshly authorized GUI acceptance run by omitting `-PreflightOnly`:
+
+```powershell
+.\scripts\windows\day-to-day-trial\Start-ScreenWiseGuiTrial.ps1 `
+  -FirewallGroup '<exact-reviewed-GUI-rule-group>' `
+  -IgnoredWindow @('PasswordManagerApp') `
+  -IgnoredUrl @('accounts.example.test')
+```
+
+The launcher creates a fresh directory beneath `.local/gui-trials`, seeds an
+explicit privacy profile, and waits while the desktop UI is used normally. It
+continuously observes the process tree and endpoints between 30-second
+authenticated API samples without captured content. Choose **Quit** from the ScreenWise tray menu
+to finish; closing the main window can leave the tray application running.
+The final report requires the expected active configuration, a 403/403/200
+bearer-authentication matrix, a loopback-only listener, no observed non-loopback
+endpoint, a fixed clean-shutdown marker, and no scoped process left behind.
+
 The default private data directory is `.local/day-to-day-trial`. Supply
 `-DataDir` to use another private directory. Supply multiple exclusions as a
 PowerShell array, as shown above.
