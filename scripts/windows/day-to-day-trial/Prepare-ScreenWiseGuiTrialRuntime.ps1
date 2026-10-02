@@ -78,5 +78,8 @@ $runtime = [ordered]@{
 $manifestPath = Join-Path $DestinationRoot 'runtime.json'
 $runtime | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
+& (Join-Path $PSScriptRoot 'Build-ScreenWiseGuiProcessMonitor.ps1') `
+    -OutputDirectory (Join-Path $DestinationRoot 'tools') | Out-Null
+
 [pscustomobject]$runtime
 Write-Host "Private GUI trial runtime manifest: $manifestPath"

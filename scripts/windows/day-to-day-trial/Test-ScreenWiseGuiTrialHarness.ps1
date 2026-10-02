@@ -92,14 +92,18 @@ try {
         ended_at_utc = '2026-10-02T00:02:00Z'; recorder_exit_code = 0
         clean_shutdown_observed = $true; exit_code_inferred_from_clean_shutdown = $false
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sessionDir 'launcher-exit.json') -Encoding utf8
-    [ordered]@{
+    $finalAudit = [ordered]@{
         scoped_process_count = 0; unscoped_observed_executable_count = 0
         api_tcp_endpoint_count = 0; api_udp_endpoint_count = 0; panic_log_file_count = 0
+        high_frequency_process_monitor_available = $true; process_monitor_failure_reason = $null
+        process_monitor_poll_interval_ms = 25; descendant_process_start_count = 3
+        unexpected_shell_process_start_count = 0; unexpected_shell_process_starts = @()
         auth_matrix = [ordered]@{ missing = 403; wrong = 403; valid = 200 }
         max_established_non_loopback_tcp_count = 0
         max_bound_non_loopback_udp_count = 0
         max_api_non_loopback_listener_count = 0
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'final-process-audit.json') -Encoding utf8
+    }
+    $finalAudit | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'final-process-audit.json') -Encoding utf8
 
     $status = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) | ConvertFrom-Json
     Assert-Equal $true $status.clean_shutdown_in_scoped_log 'GUI shutdown marker was not recognized'
@@ -108,9 +112,27 @@ try {
     Assert-Equal 0 $status.active_privacy_configuration_mismatches.Count 'active GUI configuration changed'
     Assert-Equal 0 $status.max_established_non_loopback_tcp 'non-loopback TCP count changed'
     Assert-Equal 0 $status.max_bound_non_loopback_udp 'non-loopback UDP count changed'
+    Assert-Equal $true $status.high_frequency_process_monitor_available 'high-frequency process monitor was not accepted'
+    Assert-Equal 25 $status.process_monitor_poll_interval_ms 'process monitor interval changed'
+    Assert-Equal 3 $status.descendant_process_starts 'descendant process count changed'
+    Assert-Equal 0 $status.unexpected_shell_process_starts 'unexpected shell count changed'
     Assert-Equal $false $status.attention_required 'healthy synthetic GUI run requires attention'
 
-    foreach ($scriptName in @('Start-ScreenWiseGuiTrial.ps1', 'Watch-ScreenWiseGuiTrial.ps1', 'Prepare-ScreenWiseGuiTrialRuntime.ps1')) {
+    $finalAudit.high_frequency_process_monitor_available = $false
+    $finalAudit.process_monitor_failure_reason = 'launch_failed'
+    $finalAudit | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'final-process-audit.json') -Encoding utf8
+    $degraded = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) | ConvertFrom-Json
+    Assert-Equal $true $degraded.attention_required 'unavailable high-frequency process monitor did not require attention'
+
+    $finalAudit.high_frequency_process_monitor_available = $true
+    $finalAudit.process_monitor_failure_reason = $null
+    $finalAudit.unexpected_shell_process_start_count = 1
+    $finalAudit.unexpected_shell_process_starts = @([ordered]@{ process_name = 'powershell.exe' })
+    $finalAudit | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'final-process-audit.json') -Encoding utf8
+    $shellObserved = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) | ConvertFrom-Json
+    Assert-Equal $true $shellObserved.attention_required 'unexpected shell descendant did not require attention'
+
+    foreach ($scriptName in @('Start-ScreenWiseGuiTrial.ps1', 'Watch-ScreenWiseGuiTrial.ps1', 'Prepare-ScreenWiseGuiTrialRuntime.ps1', 'Build-ScreenWiseGuiProcessMonitor.ps1')) {
         [void][scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $scriptName)))
     }
     Write-Output 'ScreenWise GUI trial harness synthetic regression: PASS'

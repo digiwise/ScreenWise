@@ -87,10 +87,16 @@ Start a freshly authorized GUI acceptance run by omitting `-PreflightOnly`:
   -IgnoredUrl @('accounts.example.test')
 ```
 
+For a visual-only controlled acceptance, use the `-DisableAudio` switch with
+`-TranscriptionEngine disabled`; this avoids collecting irrelevant ambient audio.
+
 The launcher creates a fresh directory beneath `.local/gui-trials`, seeds an
 explicit privacy profile, and waits while the desktop UI is used normally. It
 continuously observes the process tree and endpoints between 30-second
-authenticated API samples without captured content. Choose **Quit** from the ScreenWise tray menu
+authenticated API samples without captured content. A self-tested local Toolhelp
+sampler also records descendant process names every 25 ms so short-lived shell
+helpers cannot hide between ordinary process snapshots; its failure is an
+explicit trial failure. Choose **Quit** from the ScreenWise tray menu
 to finish; closing the main window can leave the tray application running.
 The final report requires the expected active configuration, a 403/403/200
 bearer-authentication matrix, a loopback-only listener, no observed non-loopback

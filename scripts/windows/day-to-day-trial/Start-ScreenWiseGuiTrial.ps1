@@ -15,6 +15,7 @@ param(
     [string[]]$IgnoredWindow = @(),
     [string[]]$IgnoredUrl = @(),
     [ValidateSet('parakeet', 'disabled')] [string]$TranscriptionEngine = 'parakeet',
+    [switch]$DisableAudio,
     [switch]$PreflightOnly
 )
 
@@ -37,6 +38,20 @@ $ffmpegExecutable = (Resolve-Path -LiteralPath ([string]$runtime.ffmpeg_executab
 $ffprobeExecutable = (Resolve-Path -LiteralPath ([string]$runtime.ffprobe_executable)).Path
 $bunExecutable = (Resolve-Path -LiteralPath ([string]$runtime.bun_executable)).Path
 $scopedPaths = @($GuiExecutablePath, $ffmpegExecutable, $ffprobeExecutable, $bunExecutable, $webViewExecutable)
+$processMonitorManifestPath = Join-Path $repoRoot '.local\gui-trial-runtime\tools\gui-process-tree-monitor.json'
+if (-not (Test-Path -LiteralPath $processMonitorManifestPath -PathType Leaf)) {
+    throw 'The GUI process monitor is not prepared; run Build-ScreenWiseGuiProcessMonitor.ps1.'
+}
+$processMonitorRuntime = Get-Content -Raw -LiteralPath $processMonitorManifestPath | ConvertFrom-Json
+if ("$($processMonitorRuntime.schema)" -ne 'screenwise.gui-process-tree-runtime.v1') {
+    throw 'The GUI process monitor manifest has an unsupported schema.'
+}
+$processMonitorSource = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'GuiProcessTreeMonitor.cs')).Path
+$processMonitorExecutable = (Resolve-Path -LiteralPath ([string]$processMonitorRuntime.executable_path)).Path
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $processMonitorSource).Hash -ne [string]$processMonitorRuntime.source_sha256 -or
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $processMonitorExecutable).Hash -ne [string]$processMonitorRuntime.executable_sha256) {
+    throw 'The GUI process monitor no longer matches its prepared, self-tested manifest.'
+}
 
 $privateRuntimeRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.local\gui-trial-runtime'))
 if (-not $webViewExecutable.StartsWith($privateRuntimeRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -118,7 +133,7 @@ if (-not $unscopedControlSucceeded) {
 }
 
 $audioModelsReady = $null
-if ($TranscriptionEngine -eq 'parakeet') {
+if (-not $DisableAudio -and $TranscriptionEngine -eq 'parakeet') {
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $CliExecutablePath
     $psi.Arguments = 'audio models --output json'
@@ -153,8 +168,11 @@ if ($PreflightOnly) {
         gui_sha256 = (Get-FileHash -LiteralPath $GuiExecutablePath -Algorithm SHA256).Hash
         firewall_group = $FirewallGroup
         scoped_executable_count = $scopedPaths.Count
+        high_frequency_process_monitor_ready = $true
+        process_monitor_sha256 = [string]$processMonitorRuntime.executable_sha256
         port = $Port
         audio_models_ready = $audioModelsReady
+        audio_capture_enabled = (-not $DisableAudio)
         scoped_outbound_probe_blocked = $true
         unscoped_outbound_control_succeeded = $true
         recording_started = $false
@@ -191,7 +209,7 @@ $settings = [ordered]@{
     autoStartEnabled = $false
     showShortcutOverlay = $false
     minimizeToTrayOnClose = $false
-    disableAudio = $false
+    disableAudio = [bool]$DisableAudio
     audioTranscriptionEngine = $TranscriptionEngine
     transcriptionMode = 'batch'
     audioDevices = @('default')
@@ -253,11 +271,14 @@ $launch = [ordered]@{
     port = $Port
     firewall_group = $FirewallGroup
     scoped_executable_paths = $scopedPaths
+    process_monitor_executable_path = $processMonitorExecutable
+    process_monitor_executable_sha256 = [string]$processMonitorRuntime.executable_sha256
     log_patterns = @('screenpipe*.log')
     keyboard_capture_requested = $true
     clipboard_capture_requested = $true
-    system_default_audio_requested = $true
+    system_default_audio_requested = (-not $DisableAudio)
     transcription_engine = $TranscriptionEngine
+    audio_capture_requested = (-not $DisableAudio)
     audio_models_ready = $audioModelsReady
     scoped_outbound_probe_blocked = $true
     unscoped_outbound_control_succeeded = $true

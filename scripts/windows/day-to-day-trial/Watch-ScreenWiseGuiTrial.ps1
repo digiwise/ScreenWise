@@ -15,6 +15,7 @@ $guiPid = [int]$launch.gui_process_id
 $port = [int]$launch.port
 $startedAtUtc = [string]$launch.started_at_utc
 $scopedPaths = @($launch.scoped_executable_paths | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })
+$processMonitorExecutable = [IO.Path]::GetFullPath([string]$launch.process_monitor_executable_path)
 $pollFile = Join-Path $SessionDir 'operational-metrics.jsonl'
 $finalFile = Join-Path $SessionDir 'final-process-audit.json'
 $observed = @{}
@@ -24,6 +25,18 @@ $networkMax = [ordered]@{
     bound_non_loopback_udp_count = 0
     api_non_loopback_listener_count = 0
 }
+$processMonitor = $null
+$processMonitorAvailable = $false
+$processMonitorFailureReason = $null
+$processMonitorSummary = $null
+try {
+    $quotedSessionDir = '"{0}"' -f $SessionDir
+    $processMonitor = Start-Process -FilePath $processMonitorExecutable `
+        -ArgumentList @('--root-pid', "$guiPid", '--out-dir', $quotedSessionDir) `
+        -WindowStyle Hidden -PassThru -ErrorAction Stop
+    $processMonitorAvailable = $true
+}
+catch { $processMonitorFailureReason = 'launch_failed' }
 
 function Get-ProcessSnapshot {
     @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -238,6 +251,31 @@ while ($stoppedSamples -lt 3) {
 }
 
 Start-Sleep -Seconds 2
+if ($processMonitorAvailable) {
+    if (-not $processMonitor.WaitForExit(10000)) {
+        try { $processMonitor.Kill() } catch {}
+        $processMonitorAvailable = $false
+        $processMonitorFailureReason = 'completion_timeout'
+    }
+    elseif ($processMonitor.ExitCode -ne 0) {
+        $processMonitorAvailable = $false
+        $processMonitorFailureReason = 'nonzero_exit'
+    }
+    else {
+        try {
+            $processMonitorSummary = Get-Content -Raw -LiteralPath (Join-Path $SessionDir 'process-tree-summary.json') | ConvertFrom-Json
+            if (-not [bool]$processMonitorSummary.sampler_available -or -not [bool]$processMonitorSummary.root_observed) {
+                $processMonitorAvailable = $false
+                $processMonitorFailureReason = 'invalid_summary'
+            }
+        }
+        catch {
+            $processMonitorAvailable = $false
+            $processMonitorFailureReason = 'summary_unavailable'
+        }
+    }
+    $processMonitor.Dispose()
+}
 $remainingSnapshot = Get-ProcessSnapshot
 $remaining = @($remainingSnapshot | Where-Object {
     $path = [IO.Path]::GetFullPath([string]$_.ExecutablePath)
@@ -261,6 +299,12 @@ $panicFiles = @(Get-ChildItem -LiteralPath $DataDir -Filter '*panic*.log' -File 
     rolling_log_file_count = $logFiles.Count
     rolling_log_total_bytes = ($logFiles | Measure-Object Length -Sum).Sum
     panic_log_file_count = $panicFiles.Count
+    high_frequency_process_monitor_available = $processMonitorAvailable
+    process_monitor_failure_reason = $processMonitorFailureReason
+    process_monitor_poll_interval_ms = if ($processMonitorSummary) { $processMonitorSummary.poll_interval_ms } else { $null }
+    descendant_process_start_count = if ($processMonitorSummary) { $processMonitorSummary.descendant_process_start_count } else { $null }
+    unexpected_shell_process_start_count = if ($processMonitorSummary) { $processMonitorSummary.unexpected_shell_process_start_count } else { $null }
+    unexpected_shell_process_starts = if ($processMonitorSummary) { @($processMonitorSummary.unexpected_shell_process_starts) } else { @() }
     monitor_had_api_token = [bool]$token
     auth_matrix = $latestAuthMatrix
     max_established_non_loopback_tcp_count = $networkMax.established_non_loopback_tcp_count

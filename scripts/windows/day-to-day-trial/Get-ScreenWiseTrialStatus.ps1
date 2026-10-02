@@ -328,6 +328,8 @@ $attentionRequired = $errorLines.Count -gt 0 -or
     $maxNonLoopbackTcp -gt 0 -or $maxNonLoopbackUdp -gt 0 -or
     $maxNonLoopbackListener -gt 0 -or
     ($finalAudit -and (Number-OrZero $finalAudit.unscoped_observed_executable_count) -gt 0) -or
+    ($guiTrial -and $finalAudit -and -not [bool]$finalAudit.high_frequency_process_monitor_available) -or
+    ($finalAudit -and (Number-OrZero $finalAudit.unexpected_shell_process_start_count) -gt 0) -or
     ($finalAudit -and ((Number-OrZero $finalAudit.api_tcp_endpoint_count) -gt 0 -or
         (Number-OrZero $finalAudit.api_udp_endpoint_count) -gt 0))
 $assessment = if ($attentionRequired) {
@@ -399,6 +401,11 @@ $status = [ordered]@{
         (Number-OrZero $finalAudit.api_tcp_endpoint_count) + (Number-OrZero $finalAudit.api_udp_endpoint_count)
     } else { $null }
     panic_log_file_count = if ($finalAudit) { $finalAudit.panic_log_file_count } else { $null }
+    high_frequency_process_monitor_available = if ($finalAudit) { [bool]$finalAudit.high_frequency_process_monitor_available } else { $null }
+    process_monitor_failure_reason = if ($finalAudit) { $finalAudit.process_monitor_failure_reason } else { $null }
+    process_monitor_poll_interval_ms = if ($finalAudit) { $finalAudit.process_monitor_poll_interval_ms } else { $null }
+    descendant_process_starts = if ($finalAudit) { $finalAudit.descendant_process_start_count } else { $null }
+    unexpected_shell_process_starts = if ($finalAudit) { $finalAudit.unexpected_shell_process_start_count } else { $null }
     auth_missing_status = if ($authMatrix) { $authMatrix.missing } else { $null }
     auth_wrong_status = if ($authMatrix) { $authMatrix.wrong } else { $null }
     auth_valid_status = if ($authMatrix) { $authMatrix.valid } else { $null }
