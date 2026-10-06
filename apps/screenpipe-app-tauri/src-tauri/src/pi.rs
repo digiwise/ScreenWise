@@ -496,24 +496,35 @@ impl PiManager {
 /// directory prevents this local-only runtime from reading a user's global Pi
 /// providers or credentials.
 fn get_pi_config_dir() -> Result<PathBuf, String> {
-    Ok(screenpipe_core::paths::default_screenpipe_data_dir().join("pi-agent-config"))
+    Ok(crate::pi_runtime::config_directory(
+        &screenpipe_core::paths::default_screenpipe_data_dir(),
+    ))
 }
 
 /// Find pi executable
 /// Returns the screenpipe-managed pi install directory (`~/.screenpipe/pi-agent/`).
-fn pi_local_install_dir() -> Option<PathBuf> {
-    Some(screenpipe_core::paths::default_screenpipe_data_dir().join("pi-agent"))
+fn pi_local_install_dir() -> Result<PathBuf, String> {
+    crate::pi_runtime::install_directory(
+        &screenpipe_core::paths::default_screenpipe_data_dir(),
+        std::env::var_os("SCREENWISE_PI_RUNTIME_DIR").as_deref(),
+    )
 }
 
 fn pi_provisioning_instructions(install_dir: &Path, problem: Option<&str>) -> String {
     let data_dir = install_dir.parent().unwrap_or(install_dir);
+    let recording_data = screenpipe_core::paths::default_screenpipe_data_dir();
+    let helper_dir = if std::env::var_os("SCREENWISE_PI_RUNTIME_DIR").is_some() {
+        recording_data.as_path()
+    } else {
+        data_dir
+    };
     let detail = problem
         .map(|value| format!(" ({value})"))
         .unwrap_or_default();
 
     #[cfg(windows)]
     {
-        match crate::pi_provisioning::materialize_windows_provisioner(data_dir) {
+        match crate::pi_provisioning::materialize_windows_provisioner(helper_dir) {
             Ok(script_path) => {
                 let command = crate::pi_provisioning::windows_command(&script_path, data_dir)
                     .unwrap_or_else(|error| format!("<could not build command: {error}>"));
@@ -556,6 +567,9 @@ fn is_local_pi_version_current(install_dir: &std::path::Path) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
+    if parsed.get("name").and_then(|v| v.as_str()) != Some("@earendil-works/pi-coding-agent") {
+        return false;
+    }
     let installed = match parsed.get("version").and_then(|v| v.as_str()) {
         Some(v) => v,
         None => return false,
@@ -601,6 +615,11 @@ fn resolve_node_module_package_from(
 fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
     let pi_dir = pi_package_dir(install_dir);
     let cli_js = pi_dir.join("dist").join("cli.js");
+    for path in [&cli_js, &pi_dir.join("package.json")] {
+        if let Err(error) = crate::pi_runtime::reject_links(path) {
+            return Some(error);
+        }
+    }
     if !cli_js.exists() {
         return Some(format!("missing Pi entrypoint at {}", cli_js.display()));
     }
@@ -611,7 +630,13 @@ fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
 
     let resolve_start = pi_dir.join("dist");
     for package_name in ["@earendil-works/pi-ai", "cross-spawn"] {
-        if resolve_node_module_package_from(&resolve_start, install_dir, package_name).is_none() {
+        if let Some(dependency) =
+            resolve_node_module_package_from(&resolve_start, install_dir, package_name)
+        {
+            if let Err(error) = crate::pi_runtime::reject_links(&dependency.join("package.json")) {
+                return Some(error);
+            }
+        } else {
             return Some(format!(
                 "missing Pi dependency {} from {}",
                 package_name,
@@ -625,7 +650,7 @@ fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
 
 /// Find the JS entrypoint for the locally-installed pi package.
 fn find_local_pi_entrypoint() -> Option<String> {
-    let dir = pi_local_install_dir()?;
+    let dir = pi_local_install_dir().ok()?;
     let cli_js = pi_package_dir(&dir).join("dist").join("cli.js");
     if cli_js.exists() {
         Some(cli_js.to_string_lossy().to_string())
@@ -637,7 +662,7 @@ fn find_local_pi_entrypoint() -> Option<String> {
 fn find_pi_executable() -> Option<String> {
     // ScreenWise runs only the verified, explicitly provisioned local runtime.
     if let Some(js) = find_local_pi_entrypoint() {
-        if let Some(install_dir) = pi_local_install_dir() {
+        if let Ok(install_dir) = pi_local_install_dir() {
             if let Some(error) = local_pi_install_integrity_error(&install_dir) {
                 warn!("Ignoring unhealthy local pi-agent install: {}", error);
                 return None;
@@ -942,7 +967,27 @@ pub async fn pi_start_inner(
             std::env::VarError::NotPresent => Ok(None),
             _ => Err("Invalid Pi validation mode; no agent was started".to_string()),
         })?;
-    let tool_free_validation = pi_validation_mode(validation_value.as_deref())?;
+    let production_tool_mode =
+        std::env::var("SCREENWISE_PI_NO_TOOLS")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err("Invalid ScreenWise Pi tool mode; no agent was started".to_string()),
+            })?;
+    let validation_only = pi_validation_mode(validation_value.as_deref())?;
+    let tool_free_validation =
+        validation_only || crate::pi_runtime::tools_disabled(production_tool_mode.as_deref())?;
+    let recording_mode = std::env::var("SCREENWISE_PI_RECORDING_TOOLS_ONLY")
+        .map(Some)
+        .or_else(|error| match error {
+            std::env::VarError::NotPresent => Ok(None),
+            _ => Err("Invalid ScreenWise Pi tool mode; no agent was started".to_string()),
+        })?;
+    let recording_tools_only = crate::pi_runtime::tools_disabled(recording_mode.as_deref())?;
+    if recording_tools_only && tool_free_validation {
+        return Err("Conflicting ScreenWise Pi tool modes; no agent was started.".into());
+    }
+    let restricted_tools = tool_free_validation || recording_tools_only;
     let project_dir = project_dir.trim().to_string();
     if project_dir.is_empty() {
         return Err("Project directory is required".to_string());
@@ -955,12 +1000,7 @@ pub async fn pi_start_inner(
         take_pi_install_error().unwrap_or_else(|| {
             pi_local_install_dir()
                 .map(|dir| pi_provisioning_instructions(&dir, None))
-                .unwrap_or_else(|| {
-                    format!(
-                        "Pi is not provisioned. Install the pinned {} runtime and dependencies under <data-dir>/pi-agent; ScreenWise will not download Pi automatically.",
-                        PI_PACKAGE
-                    )
-                })
+                .unwrap_or_else(|error| error)
         })
     })?;
 
@@ -969,14 +1009,14 @@ pub async fn pi_start_inner(
         .map_err(|e| format!("Failed to create project directory: {}", e))?;
 
     // Ensure screenpipe skills exist in project
-    if !tool_free_validation {
+    if !restricted_tools {
         ensure_screenpipe_skill(&project_dir)?;
         remove_web_search_extension(&project_dir)?;
         remove_mcp_bridge_extension(&project_dir)?;
     }
 
     // Ensure Pi is configured with the user's provider
-    ensure_pi_config(provider_config.as_ref(), tool_free_validation).await?;
+    ensure_pi_config(provider_config.as_ref(), validation_only).await?;
 
     let pi_provider = "ollama".to_string();
     let pi_model = provider_config
@@ -1089,7 +1129,7 @@ pub async fn pi_start_inner(
 
             // On Windows, discover the user-provisioned bash used by Pi's bash tool.
             #[cfg(windows)]
-            let new_path = if tool_free_validation {
+            let new_path = if restricted_tools {
                 bun_dir.to_string_lossy().to_string()
             } else {
                 let mut path = new_path;
@@ -1167,7 +1207,7 @@ pub async fn pi_start_inner(
     // For local Ollama models, explicitly tell them to read the
     // screenpipe-api skill file — they often skip reading skills on their own.
     let is_local_model = pi_provider == "ollama";
-    if is_local_model && !tool_free_validation {
+    if is_local_model && !restricted_tools {
         let api_hint = "IMPORTANT: You MUST read the screenpipe-api skill file BEFORE making any API calls. It contains authentication instructions, endpoint docs, and examples. Without reading it first, your API calls will fail with 403 unauthorized.";
         cmd.args(["--append-system-prompt", api_hint]);
     }
@@ -1183,7 +1223,14 @@ pub async fn pi_start_inner(
 
     if tool_free_validation {
         configure_pi_tool_free_validation(&mut cmd, &bun_path)?;
-        info!("Pi synthetic validation active: tools and resource discovery disabled; bounded text-only local inference");
+        if !validation_only {
+            cmd.args(["--system-prompt", "Answer using the local model. No tools are available. State uncertainty rather than inventing evidence."]);
+        }
+        info!("Pi tools and resource discovery disabled; local inference only");
+    } else if recording_tools_only {
+        let extension = crate::pi_runtime::recording_extension()?;
+        crate::pi_runtime::configure_recording_tools(&mut cmd, &bun_path, &extension)?;
+        info!("Pi recording retrieval active: authenticated read-only local API tool; shell and file tools disabled");
     }
 
     // Bun 1.3+ fixed the readline pipe bug (bun 1.2 needed a PTY workaround).
@@ -1207,7 +1254,14 @@ pub async fn pi_start_inner(
         use crate::recording::local_api_context_from_app;
         let api = local_api_context_from_app(&app);
         cmd.env("SCREENPIPE_LOCAL_API_PORT", api.port.to_string());
-        cmd.env("SCREENPIPE_LOCAL_API_URL", api.url(""));
+        cmd.env(
+            "SCREENPIPE_LOCAL_API_URL",
+            if recording_tools_only {
+                crate::pi_runtime::recording_api_url(api.port)
+            } else {
+                api.url("")
+            },
+        );
         if let Some(ref key) = api.api_key {
             cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
         }
@@ -1224,8 +1278,10 @@ pub async fn pi_start_inner(
     // Auto-auth the agent's `curl localhost:3030/...` calls via a bash
     // shim sourced from $BASH_ENV on every subshell. See bash_env.rs in
     // screenpipe-core.
-    if let Ok(p) = screenpipe_core::agents::bash_env::ensure_wrapper_in_default_dir() {
-        cmd.env("BASH_ENV", p);
+    if !restricted_tools {
+        if let Ok(p) = screenpipe_core::agents::bash_env::ensure_wrapper_in_default_dir() {
+            cmd.env("BASH_ENV", p);
+        }
     }
 
     // Backstop: if local_api_context_from_app couldn't resolve a key earlier,
@@ -2131,17 +2187,14 @@ pub fn validate_pi_provisioning() {
     }
 
     match pi_local_install_dir() {
-        Some(dir) => match local_pi_install_integrity_error(&dir) {
+        Ok(dir) => match local_pi_install_integrity_error(&dir) {
             None => info!(
                 "validated explicitly provisioned Pi runtime at {}",
                 dir.display()
             ),
             Some(error) => set_pi_install_error(pi_provisioning_instructions(&dir, Some(&error))),
         },
-        None => set_pi_install_error(
-            "Pi runtime is not provisioned: ScreenWise could not determine <data-dir>/pi-agent"
-                .to_string(),
-        ),
+        Err(error) => set_pi_install_error(error),
     }
 }
 #[cfg(test)]
@@ -2218,6 +2271,19 @@ mod tests {
             "unexpected integrity error: {}",
             error
         );
+    }
+
+    #[test]
+    fn local_pi_integrity_rejects_wrong_identity_or_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_pi_package(dir.path());
+        for (name, version) in [
+            ("unrelated-package", "0.75.4"),
+            ("@earendil-works/pi-coding-agent", "0.75.5"),
+        ] {
+            write_package_json(&super::pi_package_dir(dir.path()), name, version);
+            assert!(super::local_pi_install_integrity_error(dir.path()).is_some());
+        }
     }
 
     #[test]

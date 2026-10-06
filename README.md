@@ -79,6 +79,12 @@ screenpipe auth token --data-dir <recorder-data-directory>
 
 This local token is independent from local model configuration.
 
+For an on-demand DigiTrack evidence client, see the
+[API integration assessment and guide](docs/DIGITRACK_API_INTEGRATION.md).
+It documents available records, timestamps and provenance, alongside the gaps
+in historical privacy coverage and pagination. It does not certify complete
+capture history or implement Clockify integration.
+
 ## Build and validation
 
 Start with [Windows setup](docs/WINDOWS_SETUP.md) and
@@ -99,6 +105,11 @@ always locked and offline. Do not run
 tests need the separate Ninja Multi-Config and CRT matrix in the setup guide.
 Reusable [interactive test sources](scripts/windows/interactive-validation/README.md)
 require configuration, offline preparation and fresh owner readiness.
+
+For a persistent local developer installation, use the
+[Windows deployment scripts](scripts/windows/deployment/README.md). They separate
+release binaries from build outputs, preserve recording data, and require
+explicit firewall setup before launch; they are not a validated installer.
 
 ## Architecture and provenance
 

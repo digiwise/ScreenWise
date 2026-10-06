@@ -61,6 +61,7 @@ mod pi_job_containment;
 #[cfg(windows)]
 mod pi_provisioning;
 mod pi_rpc_inventory;
+mod pi_runtime;
 mod recording;
 mod retention;
 mod secrets;

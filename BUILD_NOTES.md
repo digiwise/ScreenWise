@@ -4,6 +4,47 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Shared Pi deployment and API review preparation (2026-10-06)
+
+The changed desktop target passed `DesktopCheck`, `DesktopFmt`, three linked
+`local_pi_integrity` regressions and seven standalone pure Rust helper tests.
+`DesktopTest` adopted its existing canonical test cache once after the launcher
+reported no matching successful baseline; 921 external artifacts were reused
+and none rebuilt. The `DesktopBuild` quick `release-local` build passed in
+4m02s, reusing 1080 external artifacts and rebuilding only the app target.
+The pinned SDK loader and mocked recording tool executed through that profile's
+bundled Bun without a model, real API or GUI.
+
+Deployment scripts passed 38 synthetic checks; the private evidence exporter
+passed 72, and its Pi GET transport passed 15. These cover source/runtime/data
+isolation, package identity, restricted tool arguments, output limits and
+timestamp/pagination pitfalls. The exact commands are in the deployment and
+evidence-review guides. Runtime scripts use file sizes/timestamps rather than
+large-file hashes. Models, Pi and WebView2 are reused without package/model
+copies. New deployment paths still require explicit owner-run firewall rules
+and live startup/shutdown/retrieval validation. No capture was started.
+
+The full canonical `DesktopBuild -BuildProfile release` passed in 10m41s,
+reusing 1080 external artifacts, rebuilding one app target and no dependencies.
+The unchanged recorder release executable was retained without a root rebuild.
+The non-launching deployment staged these binaries and owned extension files,
+reusing one Pi 0.75.4 package and the existing model/WebView2 stores. New deployed
+paths require the owner's separate nine-rule firewall installation before any
+live preflight/startup. Deployment did not register login startup or start capture.
+The actual 17,178-file staged inventory and owned extension source comparisons
+passed. Native metadata lookup completes in 9.46 seconds; a serialized manifest
+regression covers PowerShell's automatic date conversion. No binary rebuild was
+needed for these PowerShell-only corrections.
+The owner's Windows PowerShell 5.1 firewall preflight exposed a long-path false
+negative: ordinary .NET Framework FileInfo reported an unchanged 261-character
+package path missing. Native metadata now uses extended Windows path spelling,
+retaining canonical executable rule paths and all size/timestamp/link checks.
+Forty-three synthetic deployment checks passed, including >260-character files,
+real metadata changes and missing files. Actual 17,178-file checks passed in
+PowerShell 7; a read-only Windows PowerShell 5.1 native metadata probe also
+reported zero mismatches. No redeployment, Rust rebuild or firewall mutation
+was required for this correction.
+
 ## Current iteration profile (2026-10-05)
 
 Commit preparation, 2026-10-06: both canonical `RootFmt` and `DesktopFmt`

@@ -10,6 +10,96 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Persistent local deployment preparation, 2026-10-06
+
+Added [deployment scripts](scripts/windows/deployment/README.md) for separate
+release binaries and persistent recording data, with explicit scoped firewall
+installation/restoration and opt-in login startup. They reuse the prepared
+private WebView2 runtime and existing model stores; no Pi package is copied.
+Runtime update checks use sizes/timestamps, not cryptographic tamper detection.
+The app accepts an explicit pinned shared Pi runtime while mutable configuration,
+chats and sessions stay under each recording root. Deployment enables only the
+owned read-only recording API extension, with literal loopback URLs, bearer
+authentication, bounded responses and no built-in shell/file tools. Ollama's
+three executable paths join six app/runtime paths in the deployment scope.
+
+Thirty-eight background synthetic PowerShell checks passed: parsing, local path
+boundaries, data/runtime isolation, running-process update refusal, failed-stage
+preservation, previous-version retention, changed runtime metadata, nine executable
+scopes, conflicting/loopback-blocking rules, firewall inspection errors, shared
+package identity/version/dependencies, broad-tool refusal and restoration after
+runtime unavailability. Seven pure Rust path/tool/integrity tests and three
+linked desktop package-integrity regressions passed. Fifteen mocked JavaScript
+transport tests passed, including microsecond dates, cache bounds, pagination,
+GET-only scope, secret omission and truncation. The installed MIT Pi 0.75.4 SDK
+registered exactly one owned tool and executed it using fabricated fetch only.
+No SDK implementation was copied; its package metadata, extension loader/type
+contracts, extension guide and CLI argument handling were the scoped reference.
+The non-mutating deployment plan passed. Windows PowerShell 5.1 execution was
+blocked by that host's script policy; no policy was changed. Login registration,
+real deployed GUI startup/shutdown, relocated resource loading and live firewall
+validation remain untested. The `release-local` GUI build and full release build
+both passed, each reusing 1080 external artifacts and rebuilding only one app
+target. The unchanged recorder was not rebuilt. A non-launching deployment then
+staged the release candidate, owned extension and manifest with separate empty
+recording data, reusing the existing Pi/model/WebView2 stores. No capture, model
+download, login registration or firewall mutation occurred. The owner must
+install the nine rules before live preflight/startup; tool-enabled GUI retrieval
+and shutdown against these new deployment paths remain untested.
+The actual staged inventory passed 17,178 size/timestamp/link-boundary checks;
+native metadata lookup reduced verification to 9.46 seconds. This surfaced and
+fixed a second JSON-date conversion bug in the deployment manifest comparison;
+a serialized timestamp regression now covers it. The deployed owned extension
+matched the compiled source files; at preparation verification, the recording
+directory was empty and contained no Pi package. Metadata matching is not tamper
+certification.
+The subsequent owner-run Windows PowerShell 5.1 firewall script stopped before
+rule creation on a falsely missing long package path. Fixed native inspection
+using extended Windows paths while keeping rule paths canonical. Forty-three
+synthetic checks now pass, covering long paths and actual change/missing-file
+refusal. Actual PowerShell 7 verification and a Windows PowerShell 5.1 native
+metadata probe each checked 17,178 files with no mismatch. No firewall mutation,
+redeployment or binary rebuild was performed during this correction.
+
+## Local DigiTrack evidence exporter, 2026-10-06
+
+Added [private API review scripts](scripts/windows/evidence-review/README.md)
+for an explicit timezone-bearing, end-exclusive period. Per-modality JSON and an
+escaped self-contained HTML view retain source references; retrieval failures,
+budgets and unknown coverage are visible. No model/cloud call or raw media fetch
+is made. Optional frame context and bounded prior notices support inspection,
+without claiming an authoritative historical initial state or full snapshot.
+Seventy-two synthetic assertions passed, including serialized JSON timestamps,
+micro/nanosecond precision, meeting overlap, filtered empty-page advancement,
+notice subdivision/saturation, metadata reconciliation, auth failure versus empty,
+HTML escaping, secret omission and overwrite refusal. Tests found and fixed
+PowerShell's automatic JSON-date conversion and a mock closure scope defect.
+Proxy use and redirects are disabled. Comparisons preserve original timestamp
+strings but have documented 100 ns precision limits. No captured contents were
+read and live API/export compatibility remains untested. The optional
+`-OpenReview` switch opens the generated local HTML after saving; script parsing
+passed, but automatic browser opening was not exercised during preparation.
+
+## DigiTrack API contract assessment, 2026-10-06
+
+The [integration guide](docs/DIGITRACK_API_INTEGRATION.md) records a source-level
+review of time-range evidence, timestamp/provenance fields, authentication and
+privacy notices. The current API is usable for limited on-demand enrichment of
+DigiTrack's own activity history; it is not a complete or snapshot-consistent
+capture-history contract. Findings include missing historical coverage/state
+intervals and store identity, capped notices without a cursor, meeting-start
+filters instead of overlap selection, and timestamp-only offset pagination.
+Accessibility `on_screen` search selects frames but returns combined frame text;
+use source/visibility-filtered elements for explicitly visible text.
+
+Canonical locked/offline engine library tests passed: seven privacy-notice,
+seven search utility and eight timezone tests. No external/workspace rebuilds,
+real capture reads, recording, firewall changes or runtime source edits occurred.
+Router-level client integration and complete historical coverage remain untested.
+Added nine fabricated JSON response examples and per-channel request targets,
+including pagination, overlap and boundary handling. All JSON examples parsed;
+they are illustrative contract data, not observations from a live recorder.
+
 ## Real Pi GUI attempt, 2026-10-06
 
 **Latest result:** the third fresh, content-disabled `release-local` GUI run
