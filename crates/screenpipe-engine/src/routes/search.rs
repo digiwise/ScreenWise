@@ -77,6 +77,10 @@ pub(crate) struct SearchQuery {
     /// (or all). See issue #2436. Default: omitted = match everything.
     #[serde(default, deserialize_with = "deserialize_flexible_bool_option")]
     on_screen: Option<bool>,
+    /// Match frames from the stable foreground monitor (true) or other monitors (false).
+    /// Requires content_type=ocr; unknown and unstable metadata never matches.
+    #[serde(default, deserialize_with = "deserialize_flexible_bool_option")]
+    active_monitor: Option<bool>,
     #[serde(default)]
     browser_url: Option<String>,
     /// Filter audio transcriptions by speaker name (case-insensitive partial match)
@@ -100,6 +104,16 @@ pub(crate) struct SearchQuery {
     /// nothing when this is set. Omit for no tag filtering.
     #[serde(default, deserialize_with = "from_comma_separated_string_array")]
     tags: Option<Vec<String>>,
+}
+
+impl SearchQuery {
+    fn validate_active_monitor(&self) -> Result<(), &'static str> {
+        if self.active_monitor.is_some() && self.content_type != ContentType::OCR {
+            Err("active_monitor requires content_type=ocr")
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(OaSchema, Deserialize)]
@@ -313,6 +327,7 @@ pub(crate) fn compute_search_cache_key(query: &SearchQuery) -> u64 {
     // cache key so a cached "no filter" response can't be returned for
     // an "on_screen=true" query (and vice-versa). Issue #2436.
     query.on_screen.hash(&mut hasher);
+    query.active_monitor.hash(&mut hasher);
     query.browser_url.hash(&mut hasher);
     query.speaker_name.hash(&mut hasher);
     query.max_content_length.hash(&mut hasher);
@@ -348,6 +363,13 @@ pub(crate) async fn search(
         query.focused,
     );
 
+    if let Err(message) = query.validate_active_monitor() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": message})),
+        ));
+    }
+
     // Check cache first (only for queries without frame extraction)
     let cache_key = compute_search_cache_key(&query);
     if !query.include_frames {
@@ -365,7 +387,7 @@ pub(crate) async fn search(
     let (results, total) = timeout(
         Duration::from_secs(30),
         try_join(
-            state.db.search_with_tags(
+            state.db.search_with_tags_and_active_monitor(
                 query_str,
                 content_type.clone(),
                 query.pagination.limit,
@@ -385,8 +407,9 @@ pub(crate) async fn search(
                 query.machine_id.as_deref(),
                 query.on_screen,
                 tags,
+                query.active_monitor,
             ),
-            state.db.count_search_results_with_tags(
+            state.db.count_search_results_with_tags_and_active_monitor(
                 query_str,
                 content_type,
                 query.start_time,
@@ -402,6 +425,7 @@ pub(crate) async fn search(
                 query.speaker_name.as_deref(),
                 query.on_screen,
                 tags,
+                query.active_monitor,
             ),
         ),
     )
@@ -708,6 +732,9 @@ mod tests {
     fn capture_privacy_search_api_preserves_structured_metadata_and_legacy_null() {
         let metadata = serde_json::json!({
             "schema_version": 1,
+            "is_active_monitor": true,
+            "foreground_monitor": "monitor_1",
+            "foreground_monitor_changed": false,
             "outcome": "foreground_window",
             "reason": null,
             "blockers": [{"app": "fixture.exe", "reasons": ["excluded_app"], "foreground": false}],
@@ -758,6 +785,40 @@ mod tests {
     }
 
     #[test]
+    fn active_monitor_query_validation_and_cache() {
+        let parse = |content_type: &str, active: Option<&str>| {
+            let mut value = json!({"content_type": content_type, "limit": "10", "offset": "0"});
+            if let Some(active) = active {
+                value["active_monitor"] = json!(active);
+            }
+            serde_json::from_value::<SearchQuery>(value).unwrap()
+        };
+        let none = parse("ocr", None);
+        let yes = parse("ocr", Some("true"));
+        let no = parse("ocr", Some("false"));
+        assert_eq!(none.active_monitor, None);
+        assert_eq!(yes.active_monitor, Some(true));
+        assert_eq!(no.active_monitor, Some(false));
+        assert!(none.validate_active_monitor().is_ok());
+        assert!(yes.validate_active_monitor().is_ok());
+        assert!(no.validate_active_monitor().is_ok());
+        for kind in ["all", "audio", "accessibility", "input", "memory"] {
+            assert!(parse(kind, Some("true")).validate_active_monitor().is_err());
+            assert!(parse(kind, Some("false"))
+                .validate_active_monitor()
+                .is_err());
+            assert!(parse(kind, None).validate_active_monitor().is_ok());
+        }
+        let keys = [
+            compute_search_cache_key(&none),
+            compute_search_cache_key(&yes),
+            compute_search_cache_key(&no),
+        ];
+        assert_ne!(keys[0], keys[1]);
+        assert_ne!(keys[0], keys[2]);
+        assert_ne!(keys[1], keys[2]);
+    }
+    #[test]
     fn test_search_cache_key_deterministic() {
         // Same query should produce same cache key
         let query1 = SearchQuery {
@@ -778,6 +839,7 @@ mod tests {
             speaker_ids: None,
             focused: None,
             on_screen: None,
+            active_monitor: None,
             browser_url: None,
             speaker_name: None,
             max_content_length: None,
@@ -804,6 +866,7 @@ mod tests {
             speaker_ids: None,
             focused: None,
             on_screen: None,
+            active_monitor: None,
             browser_url: None,
             speaker_name: None,
             max_content_length: None,
@@ -838,6 +901,7 @@ mod tests {
             speaker_ids: None,
             focused: None,
             on_screen: None,
+            active_monitor: None,
             browser_url: None,
             speaker_name: None,
             max_content_length: None,
@@ -864,6 +928,7 @@ mod tests {
             speaker_ids: None,
             focused: None,
             on_screen: None,
+            active_monitor: None,
             browser_url: None,
             speaker_name: None,
             max_content_length: None,
@@ -905,6 +970,7 @@ mod tests {
             speaker_ids: None,
             focused: None,
             on_screen,
+            active_monitor: None,
             browser_url: None,
             speaker_name: None,
             max_content_length: None,

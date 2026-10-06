@@ -2163,6 +2163,9 @@ async fn do_capture(
     })
     .await?;
 
+    #[cfg(target_os = "windows")]
+    windows_privacy.refresh_foreground_monitor(params.monitor_id);
+
     // If the window was skipped (incognito/private browsing or user filter),
     // bail out entirely — don't OCR the screenshot.
 

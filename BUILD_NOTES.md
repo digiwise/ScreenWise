@@ -4,6 +4,53 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Foreground blockers and active-monitor filter (2026-10-06)
+
+The additive metadata/filter changes use the existing canonical caches and
+configured Developer PowerShell/native environment. Validation commands:
+
+```powershell
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootFmt
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopFmt
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-screen -Lib -TestFilter capture_
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-db -TestTarget capture_privacy_test
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-engine -Lib -TestFilter routes::search::tests
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-engine -Lib -TestFilter event_driven_capture::tests
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-capture -Lib -TestFilter capture_privacy
+```
+
+All 120 checks passed (65 screen, four SQLite, nine API/search, 41 engine,
+one paired persistence smoke). Every suite reused all selected external
+dependencies; no new variants or unexpected rebuilds were reported. The second
+engine test selection reused its just-compiled library test binary. Direct
+`rustfmt --edition 2021` was used only to format the affected Rust files before
+the canonical format checks. No recording, GUI interaction, model provisioning
+or firewall mutation was performed. Active-monitor behavior needs an observation
+after deploying the new binaries; see [the field reference](docs/CAPTURE_PRIVACY.md).
+
+The recorder quick build passed in 2m22s (785 external reused, seven workspace
+rebuilt); GUI quick build passed in 4m56s (1080 external reused, seven workspace
+rebuilt). No external rebuilds or new variants were reported. Non-recording
+recorder `--version` and `--help` checks passed. The full recorder release build
+passed in 6m15s, again reusing all 785 external artifacts and rebuilding seven
+workspace artifacts. Its inert CLI checks passed; the expected macOS-only Swift
+skip warning remains. Commands for the affected build profiles:
+
+```powershell
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -Package screenpipe-engine -Bin screenpipe
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -BuildProfile release
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -BuildProfile release
+```
+
+The full GUI release build passed in 10m52s, reusing all 1080 external artifacts
+and rebuilding seven workspace artifacts. Both full builds had zero new external
+variants or unexpected rebuilds. The 585 recorded Rust/manifest/migration/lockfile
+input sizes and UTC timestamps remained unchanged from completed testing through
+release compilation. Artifact verification uses file sizes/timestamps, without
+artifact hashes. These are compilation and synthetic/inert checks; no new live
+capture or GUI was launched and the persistent deployment was not replaced.
+
 ## Capture-blocker metadata and Explorer fallback (2026-10-06)
 
 Background validation uses the configured canonical Developer PowerShell/native

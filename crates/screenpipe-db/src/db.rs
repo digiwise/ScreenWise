@@ -3331,7 +3331,7 @@ impl DatabaseManager {
     pub async fn search_with_tags(
         &self,
         query: &str,
-        mut content_type: ContentType,
+        content_type: ContentType,
         limit: u32,
         offset: u32,
         start_time: Option<DateTime<Utc>>,
@@ -3354,6 +3354,66 @@ impl DatabaseManager {
         on_screen: Option<bool>,
         tags: &[String],
     ) -> Result<Vec<SearchResult>, sqlx::Error> {
+        self.search_with_tags_and_active_monitor(
+            query,
+            content_type,
+            limit,
+            offset,
+            start_time,
+            end_time,
+            app_name,
+            window_name,
+            min_length,
+            max_length,
+            speaker_ids,
+            frame_name,
+            browser_url,
+            focused,
+            speaker_name,
+            device_name,
+            machine_id,
+            on_screen,
+            tags,
+            None,
+        )
+        .await
+    }
+
+    /// Like the legacy wrapper, with an optional stable foreground-monitor filter.
+    /// This filter requires OCR and excludes missing, malformed or unstable metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_with_tags_and_active_monitor(
+        &self,
+        query: &str,
+        mut content_type: ContentType,
+        limit: u32,
+        offset: u32,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        min_length: Option<usize>,
+        max_length: Option<usize>,
+        speaker_ids: Option<Vec<i64>>,
+        frame_name: Option<&str>,
+        browser_url: Option<&str>,
+        focused: Option<bool>,
+        speaker_name: Option<&str>,
+        device_name: Option<&str>,
+        machine_id: Option<&str>,
+        // Issue #2436: when set, accessibility hits are restricted to
+        // elements visually present (true) or off-screen (false) on the
+        // captured frame. Falls through to the legacy frames_fts path
+        // when None, preserving current behavior for unaware callers.
+        on_screen: Option<bool>,
+        tags: &[String],
+        active_monitor: Option<bool>,
+    ) -> Result<Vec<SearchResult>, sqlx::Error> {
+        if active_monitor.is_some() && content_type != ContentType::OCR {
+            return Err(sqlx::Error::Protocol(
+                "active_monitor requires content_type=ocr".to_string(),
+            ));
+        }
         let mut results = Vec::new();
 
         // if focused or browser_url is present, we run only on OCR
@@ -3400,6 +3460,7 @@ impl DatabaseManager {
                                 device_name,
                                 machine_id,
                                 tags,
+                                active_monitor,
                             ),
                             self.search_audio(
                                 query,
@@ -3473,6 +3534,7 @@ impl DatabaseManager {
                                 device_name,
                                 machine_id,
                                 tags,
+                                active_monitor,
                             ),
                             async {
                                 if !tags.is_empty() {
@@ -3534,6 +3596,7 @@ impl DatabaseManager {
                         device_name,
                         machine_id,
                         tags,
+                        active_monitor,
                     )
                     .await?;
                 results.extend(ocr_results.into_iter().map(SearchResult::OCR));
@@ -3686,6 +3749,7 @@ impl DatabaseManager {
         // Match only frames carrying ALL of these tags (vision_tags join).
         // Empty slice = no tag filter. See `search_with_tags`.
         tags: &[String],
+        active_monitor: Option<bool>,
     ) -> Result<Vec<OCRResult>, sqlx::Error> {
         // Acquire a heavy-read permit (max 2 concurrent). OCR searches can
         // return massive text blobs and hold connections for seconds, starving
@@ -3777,6 +3841,11 @@ impl DatabaseManager {
                 GROUP BY vt.vision_id
                 HAVING COUNT(DISTINCT t.name) = json_array_length(?12)
             ))
+            AND (?13 IS NULL OR CASE WHEN json_valid(frames.capture_privacy) THEN
+                json_type(frames.capture_privacy, '$.is_active_monitor') IN ('true', 'false')
+                AND json_extract(frames.capture_privacy, '$.is_active_monitor') = ?13
+                AND json_type(frames.capture_privacy, '$.foreground_monitor_changed') = 'false'
+                ELSE 0 END)
         GROUP BY frames.id
         ORDER BY frames.timestamp DESC
         LIMIT ?10 OFFSET ?11
@@ -3813,6 +3882,7 @@ impl DatabaseManager {
             .bind(limit)
             .bind(offset)
             .bind(&tags_json)
+            .bind(active_monitor)
             .fetch_all(&self.pool)
             .await?;
 
@@ -4603,7 +4673,7 @@ impl DatabaseManager {
     pub async fn count_search_results_with_tags(
         &self,
         query: &str,
-        mut content_type: ContentType,
+        content_type: ContentType,
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         app_name: Option<&str>,
@@ -4620,6 +4690,56 @@ impl DatabaseManager {
         on_screen: Option<bool>,
         tags: &[String],
     ) -> Result<usize, sqlx::Error> {
+        self.count_search_results_with_tags_and_active_monitor(
+            query,
+            content_type,
+            start_time,
+            end_time,
+            app_name,
+            window_name,
+            min_length,
+            max_length,
+            speaker_ids,
+            frame_name,
+            browser_url,
+            focused,
+            speaker_name,
+            on_screen,
+            tags,
+            None,
+        )
+        .await
+    }
+
+    /// Like the legacy wrapper, with an optional stable foreground-monitor filter.
+    /// This filter requires OCR and excludes missing, malformed or unstable metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn count_search_results_with_tags_and_active_monitor(
+        &self,
+        query: &str,
+        mut content_type: ContentType,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        min_length: Option<usize>,
+        max_length: Option<usize>,
+        speaker_ids: Option<Vec<i64>>,
+        frame_name: Option<&str>,
+        browser_url: Option<&str>,
+        focused: Option<bool>,
+        speaker_name: Option<&str>,
+        // Mirror of `db::search`'s on_screen — must agree or pagination
+        // breaks (`total` no longer matches the visible page). Issue #2436.
+        on_screen: Option<bool>,
+        tags: &[String],
+        active_monitor: Option<bool>,
+    ) -> Result<usize, sqlx::Error> {
+        if active_monitor.is_some() && content_type != ContentType::OCR {
+            return Err(sqlx::Error::Protocol(
+                "active_monitor requires content_type=ocr".to_string(),
+            ));
+        }
         // if focused or browser_url is present, we run only on OCR
         if focused.is_some() || browser_url.is_some() {
             content_type = ContentType::OCR;
@@ -4814,6 +4934,11 @@ impl DatabaseManager {
                            GROUP BY vt.vision_id
                            HAVING COUNT(DISTINCT t.name) = json_array_length(?8)
                        ))
+            AND (?9 IS NULL OR CASE WHEN json_valid(frames.capture_privacy) THEN
+                json_type(frames.capture_privacy, '$.is_active_monitor') IN ('true', 'false')
+                AND json_extract(frames.capture_privacy, '$.is_active_monitor') = ?9
+                AND json_type(frames.capture_privacy, '$.foreground_monitor_changed') = 'false'
+                ELSE 0 END)
                        {a11y_filter}"#,
                 fts_join = if has_fts {
                     "JOIN frames_fts ON frames.id = frames_fts.rowid"
@@ -4967,6 +5092,7 @@ impl DatabaseManager {
                     .bind(frame_name)
                     .bind(focused)
                     .bind(&tags_json)
+                    .bind(active_monitor)
                     .fetch_one(&self.pool)
                     .await?
             }

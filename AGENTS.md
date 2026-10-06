@@ -206,8 +206,11 @@ window titles, URLs, user identifiers or private paths in these notices. Never
 reuse a captured image as a failure placeholder.
 
 The owner's requested per-frame capture-blocker diagnostics are a separate
-structured database/API field: only verified executable basenames and fixed
-reason codes are permitted. Unknown identities remain unknown; do not infer an
+structured database/API field: only verified executable basenames, fixed
+reason codes and sampled foreground-monitor provenance are permitted. Monitor
+association must remain nullable and must become unknown if sampled phases
+disagree; it is not a continuous activity or privacy guarantee.
+Unknown identities remain unknown; do not infer an
 app from stale focus or expose excluded titles, URLs, patterns or paths. See
 [capture decision metadata](docs/CAPTURE_PRIVACY.md). Keep generic notices and
 logs content-free; the application identities themselves remain local activity

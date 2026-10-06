@@ -10,6 +10,54 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Global foreground blockers and active-monitor queries, 2026-10-06
+
+Excluded foreground windows are now evaluated for diagnostic purposes even when
+they are on another monitor. Local monitor acquisition rules are unchanged:
+another monitor's excluded foreground does not grant a local fallback or by
+itself prohibit an otherwise permitted full-monitor frame. Structured blocker
+records retain executable basenames and fixed reasons; unavailable identities
+stay unknown. Foreground windows absent from enumeration receive a distinct
+uncertainty code, not an inferred configured exclusion.
+
+New frame metadata records nullable `foreground_monitor` and `is_active_monitor`,
+plus `foreground_monitor_changed`. Before/after enumeration samples and the
+capture/pre-UIA/post-UIA monitor samples must agree; differing knownness or monitor
+ownership clears the association. Changed foreground identity during enumeration
+withholds pixels rather than accepting an inconsistent snapshot. Sampling does
+not prove continuous focus between observations. Native monitor ownership is
+not the primary display, pointer location or billable activity.
+
+Authenticated OCR search now accepts `active_monitor=true|false`. SQLite applies
+the stable typed-boolean filter before pagination and to the result count.
+Unknown/legacy/malformed/changing metadata matches neither value; omit the filter
+for historical or uncertain coverage. Other content types return a validation
+error. Cache identity includes this filter. Redacted active-monitor frames remain
+searchable even though their older `focused` flag is false. DigiTrack's guide
+documents redaction codes, global versus local blocker roles, the query and its
+coverage limits. No new schema migration, authentication change or data backfill
+is required.
+
+Background checks passed: 65 capture-policy tests, four SQLite integration tests,
+nine search/API unit tests, 41 engine capture tests and one synthetic paired
+capture/persistence smoke (120 total). They include another-monitor excluded
+foreground diagnostics, sticky unknown monitor transitions, redacted-frame
+metadata, legacy null preservation, malformed JSON and filtering/counting/paging
+with both empty and FTS queries. Root/desktop formatting passed and neither Rust
+lockfile changed. These checks do not validate the new metadata against live
+Windows focus; that remains a scoped post-deployment observation. No new GUI,
+recording session, synthetic input, model download or firewall mutation was
+started for these checks. The owner's running deployment is left in place.
+
+Quick recorder and GUI builds passed in 2m22s and 4m56s. Full release builds
+passed in 6m15s and 10m52s, respectively. Every build reused all selected external
+dependencies (785 root, 1080 desktop), with seven affected workspace artifacts
+rebuilt and zero unexpected external rebuilds. Recorder quick/release version
+and help smoke passed without starting capture. The expected macOS-only Swift
+skip warning remains. All 585 tracked build inputs checked by file size/UTC
+timestamp stayed unchanged; no artifact hashes were calculated. The new binaries
+require deployment before any claim about their live foreground diagnostics.
+
 ## Capture blockers and safe Explorer fallback, 2026-10-06
 
 The owner accepted the preceding monitor-association correction as verified and

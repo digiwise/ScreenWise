@@ -24,7 +24,10 @@ captured on the same monitor:
       "foreground": false
     }
   ],
-  "blockers_truncated": false
+  "blockers_truncated": false,
+  "foreground_monitor": "monitor_2",
+  "is_active_monitor": true,
+  "foreground_monitor_changed": false
 }
 ```
 
@@ -41,6 +44,48 @@ UIA, even when they disappear during the operation. It is limited to 32 entries;
 `blockers_truncated` explicitly reports omitted entries. A later UIA refusal has
 an unknown app identity because its skip result cannot safely establish the
 executable after a possible focus change. Do not infer it from earlier focus.
+
+Foreground blockers are now observed globally, including an excluded foreground
+window on another monitor when this monitor has no permitted foreground fallback.
+`foreground=true` means the global foreground window at an observed policy phase;
+it does not mean that window overlaps this frame's monitor. Other-monitor
+background apps are omitted. A global excluded foreground app does not itself
+exclude pixels on all monitors: the top-level outcome/reason explains the local
+decision. Both configured matches and unavailable metadata remain explicit, without
+excluded window titles or filter strings. If the foreground window cannot be
+enumerated, the verified executable may be reported with
+`foreground_window_unavailable`; this is uncertainty, not a configured exclusion.
+
+## Active-monitor provenance and filtering
+
+`foreground_monitor` identifies the Windows monitor containing the global
+foreground window, using the same `monitor_<id>` spelling as frame `device_name`.
+It follows Windows monitor ownership for a window spanning displays, not the
+mouse position or configured primary display. IDs are local/session provenance,
+not portable physical-display identities. No nearest monitor is invented for a
+window that Windows cannot associate with a monitor.
+
+`is_active_monitor` is `true` when the captured monitor owns the foreground window,
+`false` when a verified different monitor does, and `null` for unavailable or
+changing association. Redacted frames retain this metadata too; it does not
+imply capture permission, input activity, visibility of every pixel or work time.
+Policy enumeration samples focus before/after; acquisition and pre-UIA evaluations
+are merged, with a final monitor check after UIA. If any sampled monitor/knownness
+differs, `foreground_monitor_changed=true` and both identity/boolean become null
+for that frame, even if focus returns. This is sampled provenance, not proof that
+no transition occurred between checks. A changed foreground window during policy
+enumeration produces an inconsistent-focus placeholder and the fixed blocker code
+`foreground_changed_during_evaluation`.
+
+Use authenticated `GET /search?content_type=ocr&active_monitor=true` for a first
+pass containing known active-monitor screen/UIA/OCR **and placeholder** records.
+`active_monitor=false` selects known other-monitor records. Filtering occurs
+before pagination and applies to `pagination.total`; omit the filter for all
+records. Null, missing, malformed and explicitly changing associations match
+neither boolean filter. The option requires `content_type=ocr`; incompatible
+types are rejected. Other modalities and historical coverage require separate
+queries. A filtered empty result does not establish an empty or inactive period.
+Old records have no active-monitor provenance and need an unfiltered fallback.
 
 | Outcome | Meaning |
 |---|---|

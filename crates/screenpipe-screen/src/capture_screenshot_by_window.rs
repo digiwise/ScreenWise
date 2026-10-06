@@ -979,6 +979,9 @@ pub struct WindowsCapturePrivacy {
     pub reason: Option<&'static str>,
     pub blockers: Vec<WindowsCaptureBlocker>,
     pub blockers_truncated: bool,
+    pub foreground_monitor: Option<String>,
+    pub is_active_monitor: Option<bool>,
+    pub foreground_monitor_changed: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -998,12 +1001,28 @@ impl Default for WindowsCapturePrivacy {
             reason: None,
             blockers: Vec::new(),
             blockers_truncated: false,
+            foreground_monitor: None,
+            is_active_monitor: None,
+            foreground_monitor_changed: false,
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 impl WindowsCapturePrivacy {
+    pub fn refresh_foreground_monitor(&mut self, captured: u32) {
+        self.merge(Self::default().with_foreground_monitor(
+            sample_windows_foreground().and_then(|sample| sample.monitor),
+            captured,
+        ));
+    }
+
+    fn with_foreground_monitor(mut self, foreground: Option<u32>, captured: u32) -> Self {
+        self.foreground_monitor = foreground.map(|id| format!("monitor_{id}"));
+        self.is_active_monitor = foreground.map(|id| id == captured);
+        self
+    }
+
     pub fn with_outcome(mut self, outcome: WindowsCaptureOutcome) -> Self {
         (self.outcome, self.reason) = match outcome {
             WindowsCaptureOutcome::FullMonitor => ("full_monitor", None),
@@ -1077,10 +1096,71 @@ impl WindowsCapturePrivacy {
     /// Preserve restrictions observed before and after acquisition, even if the
     /// final plan changes to full-monitor. Earlier restrictions still shaped pixels.
     pub fn merge(&mut self, other: Self) {
+        // All sampled phases must agree. Unknown or changing association must
+        // not be promoted into a claim that this was the active monitor.
+        if self.foreground_monitor_changed
+            || other.foreground_monitor_changed
+            || self.foreground_monitor != other.foreground_monitor
+            || self.is_active_monitor != other.is_active_monitor
+        {
+            self.foreground_monitor_changed = true;
+            self.foreground_monitor = None;
+            self.is_active_monitor = None;
+        }
         self.blockers_truncated |= other.blockers_truncated;
         for b in other.blockers {
             self.add_blocker(b.app, b.reasons, b.foreground);
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsForegroundSample {
+    window: u32,
+    process: u32,
+    monitor: Option<u32>,
+}
+
+#[cfg(target_os = "windows")]
+fn sample_windows_foreground() -> Option<WindowsForegroundSample> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowThreadProcessId(hwnd: isize, process: *mut u32) -> u32;
+        fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
+    }
+    let window = unsafe { GetForegroundWindow() };
+    if window == 0 {
+        return None;
+    }
+    let mut process = 0;
+    if unsafe { GetWindowThreadProcessId(window, &mut process) } == 0 || process == 0 {
+        return None;
+    }
+    // xcap 0.9.4 uses the native HMONITOR/HWND cast to u32 as its IDs.
+    // DEFAULTTONULL avoids inventing a nearest monitor for an off-screen HWND.
+    let monitor = unsafe { MonitorFromWindow(window, 0) };
+    let sample = WindowsForegroundSample {
+        window: window as u32,
+        process,
+        monitor: (monitor != 0).then_some(monitor as u32),
+    };
+    (unsafe { GetForegroundWindow() } == window).then_some(sample)
+}
+
+#[cfg(target_os = "windows")]
+fn record_windows_window_blockers(
+    privacy: &mut WindowsCapturePrivacy,
+    app: Option<String>,
+    reasons: Vec<&'static str>,
+    foreground: bool,
+    overlaps_monitor: bool,
+) {
+    // Global excluded focus explains why no local foreground fallback exists,
+    // even when that foreground window belongs to a different monitor.
+    if overlaps_monitor || foreground {
+        privacy.add_blocker(app, reasons, foreground);
     }
 }
 
@@ -1452,14 +1532,19 @@ pub fn evaluate_windows_monitor_capture(
         height: monitor.height(),
     };
     let mut runtime_windows = Vec::new();
-    let mut privacy = WindowsCapturePrivacy::default();
+    let foreground = sample_windows_foreground();
+    let mut privacy = WindowsCapturePrivacy::default()
+        .with_foreground_monitor(foreground.and_then(|sample| sample.monitor), monitor.id());
     let mut foreground_unsuitable = None;
+    let mut foreground_seen = false;
 
     for source in Window::all()? {
         if source.is_minimized()? {
             continue;
         }
 
+        let id = source.id()?;
+        let is_focused = foreground.is_some_and(|sample| sample.window == id);
         let window_x = source.x()?;
         let window_y = source.y()?;
         let window_width = source.width()?;
@@ -1470,12 +1555,19 @@ pub fn evaluate_windows_monitor_capture(
             width: window_width,
             height: window_height,
         };
-        if window_width == 0 || window_height == 0 || !bounds.overlaps(&monitor_bounds) {
+        let overlaps_monitor =
+            window_width != 0 && window_height != 0 && bounds.overlaps(&monitor_bounds);
+        if !overlaps_monitor && !is_focused {
             continue;
         }
 
-        let id = source.id()?;
         let process_id = source.pid()? as i32;
+        if is_focused && foreground.is_some_and(|sample| sample.process != process_id as u32) {
+            return Err(
+                std::io::Error::other("foreground process changed during evaluation").into(),
+            );
+        }
+        foreground_seen |= is_focused;
         let app_name = source.app_name().unwrap_or_default();
         let app_name = if app_name.is_empty() {
             get_process_exe_name(process_id as u32).unwrap_or_default()
@@ -1483,7 +1575,6 @@ pub fn evaluate_windows_monitor_capture(
             app_name
         };
         let window_name = source.title().unwrap_or_default();
-        let is_focused = source.is_focused()?;
         let executable = get_process_exe_name(process_id as u32);
         let diagnostic_app = diagnostic_executable_name(executable.as_deref());
         let app_name_lower = app_name.to_lowercase();
@@ -1555,7 +1646,17 @@ pub fn evaluate_windows_monitor_capture(
                 foreground_unsuitable = Some((diagnostic_app.clone(), reason));
             }
         }
-        privacy.add_blocker(diagnostic_app, reasons, is_focused);
+        record_windows_window_blockers(
+            &mut privacy,
+            diagnostic_app,
+            reasons,
+            is_focused,
+            overlaps_monitor,
+        );
+
+        if !overlaps_monitor {
+            continue;
+        }
 
         runtime_windows.push(RuntimeWindow {
             source,
@@ -1581,7 +1682,25 @@ pub fn evaluate_windows_monitor_capture(
         .iter()
         .map(|window| window.snapshot.clone())
         .collect();
-    let choice = choose_windows_capture(&snapshots, &monitor_bounds);
+    if !foreground_seen {
+        let app = foreground.and_then(|sample| get_process_exe_name(sample.process));
+        privacy.add_blocker(
+            diagnostic_executable_name(app.as_deref()),
+            vec!["foreground_window_unavailable"],
+            true,
+        );
+    }
+    let final_foreground = sample_windows_foreground();
+    let choice = if foreground != final_foreground {
+        privacy.merge(WindowsCapturePrivacy::default().with_foreground_monitor(
+            final_foreground.and_then(|sample| sample.monitor),
+            monitor.id(),
+        ));
+        privacy.foreground_blocked("foreground_changed_during_evaluation");
+        WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus)
+    } else {
+        choose_windows_capture(&snapshots, &monitor_bounds)
+    };
     if matches!(
         choice,
         WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
@@ -2300,6 +2419,77 @@ mod tests {
         ));
         assert_eq!(failed.reason, Some("post_capture_privacy_evaluation"));
         assert_eq!(failed.blockers.len(), 3);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_records_excluded_foreground_on_another_monitor() {
+        let mut privacy = WindowsCapturePrivacy::default().with_foreground_monitor(Some(2), 1);
+        record_windows_window_blockers(
+            &mut privacy,
+            Some("excel.exe".into()),
+            vec!["configured_exclusion"],
+            true,
+            false,
+        );
+        record_windows_window_blockers(
+            &mut privacy,
+            Some("unrelated.exe".into()),
+            vec!["configured_exclusion"],
+            false,
+            false,
+        );
+        let privacy = privacy.with_outcome(WindowsCaptureOutcome::CaptureRedacted(
+            WindowsCaptureRedactionReason::NoSafeActiveWindow,
+        ));
+        assert_eq!(privacy.reason, Some("no_safe_active_window"));
+        assert_eq!(privacy.blockers.len(), 1);
+        assert_eq!(privacy.blockers[0].app.as_deref(), Some("excel.exe"));
+        assert!(privacy.blockers[0].foreground);
+        assert_eq!(privacy.foreground_monitor.as_deref(), Some("monitor_2"));
+        assert_eq!(privacy.is_active_monitor, Some(false));
+        let serialized = serde_json::to_value(privacy).unwrap();
+        assert!(serialized.get("window_title").is_none());
+        assert!(serialized.get("process_id").is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_active_monitor_agreement_includes_redacted_foreground() {
+        let mut privacy = WindowsCapturePrivacy::default().with_foreground_monitor(Some(7), 7);
+        privacy.merge(WindowsCapturePrivacy::default().with_foreground_monitor(Some(7), 7));
+        privacy.add_blocker(
+            Some("firefox.exe".into()),
+            vec!["configured_exclusion"],
+            true,
+        );
+        let privacy = privacy.with_outcome(WindowsCaptureOutcome::CaptureRedacted(
+            WindowsCaptureRedactionReason::ActiveWindowExcluded,
+        ));
+        assert_eq!(privacy.is_active_monitor, Some(true));
+        assert_eq!(privacy.foreground_monitor.as_deref(), Some("monitor_7"));
+        assert!(!privacy.foreground_monitor_changed);
+        assert!(privacy.blockers[0].foreground);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_active_monitor_changes_and_unknowns_stay_unknown() {
+        for later in [Some(8), None] {
+            let mut privacy = WindowsCapturePrivacy::default().with_foreground_monitor(Some(7), 7);
+            privacy.merge(WindowsCapturePrivacy::default().with_foreground_monitor(later, 7));
+            privacy.merge(WindowsCapturePrivacy::default().with_foreground_monitor(Some(7), 7));
+            assert_eq!(privacy.foreground_monitor, None);
+            assert_eq!(privacy.is_active_monitor, None);
+            assert!(privacy.foreground_monitor_changed);
+        }
+        let mut unknown = WindowsCapturePrivacy::default();
+        unknown.merge(WindowsCapturePrivacy::default());
+        assert_eq!(unknown.is_active_monitor, None);
+        assert!(!unknown.foreground_monitor_changed);
+        unknown.merge(WindowsCapturePrivacy::default().with_foreground_monitor(Some(7), 7));
+        assert_eq!(unknown.is_active_monitor, None);
+        assert!(unknown.foreground_monitor_changed);
     }
 
     #[test]

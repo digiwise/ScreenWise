@@ -759,6 +759,8 @@ mod tests {
         let now = Utc::now();
         let privacy = serde_json::json!({
             "schema_version": 1, "outcome": "redacted", "reason": "active_window_excluded",
+            "foreground_monitor": "monitor_1", "is_active_monitor": true,
+            "foreground_monitor_changed": false,
             "blockers": [{"app": "fixture.exe", "reasons": ["ignored_window"], "foreground": true}],
             "blockers_truncated": false
         });

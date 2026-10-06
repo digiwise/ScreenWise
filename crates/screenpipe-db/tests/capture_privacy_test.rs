@@ -143,3 +143,200 @@ async fn capture_privacy_migration_preserves_existing_frame() {
             .unwrap();
     assert_eq!(row, ("synthetic existing text".to_string(), None));
 }
+
+async fn search_active(
+    db: &DatabaseManager,
+    query: &str,
+    active: Option<bool>,
+    limit: u32,
+    offset: u32,
+) -> Vec<i64> {
+    db.search_with_tags_and_active_monitor(
+        query,
+        ContentType::OCR,
+        limit,
+        offset,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &[],
+        active,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| match r {
+        SearchResult::OCR(row) => row.frame_id,
+        _ => panic!("expected OCR"),
+    })
+    .collect()
+}
+
+async fn count_active(db: &DatabaseManager, query: &str, active: Option<bool>) -> usize {
+    db.count_search_results_with_tags_and_active_monitor(
+        query,
+        ContentType::OCR,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &[],
+        active,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn active_monitor_filter_pages_and_counts_only_stable_json_booleans() {
+    let db = DatabaseManager::new("sqlite::memory:", Default::default())
+        .await
+        .unwrap();
+    let metadata = [
+        None,
+        Some("{}"),
+        Some(r#"{"is_active_monitor":null,"foreground_monitor_changed":false}"#),
+        Some("not-json"),
+        Some(r#"{"is_active_monitor":1,"foreground_monitor_changed":false}"#),
+        Some(r#"{"is_active_monitor":"true","foreground_monitor_changed":false}"#),
+        Some(r#"{"is_active_monitor":true,"foreground_monitor_changed":true}"#),
+        Some(r#"{"is_active_monitor":false,"foreground_monitor_changed":true}"#),
+        Some(r#"{"is_active_monitor":true}"#),
+        Some(
+            r#"{"is_active_monitor":true,"foreground_monitor":"monitor_1","foreground_monitor_changed":false}"#,
+        ),
+        Some(
+            r#"{"is_active_monitor":false,"foreground_monitor":"monitor_1","foreground_monitor_changed":false}"#,
+        ),
+        Some(
+            r#"{"is_active_monitor":true,"foreground_monitor":"monitor_2","foreground_monitor_changed":false}"#,
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (index, privacy) in metadata.into_iter().enumerate() {
+        let id = insert(&db, privacy).await;
+        sqlx::query("UPDATE frames SET timestamp = ?1 WHERE id = ?2")
+            .bind(Utc::now() + chrono::Duration::seconds(index as i64))
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    // Both empty and FTS text searches apply admission before LIMIT/OFFSET.
+    for query in ["", "captureprivacyfixture"] {
+        assert_eq!(count_active(&db, query, None).await, ids.len());
+        assert_eq!(
+            search_active(&db, query, None, 100, 0).await.len(),
+            ids.len()
+        );
+        assert_eq!(count_active(&db, query, Some(true)).await, 2);
+        assert_eq!(
+            search_active(&db, query, Some(true), 1, 0).await,
+            vec![ids[11]]
+        );
+        assert_eq!(
+            search_active(&db, query, Some(true), 1, 1).await,
+            vec![ids[9]]
+        );
+        assert!(search_active(&db, query, Some(true), 1, 2).await.is_empty());
+        assert_eq!(count_active(&db, query, Some(false)).await, 1);
+        assert_eq!(
+            search_active(&db, query, Some(false), 1, 0).await,
+            vec![ids[10]]
+        );
+        assert!(search_active(&db, query, Some(false), 1, 1)
+            .await
+            .is_empty());
+        // The legacy method still sees the complete set, including old/null metadata.
+        let legacy = db
+            .search(
+                query,
+                ContentType::OCR,
+                100,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.len(), ids.len());
+    }
+    assert!(db
+        .search_with_tags_and_active_monitor(
+            "",
+            ContentType::All,
+            1,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some(true)
+        )
+        .await
+        .is_err());
+    assert!(db
+        .count_search_results_with_tags_and_active_monitor(
+            "",
+            ContentType::Audio,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some(false)
+        )
+        .await
+        .is_err());
+}

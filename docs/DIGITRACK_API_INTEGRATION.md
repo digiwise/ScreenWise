@@ -3,6 +3,8 @@
 Reviewed 2026-10-06 against ScreenWise commit `3078fb4d8`.
 Retrieval guidance updated 2026-10-06 using the two-minute export assessment
 reported against `303fd20b4`; the API contract review baseline is unchanged.
+Capture-decision and active-monitor additions documented 2026-10-06; these
+additive fields apply to newly captured Windows event-driven frames.
 
 The purpose of this guide is to explain ScreenWise's ability to provide evidence to DigiTrack.
 
@@ -49,12 +51,12 @@ an instruction to load every element and full frame context for every period.
 
 | Purpose | GET route | Important fields/shape |
 |---|---|---|
-| Screen text and frame references | `/search?content_type=ocr` | `{data:[{type:"OCR",content:{...}}],pagination:{limit,offset,total}}`; `frame_id`, `timestamp`, `text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused`, `device_name` |
+| Screen text and frame references | `/search?content_type=ocr` | `{data:[{type:"OCR",content:{...}}],pagination:{limit,offset,total}}`; `frame_id`, `timestamp`, `text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused`, `device_name`, `capture_privacy`; optional `active_monitor=true` for known active-monitor frames, including redactions |
 | Individual retained accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence`; add visibility/source filters when needed |
 | Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; `chunk_id`, `offset_index`, `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
 | Optional retained input events | `/search?content_type=input` | `type:"Input"`; `id`, `timestamp`, `event_type`, optional app/window/context, `text_content` and `frame_id` |
 | Frame timestamp for a reference | `/frames/{frame_id}/metadata` | `{frame_id,timestamp}`; returns 404 when the frame is absent |
-| Full retained frame context on demand | `/frames/{frame_id}/context` | `{frame_id,text,nodes,urls,text_source}`; accessibility first, OCR fallback |
+| Full retained frame context on demand | `/frames/{frame_id}/context` | `{frame_id,text,nodes,urls,text_source,capture_privacy}`; accessibility first, OCR fallback |
 | Full element detail for a frame | `/frames/{frame_id}/elements` | `{data:[...],pagination:{...}}`; optional `source=accessibility` or `source=ocr`; returns all frame elements rather than offset pages |
 | Meeting metadata | `/meetings` and `/meetings/{id}` | Array/single record; `id`, `meeting_start`, nullable `meeting_end`, `meeting_app`, `detection_source`, optional title/attendees/note |
 | Meeting-specific transcript references | `/meetings/{id}/transcript` | Array with **camelCase** fields, including `id`, `meetingId`, `capturedAt`, `transcript`, `source`, `provider`, `model`, `audioChunkId`, `audioTranscriptionId`, `deviceName`, `deviceType` |
@@ -65,6 +67,71 @@ whole responses into an LLM: project only the evidence necessary for the task.
 `transcription` and `text` are aliases, not two separate observations.
 Do not assume audio `device_type` casing matches the meeting transcript's string
 field; decode each response contract separately.
+
+### Explain redactions and prioritise the active monitor
+
+Use `content.capture_privacy` on screen search results (also returned by frame
+context) to distinguish a configured exclusion from metadata uncertainty or
+acquisition failure. Keep the top-level `outcome`/`reason` and each blocker
+`app`, `reasons`, and `foreground` with the source reference. `app` is only a
+verified executable basename; titles, document names, URLs and exclusion patterns
+are deliberately withheld. Null means unknown, not unrestricted or healthy.
+See [the complete field/code reference](CAPTURE_PRIVACY.md).
+
+For example, this **fabricated** placeholder from `monitor_1` explains that a
+background exclusion affected that monitor while excluded Excel held global
+foreground focus on `monitor_2`:
+
+```json
+{
+  "device_name": "monitor_1",
+  "text_source": "privacy_placeholder",
+  "capture_privacy": {
+    "schema_version": 1,
+    "outcome": "redacted",
+    "reason": "no_safe_active_window",
+    "blockers": [
+      {"app": "firefox.exe", "reasons": ["configured_exclusion"], "foreground": false},
+      {"app": "excel.exe", "reasons": ["configured_exclusion"], "foreground": true}
+    ],
+    "blockers_truncated": false,
+    "foreground_monitor": "monitor_2",
+    "is_active_monitor": false,
+    "foreground_monitor_changed": false
+  }
+}
+```
+
+`foreground=true` refers to global Windows focus and may be on another monitor.
+`window_metadata_unavailable`, `browser_url_unavailable`, or
+`foreground_window_unavailable` are policy-check uncertainty; do not describe
+these as a known private document or a configured exclusion. `active_window_excluded`
+is an outcome category; consult blocker codes to say **why** it was withheld.
+An unavailable app identity must stay unknown. Blockers accumulate across sampled
+phases and are capped; preserve `blockers_truncated` and do not infer the exact
+number of excluded windows. Generic `/capture-events` notices remain separate
+and cover pauses/gaps that have no frame.
+
+For a bounded, smaller first pass, request:
+
+```http
+GET /search?content_type=ocr&active_monitor=true&start_time=2026-10-06T00:00:00Z&end_time=2026-10-06T00:30:00Z&include_frames=false&limit=100&offset=0&timezone=utc
+Authorization: Bearer <token>
+```
+
+This server-side filter applies before pagination, including the filtered total.
+It retains active-monitor placeholders; do not add `focused=true` to this query,
+because the older focused field is false on placeholders. `active_monitor=false`
+selects verified other-monitor records; omit the parameter for all records.
+It is accepted only with `content_type=ocr`. Missing/null/malformed metadata and
+frames with changed monitor association match neither value, so use an unfiltered
+fallback for old/uncertain periods and fetch other-monitor evidence on demand.
+Do not choose a single monitor for the entire period: focus can move between
+displays. No pointer position, primary-monitor assumption or pixel visibility is
+implied. Per-frame samples do not establish continuous focus or billable time.
+
+Continue querying input, audio/meeting evidence and safe notices independently.
+An active-monitor filter does not describe the coverage of those modalities.
 
 ### Example request targets
 
@@ -327,7 +394,8 @@ Frame `text` may be the stored combined/full text; source-specific elements
 provide finer provenance. Do not turn `focused=null` into either true or false.
 Multiple monitor records are evidence of one elapsed period, not additive time.
 Identical text was observed under different monitor labels in the reviewed
-export. Its acquisition/attribution cause is under investigation: do not infer
+export. The Windows foreground-UIA association defect was subsequently corrected;
+historical rows were not repaired. Do not infer
 that a window was visible on every named monitor, that its pixels were copied,
 or that privacy suppression caused the duplication. Retain the original labels
 as reported provenance, with monitor attribution uncertain where relevant.
@@ -480,7 +548,10 @@ follow-up requirements, not changes made by this review.
    boundaries and assumptions, including whether a brief switch belongs to the
    surrounding task.
 2. **Retrieve a bounded first pass.** Query screen text with
-   `/search?content_type=ocr&include_frames=false`, retained input events, safe
+   `/search?content_type=ocr&active_monitor=true&include_frames=false` for new
+   records with known active-monitor provenance; use an unfiltered fallback for
+   older/uncertain coverage. Preserve redaction decisions and blocker codes as
+   missing-evidence explanations. Also query retained input events, safe
    `/capture-events` notices and relevant audio/meeting evidence for the period.
    Page these routes within explicit budgets and cache results by source identity,
    range and query. Reconcile recent transcripts when needed. Do not request
