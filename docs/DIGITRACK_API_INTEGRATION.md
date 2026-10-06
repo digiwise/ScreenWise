@@ -1,6 +1,8 @@
 # DigiTrack evidence integration: API assessment and client guide
 
 Reviewed 2026-10-06 against ScreenWise commit `3078fb4d8`.
+Retrieval guidance updated 2026-10-06 using the two-minute export assessment
+reported against `303fd20b4`; the API contract review baseline is unchanged.
 
 The purpose of this guide is to explain ScreenWise's ability to provide evidence to DigiTrack.
 
@@ -14,6 +16,9 @@ DigiTrack should retain its own focus, idle and microphone recording and its own
 time entries and Clockify sync. ScreenWise evidence can help explain those
 periods, but cannot establish exact work or billable duration by itself.
 This guide documents existing routes and identified limitations.
+For normal summarisation, use the [staged retrieval workflow](#staged-retrieval-and-evidence-reduction)
+below. The exhaustive examples are for contract inspection and drill-down, not
+an instruction to load every element and full frame context for every period.
 
 ## Connection, authentication and time
 
@@ -45,7 +50,7 @@ This guide documents existing routes and identified limitations.
 | Purpose | GET route | Important fields/shape |
 |---|---|---|
 | Screen text and frame references | `/search?content_type=ocr` | `{data:[{type:"OCR",content:{...}}],pagination:{limit,offset,total}}`; `frame_id`, `timestamp`, `text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused`, `device_name` |
-| Individual visible accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence` |
+| Individual retained accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence`; add visibility/source filters when needed |
 | Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; `chunk_id`, `offset_index`, `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
 | Optional retained input events | `/search?content_type=input` | `type:"Input"`; `id`, `timestamp`, `event_type`, optional app/window/context, `text_content` and `frame_id` |
 | Frame timestamp for a reference | `/frames/{frame_id}/metadata` | `{frame_id,timestamp}`; returns 404 when the frame is absent |
@@ -119,10 +124,11 @@ Authorization: Bearer <token>
 }
 ```
 
-**2. Element-level text and provenance.** Fetch `/elements` without a source or
-visibility filter for all retained matching OCR/accessibility elements. This
-includes potentially off-screen accessibility text. For only explicitly visible
-accessibility elements, add `source=accessibility&on_screen=true` instead.
+**2. Element-level text and provenance.** For exhaustive inspection, fetch
+`/elements` without a source or visibility filter for all retained matching
+OCR/accessibility elements. This includes potentially off-screen accessibility
+text. Normal summarisation should fetch selected detail only; for explicitly
+visible accessibility elements, add `source=accessibility&on_screen=true`.
 
 ```http
 GET /elements?start_time=2026-10-06T00:00:00Z&end_time=2026-10-06T00:30:00Z&limit=100&offset=0&timezone=utc
@@ -320,6 +326,11 @@ read `text_source`. It can be `accessibility`, `ocr` or null for older records.
 Frame `text` may be the stored combined/full text; source-specific elements
 provide finer provenance. Do not turn `focused=null` into either true or false.
 Multiple monitor records are evidence of one elapsed period, not additive time.
+Identical text was observed under different monitor labels in the reviewed
+export. Its acquisition/attribution cause is under investigation: do not infer
+that a window was visible on every named monitor, that its pixels were copied,
+or that privacy suppression caused the duplication. Retain the original labels
+as reported provenance, with monitor attribution uncertain where relevant.
 
 **Visibility caveat:** `/search?content_type=accessibility&on_screen=true`
 selects frames with matching on-screen elements, but still returns the frame's
@@ -441,7 +452,8 @@ proof of why a historical interval lacks data.
 ## Recommended DigiTrack MVP
 
 1. Keep DigiTrack's existing recording and confirmed time entries authoritative.
-2. Retrieve ScreenWise evidence only for an explicitly selected review period.
+2. Retrieve ScreenWise evidence only for an explicitly selected review period,
+   following the staged workflow below instead of an exhaustive bulk dump.
 3. Maintain per-modality status: available, empty, unavailable, partial or unknown.
    Preserve provenance, source references and any withholding/loss notices.
 4. Give a tool-free local model only selected evidence and candidate intervals.
@@ -459,6 +471,61 @@ stable cursor/snapshot semantics, overlapping-meeting selection, source-store
 identity and a typed historical coverage/status contract. These are identified
 follow-up requirements, not changes made by this review.
 
+### Staged retrieval and evidence reduction
+
+1. **Anchor the review in DigiTrack's timeline.** Use its focus, idle and
+   microphone-process observations to propose candidate periods. ScreenWise can
+   help identify tasks within the same app/window and explain short switches;
+   app changes alone do not establish task boundaries. Record uncertain
+   boundaries and assumptions, including whether a brief switch belongs to the
+   surrounding task.
+2. **Retrieve a bounded first pass.** Query screen text with
+   `/search?content_type=ocr&include_frames=false`, retained input events, safe
+   `/capture-events` notices and relevant audio/meeting evidence for the period.
+   Page these routes within explicit budgets and cache results by source identity,
+   range and query. Reconcile recent transcripts when needed. Do not request
+   global elements and full context for every frame as part of the first pass.
+3. **Reduce repetition before inference.** Group identical screen text within
+   the same candidate activity, accounting for repeated captures across monitors.
+   Preserve every contributing source-scoped reference, timestamp, app/window,
+   reported monitor and text source. Keep first/last observations without treating
+   the interval between them as continuous work. Do not merge unrelated tasks
+   just because they contain the same text, or discard changed passages. Screen
+   text, elements and context for one frame are overlapping representations,
+   not independent observations or extra elapsed time.
+4. **Separate actions from existing context.** Newly typed text, focus changes
+   and changed passages can corroborate an action; retained old chat messages,
+   sidebar titles, menus and button labels usually supply background context.
+   A capture timestamp dates the observation, not the creation or performance
+   of every activity described in its text. Input fragments, edits and clicks
+   need interpretation; a command visible in a chat or paste preview does not
+   prove it executed. Prefer relevant content over repeated interface chrome,
+   without deleting the original evidence.
+5. **Resolve selected ambiguity on demand.** For representative frames or
+   uncertain task transitions, use source/visibility-filtered `/elements`, or
+   fetch `/frames/{id}/elements` with a source filter and select `on_screen=true`
+   records on the client. Resolve timestamps from existing screen records or
+   `/metadata`. Prefer explicitly visible accessibility text when available;
+   null visibility and unverified monitor attribution remain uncertain. Load
+   `/frames/{id}/context` only when this adds needed context or a reviewer opens
+   a reference. Off-screen/older text must stay labelled as context. Missing
+   visible evidence does not establish an empty screen or justify reconstructing
+   withheld content.
+6. **Summarise a compact evidence packet.** Give the local model selected
+   changes/actions, representative excerpts, candidate boundaries, safe status,
+   assumptions and references. Set explicit text/record/request budgets and
+   report omitted or incomplete evidence. Retain drill-down access to originals;
+   the default review should show short proposed work descriptions and supporting
+   references, rather than pages of repeated JSON. Keep the existing untrusted
+   content, authentication and human-confirmation requirements.
+
+Treat privacy placeholders as point observations of unavailable/withheld screen
+evidence. Neither their count nor the fraction of frames they occupy measures
+lost time. Empty audio/transcript results cannot distinguish silence from absent,
+suppressed or delayed capture. No notices in the requested range do not establish
+complete privacy-status coverage; preserve bounded prior context and unknown
+initial state as described above.
+
 ## Inspect the API evidence locally
 
 With an existing ScreenWise instance running, use the standalone PowerShell 7
@@ -467,7 +534,7 @@ exporter to see the retained evidence a DigiTrack client could retrieve:
 ```powershell
 pwsh -NoProfile -File .\scripts\windows\evidence-review\Export-ScreenWiseEvidence.ps1 `
   -Start '2026-10-06T10:00:00+11:00' -End '2026-10-06T10:30:00+11:00' `
-  -IncludeFrameContext
+  -OpenReview
 ```
 
 The deployment manifest supplies the executable, data directory and API port.
@@ -480,8 +547,39 @@ The exporter includes screen/UIA/OCR text, source elements, audio transcripts,
 keyboard/clipboard records, overlapping meetings and their transcripts, frame
 metadata/context, safe notices and bounded prior notice context. Pagination and
 request budgets can produce partial data; failures, unknown initial state and
-timestamp precision are recorded explicitly. Omit `-IncludeFrameContext` for a
-smaller export. [Options and limits](../scripts/windows/evidence-review/README.md).
+timestamp precision are recorded explicitly. Full frame context is omitted by
+default; add `-IncludeFrameContext` only for detailed inspection. Even without
+it, this diagnostic exporter retrieves global elements and can be much larger
+than the compact evidence packet recommended for DigiTrack. It is not a model
+prompt or a proposed normal client workflow.
+[Options and limits](../scripts/windows/evidence-review/README.md).
+
+### Findings from a two-minute export (2026-10-06)
+
+A completed assessment of an owner-reviewed export reported these aggregate
+counts. No captured text, private paths or personal record identifiers are
+included here. This documentation update used that assessment without reading
+or re-querying the recording store.
+
+| Result | Observed amount | Implication for DigiTrack |
+|---|---:|---|
+| Screen text | 56 frames; 24 distinct text values | Repeated text can be grouped while preserving references and changes. |
+| Elements | 8,430 records; 3,157 explicitly off-screen | Fetch selected visible detail, rather than every retained element. |
+| Full frame context | 56 responses; about 10.4 MB | Avoid duplicating screen text/elements in every review. |
+| Input | 32 events | Typing and app/focus changes provide useful corroboration. |
+| Retrieval | 147 sequential API requests | Approximately 85 element pages and 56 context requests dominated request count. |
+| Review files | About 20.2 MB HTML; 36.2 MB total | Embedding all JSON again makes even a short period cumbersome to review. |
+| Privacy placeholders | 11 frames; no in-period `/capture-events` notices | Preserve the reported withholding state; do not convert frame counts to unavailable duration. |
+| Audio/transcripts | No returned records | Cause remains unknown; this is not a silence or audio-health assertion. |
+
+The sample contained enough task/action evidence for a useful short description,
+but repeated old conversation text and interface labels were poor evidence of
+what work happened at capture time. Identical text appeared under multiple
+monitor labels; the recorder cause remains a separate investigation. The sample
+does not establish correct monitor attribution or privacy enforcement. Request
+counts and file sizes explain likely overhead, but API latency and browser
+rendering time were not separately benchmarked. These findings refine client
+retrieval strategy; they do not change the route contracts or prove completeness.
 
 ## Verification and scope
 
