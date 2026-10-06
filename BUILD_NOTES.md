@@ -4,6 +4,58 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Capture-blocker metadata and Explorer fallback (2026-10-06)
+
+Background validation uses the configured canonical Developer PowerShell/native
+environment, with locked/offline dependencies and the existing root target cache:
+
+```powershell
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootFmt
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopFmt
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-screen -Lib -TestFilter capture_
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-db -TestTarget capture_privacy_test
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-engine -Lib -TestFilter event_driven_capture::tests
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-engine -Lib -TestFilter capture_privacy_search_api
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-capture -Lib -TestFilter capture_privacy
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -Package screenpipe-engine -Bin screenpipe
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -BuildProfile release
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -BuildProfile release
+```
+
+The standalone screen/capture tests and new database integration target initially
+used `-AllowColdCache` after reviewing `-PlanOnly`, existing artifacts and stable
+native paths. This adopted their selected variants without cleaning caches.
+The screen suite initially failed two assertions, corrected to preserve existing
+scoped-include semantics and stable blocker ordering. Final counts are 62 screen,
+three SQLite integration, 41 capture-engine, one API serializer and one paired
+capture smoke: 108 passing checks. The SQLite target created two narrower SQLx
+variants; all other targeted suites reused external dependencies. No unexpected
+external rebuild was reported. A final screen-suite rerun covers rejected
+truncated process paths. Root/desktop formatting passed; neither lockfile changed.
+The paired capture smoke writes a synthetic JPEG and verifies real atomic
+SQLite persistence without acquiring the desktop, running UIA or extracting OCR.
+
+The first quick recorder build passed in 2m16s (785 external artifacts reused,
+zero rebuilt). The final process-path guard required the affected suite and quick
+recorder build again; the final recorder build passed in 1m25s with the same
+external reuse and four workspace artifacts rebuilt. The GUI quick build passed
+in 5m00s, reusing 1080 external artifacts and rebuilding seven workspace
+artifacts. Non-recording recorder `--version` and `--help` smoke checks passed.
+The full recorder release build passed in 6m23s, reusing 785 external artifacts,
+rebuilding seven workspace artifacts and reporting no unexpected rebuilds.
+Its non-recording version/help smoke passed. The existing macOS-only
+Apple Intelligence Swift-skip build warning remains expected on Windows.
+The full GUI release build passed in 11m39s, reusing 1080 external artifacts,
+rebuilding seven workspace artifacts and reporting no unexpected rebuilds.
+Sizes and UTC timestamps for all 592 recorded Rust/manifest/migration/lockfile
+inputs remained unchanged across release builds; artifact hashes were not
+computed. Release compilation does not update the persistent deployment.
+No new capture session or GUI was launched. The owner accepted the previous
+monitor correction; the additional Explorer/background live case remains
+unverified. See [capture decision metadata](docs/CAPTURE_PRIVACY.md) and the
+[validation register](VALIDATION_REGISTER.md) for scope and limitations.
+
 ## Shared Pi deployment and API review preparation (2026-10-06)
 
 The changed desktop target passed `DesktopCheck`, `DesktopFmt`, three linked

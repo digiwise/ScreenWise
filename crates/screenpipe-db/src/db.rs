@@ -2846,6 +2846,51 @@ impl DatabaseManager {
         ocr_data: Option<(&str, &str, &str)>, // (text, text_json, ocr_engine)
         elements_ref_frame_id: Option<i64>,
     ) -> Result<i64, sqlx::Error> {
+        self.insert_snapshot_frame_with_ocr_and_privacy(
+            device_name,
+            timestamp,
+            snapshot_path,
+            app_name,
+            window_name,
+            browser_url,
+            document_path,
+            focused,
+            capture_trigger,
+            accessibility_text,
+            text_source,
+            accessibility_tree_json,
+            content_hash,
+            simhash,
+            ocr_data,
+            elements_ref_frame_id,
+            None,
+        )
+        .await
+    }
+
+    /// Atomically persist capture privacy disclosure metadata with a snapshot.
+    /// Callers supply verified executable basenames and fixed reason codes only.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_snapshot_frame_with_ocr_and_privacy(
+        &self,
+        device_name: &str,
+        timestamp: DateTime<Utc>,
+        snapshot_path: &str,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        browser_url: Option<&str>,
+        document_path: Option<&str>,
+        focused: bool,
+        capture_trigger: Option<&str>,
+        accessibility_text: Option<&str>,
+        text_source: Option<&str>,
+        accessibility_tree_json: Option<&str>,
+        content_hash: Option<i64>,
+        simhash: Option<i64>,
+        ocr_data: Option<(&str, &str, &str)>,
+        elements_ref_frame_id: Option<i64>,
+        capture_privacy: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
         use crate::write_queue::{WriteOp, WriteResult};
 
         // Compute full_text before submitting to queue (pure computation, no DB)
@@ -2896,6 +2941,7 @@ impl DatabaseManager {
                 capture_trigger: capture_trigger.map(String::from),
                 accessibility_text: accessibility_text.map(String::from),
                 text_source: text_source.map(String::from),
+                capture_privacy: capture_privacy.map(String::from),
                 accessibility_tree_json: accessibility_tree_json.map(String::from),
                 content_hash,
                 simhash,
@@ -3705,7 +3751,8 @@ impl DatabaseManager {
             GROUP_CONCAT(tags.name, ',') as tags,
             frames.browser_url,
             frames.focused,
-            frames.text_source
+            frames.text_source,
+            frames.capture_privacy
         FROM frames
         LEFT JOIN video_chunks ON frames.video_chunk_id = video_chunks.id
         LEFT JOIN ocr_text ON frames.id = ocr_text.frame_id
@@ -3790,6 +3837,9 @@ impl DatabaseManager {
                 browser_url: raw.browser_url,
                 focused: raw.focused,
                 text_source: raw.text_source,
+                capture_privacy: raw
+                    .capture_privacy
+                    .and_then(|json| serde_json::from_str(&json).ok()),
             })
             .collect())
     }
@@ -4457,6 +4507,21 @@ impl DatabaseManager {
         .await?;
 
         Ok(result.flatten())
+    }
+
+    /// Get structured capture privacy metadata; legacy rows return None.
+    pub async fn get_frame_capture_privacy(
+        &self,
+        frame_id: i64,
+    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+        let json = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT capture_privacy FROM frames WHERE id = ?1",
+        )
+        .bind(frame_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
     /// Get accessibility data for a frame (accessibility_text, accessibility_tree_json).

@@ -205,6 +205,14 @@ Never include captured screen/audio/input content, passwords, clipboard values,
 window titles, URLs, user identifiers or private paths in these notices. Never
 reuse a captured image as a failure placeholder.
 
+The owner's requested per-frame capture-blocker diagnostics are a separate
+structured database/API field: only verified executable basenames and fixed
+reason codes are permitted. Unknown identities remain unknown; do not infer an
+app from stale focus or expose excluded titles, URLs, patterns or paths. See
+[capture decision metadata](docs/CAPTURE_PRIVACY.md). Keep generic notices and
+logs content-free; the application identities themselves remain local activity
+metadata requiring the usual authenticated access and publication exclusions.
+
 Persist typed notices independently of capture admission so a privacy pause
 does not suppress its explanation. If persistence fails, log a safe failure and
 expose degraded status to the timeline. Activity buffers must warn before capacity

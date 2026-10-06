@@ -517,6 +517,10 @@ pub enum SkipReason {
     NotInIncludeList,
     /// Focused browser tab's URL matched a user-configured ignored URL.
     BlockedUrl,
+    /// The foreground window belongs to another monitor; use this monitor's safe pixels.
+    DifferentMonitor,
+    /// Monitor/focus association could not be established safely.
+    MonitorUnverified,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -527,6 +531,12 @@ impl std::fmt::Display for SkipReason {
             SkipReason::UserIgnored => write!(f, "user-configured ignored window"),
             SkipReason::NotInIncludeList => write!(f, "not in included windows list"),
             SkipReason::BlockedUrl => write!(f, "user-configured ignored URL"),
+            SkipReason::DifferentMonitor => {
+                write!(f, "foreground window belongs to another monitor")
+            }
+            SkipReason::MonitorUnverified => {
+                write!(f, "foreground monitor association unavailable")
+            }
         }
     }
 }

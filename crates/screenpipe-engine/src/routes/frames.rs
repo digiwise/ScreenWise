@@ -518,6 +518,8 @@ pub struct FrameContextResponse {
     pub urls: Vec<String>,
     /// "accessibility" or "ocr"
     pub text_source: String,
+    /// Structured capture decision and blockers; absent for legacy frames.
+    pub capture_privacy: Option<serde_json::Value>,
 }
 
 /// Get frame context: accessibility text, tree nodes, and extracted URLs.
@@ -527,6 +529,16 @@ pub async fn get_frame_context(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
 ) -> Result<JsonResponse<FrameContextResponse>, (StatusCode, JsonResponse<Value>)> {
+    let capture_privacy = state
+        .db
+        .get_frame_capture_privacy(frame_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": "Failed to read capture privacy metadata"})),
+            )
+        })?;
     // Try to get accessibility data; gracefully handle missing columns (pre-migration DBs)
     let (a11y_text, a11y_tree_json) = match state.db.get_frame_accessibility_data(frame_id).await {
         Ok(data) => data,
@@ -638,6 +650,7 @@ pub async fn get_frame_context(
             nodes,
             urls,
             text_source: "accessibility".to_string(),
+            capture_privacy,
         }));
     }
 
@@ -675,6 +688,7 @@ pub async fn get_frame_context(
         nodes: Vec::new(),
         urls,
         text_source: "ocr".to_string(),
+        capture_privacy,
     }))
 }
 

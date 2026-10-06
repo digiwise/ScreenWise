@@ -187,14 +187,26 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
 
-        // Safety: single-threaded access guaranteed by walker thread design
-        let uia = unsafe { self.ensure_init()? };
-
         // Get the focused window
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd == HWND::default() {
+            if self.config.monitor_width != 0.0 || self.config.monitor_height != 0.0 {
+                return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+            }
             return Ok(TreeWalkResult::NotFound);
         }
+
+        // Each capture worker owns one monitor. Never walk the global foreground
+        // window for another worker, or normalize its nodes against that window's
+        // monitor and then attach them to a different screenshot.
+        let monitor_rect = match scoped_monitor(&self.config, get_monitor_rect(hwnd)) {
+            Ok(rect) => rect,
+            Err(reason) => return Ok(TreeWalkResult::Skipped(reason)),
+        };
+
+        // Safety: single-threaded access guaranteed by walker thread design.
+        // Other-monitor workers avoid initializing UIA at all.
+        let uia = unsafe { self.ensure_init()? };
 
         // Skip transient shell-internal windows (MSCTFIME UI, Shell_TrayWnd, CiceroUIWndFrame).
         // On Windows 11 24H2+ a TSF/IME regression causes these explorer.exe-owned windows to
@@ -277,8 +289,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             None => return Ok(TreeWalkResult::NotFound),
         };
 
-        // Get monitor dimensions for normalizing element bounds to 0-1 coords
-        let monitor_rect = get_monitor_rect(hwnd);
+        // Use the admitted capture monitor for normalizing element bounds.
         // Window rect for the on-screen visibility check (issue #2436).
         // Stored once per walk — GetWindowRect is cheap and the focused
         // window doesn't move during the sub-second walk in practice.
@@ -325,6 +336,11 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         }
 
         let node_count = root.node_count();
+        // Focus or monitor ownership can change while a provider is being read.
+        // Discard the acquired tree instead of attaching stale text to a frame.
+        if unsafe { GetForegroundWindow() } != hwnd || get_monitor_rect(hwnd) != monitor_rect {
+            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+        }
         let content_hash = TreeSnapshot::compute_hash(&text_buffer);
         let simhash = TreeSnapshot::compute_simhash(&text_buffer);
         let walk_duration = start.elapsed();
@@ -363,11 +379,45 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
 }
 
 /// Monitor rectangle in screen coordinates (virtual desktop).
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct MonitorRect {
     x: f64,
     y: f64,
     width: f64,
     height: f64,
+}
+
+fn scoped_monitor(
+    config: &TreeWalkerConfig,
+    foreground: Option<MonitorRect>,
+) -> std::result::Result<Option<MonitorRect>, SkipReason> {
+    // Standalone debug/UI recorders have no capture-monitor scope.
+    if config.monitor_x == 0.0
+        && config.monitor_y == 0.0
+        && config.monitor_width == 0.0
+        && config.monitor_height == 0.0
+    {
+        return Ok(foreground);
+    }
+    let requested = MonitorRect {
+        x: config.monitor_x,
+        y: config.monitor_y,
+        width: config.monitor_width,
+        height: config.monitor_height,
+    };
+    if ![requested.x, requested.y, requested.width, requested.height]
+        .iter()
+        .all(|v| v.is_finite())
+        || requested.width <= 0.0
+        || requested.height <= 0.0
+    {
+        return Err(SkipReason::MonitorUnverified);
+    }
+    match foreground {
+        Some(rect) if rect == requested => Ok(Some(requested)),
+        Some(_) => Err(SkipReason::DifferentMonitor),
+        None => Err(SkipReason::MonitorUnverified),
+    }
 }
 
 /// Focused-window rectangle in screen coordinates. Used for the "is the
@@ -797,6 +847,94 @@ fn append_text(buffer: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn monitor_scope(x: f64, y: f64) -> TreeWalkerConfig {
+        TreeWalkerConfig {
+            monitor_x: x,
+            monitor_y: y,
+            monitor_width: 1920.0,
+            monitor_height: 1080.0,
+            ..TreeWalkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn monitor_association_admits_only_the_foreground_owner() {
+        let foreground = Some(MonitorRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        });
+        assert_eq!(
+            scoped_monitor(&monitor_scope(0.0, 0.0), foreground).unwrap(),
+            foreground
+        );
+        for config in [
+            monitor_scope(-1920.0, 0.0),
+            monitor_scope(1920.0, 0.0),
+            monitor_scope(0.0, -1080.0),
+        ] {
+            assert!(matches!(
+                scoped_monitor(&config, foreground),
+                Err(SkipReason::DifferentMonitor)
+            ));
+        }
+    }
+
+    #[test]
+    fn monitor_association_accepts_negative_virtual_desktop_origin() {
+        let foreground = Some(MonitorRect {
+            x: -1920.0,
+            y: -1080.0,
+            width: 1920.0,
+            height: 1080.0,
+        });
+        assert_eq!(
+            scoped_monitor(&monitor_scope(-1920.0, -1080.0), foreground).unwrap(),
+            foreground
+        );
+    }
+
+    #[test]
+    fn monitor_association_unknown_or_invalid_geometry_fails_closed() {
+        assert!(matches!(
+            scoped_monitor(&monitor_scope(0.0, 0.0), None),
+            Err(SkipReason::MonitorUnverified)
+        ));
+        for (width, height, x) in [
+            (0.0, 1080.0, 0.0),
+            (-1.0, 1080.0, 0.0),
+            (1920.0, f64::NAN, 0.0),
+            (1920.0, 1080.0, f64::INFINITY),
+        ] {
+            let mut config = monitor_scope(x, 0.0);
+            config.monitor_width = width;
+            config.monitor_height = height;
+            assert!(matches!(
+                scoped_monitor(&config, None),
+                Err(SkipReason::MonitorUnverified)
+            ));
+        }
+    }
+
+    #[test]
+    fn monitor_association_unscoped_debug_walk_keeps_existing_behavior() {
+        let foreground = Some(MonitorRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        });
+        assert_eq!(
+            scoped_monitor(&TreeWalkerConfig::default(), foreground).unwrap(),
+            foreground
+        );
+        assert_eq!(
+            scoped_monitor(&TreeWalkerConfig::default(), None).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn test_skip_types() {

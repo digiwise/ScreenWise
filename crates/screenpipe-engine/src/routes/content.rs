@@ -75,6 +75,8 @@ pub struct OCRContent {
     /// historically called OCR but most captures are accessibility-derived
     /// — read this field to know which path produced the text.
     pub text_source: Option<String>,
+    /// Structured capture decision and blockers; absent for legacy frames.
+    pub capture_privacy: Option<serde_json::Value>,
 }
 
 #[derive(OaSchema, Serialize, Deserialize, Debug, Clone)]

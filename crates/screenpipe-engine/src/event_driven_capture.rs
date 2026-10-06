@@ -22,9 +22,9 @@ use screenpipe_screen::capture_screenshot_by_window::get_excluded_sck_window_ids
 use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
 #[cfg(target_os = "windows")]
 use screenpipe_screen::capture_screenshot_by_window::{
-    capture_windows_monitor_privacy_safe, plan_windows_monitor_capture,
+    capture_windows_monitor_privacy_safe, evaluate_windows_monitor_capture,
     render_windows_capture_notice, WindowsCaptureFailureStage, WindowsCaptureOutcome,
-    WindowsMonitorCapturePlan,
+    WindowsCapturePrivacy, WindowsMonitorCapturePlan,
 };
 use screenpipe_screen::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use screenpipe_screen::monitor::{list_monitors, SafeMonitor};
@@ -1695,12 +1695,31 @@ fn log_windows_capture_transition(
 }
 
 #[cfg(target_os = "windows")]
+fn pre_walk_privacy_outcome(
+    acquired: WindowsCaptureOutcome,
+    latest: WindowsCaptureOutcome,
+) -> Option<WindowsCaptureOutcome> {
+    if latest.is_placeholder() {
+        Some(latest)
+    } else if acquired == WindowsCaptureOutcome::FullMonitor
+        && latest == WindowsCaptureOutcome::BackgroundRedacted
+    {
+        Some(WindowsCaptureOutcome::CaptureRedacted(
+            screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::InconsistentFocus,
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
 async fn persist_windows_placeholder(
     params: &CaptureParams<'_>,
     trigger: &CaptureTrigger,
     captured_at: chrono::DateTime<Utc>,
     outcome: WindowsCaptureOutcome,
     screenshot_disabled: bool,
+    privacy: &WindowsCapturePrivacy,
 ) -> Result<CaptureOutput> {
     let marker = outcome
         .marker_text()
@@ -1720,6 +1739,7 @@ async fn persist_windows_placeholder(
             windows_outcome: outcome,
         });
     }
+    let capture_privacy_json = serde_json::to_string(&privacy.clone().with_outcome(outcome))?;
     let ctx = CaptureContext {
         db: params.db,
         snapshot_writer: params.snapshot_writer,
@@ -1738,6 +1758,7 @@ async fn persist_windows_placeholder(
         elements_ref_frame_id: None,
         screenshot_disabled,
         placeholder_text: Some(marker),
+        capture_privacy: Some(&capture_privacy_json),
     };
     let result = paired_capture(&ctx, None).await?;
     let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());
@@ -1753,12 +1774,18 @@ fn resolve_capture_metadata(
     tree_snapshot: Option<&screenpipe_a11y::tree::TreeSnapshot>,
     trigger: &CaptureTrigger,
     lightweight_app_name: Option<&str>,
+    foreground_on_monitor: bool,
 ) -> (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
 ) {
+    // App-switch/focus triggers are broadcast to all monitor workers. They
+    // describe the global foreground window, not every worker's screenshot.
+    if !foreground_on_monitor {
+        return (None, None, None, None);
+    }
     let (mut app_name, mut window_name, browser_url, document_path) = match tree_snapshot {
         Some(snap) => (
             Some(snap.app_name.clone()),
@@ -1810,6 +1837,17 @@ fn resolve_capture_metadata(
     }
 
     (app_name, window_name, browser_url, document_path)
+}
+
+fn matching_elements_reference(
+    current_hash: Option<i64>,
+    previous_hash: Option<i64>,
+    candidate: Option<i64>,
+) -> Option<i64> {
+    match current_hash {
+        Some(hash) if hash != 0 && Some(hash) == previous_hash => candidate,
+        _ => None,
+    }
 }
 
 /// Rate-limit OCR-heavy apps. Two groups:
@@ -1941,10 +1979,11 @@ async fn do_capture(
     let windows_capture =
         capture_windows_monitor_privacy_safe(params.monitor, &window_filters).await;
     #[cfg(target_os = "windows")]
-    let (image, windows_outcome, capture_dur) = (
+    let (image, windows_outcome, capture_dur, mut windows_privacy) = (
         windows_capture.image,
         windows_capture.outcome,
         windows_capture.duration,
+        windows_capture.privacy,
     );
 
     #[cfg(not(target_os = "windows"))]
@@ -1974,6 +2013,7 @@ async fn do_capture(
             captured_at,
             windows_outcome,
             screenshot_disabled,
+            &windows_privacy,
         )
         .await;
     }
@@ -2003,11 +2043,21 @@ async fn do_capture(
     // more immediately before UIA so a newly focused excluded window never has
     // its accessibility tree paired with the previously safe bitmap.
     #[cfg(target_os = "windows")]
-    let pre_walk_outcome = match plan_windows_monitor_capture(params.monitor, &window_filters) {
-        Ok(WindowsMonitorCapturePlan::FullMonitor)
-        | Ok(WindowsMonitorCapturePlan::ActiveWindow(_)) => None,
-        Ok(WindowsMonitorCapturePlan::Redacted(reason)) => {
-            Some(WindowsCaptureOutcome::CaptureRedacted(reason))
+    let pre_walk_outcome = match evaluate_windows_monitor_capture(params.monitor, &window_filters) {
+        Ok(evaluation) => {
+            windows_privacy.merge(evaluation.privacy);
+            // New background exclusions invalidate an acquired full-monitor
+            // bitmap. Only a fresh safe acquisition can admit it again.
+            let latest = match evaluation.plan {
+                WindowsMonitorCapturePlan::FullMonitor => WindowsCaptureOutcome::FullMonitor,
+                WindowsMonitorCapturePlan::ActiveWindow(_) => {
+                    WindowsCaptureOutcome::BackgroundRedacted
+                }
+                WindowsMonitorCapturePlan::Redacted(reason) => {
+                    WindowsCaptureOutcome::CaptureRedacted(reason)
+                }
+            };
+            pre_walk_privacy_outcome(windows_outcome, latest)
         }
         Err(_) => Some(WindowsCaptureOutcome::CaptureFailed(
             WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
@@ -2021,6 +2071,7 @@ async fn do_capture(
             captured_at,
             outcome,
             screenshot_disabled,
+            &windows_privacy,
         )
         .await;
     }
@@ -2131,11 +2182,34 @@ async fn do_capture(
         }
     }
 
+    let foreground_on_monitor = !matches!(
+        tree_walk_result,
+        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor)
+    );
     let tree_snapshot = match tree_walk_result {
         TreeWalkResult::Found(snap) => Some(snap),
+        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor) => None,
+        #[cfg(target_os = "windows")]
+        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::MonitorUnverified) => {
+            warn!("Windows accessibility monitor association could not be verified; withholding frame");
+            windows_privacy.foreground_blocked("monitor_unverified");
+            return persist_windows_placeholder(params, trigger, captured_at,
+                WindowsCaptureOutcome::CaptureRedacted(
+                    screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::InconsistentFocus),
+                screenshot_disabled, &windows_privacy).await;
+        }
         TreeWalkResult::Skipped(_reason) => {
             #[cfg(target_os = "windows")]
             {
+                windows_privacy.foreground_blocked(match _reason {
+                    screenpipe_a11y::tree::SkipReason::Incognito => "private_browsing",
+                    screenpipe_a11y::tree::SkipReason::ExcludedApp => "builtin_application_skip",
+                    screenpipe_a11y::tree::SkipReason::UserIgnored => "ignored_window",
+                    screenpipe_a11y::tree::SkipReason::NotInIncludeList => "not_in_include_list",
+                    screenpipe_a11y::tree::SkipReason::BlockedUrl => "blocked_url",
+                    screenpipe_a11y::tree::SkipReason::MonitorUnverified => "monitor_unverified",
+                    screenpipe_a11y::tree::SkipReason::DifferentMonitor => "different_monitor",
+                });
                 let outcome = WindowsCaptureOutcome::CaptureRedacted(
                     screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
                 );
@@ -2145,6 +2219,7 @@ async fn do_capture(
                     captured_at,
                     outcome,
                     screenshot_disabled,
+                    &windows_privacy,
                 )
                 .await;
             }
@@ -2175,7 +2250,7 @@ async fn do_capture(
     // (tree-missing fallback + post-resolution final gate) share this slice.
     let ignored_patterns = WindowPattern::parse_list(&params.tree_walker_config.ignored_windows);
 
-    if tree_snapshot.is_none() {
+    if tree_snapshot.is_none() && foreground_on_monitor {
         if let Some(ref app) = trigger_app {
             let app_lower = app.to_lowercase();
             // Without window title we can only fire legacy unscoped patterns;
@@ -2184,6 +2259,7 @@ async fn do_capture(
             if window_pattern::matches_any(&ignored_patterns, &app_lower, "") {
                 #[cfg(target_os = "windows")]
                 {
+                    windows_privacy.foreground_blocked("ignored_window");
                     let outcome = WindowsCaptureOutcome::CaptureRedacted(
                         screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
                     );
@@ -2193,6 +2269,7 @@ async fn do_capture(
                         captured_at,
                         outcome,
                         screenshot_disabled,
+                        &windows_privacy,
                     )
                     .await;
                 }
@@ -2246,7 +2323,12 @@ async fn do_capture(
     // Use tree metadata by default, but for focus-change triggers prefer the
     // event payload when the tree lags or reports the wrong frontmost target.
     let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
-        resolve_capture_metadata(tree_snapshot.as_ref(), trigger, trigger_app.as_deref());
+        resolve_capture_metadata(
+            tree_snapshot.as_ref(),
+            trigger,
+            trigger_app.as_deref(),
+            foreground_on_monitor,
+        );
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
@@ -2312,6 +2394,7 @@ async fn do_capture(
         if window_pattern::matches_any(&ignored_patterns, &check_app, &check_win) {
             #[cfg(target_os = "windows")]
             {
+                windows_privacy.foreground_blocked("ignored_window");
                 let outcome = WindowsCaptureOutcome::CaptureRedacted(
                     screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
                 );
@@ -2321,6 +2404,7 @@ async fn do_capture(
                     captured_at,
                     outcome,
                     screenshot_disabled,
+                    &windows_privacy,
                 )
                 .await;
             }
@@ -2370,6 +2454,19 @@ async fn do_capture(
         });
     }
 
+    // The caller's candidate was derived from the previous capture. Recheck
+    // against this acquired tree, especially after focus moves to another monitor.
+    let elements_ref_frame_id = matching_elements_reference(
+        tree_snapshot.as_ref().map(|snap| snap.content_hash as i64),
+        previous_content_hash,
+        elements_ref_frame_id,
+    );
+    #[cfg(target_os = "windows")]
+    let capture_privacy_json = Some(serde_json::to_string(
+        &windows_privacy.with_outcome(windows_outcome),
+    )?);
+    #[cfg(not(target_os = "windows"))]
+    let capture_privacy_json: Option<String> = None;
     let ctx = CaptureContext {
         db: params.db,
         snapshot_writer: params.snapshot_writer,
@@ -2381,13 +2478,14 @@ async fn do_capture(
         window_name: window_name_owned.as_deref(),
         browser_url: browser_url_owned.as_deref(),
         document_path: document_path_owned.as_deref(),
-        focused: true, // event-driven captures are always for the focused window
+        focused: foreground_on_monitor,
         capture_trigger: trigger.as_str(),
         use_pii_removal: params.use_pii_removal,
         languages: params.languages.to_vec(),
         elements_ref_frame_id,
         screenshot_disabled,
         placeholder_text: None,
+        capture_privacy: capture_privacy_json.as_deref(),
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
@@ -2527,6 +2625,31 @@ fn is_frame_mostly_black(image: &image::DynamicImage) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_late_exclusion_withholds_previously_acquired_monitor_pixels() {
+        use super::*;
+        use screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason;
+        let full = WindowsCaptureOutcome::FullMonitor;
+        let restricted = WindowsCaptureOutcome::BackgroundRedacted;
+        let redacted = WindowsCaptureOutcome::CaptureRedacted(
+            WindowsCaptureRedactionReason::ActiveWindowExcluded,
+        );
+        let failed = WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+        );
+        assert_eq!(
+            pre_walk_privacy_outcome(full, restricted),
+            Some(WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::InconsistentFocus
+            ))
+        );
+        assert_eq!(pre_walk_privacy_outcome(full, redacted), Some(redacted));
+        assert_eq!(pre_walk_privacy_outcome(restricted, failed), Some(failed));
+        assert_eq!(pre_walk_privacy_outcome(restricted, full), None);
+        assert_eq!(pre_walk_privacy_outcome(restricted, restricted), None);
+        assert_eq!(pre_walk_privacy_outcome(full, full), None);
+    }
     use super::*;
 
     #[cfg(target_os = "windows")]
@@ -2605,6 +2728,51 @@ mod tests {
         assert_eq!(CaptureTrigger::VisualChange.as_str(), "visual_change");
         assert_eq!(CaptureTrigger::Idle.as_str(), "idle");
         assert_eq!(CaptureTrigger::Manual.as_str(), "manual");
+    }
+
+    #[test]
+    fn monitor_association_foreign_focus_triggers_do_not_label_background_pixels() {
+        for trigger in [
+            CaptureTrigger::AppSwitch {
+                app_name: "foreground.exe".into(),
+                target: None,
+            },
+            CaptureTrigger::WindowFocus {
+                window_name: "foreground title".into(),
+                target: None,
+            },
+        ] {
+            assert_eq!(
+                resolve_capture_metadata(None, &trigger, Some("foreground.exe"), false),
+                (None, None, None, None)
+            );
+        }
+        let trigger = CaptureTrigger::AppSwitch {
+            app_name: "foreground.exe".into(),
+            target: None,
+        };
+        assert_eq!(
+            resolve_capture_metadata(None, &trigger, None, true).0,
+            Some("foreground.exe".into())
+        );
+    }
+
+    #[test]
+    fn monitor_association_ocr_never_inherits_previous_accessibility_elements() {
+        assert_eq!(matching_elements_reference(None, Some(7), Some(42)), None);
+        assert_eq!(
+            matching_elements_reference(Some(8), Some(7), Some(42)),
+            None
+        );
+        assert_eq!(
+            matching_elements_reference(Some(0), Some(0), Some(42)),
+            None
+        );
+        assert_eq!(
+            matching_elements_reference(Some(7), Some(7), Some(42)),
+            Some(42)
+        );
+        assert_eq!(matching_elements_reference(Some(7), Some(7), None), None);
     }
 
     #[test]

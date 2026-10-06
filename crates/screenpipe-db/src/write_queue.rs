@@ -117,6 +117,7 @@ pub(crate) enum WriteOp {
         capture_trigger: Option<String>,
         accessibility_text: Option<String>,
         text_source: Option<String>,
+        capture_privacy: Option<String>,
         accessibility_tree_json: Option<String>,
         content_hash: Option<i64>,
         simhash: Option<i64>,
@@ -1024,6 +1025,7 @@ async fn execute_single_write(
             capture_trigger,
             accessibility_text,
             text_source,
+            capture_privacy,
             accessibility_tree_json,
             content_hash,
             simhash,
@@ -1039,13 +1041,13 @@ async fn execute_single_write(
                     browser_url, app_name, window_name, focused, device_name,
                     snapshot_path, capture_trigger, accessibility_text, text_source,
                     accessibility_tree_json, content_hash, simhash, full_text,
-                    elements_ref_frame_id, document_path
+                    elements_ref_frame_id, document_path, capture_privacy
                 ) VALUES (
                     NULL, 0, ?1, ?2,
                     ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13, ?14, ?15,
-                    ?16, ?17
+                    ?16, ?17, ?18
                 )"#,
             )
             .bind(timestamp)
@@ -1073,6 +1075,7 @@ async fn execute_single_write(
             .bind(full_text.as_deref())
             .bind(elements_ref_frame_id)
             .bind(document_path.as_deref())
+            .bind(capture_privacy.as_deref())
             .execute(&mut **conn)
             .await?
             .last_insert_rowid();
@@ -1648,6 +1651,7 @@ mod tests {
                 capture_trigger TEXT,
                 accessibility_text TEXT,
                 text_source TEXT,
+                capture_privacy TEXT,
                 accessibility_tree_json TEXT,
                 content_hash INTEGER,
                 simhash INTEGER,
@@ -2137,6 +2141,7 @@ mod tests {
                 capture_trigger: Some("click".to_string()),
                 accessibility_text: Some("page content".to_string()),
                 text_source: Some("accessibility".to_string()),
+                capture_privacy: None,
                 accessibility_tree_json: None,
                 content_hash: Some(12345),
                 simhash: Some(67890),

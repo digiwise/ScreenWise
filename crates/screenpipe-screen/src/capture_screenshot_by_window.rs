@@ -245,27 +245,35 @@ impl WindowFilters {
     /// `AppName::WindowTitle` scope (parsed in `screenpipe-core::window_pattern`);
     /// legacy unscoped strings keep the historical "app OR title contains" behavior.
     pub fn is_valid(&self, app_name: &str, title: &str) -> bool {
+        self.exclusion_reason(app_name, title).is_none()
+    }
+
+    /// Fixed policy code only; never return the title, URL or configured pattern.
+    fn exclusion_reason(&self, app_name: &str, title: &str) -> Option<&'static str> {
         let app_name_lower = app_name.to_lowercase();
         let title_lower = title.to_lowercase();
 
         // Always reject built-in system apps (lock screen, etc.)
         if Self::BUILTIN_IGNORED.iter().any(|b| app_name_lower == *b) {
-            return false;
+            return Some("builtin_exclusion");
         }
 
         // Check ignore list first — always reject ignored windows
         if window_pattern::matches_any(&self.ignore_patterns, &app_name_lower, &title_lower) {
-            return false;
+            return Some("configured_exclusion");
         }
 
         // Check if window title suggests a blocked URL (catches streaming sites
         // like DAZN/Netflix where URL detection only works for focused windows)
         if self.is_title_suggesting_blocked_url(title) {
-            return false;
+            return Some("configured_url_exclusion");
         }
 
         // Include list: empty = pass; non-empty applies scoped/legacy semantics.
-        window_pattern::passes_includes(&self.include_patterns, &app_name_lower, &title_lower)
+        if !window_pattern::passes_includes(&self.include_patterns, &app_name_lower, &title_lower) {
+            return Some("outside_include_filter");
+        }
+        None
     }
 
     /// Check if a URL should be filtered out for privacy
@@ -814,20 +822,21 @@ fn get_process_exe_name(pid: u32) -> Option<String> {
         let len = GetModuleFileNameExW(handle, 0, buf.as_mut_ptr(), buf.len() as u32);
         CloseHandle(handle);
 
-        if len == 0 {
-            return None;
-        }
-
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-
-        // Extract filename without .exe
-        let filename = path.rsplit('\\').next().unwrap_or(&path);
-        let name = filename.strip_suffix(".exe").unwrap_or(filename);
-        if name.is_empty() {
-            return None;
-        }
-        Some(name.to_string())
+        executable_from_path_buffer(&buf, len as usize)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn executable_from_path_buffer(buffer: &[u16], length: usize) -> Option<String> {
+    // An API result filling the entire buffer may be a truncated private path.
+    // Treat it as unknown instead of turning its last fragment into an app name.
+    if length == 0 || length >= buffer.len() {
+        return None;
+    }
+    let path = String::from_utf16(&buffer[..length]).ok()?;
+    let filename = path.rsplit('\\').next()?;
+    let name = filename.strip_suffix(".exe").unwrap_or(filename);
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -957,6 +966,182 @@ pub struct WindowsPrivacyCapture {
     pub active_window: Option<CapturedWindow>,
     pub outcome: WindowsCaptureOutcome,
     pub duration: std::time::Duration,
+    pub privacy: WindowsCapturePrivacy,
+}
+
+/// Locally persisted disclosure: executable basenames and fixed codes only.
+/// Unknown identities stay unknown rather than being inferred from old focus.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowsCapturePrivacy {
+    pub schema_version: u8,
+    pub outcome: &'static str,
+    pub reason: Option<&'static str>,
+    pub blockers: Vec<WindowsCaptureBlocker>,
+    pub blockers_truncated: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowsCaptureBlocker {
+    pub app: Option<String>,
+    pub reasons: Vec<&'static str>,
+    pub foreground: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl Default for WindowsCapturePrivacy {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            outcome: "full_monitor",
+            reason: None,
+            blockers: Vec::new(),
+            blockers_truncated: false,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCapturePrivacy {
+    pub fn with_outcome(mut self, outcome: WindowsCaptureOutcome) -> Self {
+        (self.outcome, self.reason) = match outcome {
+            WindowsCaptureOutcome::FullMonitor => ("full_monitor", None),
+            WindowsCaptureOutcome::BackgroundRedacted => {
+                ("active_window_only", Some("excluded_background"))
+            }
+            WindowsCaptureOutcome::CaptureRedacted(reason) => (
+                "redacted",
+                Some(match reason {
+                    WindowsCaptureRedactionReason::ActiveWindowExcluded => "active_window_excluded",
+                    WindowsCaptureRedactionReason::NoSafeActiveWindow => "no_safe_active_window",
+                    WindowsCaptureRedactionReason::InconsistentFocus => "inconsistent_focus",
+                }),
+            ),
+            WindowsCaptureOutcome::CaptureFailed(stage) => (
+                "capture_failed",
+                Some(match stage {
+                    WindowsCaptureFailureStage::InitialPrivacyEvaluation => {
+                        "initial_privacy_evaluation"
+                    }
+                    WindowsCaptureFailureStage::MonitorAcquisition => "monitor_acquisition",
+                    WindowsCaptureFailureStage::ActiveWindowAcquisition => {
+                        "active_window_acquisition"
+                    }
+                    WindowsCaptureFailureStage::PostCapturePrivacyEvaluation => {
+                        "post_capture_privacy_evaluation"
+                    }
+                }),
+            ),
+        };
+        self
+    }
+
+    fn add_blocker(&mut self, app: Option<String>, reasons: Vec<&'static str>, foreground: bool) {
+        if reasons.is_empty() {
+            return;
+        }
+        if let Some(existing) = self
+            .blockers
+            .iter_mut()
+            .find(|b| b.app == app && b.foreground == foreground)
+        {
+            for reason in reasons {
+                if !existing.reasons.contains(&reason) {
+                    existing.reasons.push(reason);
+                }
+            }
+            existing.reasons.sort_unstable();
+        } else if self.blockers.len() < 32 {
+            let mut reasons = reasons;
+            reasons.sort_unstable();
+            reasons.dedup();
+            self.blockers.push(WindowsCaptureBlocker {
+                app,
+                reasons,
+                foreground,
+            });
+            self.blockers
+                .sort_by(|a, b| (&a.app, a.foreground).cmp(&(&b.app, b.foreground)));
+        } else {
+            self.blockers_truncated = true;
+        }
+    }
+
+    pub fn foreground_blocked(&mut self, reason: &'static str) {
+        // A UIA rejection does not carry a verified executable identity. Focus
+        // may have changed since enumeration; never blame the earlier app.
+        self.add_blocker(None, vec![reason], true);
+    }
+
+    /// Preserve restrictions observed before and after acquisition, even if the
+    /// final plan changes to full-monitor. Earlier restrictions still shaped pixels.
+    pub fn merge(&mut self, other: Self) {
+        self.blockers_truncated |= other.blockers_truncated;
+        for b in other.blockers {
+            self.add_blocker(b.app, b.reasons, b.foreground);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn diagnostic_executable_name(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if value.is_empty()
+        || value.len() > 120
+        || value.starts_with('.')
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b" ._-".contains(&c))
+    {
+        return None;
+    }
+    let value = value.to_ascii_lowercase();
+    Some(if value.ends_with(".exe") {
+        value
+    } else {
+        format!("{value}.exe")
+    })
+}
+
+/// The Explorer executable also owns the desktop/taskbar. Only known folder
+/// window classes may serve as the foreground-only privacy fallback.
+#[cfg(target_os = "windows")]
+fn foreground_capture_skip_reason(
+    app: &str,
+    title: &str,
+    executable: Option<&str>,
+    class: Option<&str>,
+) -> Option<&'static str> {
+    let explorer = app == "Windows Explorer"
+        || executable.is_some_and(|v| {
+            v.eq_ignore_ascii_case("explorer") || v.eq_ignore_ascii_case("explorer.exe")
+        });
+    if explorer {
+        if !matches!(class, Some("CabinetWClass" | "ExploreWClass")) {
+            return Some("shell_surface");
+        }
+    } else if SKIP_APPS.contains(app) {
+        return Some("builtin_application_skip");
+    }
+    if app.is_empty() || title.is_empty() {
+        return Some("window_metadata_unavailable");
+    }
+    if SKIP_TITLES.contains(title) {
+        return Some("shell_surface");
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn window_class_name(id: u32) -> Option<String> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetClassNameW(hwnd: isize, buffer: *mut u16, length: i32) -> i32;
+    }
+    let mut buffer = [0u16; 256];
+    let length = unsafe { GetClassNameW(id as isize, buffer.as_mut_ptr(), buffer.len() as i32) };
+    (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
 #[cfg(target_os = "windows")]
@@ -1142,6 +1327,7 @@ fn placeholder_capture(
     monitor: &SafeMonitor,
     outcome: WindowsCaptureOutcome,
     started_at: std::time::Instant,
+    privacy: WindowsCapturePrivacy,
 ) -> WindowsPrivacyCapture {
     let notice = outcome
         .notice()
@@ -1151,6 +1337,7 @@ fn placeholder_capture(
         active_window: None,
         outcome,
         duration: started_at.elapsed(),
+        privacy: privacy.with_outcome(outcome),
     }
 }
 
@@ -1222,15 +1409,29 @@ pub enum WindowsMonitorCapturePlan {
     Redacted(WindowsCaptureRedactionReason),
 }
 
-/// Decide whether Windows may use monitor WGC or must use only the active
-/// window. This enumerates metadata only; background windows are never captured.
-/// Browser URL exclusions fail closed for background browsers because Windows
-/// exposes a reliable URL only for the active browser window.
+#[cfg(target_os = "windows")]
+pub struct WindowsMonitorCaptureEvaluation {
+    pub plan: WindowsMonitorCapturePlan,
+    pub privacy: WindowsCapturePrivacy,
+}
+
 #[cfg(target_os = "windows")]
 pub fn plan_windows_monitor_capture(
     monitor: &SafeMonitor,
     window_filters: &WindowFilters,
 ) -> Result<WindowsMonitorCapturePlan, Box<dyn Error>> {
+    Ok(evaluate_windows_monitor_capture(monitor, window_filters)?.plan)
+}
+
+/// Decide whether Windows may use monitor WGC or must use only the active
+/// window. This enumerates metadata only; background windows are never captured.
+/// Browser URL exclusions fail closed for background browsers because Windows
+/// exposes a reliable URL only for the active browser window.
+#[cfg(target_os = "windows")]
+pub fn evaluate_windows_monitor_capture(
+    monitor: &SafeMonitor,
+    window_filters: &WindowFilters,
+) -> Result<WindowsMonitorCaptureEvaluation, Box<dyn Error>> {
     struct RuntimeWindow {
         source: Window,
         snapshot: WindowsPrivacySnapshot,
@@ -1251,6 +1452,8 @@ pub fn plan_windows_monitor_capture(
         height: monitor.height(),
     };
     let mut runtime_windows = Vec::new();
+    let mut privacy = WindowsCapturePrivacy::default();
+    let mut foreground_unsuitable = None;
 
     for source in Window::all()? {
         if source.is_minimized()? {
@@ -1281,6 +1484,8 @@ pub fn plan_windows_monitor_capture(
         };
         let window_name = source.title().unwrap_or_default();
         let is_focused = source.is_focused()?;
+        let executable = get_process_exe_name(process_id as u32);
+        let diagnostic_app = diagnostic_executable_name(executable.as_deref());
         let app_name_lower = app_name.to_lowercase();
         let is_browser = BROWSER_NAMES
             .iter()
@@ -1311,16 +1516,46 @@ pub fn plan_windows_monitor_capture(
         let url_excluded = browser_url
             .as_deref()
             .is_some_and(|url| window_filters.is_url_blocked(url));
+        let filter_reason = window_filters.exclusion_reason(&app_name, &window_name);
         let is_excluded = is_screenpipe_ui
             || metadata_uncertain
             || url_uncertain
             || url_excluded
-            || !window_filters.is_valid(&app_name, &window_name);
-        let can_capture = !is_excluded
-            && !SKIP_APPS.contains(app_name.as_str())
-            && !app_name.is_empty()
-            && !window_name.is_empty()
-            && !SKIP_TITLES.contains(window_name.as_str());
+            || filter_reason.is_some();
+        let class = if is_focused {
+            window_class_name(id)
+        } else {
+            None
+        };
+        let foreground_skip = foreground_capture_skip_reason(
+            &app_name,
+            &window_name,
+            executable.as_deref(),
+            class.as_deref(),
+        );
+        let can_capture = !is_excluded && foreground_skip.is_none();
+        let mut reasons = Vec::new();
+        if is_screenpipe_ui {
+            reasons.push("recorder_ui");
+        }
+        if metadata_uncertain {
+            reasons.push("window_metadata_unavailable");
+        }
+        if url_uncertain {
+            reasons.push("browser_url_unavailable");
+        }
+        if url_excluded {
+            reasons.push("configured_url_exclusion");
+        }
+        if let Some(reason) = filter_reason {
+            reasons.push(reason);
+        }
+        if is_focused {
+            if let Some(reason) = foreground_skip {
+                foreground_unsuitable = Some((diagnostic_app.clone(), reason));
+            }
+        }
+        privacy.add_blocker(diagnostic_app, reasons, is_focused);
 
         runtime_windows.push(RuntimeWindow {
             source,
@@ -1346,9 +1581,23 @@ pub fn plan_windows_monitor_capture(
         .iter()
         .map(|window| window.snapshot.clone())
         .collect();
-    match choose_windows_capture(&snapshots, &monitor_bounds) {
-        WindowsCaptureChoice::FullMonitor => Ok(WindowsMonitorCapturePlan::FullMonitor),
-        WindowsCaptureChoice::Redacted(reason) => Ok(WindowsMonitorCapturePlan::Redacted(reason)),
+    let choice = choose_windows_capture(&snapshots, &monitor_bounds);
+    if matches!(
+        choice,
+        WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+    ) {
+        if let Some((app, reason)) = foreground_unsuitable {
+            privacy.add_blocker(app, vec![reason], true);
+        }
+    }
+    privacy = privacy.with_outcome(match &choice {
+        WindowsCaptureChoice::FullMonitor => WindowsCaptureOutcome::FullMonitor,
+        WindowsCaptureChoice::ActiveWindow(_) => WindowsCaptureOutcome::BackgroundRedacted,
+        WindowsCaptureChoice::Redacted(reason) => WindowsCaptureOutcome::CaptureRedacted(*reason),
+    });
+    let plan = match choice {
+        WindowsCaptureChoice::FullMonitor => WindowsMonitorCapturePlan::FullMonitor,
+        WindowsCaptureChoice::Redacted(reason) => WindowsMonitorCapturePlan::Redacted(reason),
         WindowsCaptureChoice::ActiveWindow(id) => {
             let window = runtime_windows
                 .into_iter()
@@ -1356,21 +1605,20 @@ pub fn plan_windows_monitor_capture(
                 .ok_or_else(|| {
                     std::io::Error::other("active window disappeared from capture snapshot")
                 })?;
-            Ok(WindowsMonitorCapturePlan::ActiveWindow(
-                WindowsActiveWindow {
-                    source: window.source,
-                    app_name: window.app_name,
-                    window_name: window.window_name,
-                    process_id: window.process_id,
-                    browser_url: window.browser_url,
-                    window_x: window.window_x,
-                    window_y: window.window_y,
-                    window_width: window.window_width,
-                    window_height: window.window_height,
-                },
-            ))
+            WindowsMonitorCapturePlan::ActiveWindow(WindowsActiveWindow {
+                source: window.source,
+                app_name: window.app_name,
+                window_name: window.window_name,
+                process_id: window.process_id,
+                browser_url: window.browser_url,
+                window_x: window.window_x,
+                window_y: window.window_y,
+                window_width: window.window_width,
+                window_height: window.window_height,
+            })
         }
-    }
+    };
+    Ok(WindowsMonitorCaptureEvaluation { plan, privacy })
 }
 
 #[cfg(target_os = "windows")]
@@ -1379,7 +1627,7 @@ async fn capture_windows_monitor_privacy_safe_once(
     window_filters: &WindowFilters,
 ) -> WindowsPrivacyCapture {
     let started_at = std::time::Instant::now();
-    let initial_plan = match plan_windows_monitor_capture(monitor, window_filters) {
+    let initial = match evaluate_windows_monitor_capture(monitor, window_filters) {
         Ok(plan) => plan,
         Err(_) => {
             return placeholder_capture(
@@ -1388,11 +1636,13 @@ async fn capture_windows_monitor_privacy_safe_once(
                     WindowsCaptureFailureStage::InitialPrivacyEvaluation,
                 ),
                 started_at,
+                WindowsCapturePrivacy::default(),
             )
         }
     };
 
-    let (mut image, mut active_window, initial_was_active_only) = match initial_plan {
+    let mut privacy = initial.privacy;
+    let (mut image, mut active_window, initial_was_active_only) = match initial.plan {
         WindowsMonitorCapturePlan::FullMonitor => {
             match crate::utils::capture_monitor_image(monitor, &[]).await {
                 Ok((image, _)) => (image, None, false),
@@ -1403,6 +1653,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                             WindowsCaptureFailureStage::MonitorAcquisition,
                         ),
                         started_at,
+                        privacy,
                     )
                 }
             }
@@ -1417,6 +1668,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                             WindowsCaptureFailureStage::ActiveWindowAcquisition,
                         ),
                         started_at,
+                        privacy,
                     )
                 }
             }
@@ -1426,26 +1678,43 @@ async fn capture_windows_monitor_privacy_safe_once(
                 monitor,
                 WindowsCaptureOutcome::CaptureRedacted(reason),
                 started_at,
+                privacy,
             )
         }
     };
 
-    match plan_windows_monitor_capture(monitor, window_filters) {
-        Ok(WindowsMonitorCapturePlan::FullMonitor) if !initial_was_active_only => {
+    let post = match evaluate_windows_monitor_capture(monitor, window_filters) {
+        Ok(post) => post,
+        Err(_) => {
+            return placeholder_capture(
+                monitor,
+                WindowsCaptureOutcome::CaptureFailed(
+                    WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                ),
+                started_at,
+                privacy,
+            )
+        }
+    };
+    privacy.merge(post.privacy);
+    match post.plan {
+        WindowsMonitorCapturePlan::FullMonitor if !initial_was_active_only => {
             WindowsPrivacyCapture {
                 image,
                 active_window: None,
                 outcome: WindowsCaptureOutcome::FullMonitor,
                 duration: started_at.elapsed(),
+                privacy: privacy.with_outcome(WindowsCaptureOutcome::FullMonitor),
             }
         }
-        Ok(WindowsMonitorCapturePlan::FullMonitor) => WindowsPrivacyCapture {
+        WindowsMonitorCapturePlan::FullMonitor => WindowsPrivacyCapture {
             image,
             active_window,
             outcome: WindowsCaptureOutcome::BackgroundRedacted,
             duration: started_at.elapsed(),
+            privacy: privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted),
         },
-        Ok(WindowsMonitorCapturePlan::ActiveWindow(window)) => {
+        WindowsMonitorCapturePlan::ActiveWindow(window) => {
             // Re-capture the current active window rather than trusting the
             // pre-acquisition snapshot. A focus change can otherwise pair the
             // old allowed window's pixels with the new window's metadata.
@@ -1458,6 +1727,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                         active_window,
                         outcome: WindowsCaptureOutcome::BackgroundRedacted,
                         duration: started_at.elapsed(),
+                        privacy: privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted),
                     }
                 }
                 Err(_) => placeholder_capture(
@@ -1466,20 +1736,15 @@ async fn capture_windows_monitor_privacy_safe_once(
                         WindowsCaptureFailureStage::ActiveWindowAcquisition,
                     ),
                     started_at,
+                    privacy,
                 ),
             }
         }
-        Ok(WindowsMonitorCapturePlan::Redacted(reason)) => placeholder_capture(
+        WindowsMonitorCapturePlan::Redacted(reason) => placeholder_capture(
             monitor,
             WindowsCaptureOutcome::CaptureRedacted(reason),
             started_at,
-        ),
-        Err(_) => placeholder_capture(
-            monitor,
-            WindowsCaptureOutcome::CaptureFailed(
-                WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
-            ),
-            started_at,
+            privacy,
         ),
     }
 }
@@ -1839,6 +2104,220 @@ pub async fn capture_all_visible_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_rejects_truncated_process_paths_without_inventing_app_identity() {
+        let mut path: Vec<u16> = "C:\\synthetic\\fixture.exe".encode_utf16().collect();
+        let length = path.len();
+        assert_eq!(executable_from_path_buffer(&path, length), None);
+        assert_eq!(executable_from_path_buffer(&path, length + 1), None);
+        path.push(0);
+        assert_eq!(
+            executable_from_path_buffer(&path, length),
+            Some("fixture".into())
+        );
+        assert_eq!(executable_from_path_buffer(&path, 0), None);
+        assert_eq!(executable_from_path_buffer(&[0xd800, 0], 1), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_explorer_folders_are_safe_fallbacks_but_shell_surfaces_are_not() {
+        for class in ["CabinetWClass", "ExploreWClass"] {
+            assert_eq!(
+                foreground_capture_skip_reason(
+                    "Windows Explorer",
+                    "Synthetic folder",
+                    Some("explorer"),
+                    Some(class)
+                ),
+                None
+            );
+            assert_eq!(
+                foreground_capture_skip_reason(
+                    "Localized Explorer",
+                    "Synthetic folder",
+                    Some("EXPLORER.EXE"),
+                    Some(class)
+                ),
+                None
+            );
+        }
+        for class in [
+            None,
+            Some("Progman"),
+            Some("WorkerW"),
+            Some("Shell_TrayWnd"),
+            Some("UnknownClass"),
+        ] {
+            assert_eq!(
+                foreground_capture_skip_reason(
+                    "Windows Explorer",
+                    "Synthetic shell",
+                    Some("explorer"),
+                    class
+                ),
+                Some("shell_surface")
+            );
+        }
+        assert_eq!(
+            foreground_capture_skip_reason(
+                "Windows Explorer",
+                "",
+                Some("explorer"),
+                Some("CabinetWClass")
+            ),
+            Some("window_metadata_unavailable")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_explorer_fallback_keeps_explicit_exclusions_effective() {
+        let monitor = Rect {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let filters = WindowFilters::new(&["excel::".into()], &[], &[]);
+        let folder_excluded = !filters.is_valid("Windows Explorer", "Synthetic folder");
+        let safe_folder = foreground_capture_skip_reason(
+            "Windows Explorer",
+            "Synthetic folder",
+            Some("explorer"),
+            Some("CabinetWClass"),
+        )
+        .is_none();
+        let windows = [
+            privacy_snapshot(
+                1,
+                monitor,
+                true,
+                folder_excluded,
+                safe_folder && !folder_excluded,
+            ),
+            privacy_snapshot(
+                2,
+                monitor,
+                false,
+                !filters.is_valid("Excel", "Synthetic book"),
+                false,
+            ),
+        ];
+        assert_eq!(
+            choose_windows_capture(&windows, &monitor),
+            WindowsCaptureChoice::ActiveWindow(1)
+        );
+        let filters = WindowFilters::new(&["explorer::".into()], &[], &[]);
+        let excluded = !filters.is_valid("Windows Explorer", "Synthetic folder");
+        assert!(excluded);
+        assert_eq!(
+            choose_windows_capture(
+                &[privacy_snapshot(1, monitor, true, excluded, false)],
+                &monitor
+            ),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::ActiveWindowExcluded)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_blocker_names_never_include_paths_urls_or_window_titles() {
+        assert_eq!(
+            diagnostic_executable_name(Some("EXCEL")),
+            Some("excel.exe".into())
+        );
+        assert_eq!(
+            diagnostic_executable_name(Some("ollama app.exe")),
+            Some("ollama app.exe".into())
+        );
+        for value in [
+            "",
+            ".hidden",
+            "C:\\private\\excel.exe",
+            "https://private.invalid",
+            "private/record",
+            "excel\nsecret",
+        ] {
+            assert_eq!(diagnostic_executable_name(Some(value)), None);
+        }
+        assert_eq!(diagnostic_executable_name(None), None);
+        let filters = WindowFilters::new(&["excel::secret title".into()], &[], &[]);
+        let reason = filters.exclusion_reason("Excel", "secret title").unwrap();
+        let mut privacy = WindowsCapturePrivacy::default();
+        privacy.add_blocker(Some("excel.exe".into()), vec![reason], false);
+        let serialized = serde_json::to_string(&privacy).unwrap();
+        assert!(serialized.contains("excel.exe"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("explorer.exe"));
+        assert!(!serialized.contains("foreground_app"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_blockers_merge_before_and_after_capture_and_bound_metadata() {
+        let mut first = WindowsCapturePrivacy::default();
+        first.add_blocker(
+            Some("excel.exe".into()),
+            vec!["configured_exclusion"],
+            false,
+        );
+        let mut second = WindowsCapturePrivacy::default();
+        second.add_blocker(
+            Some("excel.exe".into()),
+            vec!["configured_exclusion", "window_metadata_unavailable"],
+            false,
+        );
+        second.add_blocker(None, vec!["browser_url_unavailable"], false);
+        first.merge(second);
+        first.foreground_blocked("configured_url_exclusion");
+        let first = first.with_outcome(WindowsCaptureOutcome::BackgroundRedacted);
+        assert_eq!(first.outcome, "active_window_only");
+        assert_eq!(first.blockers.len(), 3);
+        assert_eq!(
+            first
+                .blockers
+                .iter()
+                .find(|b| b.app.as_deref() == Some("excel.exe"))
+                .unwrap()
+                .reasons,
+            vec!["configured_exclusion", "window_metadata_unavailable"]
+        );
+        let mut bounded = first.clone();
+        for index in 0..40 {
+            bounded.add_blocker(
+                Some(format!("fixture{index}.exe")),
+                vec!["configured_exclusion"],
+                false,
+            );
+        }
+        assert_eq!(bounded.blockers.len(), 32);
+        assert!(bounded.blockers_truncated);
+        let failed = first.with_outcome(WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+        ));
+        assert_eq!(failed.reason, Some("post_capture_privacy_evaluation"));
+        assert_eq!(failed.blockers.len(), 3);
+    }
+
+    #[test]
+    fn capture_exclusion_codes_distinguish_configured_builtin_and_include_filters() {
+        assert_eq!(
+            WindowFilters::new(&[], &[], &[]).exclusion_reason("logonui", "Synthetic"),
+            Some("builtin_exclusion")
+        );
+        assert_eq!(
+            WindowFilters::new(&["excel::".into()], &[], &[])
+                .exclusion_reason("Excel", "Synthetic"),
+            Some("configured_exclusion")
+        );
+        assert_eq!(
+            WindowFilters::new(&[], &["editor".into()], &[]).exclusion_reason("Excel", "Synthetic"),
+            Some("outside_include_filter")
+        );
+    }
 
     #[cfg(target_os = "windows")]
     fn privacy_snapshot(

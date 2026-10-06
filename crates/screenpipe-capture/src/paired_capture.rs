@@ -81,6 +81,8 @@ pub struct CaptureContext<'a> {
     /// accessibility and OCR extraction are bypassed entirely and the marker is
     /// stored with `text_source=privacy_placeholder`.
     pub placeholder_text: Option<&'a str>,
+    /// Serialized safe capture-decision metadata, persisted atomically with the frame.
+    pub capture_privacy: Option<&'a str>,
 }
 
 /// Result of a paired capture operation.
@@ -357,7 +359,7 @@ pub async fn paired_capture(
 
     let frame_id = ctx
         .db
-        .insert_snapshot_frame_with_ocr(
+        .insert_snapshot_frame_with_ocr_and_privacy(
             ctx.device_name,
             ctx.captured_at,
             &snapshot_path_str,
@@ -374,6 +376,7 @@ pub async fn paired_capture(
             simhash,
             ocr_data,
             ctx.elements_ref_frame_id,
+            ctx.capture_privacy,
         )
         .await?;
 
@@ -734,6 +737,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             placeholder_text: None,
+            capture_privacy: None,
         };
 
         let result = paired_capture(&ctx, None).await.unwrap();
@@ -746,13 +750,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_placeholder_capture_bypasses_accessibility_and_ocr_content() {
+    async fn capture_privacy_placeholder_bypasses_accessibility_and_ocr_content() {
         let tmp = TempDir::new().unwrap();
         let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
         let db = DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap();
         let now = Utc::now();
+        let privacy = serde_json::json!({
+            "schema_version": 1, "outcome": "redacted", "reason": "active_window_excluded",
+            "blockers": [{"app": "fixture.exe", "reasons": ["ignored_window"], "foreground": true}],
+            "blockers_truncated": false
+        });
+        let privacy_json = privacy.to_string();
         let ctx = CaptureContext {
             db: &db,
             snapshot_writer: &snapshot_writer,
@@ -771,6 +781,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             placeholder_text: Some("CAPTURE REDACTED"),
+            capture_privacy: Some(&privacy_json),
         };
         let snap = TreeSnapshot {
             app_name: "ExcludedApp".to_string(),
@@ -805,6 +816,14 @@ mod tests {
             .unwrap();
         assert_eq!(stored_text.as_deref(), Some("CAPTURE REDACTED"));
         assert_eq!(stored_tree, None);
+        assert_eq!(
+            db.get_frame_capture_privacy(result.frame_id).await.unwrap(),
+            Some(privacy)
+        );
+        assert_eq!(
+            db.get_frame_ocr_text_json(result.frame_id).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -836,6 +855,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             placeholder_text: None,
+            capture_privacy: None,
         };
 
         let snap = TreeSnapshot {
@@ -902,6 +922,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: true,
             placeholder_text: None,
+            capture_privacy: None,
         };
 
         let snap = TreeSnapshot {
@@ -1010,6 +1031,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             placeholder_text: None,
+            capture_privacy: None,
         };
 
         // Empty accessibility text should be treated as no text

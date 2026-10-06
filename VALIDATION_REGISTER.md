@@ -10,6 +10,157 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Capture blockers and safe Explorer fallback, 2026-10-06
+
+The owner accepted the preceding monitor-association correction as verified and
+authorized this subsequent enhancement, background tests, full release builds
+and publication. New Windows event-driven frames store structured
+`capture_privacy` JSON atomically with their frame. Authenticated OCR search and
+frame-context responses expose it; old rows remain null with no backfill.
+Blockers contain verified executable basenames and fixed reason codes only,
+with a 32-entry cap and explicit truncation. No titles, URLs, document paths or
+configured filter strings enter this field. Unavailable identities and later
+UIA refusals remain unknown rather than being inferred from stale focus.
+See [the field and policy reference](docs/CAPTURE_PRIVACY.md).
+
+Ordinary Explorer folder classes may now serve as the already existing allowed
+foreground-window-only fallback when excluded background windows overlap the
+same monitor. Desktop/taskbar/unknown Explorer surfaces cannot, and explicit
+Explorer exclusions still win. Background pixels remain blacked out; other
+monitors do not borrow the foreground window. An exclusion discovered immediately
+before UIA now invalidates an earlier full-monitor bitmap, preserving the
+blocker evidence on a source-free inconsistent-focus placeholder.
+
+Background checks so far: 62 screen/capture policy tests, three real SQLite
+migration/persistence/search integration tests, 41 engine capture tests and one
+API serializer test passed. The synthetic paired-capture smoke also persisted
+the exact disclosure while bypassing accessibility/OCR extraction. The first screen-suite attempt had two incorrect
+test expectations (scoped includes leave unrelated apps unrestricted, and
+deterministic ordering places unknown blockers first); correcting the assertions
+made the rerun pass without changing the established filter semantics. No new
+capture session, focus change, synthetic input, model download or firewall
+mutation was performed. Private synthetic database/image test artifacts are
+not publication content.
+
+The reviewed standalone screen test cache reused all 433 external artifacts.
+The new SQLite integration target adopted its existing cache and created two
+SQLx variants for its narrower dependency graph; no unexpected external rebuild
+was reported. Engine tests reused all 685 external artifacts. Both Rust lockfiles
+remain unchanged. A final process-identity guard rejects truncated/invalid UTF-16
+path buffers instead of inventing an app identity; its additional regression and
+the affected screen-suite rerun passed. Final quick builds passed for recorder
+(1m25s, 785 external reused) and GUI (5m00s, 1080 external reused), rebuilding
+only affected workspace artifacts. Non-recording recorder version/help smoke
+passed. The full recorder release build passed in 6m23s with all 785 external
+artifacts reused, seven workspace artifacts rebuilt and a passing non-recording
+version/help smoke. The expected macOS-only Swift-skip build warning remains.
+The full GUI release build passed in 11m39s, reusing all 1080 external artifacts
+and rebuilding seven workspace artifacts. Source sizes/UTC timestamps for 592
+recorded build inputs stayed unchanged across release compilation. No artifact
+hashes were computed. These are compile and inert CLI checks, not new production
+capture or performance measurements. Full and quick builds had zero unexpected
+external rebuilds. Canonical root/desktop formatting and staged diff checks passed.
+
+Outstanding: real Explorer-over-excluded-Excel operation and the GUI display of
+these new app-level details have not been tested. Current GUI banners retain
+their fixed explanation; the structured details are available in the database
+and APIs. Per-frame metadata is not exhaustive interval coverage, and a
+preexisting allowed-window-to-allowed-window focus race can pair an earlier
+bitmap with later UIA text. Broader provider/occlusion/transition coverage,
+reconciliation-worker shutdown catch-up and the original privacy/firewall
+milestone remain open. The running deployment is not updated by a build/push.
+
+## Windows per-monitor accessibility association, 2026-10-06
+
+A reviewed owner-authorized short real-data export exposed the same foreground
+accessibility tree stored against several monitor devices. Source review found
+that the Windows tree walker ignored the capture worker's monitor scope. The
+screenshot acquisition policy already evaluates each monitor separately; this
+finding concerns text, element and metadata provenance and does not establish
+that screenshot pixels were copied from another monitor.
+
+The correction admits the foreground accessibility tree only on its owning
+monitor, checks ownership again after acquisition, and uses OCR of already
+privacy-checked pixels on other monitors. Those background frames no longer
+inherit the foreground app/title or focused flag. Unverifiable ownership emits
+the existing safe inconsistent-focus placeholder with a content-free local log
+reason. A current-tree hash check also prevents OCR or changed-tree frames from
+reusing stale accessibility-element references. Screenshot privacy admission,
+authentication and historical recorded data are unchanged. A spanning window
+has one accessibility owner; visible portions on other monitors use OCR.
+
+Fifteen Windows tree-walker tests and forty event-driven capture tests passed,
+including six new ownership, invalid geometry, negative-origin, metadata and
+element-reference regressions. Canonical root formatting and `git diff --check`
+passed. The first standalone accessibility test target required reviewed initial
+cache adoption: four external variants rebuilt, with no unexpected external
+rebuild. Its existing unused `press_key` test-helper warning remains. Engine tests
+reused all 685 external artifacts. The scoped locked/offline `release-local`
+recorder build passed in 3m07s, reusing 785 external artifacts and rebuilding five
+workspace artifacts. Both Rust lockfiles remained unchanged.
+
+Non-recording CLI help and three-monitor enumeration passed. Read-only effective
+ActiveStore inspection found enforced existing exact-path outbound block rules
+for this recorder and its FFmpeg/FFprobe sidecars, preserving loopback ranges.
+This inspection is not a new outbound-connectivity test. A short real-data run
+with independent foreground-monitor samples was prepared behind a fresh owner
+readiness gate. The deployed full-release recorder has not been updated; no
+production-artifact behavior claim or firewall mutation is made.
+
+The first owner-approved sixty-second attempt ran under the isolated automation
+account rather than the interactive desktop. All 598 foreground samples were
+unavailable, UIA initialization failed, privacy gates paused acquisition and no
+frames were written. It is an invalid monitor-association test, not a pass.
+Health returned 200; protected requests returned 403 without a token, 403 with a
+wrong token and 200 with the matching local token. OS endpoint sampling showed
+only a loopback listener for the owned recorder and no UDP endpoints. Graceful
+console shutdown timed out; the guarded controller terminated its owned process.
+Read-only OS inspection confirmed no remaining test process or listener. Existing
+privacy evidence was preserved. The controller now refuses to start when the
+foreground desktop is unavailable. A non-recording normal-user desktop probe
+succeeded; the retry required fresh readiness. Smart text-PII model provisioning
+was absent in the isolated account and regex-only coverage was reported; no
+models were downloaded and no privacy gate was disabled.
+
+The subsequent owner-approved normal-user retry ran from 07:47:04 to 07:48:06
+UTC, with audio and keyboard/clipboard row persistence disabled, all three
+monitors selected and Firefox/Excel exclusions retained. It saved 26 frames:
+16 accessibility, three background OCR and seven no-safe-active-window privacy
+placeholders. All 12 accessibility frames with a stable independently sampled
+foreground owner matched their capture monitor; four near focus transitions
+were ambiguous and are not claimed as independently verified. No identical
+accessibility text occurred across different devices within two seconds.
+The three background OCR frames carried no foreground app/title/URL/document
+metadata or previous accessibility-element reference, and their 972 elements
+were OCR sourced. Accessibility persisted 4,175 elements on the two admitted
+monitors. The third monitor had only privacy placeholders, so positive UIA/OCR
+capture there remains untested. No element-reference reuse occurred in this run;
+the current-tree reference checks have unit-test coverage only.
+
+SQLite `quick_check` returned `ok`. Health/authentication repeated 200/403/403/200.
+OS sampling found the exact recorder's loopback-only listener and no UDP
+endpoints; no deliberate outbound probe was run. Ctrl+C reached the recorder,
+shutdown completed with exit code zero and no forced termination, and both
+native inventory and read-only OS inspection found no remaining owned process
+or test listener. Audio, password stimuli, image pixels, production release
+performance and sustained recording were outside this check's scope.
+
+Follow-up observations: Smart text-PII models were also missing for the normal
+user, leaving regex-only reconciliation; image-PII processing was disabled.
+UIA keyboard privacy initialization retried once and unknown/stale focus states
+were suppressed safely; no keyboard/clipboard rows were persisted. One async
+accessibility-reconciliation SQLite-lock warning occurred and reported retry.
+At shutdown, 25 of 26 frames had a completed reconciliation marker; the final
+frame, captured about two seconds before shutdown, remained unmarked. Capture
+applies synchronous regex removal separately, so this observation does not
+establish an unredacted disclosure. Review async worker shutdown/catch-up and
+content-free backlog reporting before claiming final-tail reconciliation.
+
+**Scoped result:** the two-monitor foreground UIA attribution and background OCR
+checks support the monitor-association correction. They do not complete general
+privacy validation or update the deployed production recorder. The failed first
+attempt and both private evidence directories remain preserved.
+
 ## Persistent local deployment preparation, 2026-10-06
 
 Added [deployment scripts](scripts/windows/deployment/README.md) for separate

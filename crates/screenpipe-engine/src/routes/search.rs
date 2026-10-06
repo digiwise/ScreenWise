@@ -218,6 +218,7 @@ pub fn search_result_to_content_item(
             focused: ocr.focused,
             device_name: ocr.device_name.clone(),
             text_source: ocr.text_source.clone(),
+            capture_privacy: ocr.capture_privacy.clone(),
         }),
         SearchResult::Audio(audio) => {
             let transcription = truncate(audio.transcription.clone());
@@ -702,6 +703,43 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_privacy_search_api_preserves_structured_metadata_and_legacy_null() {
+        let metadata = serde_json::json!({
+            "schema_version": 1,
+            "outcome": "foreground_window",
+            "reason": null,
+            "blockers": [{"app": "fixture.exe", "reasons": ["excluded_app"], "foreground": false}],
+            "blockers_truncated": false
+        });
+        for privacy in [Some(metadata), None] {
+            let result = SearchResult::OCR(screenpipe_db::OCRResult {
+                frame_id: 1,
+                frame_name: "fixture".to_string(),
+                ocr_text: "synthetic fixture text".to_string(),
+                text_json: "[]".to_string(),
+                timestamp: Utc::now(),
+                file_path: "synthetic.jpg".to_string(),
+                offset_index: 0,
+                app_name: "editor.exe".to_string(),
+                ocr_engine: "synthetic".to_string(),
+                window_name: "fixture".to_string(),
+                tags: vec![],
+                browser_url: None,
+                focused: Some(true),
+                device_name: "synthetic".to_string(),
+                text_source: Some("ocr".to_string()),
+                capture_privacy: privacy.clone(),
+            });
+            let content = search_result_to_content_item(&result, Some(8));
+            let json = serde_json::to_value(content).unwrap();
+            assert_eq!(
+                json["content"]["capture_privacy"],
+                privacy.unwrap_or(serde_json::Value::Null)
+            );
+        }
+    }
 
     #[test]
     fn flexible_bool_accepts_common_truthy_falsy_values() {
