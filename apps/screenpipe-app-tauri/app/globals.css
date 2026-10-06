@@ -283,6 +283,11 @@
   }
 
   /* Prevent all image and element dragging globally */
+  [data-pi-setup-instructions] {
+    -webkit-user-select: text !important;
+    user-select: text !important;
+  }
+
   img, a, [draggable] {
     -webkit-user-drag: none;
     user-drag: none;

@@ -154,7 +154,7 @@
     {
       "archive_path": "prep/preflight.ps1",
       "stage_path": "target/interactive-prep-20260915-01a09e45/preflight.ps1",
-      "sha256": "40F286B54C0155D85F41B65027DB9E36039380C225C8FAE37B85E0B45DF49EAC",
+      "sha256": "5DADD8CA54EE600EA62281D49716616BE4C31FB02461F6CC90596F38E05BE988",
       "original_sha256": "B6310559742F4844EBF6FC3856427CA6BFFD1BFAE4C894A9804039EF801834DB"
     },
     {
@@ -262,13 +262,13 @@
     {
       "archive_path": "common/config.example.json",
       "stage_path": "target/interactive-validation/common/config.example.json",
-      "sha256": "BAF4E2BDB0398370656576CF49751BA4317DF053B4F5A759C256DC4356B495EA",
+      "sha256": "EFF72235204397C501C49CB1A448DFCB5E95E638CFD9922E368ADEB81012ACBF",
       "original_sha256": "DD52935A9B41F5FD1875E56DF5391328B329CE033D78DB99DA0A6AFDE7A8A21C"
     },
     {
       "archive_path": "common/Invoke-ValidationController.ps1",
       "stage_path": "target/interactive-validation/common/Invoke-ValidationController.ps1",
-      "sha256": "00D6885D0B18319405C333D6156A0BEAA3493DB6EFEB405DE28C7D46EDA5BD9D",
+      "sha256": "23AB437AA8DC3E596094BC1B1B87F071ECF23E4CDA6F22901391D7FD40B4C67C",
       "original_sha256": "1F8728A4E1F14A39F251B7C4E266CF0DE8306570616D34E042FDFFF83D9FF9C3"
     },
     {

@@ -18,6 +18,7 @@ import { TimelineTagToolbar } from "./timeline-tag-toolbar";
 import { extractDomain, FaviconImg } from "./favicon-utils";
 import { localFetch } from "@/lib/api";
 import { NativeAppIcon } from "@/components/native-app-icon";
+import { FilterColumnViewport } from "./filter-column-viewport";
 
 /** App icon loaded through native IPC and cached by NativeAppIcon. */
 const CachedAppIcon = React.memo(function CachedAppIcon({ appName, className }: { appName: string; className?: string }) {
@@ -991,10 +992,8 @@ export const TimelineSlider = ({
 	return (
 		<div className="relative w-full" dir="rtl">
 			{/* Filter icon column + inline expand (design E) */}
-			<div
+			<FilterColumnViewport
 				ref={(el) => { if (filtersRef) filtersRef.current = el; }}
-				className="absolute left-3 bottom-[calc(100%-60px)] z-30 flex flex-col gap-0.5 items-start"
-				dir="ltr"
 				onMouseLeave={() => setExpandedFilterSection(null)}
 			>
 				{/* Refresh row */}
@@ -1355,7 +1354,7 @@ export const TimelineSlider = ({
 						<PanelBottomClose className="w-3.5 h-3.5 text-foreground/70" />
 					)}
 				</button>
-			</div>
+			</FilterColumnViewport>
 
 			<div
 				ref={(el) => {

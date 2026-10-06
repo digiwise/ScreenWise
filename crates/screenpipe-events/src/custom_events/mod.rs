@@ -7,3 +7,4 @@ pub mod audio_devices;
 pub mod audio_shutdown;
 pub mod permissions;
 pub mod power;
+pub mod session_recovery;

@@ -55,6 +55,18 @@ Copy `common/config.example.json` to an ignored local file such as
 `target/interactive-validation/config.local.json`. Replace every angle-bracket
 placeholder. A live run fails closed when any required field is missing.
 
+Set `build_profile` to `release-local` for functional trials or `release` for
+production-performance evidence. Both workspaces build through
+[the canonical launcher](../build/README.md); use `RootBuild` or `DesktopBuild`
+instead of direct Cargo for standard tasks. `release_dir` must be exactly
+`<repo>/target/<build_profile>` and every runtime pin must identify the matching
+artifact. The former `release-dev` profile is retired. Migration requires reviewed
+sidecar/DLL staging, refreshed hashes and owner-confirmed firewall scope for the
+new executable paths. Old local configuration, staged helper copies and readiness
+records do not authorize a migrated trial. Preserve prior evidence; do not edit
+ignored historical copies to make their hashes pass. Regenerate/review a new
+prepared kit and configuration before interactive execution.
+
 The configuration names these machine-specific inputs explicitly:
 
 - absolute repository, Python, PowerShell 7 (`pwsh.exe`), Visual Studio developer-shell,

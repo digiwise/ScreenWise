@@ -46,22 +46,20 @@ The OpenBLAS DLL used in validation had SHA-256
 Windows ARM64 requires separately audited artifacts and an explicit
 `SCREENPIPE_ORT_DLL_SHA256`; x64 results do not validate ARM64.
 
-Open the Developer PowerShell supplied by your Visual Studio installation,
-change to the repository root, and set paths to your provisioned directories:
+Configure the [canonical launcher](../scripts/windows/build/README.md) once with
+the paths to your provisioned Visual Studio developer shell, OpenBLAS and ONNX
+Runtime directories. From ordinary PowerShell at the repository root:
 
 ```powershell
-$repoRoot = (Get-Location).Path
-$env:OPENBLAS_PATH = 'C:\Dependencies\OpenBLAS\win64' # choose your location
-$env:ORT_LIB_LOCATION = 'C:\Dependencies\onnxruntime-win-x64-1.22.0'
-$env:CMAKE_GENERATOR = 'Ninja Multi-Config'
-$env:CMAKE_CONFIGURATION_TYPES = 'Debug;Release;RelWithDebInfo;MinSizeRel'
-$env:PATH = "$(Join-Path $env:OPENBLAS_PATH 'bin');$env:PATH"
-cargo build --release --locked
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -PlanOnly
+# Initial reviewed cache adoption/profile build only:
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -AllowColdCache
+# Subsequent functional builds:
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild
 ```
 
-Cargo may acquire missing locked dependencies during an ordinary build. To
-require a network-free build after explicit dependency provisioning, add
-`--offline`. Neither flag supplies the separately provisioned native artifacts.
+The launcher always uses locked, offline resolution. Provision missing dependencies
+explicitly; neither flag supplies the separately provisioned native artifacts.
 The build stages ONNX Runtime beside the executable. Copy the provisioned
 OpenBLAS DLL beside it for distribution, or retain its `bin` directory on PATH.
 Do not download an arbitrary replacement DLL to suppress a load error.
@@ -73,8 +71,15 @@ inherited commands remove provisioned sidecars and unrelated build inputs.
 
 ## Build profiles and iteration time
 
-Cargo keeps test/debug and release outputs separately under `target\debug` and
-`target\release`; switching profiles does not overwrite the other profile's
+Prefer the [canonical Windows Cargo launcher](../scripts/windows/build/README.md)
+for recurring checks, tests and builds. It selects the established cache for each
+workspace/mode, applies the native environment consistently and records private
+build evidence. Use `-PlanOnly` to inspect the invocation without running tools;
+use `-Diagnostics` on an already necessary run to investigate unexpected repeats.
+It does not clear caches. RootBuild and DesktopBuild default to `release-local`.
+
+Cargo keeps test/debug, functional and release outputs separately under
+`target\debug`, `target\release-local` and `target\release`; switching profiles does not overwrite the other profile's
 artifacts. It also cannot reuse a release object as a test object. Cache reuse is
 specific to the compiler, target, profile, enabled features, Rust flags and
 relevant build-script environment. Keep the same Developer PowerShell variables
@@ -111,10 +116,7 @@ it only deliberately when no build is active. During intermediate editing,
 catch type and integration errors without the expensive final test link:
 
 ```powershell
-cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' check `
-  -p screenpipe-app `
-  --manifest-path apps\screenpipe-app-tauri\src-tauri\Cargo.toml `
-  --tests --locked --offline
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopCheck
 ```
 
 After related edits settle, run the required focused linked tests once against
@@ -125,11 +127,16 @@ The root development profile optimizes dependencies at level 2 without their
 debug symbols. This improves runtime and limits artifact size, but makes an
 uncached test dependency graph more expensive to compile. The full `release`
 profile uses full LTO and one code-generation unit and is intentionally slow.
-Use it for a settled evidence candidate. For intermediate optimized executable
-checks, the incremental `release-dev` profile is available:
+Use it for production-representative performance evidence and release milestones.
+For intermediate functional checks, both workspaces use `release-local`:
+incremental compilation, 16 code-generation units, optimization level 1 and no LTO.
+The former `release-dev` profile has been removed. Runtime throughput/resource
+results from `release-local` are not production performance results.
 
 ```powershell
-cargo build --profile release-dev --locked
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild
+# Explicit production/performance build, when required:
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -BuildProfile release
 ```
 
 The workspace permits 16 parallel build jobs. That can be counterproductive on
@@ -138,7 +145,8 @@ retry a comparable cleanly identified build with a lower per-command limit and
 record which setting is faster on that machine, for example:
 
 ```powershell
-cargo test -j 8 -p <affected-crate> --lib <focused-filter> --locked
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest `
+  -Jobs 8 -Package <affected-crate> -Lib -TestFilter <focused-filter>
 ```
 
 Do not treat eight jobs as a repository requirement; available memory and native
@@ -150,10 +158,15 @@ cached configuration, clean only that exact package as described below.
 
 AI Chat requires the pinned Pi runtime in the same ScreenWise data directory
 used by the application. ScreenWise never downloads or repairs this runtime in
-the background. Close ScreenWise, open PowerShell in the repository and run:
+the background. If AI Chat reports that Pi is missing, the app writes its
+embedded setup helper to `<data-dir>\setup\Provision-ScreenWisePi.ps1`. Use
+**Copy command** in the persistent setup notice, close ScreenWise, and paste the
+complete command into PowerShell. The command contains the absolute helper path
+and active data directory; it works independently of a repository checkout.
+The notice also provides a selectable command for manual copying. For example:
 
 ```powershell
-.\scripts\windows\Provision-ScreenWisePi.ps1 `
+& '<the absolute setup script path shown by the app>' `
   -DataDir '<the ScreenWise data directory shown by the app>'
 ```
 
@@ -162,9 +175,25 @@ The explicit provisioning command downloads
 `<data-dir>\pi-agent`, verifies the expected entrypoint, version and required
 runtime dependencies, and then promotes the completed staging directory. It
 refuses to overwrite an existing incomplete or unexpected `pi-agent` directory;
-review and move that directory aside manually before retrying. Restart
-ScreenWise after provisioning succeeds. A selected local AI provider such as
-Ollama must also be provisioned and running separately.
+review and move that directory aside manually before retrying. Bun must already
+be installed and available on `PATH`, or supplied using
+`-BunExecutable '<absolute path to reviewed bun.exe>'`. A firewall-blocked Bun
+cannot provision packages; the script does not change rules or relocate Bun to
+evade them. Restart ScreenWise after provisioning succeeds. A selected local AI
+provider such as Ollama and its model must also be provisioned and running
+separately. Pi is optional for AI Chat and is not needed for recording or Timeline.
+The helper is embedded in the desktop executable; an installer distribution has
+not been validated by this setup check.
+
+The managed Pi child now explicitly sets `PI_OFFLINE=1`,
+`PI_SKIP_VERSION_CHECK=1` and `PI_TELEMETRY=0`, overriding inherited opt-ins.
+For the pinned Pi version these disable startup network acquisition, version
+checks and install telemetry; they do not disable local model inference.
+These settings do not replace exact executable firewall scope. Ollama and its
+model-server executable need their own scope for an OS-level offline test.
+Provision the model explicitly before applying those blocks. The default is
+`ministral-3:latest`; record the tested digest rather than assuming a mutable tag
+remains unchanged. See the [synthetic RPC procedure](../scripts/windows/day-to-day-trial/README.md#synthetic-pi-rpc-check).
 
 ## Native tests
 
@@ -176,14 +205,10 @@ unqualified cleanup did not remove the cached release artifacts in the fresh
 published checkout.
 
 ```powershell
-$env:CMAKE_GENERATOR = 'Ninja Multi-Config'
-$env:CMAKE_CONFIGURATION_TYPES = 'Debug;Release;RelWithDebInfo;MinSizeRel'
-$env:PATH = "$(Join-Path $env:OPENBLAS_PATH 'bin');$env:PATH"
-cargo test -p screenpipe-events --lib --locked --offline
-cargo --config 'profile.dev.package."knf-rs-sys".debug-assertions=false' test `
-  -p screenpipe-app `
-  --manifest-path apps\screenpipe-app-tauri\src-tauri\Cargo.toml `
-  --locked --offline tauri_bindings_are_current -- --nocapture
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest `
+  -Package screenpipe-events -Lib
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopTest `
+  -TestFilter tauri_bindings_are_current -TestArguments @('--nocapture')
 ```
 
 The root workspace already provides the knf-rs-sys CRT override; the desktop is

@@ -19,11 +19,14 @@ export function FeedbackDialog() {
     <Dialog open={open} onOpenChange={(v) => !v && closeFeedback()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-sm font-medium">report an issue</DialogTitle>
+          <DialogTitle className="text-sm font-medium">diagnostic details</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground">
           {prefillText ||
             "For diagnostics, review the local log files and last-panic.log in your ScreenWise data directory."}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          This dialog is local. Nothing is submitted.
         </p>
       </DialogContent>
     </Dialog>

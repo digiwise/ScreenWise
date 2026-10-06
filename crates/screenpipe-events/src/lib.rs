@@ -12,3 +12,4 @@ pub use custom_events::audio_devices::*;
 pub use custom_events::audio_shutdown::*;
 pub use custom_events::permissions::*;
 pub use custom_events::power::*;
+pub use custom_events::session_recovery::*;

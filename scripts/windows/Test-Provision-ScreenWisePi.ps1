@@ -8,13 +8,16 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$provisioner = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'Provision-ScreenWisePi.ps1')).Path
 $root = Join-Path ([IO.Path]::GetTempPath()) ('screenwise-pi-provision-test-' + [Guid]::NewGuid().ToString('N'))
+$standaloneDir = Join-Path $root 'outside-checkout\setup'
+$provisioner = Join-Path $standaloneDir 'Provision-ScreenWisePi.ps1'
 $fakeBun = Join-Path $root 'fake-bun.cmd'
 $dataDir = Join-Path $root 'data'
 
 try {
     [IO.Directory]::CreateDirectory($root) | Out-Null
+    [IO.Directory]::CreateDirectory($standaloneDir) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Provision-ScreenWisePi.ps1') -Destination $provisioner
     @'
 @echo off
 mkdir node_modules\@earendil-works\pi-coding-agent\dist
@@ -27,6 +30,7 @@ mkdir node_modules\cross-spawn
 exit /b 0
 '@ | Set-Content -LiteralPath $fakeBun -Encoding ascii
 
+    # Execute the copied helper from a temporary path outside the repository.
     & $provisioner -DataDir $dataDir -BunExecutable $fakeBun
     $installDir = Join-Path $dataDir 'pi-agent'
     if (-not (Test-Path -LiteralPath (Join-Path $installDir 'node_modules\@earendil-works\pi-coding-agent\dist\cli.js') -PathType Leaf)) {

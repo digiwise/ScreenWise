@@ -82,14 +82,19 @@ This local token is independent from local model configuration.
 ## Build and validation
 
 Start with [Windows setup](docs/WINDOWS_SETUP.md) and
-[CONTRIBUTING.md](CONTRIBUTING.md). From Visual Studio Developer PowerShell,
-with native prerequisites explicitly provisioned, the production build is:
+[CONTRIBUTING.md](CONTRIBUTING.md). After explicitly provisioning the locked
+dependencies/native prerequisites and configuring the canonical launcher, a
+functional build from ordinary PowerShell is:
 
 ```powershell
-cargo build --release --locked
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild
 ```
 
-Add `--offline` after the locked dependency cache is provisioned. Do not run
+Both recorder and desktop build presets default to `release-local`. Use
+`-BuildProfile release` for production artifacts/performance evidence. The first
+reviewed build of a new profile needs `-AllowColdCache`; see the
+[launcher guide](scripts/windows/build/README.md). Its dependency resolution is
+always locked and offline. Do not run
 `cargo update` or silently acquire native prerequisites/models. Native desktop
 tests need the separate Ninja Multi-Config and CRT matrix in the setup guide.
 Reusable [interactive test sources](scripts/windows/interactive-validation/README.md)

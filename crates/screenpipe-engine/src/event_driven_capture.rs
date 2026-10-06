@@ -143,10 +143,13 @@ fn report_triggers_dropped(
         // Nothing to report unless we're tracking the lag counter.
         return;
     }
-    let _ = linker.try_send(crate::frame_linker_actor::LinkerMessage::TriggerDropped {
-        correlation_ids,
-        reason,
-    });
+    let _ = crate::frame_linker_actor::try_send_linker_message(
+        linker,
+        crate::frame_linker_actor::LinkerMessage::TriggerDropped {
+            correlation_ids,
+            reason,
+        },
+    );
 }
 
 /// Drain whatever's currently in the broadcast receiver into a
@@ -1411,7 +1414,8 @@ pub async fn event_driven_capture_loop(
                             // have nothing to pair.
                             if !correlation_ids.is_empty() {
                                 if let Some(ref linker) = linker_tx {
-                                    let _ = linker.try_send(
+                                    let _ = crate::frame_linker_actor::try_send_linker_message(
+                                        linker,
                                         crate::frame_linker_actor::LinkerMessage::FrameCaptured(
                                             crate::frame_linker::FrameCaptured {
                                                 frame_id: result.frame_id,
@@ -1457,7 +1461,8 @@ pub async fn event_driven_capture_loop(
                             // and prevents the correlation_ids from expiring unmatched.
                             if !correlation_ids.is_empty() {
                                 if let (Some(ref linker), Some(fid)) = (&linker_tx, last_frame_id) {
-                                    let _ = linker.try_send(
+                                    let _ = crate::frame_linker_actor::try_send_linker_message(
+                                        linker,
                                         crate::frame_linker_actor::LinkerMessage::FrameCaptured(
                                             crate::frame_linker::FrameCaptured {
                                                 frame_id: fid,
@@ -1553,7 +1558,8 @@ pub async fn event_driven_capture_loop(
                 // otherwise tell the linker to release them.
                 if !correlation_ids.is_empty() {
                     if let (Some(ref linker), Some(fid)) = (&linker_tx, last_frame_id) {
-                        let _ = linker.try_send(
+                        let _ = crate::frame_linker_actor::try_send_linker_message(
+                            linker,
                             crate::frame_linker_actor::LinkerMessage::FrameCaptured(
                                 crate::frame_linker::FrameCaptured {
                                     frame_id: fid,

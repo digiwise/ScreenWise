@@ -123,6 +123,16 @@ function Number-OrZero($Value) {
 }
 
 $pipeline = $latest.health.pipeline
+$linkerSendFailures = [ordered]@{}
+$linkerSendFailureCount = 0L
+foreach ($messageClass in @('frame_captured', 'event_persisted', 'events_discarded', 'trigger_dropped')) {
+    foreach ($outcome in @('full', 'closed')) {
+        $name = "frame_link_send_${messageClass}_${outcome}"
+        $value = Number-OrZero $pipeline.$name
+        $linkerSendFailures[$name] = $value
+        $linkerSendFailureCount += $value
+    }
+}
 $audio = $latest.health.audio_pipeline
 $capture = $latest.capture_events
 $excludedBackground = Count-Matching 'active-window-only; excluded background pixels'
@@ -315,6 +325,7 @@ $attentionRequired = $errorLines.Count -gt 0 -or
     (Number-OrZero $pipeline.pipeline_stall_count) -gt 0 -or
     (Number-OrZero $pipeline.frame_link_ttl_evictions) -gt 0 -or
     (Number-OrZero $pipeline.frame_link_updates_failed) -gt 0 -or
+    $linkerSendFailureCount -gt 0 -or
     (Number-OrZero $audio.transcription_errors) -gt 0 -or
     [bool]$capture.persistence_degraded -or
     $audioShutdownDegraded -or
@@ -372,6 +383,8 @@ $status = [ordered]@{
     frame_link_ttl_unexplained = (Number-OrZero $pipeline.frame_link_ttl_evictions) -
         (Number-OrZero $pipeline.frame_link_ttl_known_capture_drops)
     frame_link_update_failures = $pipeline.frame_link_updates_failed
+    frame_link_send_failures = $linkerSendFailureCount
+    frame_link_send_failure_counts = $linkerSendFailures
     audio_chunks_received = $audio.chunks_received
     vad_passed = $audio.vad_passed
     vad_rejected = $audio.vad_rejected

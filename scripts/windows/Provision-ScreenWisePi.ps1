@@ -13,7 +13,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $packageName = '@earendil-works/pi-coding-agent'
 $packageVersion = '0.75.4'
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $dataRoot = [IO.Path]::GetFullPath($DataDir)
 $installDir = Join-Path $dataRoot 'pi-agent'
 
@@ -50,15 +49,6 @@ if ([string]::IsNullOrWhiteSpace($BunExecutable)) {
     $command = Get-Command bun.exe -ErrorAction SilentlyContinue
     if ($command) {
         $BunExecutable = $command.Source
-    } else {
-        $candidates = @(
-            (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\target\release-dev\bun.exe'),
-            (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\target\release\bun.exe'),
-            (Join-Path $repoRoot 'target\release\bun.exe')
-        )
-        $BunExecutable = $candidates | Where-Object {
-            Test-Path -LiteralPath $_ -PathType Leaf
-        } | Select-Object -First 1
     }
 }
 if ([string]::IsNullOrWhiteSpace($BunExecutable) -or
@@ -66,6 +56,7 @@ if ([string]::IsNullOrWhiteSpace($BunExecutable) -or
     throw 'Bun was not found. Install or provide a reviewed bun.exe with -BunExecutable.'
 }
 $BunExecutable = (Resolve-Path -LiteralPath $BunExecutable).Path
+Write-Warning 'This command uses the selected Bun executable for package downloads. If your firewall blocks that executable, provisioning will fail; use only a Bun executable approved for this environment.'
 
 [IO.Directory]::CreateDirectory($dataRoot) | Out-Null
 $staging = Join-Path $dataRoot ('.pi-agent-provision-' + [Guid]::NewGuid().ToString('N'))

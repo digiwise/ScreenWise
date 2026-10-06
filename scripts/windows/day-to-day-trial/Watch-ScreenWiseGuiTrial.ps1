@@ -13,7 +13,9 @@ $guiExecutable = [IO.Path]::GetFullPath([string]$launch.gui_executable_path)
 $cliExecutable = [IO.Path]::GetFullPath([string]$launch.cli_executable_path)
 $guiPid = [int]$launch.gui_process_id
 $port = [int]$launch.port
-$startedAtUtc = [string]$launch.started_at_utc
+# PowerShell 7 can decode JSON timestamps as DateTime; a string cast would
+# produce culture-specific text that the API cannot parse as RFC3339.
+$startedAtUtc = ([datetimeoffset]$launch.started_at_utc).ToUniversalTime().ToString('o')
 $scopedPaths = @($launch.scoped_executable_paths | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })
 $processMonitorExecutable = [IO.Path]::GetFullPath([string]$launch.process_monitor_executable_path)
 $pollFile = Join-Path $SessionDir 'operational-metrics.jsonl'
@@ -283,6 +285,7 @@ $remaining = @($remainingSnapshot | Where-Object {
 })
 $unscopedObserved = @($observed.Values | Where-Object { $scopedPaths -notcontains $_ } | Sort-Object -Unique)
 $portTcp = @(Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue)
+$activePortTcp = @($portTcp | Where-Object { [string]$_.State -notin @('TimeWait', 'Closed', 'DeleteTcb') })
 $portUdp = @(Get-NetUDPEndpoint -LocalPort $port -ErrorAction SilentlyContinue)
 $logFiles = @(Get-ChildItem -LiteralPath $DataDir -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue)
 $panicFiles = @(Get-ChildItem -LiteralPath $DataDir -Filter '*panic*.log' -File -ErrorAction SilentlyContinue)
@@ -294,7 +297,9 @@ $panicFiles = @(Get-ChildItem -LiteralPath $DataDir -Filter '*panic*.log' -File 
     observed_executable_paths = @($observed.Values | Sort-Object -Unique)
     unscoped_observed_executable_paths = $unscopedObserved
     unscoped_observed_executable_count = $unscopedObserved.Count
-    api_tcp_endpoint_count = $portTcp.Count
+    api_tcp_endpoint_count = $activePortTcp.Count
+    api_tcp_total_endpoint_count = $portTcp.Count
+    api_tcp_time_wait_count = @($portTcp | Where-Object { [string]$_.State -eq 'TimeWait' }).Count
     api_udp_endpoint_count = $portUdp.Count
     rolling_log_file_count = $logFiles.Count
     rolling_log_total_bytes = ($logFiles | Measure-Object Length -Sum).Sum

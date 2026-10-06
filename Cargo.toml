@@ -68,13 +68,15 @@ lto = true
 opt-level = "s"
 strip = true
 
-# Fast local release builds: cargo build --profile release-dev
-# ~3-5x faster than full release, still optimized for testing
-[profile.release-dev]
+# Fast functional builds through scripts/windows/build/Invoke-ScreenWiseBuild.ps1.
+# Keep full release for production artifacts and performance measurements.
+[profile.release-local]
 inherits = "release"
-lto = "thin"
+lto = false
 codegen-units = 16
 incremental = true
+opt-level = 1
+debug = false
 
 # Faster dev builds - optimize dependencies but keep local code debuggable
 [profile.dev]

@@ -489,6 +489,7 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
                 "port": core.port,
                 "auth_enabled": true,
                 "cache_namespace": local_api_cache_namespace(&core.data_dir),
+                "store_directory": screenpipe_core::paths::default_screenpipe_data_dir(),
             });
         }
     }
@@ -498,9 +499,7 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
-    let settings = crate::store::SettingsStore::get(&app_handle)
-        .ok()
-        .flatten();
+    let settings = crate::store::SettingsStore::get(&app_handle).ok().flatten();
     let fallback_port = std::env::var("SCREENPIPE_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -514,11 +513,14 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
                 .map(|store| crate::config::resolve_data_dir(&store.data_dir).0)
         })
         .unwrap_or_else(screenpipe_core::paths::default_screenpipe_data_dir);
-    fallback_local_api_config(
+    let mut config = fallback_local_api_config(
         crate::store::resolved_api_auth_key(),
         fallback_port,
         local_api_cache_namespace(&fallback_data_dir),
-    )
+    );
+    config["store_directory"] =
+        serde_json::json!(screenpipe_core::paths::default_screenpipe_data_dir());
+    config
 }
 
 /// Resolve a native application icon without exposing a local HTTP listener.
@@ -635,11 +637,8 @@ mod local_api_fallback_tests {
 
     #[test]
     fn cold_start_fallback_preserves_non_default_active_port() {
-        let value = fallback_local_api_config(
-            Some("sp-test".to_string()),
-            31579,
-            "store-a".to_string(),
-        );
+        let value =
+            fallback_local_api_config(Some("sp-test".to_string()), 31579, "store-a".to_string());
         assert_eq!(value["key"], "sp-test");
         assert_eq!(value["port"], 31579);
         assert_eq!(value["auth_enabled"], true);
@@ -658,7 +657,9 @@ mod local_api_fallback_tests {
         assert_eq!(first_id, local_api_cache_namespace(&first));
         assert_ne!(first_id, local_api_cache_namespace(&second));
         assert_eq!(first_id.len(), 64);
-        assert!(first_id.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(first_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
     }
 }
 
@@ -2896,8 +2897,7 @@ fn classify_windows_open_target(target: &str) -> Result<WindowsOpenTarget, Strin
     if let Some(app_id) = target.strip_prefix("shell:AppsFolder\\") {
         let valid_app_id = !app_id.is_empty()
             && app_id.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(character, '.' | '_' | '-' | '!')
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '!')
             });
         if valid_app_id {
             return Ok(WindowsOpenTarget::Uri(target.to_string()));
@@ -2913,15 +2913,15 @@ fn classify_windows_open_target(target: &str) -> Result<WindowsOpenTarget, Strin
         }
     }
 
-    Err("Windows target must be an absolute local path or an allowlisted shell/settings URI"
-        .to_string())
+    Err(
+        "Windows target must be an absolute local path or an allowlisted shell/settings URI"
+            .to_string(),
+    )
 }
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_open_target_tests {
-    use super::{
-        classify_windows_open_target, validate_absolute_local_path, WindowsOpenTarget,
-    };
+    use super::{classify_windows_open_target, validate_absolute_local_path, WindowsOpenTarget};
     use std::path::PathBuf;
 
     #[test]
@@ -2940,9 +2940,7 @@ mod windows_open_target_tests {
     #[test]
     fn allows_only_explicit_windows_uri_families() {
         assert!(matches!(
-            classify_windows_open_target(
-                r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"
-            ),
+            classify_windows_open_target(r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"),
             Ok(WindowsOpenTarget::Uri(_))
         ));
         assert!(matches!(

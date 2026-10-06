@@ -22,6 +22,15 @@ function Assert-Match([string]$Text, [string]$Pattern, [string]$Message) {
 }
 
 try {
+    $launcherAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Start-ScreenWiseGuiTrial.ps1'), [ref]$null, [ref]$null)
+    $scopeFunction = $launcherAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-ToolFreePiValidationScope'}, $true)
+    . ([scriptblock]::Create($scopeFunction.Extent.Text))
+    foreach ($mask in 0..15) {
+        $audio=($mask -band 1) -ne 0; $vision=($mask -band 2) -ne 0
+        $inputDisabled=($mask -band 4) -ne 0; $hasInclude=($mask -band 8) -ne 0
+        Assert-Equal ($mask -eq 15) (Test-ToolFreePiValidationScope $true $audio $vision $inputDisabled $hasInclude) 'Tool-free Pi validation accepted content capture or an absent filter'
+        Assert-Equal $true (Test-ToolFreePiValidationScope $false $audio $vision $inputDisabled $hasInclude) 'Ordinary trial unexpectedly requires validation restrictions'
+    }
     [IO.Directory]::CreateDirectory($sessionDir) | Out-Null
     $log = @(
         '2026-10-02T00:00:00.000000Z INFO screenpipe_app::recording: capture configuration active use_pii_removal=true async_pii_redaction=true pause_on_drm_content=true keyboard_content_capture=true clipboard_content_capture=true capture_on_keystroke=Some(true) capture_on_clipboard=Some(true) use_all_monitors=true use_system_default_audio=true ignored_window_pattern_count=22 ignored_url_pattern_count=2'
@@ -122,6 +131,23 @@ try {
     Assert-Equal 0 $status.unexpected_shell_process_starts 'unexpected shell count changed'
     Assert-Equal $false $status.attention_required 'healthy synthetic GUI run requires attention'
 
+    # A confirmed correlation-channel loss requires attention immediately,
+    # including before any TTL expiry. Older builds without these fields read as zero.
+    Assert-Equal 0 $status.frame_link_send_failures 'absent older-build counters were not zero'
+    foreach ($messageClass in @('frame_captured', 'event_persisted', 'events_discarded', 'trigger_dropped')) {
+        foreach ($outcome in @('full', 'closed')) {
+            $name = "frame_link_send_${messageClass}_${outcome}"
+            $sample.health.pipeline[$name] = 1
+            $sample | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $sessionDir 'operational-metrics.jsonl') -Encoding utf8
+            $loss = (& $statusScript -DataDir $testRoot -SessionName $sessionName -AsJson) | ConvertFrom-Json
+            Assert-Equal 1 $loss.frame_link_send_failures 'confirmed linker send failure was lost'
+            Assert-Equal 1 $loss.frame_link_send_failure_counts.$name 'message class or channel outcome was lost'
+            Assert-Equal $true $loss.attention_required 'send loss before TTL expiry did not require attention'
+            $sample.health.pipeline.Remove($name)
+        }
+    }
+    $sample | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $sessionDir 'operational-metrics.jsonl') -Encoding utf8
+
     $finalAudit.high_frequency_process_monitor_available = $false
     $finalAudit.process_monitor_failure_reason = 'launch_failed'
     $finalAudit | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $sessionDir 'final-process-audit.json') -Encoding utf8
@@ -165,12 +191,65 @@ try {
     }
     Assert-Match $recordingSource 'will not terminate the owning process automatically' 'Occupied local API ports must fail with a safe diagnostic'
 
+    $piSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\src\pi.rs')
+    if ($piSource -match 'Command::new\("(?:taskkill|pkill)(?:\.exe)?"\)' -or $piSource.Contains('kill_orphan_pi_processes')) {
+        throw 'Pi startup must not sweep or terminate processes whose ownership is unknown'
+    }
+    $piStartSource = $piSource.Substring($piSource.IndexOf('pub async fn pi_start_inner('))
+    if ($piStartSource.IndexOf('find_pi_executable()') -gt $piStartSource.IndexOf('m.stop()')) {
+        throw 'Missing Pi provisioning must fail before stopping a managed session'
+    }
+
     $commandsSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\src\commands.rs')
     if ($commandsSource -match 'Command::new\("cmd"\)') {
         throw 'Desktop path/URI opening must not invoke cmd.exe'
     }
     Assert-Match $commandsSource 'tauri_plugin_opener::open_path' 'Desktop local paths must use the native opener'
     Assert-Match $commandsSource 'shell:AppsFolder\\' 'Windows shell targets must use an explicit URI allowlist'
+
+    # Execute the monitor's actual normalization/filter assignments in isolation.
+    # No recorder, socket enumeration, API request or capture is started.
+    $watchPath = Join-Path $PSScriptRoot 'Watch-ScreenWiseGuiTrial.ps1'
+    $watchTokens = $null
+    $watchErrors = $null
+    $watchAst = [Management.Automation.Language.Parser]::ParseFile($watchPath, [ref]$watchTokens, [ref]$watchErrors)
+    if ($watchErrors.Count) { throw 'Trial monitor does not parse.' }
+    $timestampAssignment = $watchAst.Find({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq 'startedAtUtc'
+    }, $true)
+    $timestampCheck = [scriptblock]::Create($timestampAssignment.Extent.Text + '; $startedAtUtc')
+    foreach ($timestamp in @(
+        '2026-10-05T04:26:40.1537017Z',
+        [datetime]::SpecifyKind([datetime]'2026-10-05T04:26:40.1537017', [DateTimeKind]::Utc),
+        [datetimeoffset]'2026-10-05T15:26:40.1537017+11:00',
+        ('{"started_at_utc":"2026-10-05T04:26:40.1537017Z"}' | ConvertFrom-Json).started_at_utc
+    )) {
+        $launch = [pscustomobject]@{ started_at_utc = $timestamp }
+        $normalized = & $timestampCheck
+        Assert-Match $normalized '^2026-10-05T04:26:40\.1537017\+00:00$' 'Monitor timestamp is not culture-independent UTC RFC3339'
+        $roundTrip = [datetimeoffset]::Parse([Uri]::UnescapeDataString([Uri]::EscapeDataString($normalized)))
+        Assert-Equal 0 $roundTrip.Offset.TotalMinutes 'Encoded API query timestamp lost its UTC offset'
+    }
+    $launch = [pscustomobject]@{ started_at_utc = 'invalid-timestamp' }
+    $rejected = $false
+    try { $null = & $timestampCheck } catch { $rejected = $true }
+    Assert-Equal $true $rejected 'Malformed monitor timestamp was accepted'
+    $tcpAssignment = $watchAst.Find({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq 'activePortTcp'
+    }, $true)
+    $tcpCheck = [scriptblock]::Create($tcpAssignment.Extent.Text + '; $activePortTcp')
+    $portTcp = @('TimeWait', 'Closed', 'DeleteTcb', 'Listen', 'Established', 'CloseWait', 'Unknown' | ForEach-Object {
+        [pscustomobject]@{ State = $_ }
+    })
+    $active = @(& $tcpCheck)
+    Assert-Equal 4 $active.Count 'Closed TCP remnants were treated as active endpoints, or live/unknown states were hidden'
+    foreach ($state in @('Listen', 'Established', 'CloseWait', 'Unknown')) {
+        Assert-Equal 1 @($active | Where-Object { $_.State -eq $state }).Count 'Active or unknown endpoint state was lost'
+    }
 
     foreach ($scriptName in @('Start-ScreenWiseGuiTrial.ps1', 'Watch-ScreenWiseGuiTrial.ps1', 'Prepare-ScreenWiseGuiTrialRuntime.ps1', 'Build-ScreenWiseGuiProcessMonitor.ps1')) {
         [void][scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $scriptName)))

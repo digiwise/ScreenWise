@@ -4,6 +4,383 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Current iteration profile (2026-10-05)
+
+Commit preparation, 2026-10-06: both canonical `RootFmt` and `DesktopFmt`
+checks passed, superseding the earlier desktop formatting failures recorded
+below. The side-chat canonical locked/offline root `release` build completed
+with exit zero; its desktop `release` build was still running at this check.
+The existing bounded `release-local` smoke and regression results below remain
+the runtime evidence; no new capture or interactive test was started.
+
+### Provisioned Pi renderer correction (2026-10-06)
+
+The third fresh content-disabled GUI run completed both local arithmetic turns
+with the correct numeric answers. GUI chat files and Pi session files retained
+the ordered replies under the isolated native app root. No tool events appeared.
+Native held-handle monitoring verified three bundled Bun workers and their three
+signed System32 console hosts; all exited on tray quit. The launcher returned
+zero, the marker was `clean-v1`, and final OS inspection found no remaining GUI
+scope process or API listener. Missing/wrong/valid bearer requests returned
+403/403/200. All nine owner-installed rules remained enforced; fixed scoped
+outbound block/control evidence and socket snapshots are retained separately.
+This validates bounded `release-local`, tool-free GUI execution, not tool-enabled
+activity retrieval, production packaging, crash cleanup or packet-level isolation.
+
+The run exposed duplicate assistant text in the injected follow-up history:
+plain content and its display blocks were both appended. Direct and queued sends
+now share a history builder that uses full plain text once, preserves tool
+context, and falls back to text blocks for older rows. Forty affected tests
+passed, including the actual persisted duplicate shape, deliberate repetition,
+legacy block-only text and tool-result limits. The corrected frontend compile,
+type check and export passed. Its canonical `release-local` desktop build passed
+in 3m27s (1,080 external reused/zero rebuilt, 17 workspace reused/one rebuilt),
+with GUI SHA-256
+`8863C9DA605EBFA147E8F8A4AC5A5808B1AC4A8B4B23AF51C8D653EF9DD5376C`.
+The inert candidate preflight passed existing rule/model/runtime identity and
+fixed block/control checks; no GUI, capture or inference started in that preflight.
+The subsequent fresh, owner-authorized GUI retest passed the strict one-occurrence
+history check and matching four-message GUI/Pi persistence. Both fixed arithmetic
+equations were correct, but the model ignored plain-number output instructions.
+The original numeric-only checker rejected the extra operands; the preserved
+failure is reported separately from corrected-history/persistence acceptance.
+Native held handles verified three Bun workers and their three signed console
+hosts exited; tray quit gave `clean-v1`, exit zero, no scoped GUI processes/API
+listener. Read-only SQLite counts found zero frames, audio chunks and non-notice
+UI events. Nine rules remained enforced with the fixed block/control result and
+zero sampled established non-loopback connections. Raw generic attention/console
+flags remain preserved and reconciled against the independent native proof.
+One chat-title request timed out and a later request succeeded. The model added
+formatting despite exact-output instructions. Smart PII model absence, safe UIA
+failure notices, a startup fetch error and WebView exit warning remain recorded.
+Other-RPC advisory and managed Pi crash/restart remain separate outstanding checks.
+
+The preceding fresh GUI retry failed before Pi prompts: `is_absolute` was not
+in the minimal Tauri ACL. The directory helper now checks absolute-path syntax
+locally without that IPC, and its regression models the denied permission.
+The 37 affected directory/settings/chat tests passed. The same candidate updates
+the requested local diagnostic labels to **view crash details** / **view error
+details**, with a **diagnostic details** dialog that states nothing is submitted.
+Source review added dynamic filesystem access only for active-root `chats` and
+`pi-chat` folders, needed for isolated trial persistence; no broader root or new
+IPC permission was added. GUI persistence was still pending at that stage.
+
+The frontend compile/type/export passed with the existing `unpdf` warning.
+The canonical desktop check passed in 1m46s (1,084 external reused/zero rebuilt).
+The next `release-local` desktop build passed in 3m23s (1,080 external reused/zero
+rebuilt); GUI SHA-256 is
+`EDB32BE9A811A9B1B1C86179407402A7ADEB8E975B4712EAD509AB9B9C4A5134`.
+Narrow main.rs formatting passed after sorting the added import. Previous
+artifacts/pins and both failed attempts are preserved; no commit/push occurred.
+The second GUI's health/authentication/clean-shutdown/OS cleanup checks passed
+independently of its startup failure. The third attempt used fresh readiness.
+
+The first tool-free provisioned GUI attempt reached Pi but failed in the home
+renderer because a partial settings snapshot omitted `disabledShortcuts`.
+Settings load/change normalization and native app-directory resolution now cover
+settings, chat persistence, Pi/title work directories and large-context files.
+Unavailable native scope does not fall back to global files. The synthetic mode
+also skips skill installation and calendar publishing. Read the failed attempt's
+scope and remaining checks in [the register](VALIDATION_REGISTER.md).
+
+The focused frontend regression set passed 32 tests; the complete Vitest suite
+passed 436 tests in 46 files. A direct local Next build, with telemetry disabled
+and no prebuild/acquisition hook, passed compilation, type checking and export;
+the existing `unpdf` import.meta warning remains. The canonical desktop check
+passed in 1m54s with 1,084 external artifacts reused and zero rebuilt.
+The canonical `release-local` desktop build passed in 3m26s with 1,080 external
+artifacts reused and zero rebuilt. Its GUI SHA-256 is
+`6D62AB374340FA643359261296B5B97332244E6F3FEAFCCBF2C5AC8C7F122741`.
+Both Rust lockfiles are unchanged. DesktopFmt still reports pre-existing
+commands/browser/overlay formatting differences; the added line was formatted
+and narrow pi/main checks passed. No unrelated formatting was applied.
+
+Before the third attempt, the repinned, inert GUI/provider preflight passed exact existing executable/rule
+scope, localhost provider ownership/model identity and the fixed block/control
+probe. It started no GUI or recording. Conversation/persistence and the observer
+repair were still pending then; the third run's results above supersede that state.
+No firewall rule was added or removed, and no commit
+or push occurred. Full production-release/installer testing remains separate.
+
+Both Rust workspaces now use `release-local` for routine executable builds:
+optimization level 1, no LTO, 16 code-generation units and incremental compilation.
+The former `release-dev` profile is removed. Its references below describe actual
+historical results and do not authorize reusing that artifact for a current run.
+Full `release` remains explicit for production artifacts and performance evidence.
+Supported Windows Cargo tasks use the canonical launcher; see
+[its guide](scripts/windows/build/README.md). Trial defaults and controlled-test
+configuration now select the matching profile directory and refuse stale or
+mismatched runtime configuration before launch. The source archive's three changed
+helper/config hashes were refreshed; original snapshot hashes were preserved.
+
+Background validation passed in PowerShell 7 and Windows PowerShell 5.1:
+86 launcher stub checks, 18 synthetic cache checks, 74 trial-profile checks and
+the synthetic GUI trial harness regression in each shell. The profile checks
+exercise early runtime rejection and the actual canonical profile/path gate in
+isolation, with no recording, outbound probe or firewall changes. Locked/offline
+metadata inspection accepted both manifests (17 root packages, one desktop
+package); all 52 source-archive files verified. Archive tests passed 14 tests with
+one Windows symlink-privilege skip. `git diff --check` passed.
+
+The first application builds subsequently passed through the canonical launcher:
+
+```powershell
+& .\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -AllowColdCache
+& .\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -Package screenpipe-engine -Bin screenpipe -AllowColdCache
+```
+
+Both selected `release-local`, locked/offline dependencies and the configured
+Developer PowerShell/native environment. Cold-profile adoption was reviewed
+before building. The desktop build passed in 14m27s (1,080 external new variants,
+18 workspace artifacts); the recorder passed in 9m57s (785 external new variants,
+17 workspace artifacts). Both cache reports recorded zero unexpected external
+rebuilds, and neither build emitted compiler warnings or errors. These cold runs
+are not a comparison of incremental build time or production performance.
+
+Current executable SHA-256 pins:
+
+- GUI: `FBDAD57E336A2FEA25AE6F1697A03BF84BB523AB8801ACC2411F18857BE8728B`
+- Recorder: `5F4183B61CCAC65826409807DC0D6C50C7EA0E2C07B569ACBD26599CF3EDCD3D`
+
+Reviewed FFmpeg, FFprobe, Bun, OpenBLAS and ONNX Runtime assets were hash-checked
+and staged beside the matching new executables. The existing pinned private
+WebView2 runtime and self-tested process monitor were reused. The GUI runtime
+manifest and six executable pins were regenerated; the old manifest and private
+evidence were preserved. No dependencies were downloaded and neither Rust
+lockfile changed.
+
+No application or capture session was started during this preparation. Read-only
+OS inspection found no scoped process or test-port listener and all firewall
+profiles enabled. Existing rules did not cover the five new executable paths;
+the reused private WebView2 path retained its existing blocks. A unique six-rule
+installation block and matching restoration block were prepared, syntax-checked
+and scope-reviewed. The owner subsequently confirmed installation of six rules;
+read-only ActiveStore inspection verified every exact scope and an enforced
+status for each rule. The matching non-recording GUI preflight passed: its fixed
+outbound TCP attempt was blocked while the unscoped control succeeded. This is
+one fixed-endpoint diagnostic, not complete packet-level validation. The owner
+then provided fresh readiness for the bounded GUI check described below.
+Restoration has not run. Production-release, packaging and installer validation
+remain separate.
+
+### GUI banner and Pi copy retest (2026-10-05)
+
+The pinned `release-local` GUI ran in a fresh private directory with audio and
+transcription disabled, the reviewed exclusions, authenticated loopback API and
+the owner-confirmed six-rule group. The owner confirmed that the safe explanation
+banner was above the placeholder image with no overlap, the Pi setup button
+copied the complete absolute command, the instructions were selectable, and the
+notice persisted for 15 seconds and could be dismissed. The command was not run;
+no Pi package or provider was provisioned. The UI helper read the controls but
+failed with unavailable input geometry, so these were owner-operated checks.
+
+Tray quit returned exit code zero and `clean-v1`; read-only OS inspection found
+zero scoped processes, active API TCP endpoints, listeners or UDP endpoints.
+The last operational sample recorded 123 captures and 123 SQLite writes, no
+dropped frames or stalls, and one unexplained frame-link expiry (two other
+expired event halves were attributed to known capture drops). The bearer matrix
+was 403/403/200; socket sampling observed no non-loopback connection or listener.
+The 25 ms process monitor recorded 2,265 snapshots, eight descendants and zero
+unexpected shell starts. These are bounded observations, not a privacy guarantee
+or a final database-content audit. OCR/audio positive controls were not run.
+
+Two monitor defects were repaired after the run: JSON timestamps decoded as
+`DateTime` now normalize to UTC RFC3339 before API queries, and closed TCP
+`TIME_WAIT` remnants no longer count as active post-exit endpoints. Total and
+`TIME_WAIT` counts remain visible; live and unknown states remain actionable.
+The corrected live notice query succeeded without persistence degradation or
+reported delivery loss. Regression cases exercising the actual monitor
+assignments passed with the synthetic GUI harness in PowerShell 7. The Windows
+PowerShell 5.1 suite was blocked by script execution policy, which was not changed.
+Historical audit output is preserved with a separate correction note.
+
+The filter-column bottom inset was identified as a source of upward overflow
+into the preceding Recording status row. A shared production viewport now
+anchors at the slider top and scrolls within 60 pixels; six rendered-component
+regressions passed. The owner subsequently confirmed that the Recording status
+label looked good in the last GUI recovery run, completing the visual label
+follow-up for that layout. That run had content capture disabled; no broader
+recorded-media layout coverage is claimed. The unexplained frame-link expiry
+remains under investigation.
+Startup WebView fetch failure, optional Smart PII reduced coverage and
+a WebView class-unregistration warning at exit were also observed. Forced
+interruption/restart and real Pi/provider execution remain separate tests.
+
+### Controlled GUI interruption/restart (2026-10-05)
+
+The reusable [recovery controller](scripts/windows/day-to-day-trial/README.md#controlled-gui-crashrestart-check)
+prepares an unused private directory and waits for fresh owner readiness. It
+disables screen/audio and keyboard/clipboard content, applies a unique nonmatching
+UI include filter, verifies a persisted-notice positive control, interrupts only
+its verified GUI process handle, and waits for launcher/monitor completion before
+allowing a single controlled restart. Existing settings, token and SQLite rows
+must survive. Acceptance requires the fixed interruption notice in current logs
+and the authenticated timeline API, owner visual confirmation, a clean marker,
+403/403/200 bearer checks and no scoped processes/active endpoints afterward.
+The owner-authorized two-launch check completed on the pinned `release-local`
+candidate. It does not exercise real Pi, audio tails or WGC during interruption.
+
+The PowerShell 7 recovery regression passed 83 groups, including actual launcher
+nonempty-directory refusal and store-write bypass, receipt tampering, unsafe
+settings and hash-preserved synthetic sentinels.
+The actual health/log validators and post-restart controlled-settings comparison
+also have offline acceptance/refusal coverage; unrelated GUI defaults may change.
+One Python regression passed for the read-only SQLite aggregate helper, including
+unchanged database bytes and refusal to create a missing database. The inherited
+Python ignore rule has explicit exceptions for these two reusable source files.
+The scripts parse in Windows PowerShell 5.1, but its existing execution policy
+blocked the full suite; the
+policy was left unchanged. The GUI/trial-status suites passed. The launcher now
+records existing rolling-log offsets for restart and a completion receipt after
+its monitor finishes, preventing stale phase-one output from representing phase two.
+
+Four linker message classes now expose full/closed send failures separately in
+fixed warnings and count-only health fields. Trial summaries flag all eight
+counters immediately, including before TTL expiry. The canonical root linker
+suite passed 16 tests in 1m45s, reusing 685 external artifacts and rebuilding none;
+initial adoption of the existing test cache was explicitly reviewed. The scoped
+`release-local` CLI build passed in 2m27s, reusing 785 external artifacts with none
+rebuilt. Thirteen focused frontend tests, TypeScript and static export checks
+passed (the known `unpdf` export warning remains). No captured payload was inspected
+and the earlier orphan's cause remains unresolved.
+
+The settled canonical `DesktopBuild` passed in 6m01s, reusing 1,080 external
+artifacts with none rebuilt. The `release-local` GUI SHA-256 is
+`3406F220CB45B50B0D2128EFB8EBAE9A2C761E8307DD47BC2C7AF6EACF823AEE`;
+the recorder SHA-256 is
+`60ACE945B29A42A934AC99ADB6B439D10B14AA9C1076909B998D69165090BD35`.
+The existing six exact-path firewall rules were independently inspected and
+still matched. Non-recording preflight passed: the GUI's fixed IPv4 attempt was
+blocked while the unscoped control succeeded. Fresh owner readiness then gated
+the isolated run; it is now stopped.
+The known `unpdf` warning, Windows PowerShell policy limitation and unresolved
+historical correlation expiry remain explicit. No firewall change, provisioning,
+commit or push occurred.
+
+The exact owned GUI handle was deliberately interrupted (exit -1), leaving the
+active session marker. After the first launcher and process monitor completed,
+the single permitted restart preserved the token, controlled capture/privacy
+settings and initial SQLite notice. Exactly one fixed interruption notice was
+returned by the authenticated API; its fixed text appeared twice in current
+logs. The owner confirmed its explanation in Timeline's Recording status and
+quit from the tray. Exit zero and `clean-v1` followed. Both phases passed the
+403/403/200 authentication matrix and observed zero non-loopback TCP/UDP endpoints
+or API listeners. Independent final OS inspection found zero scoped processes,
+active API TCP endpoints or UDP endpoints. Rules remain installed.
+
+A harness assumption failed during the first launch: disabled vision/audio omit
+their health metric sections rather than reporting zero counters. The validator
+was corrected without changing the app, binary or capture settings; absent whole
+sections are accepted only with disabled status, while incomplete/nonzero present
+sections still fail. The new regression cases and read-only SQLite positive
+control passed before continuing the same authorized attempt. Aggregate checks
+before interruption, after restart and after exit found zero frames, audio chunks
+or ordinary UI events. Final SQLite `quick_check` passed. Missing metrics are not
+claimed as measured zeros; the database supplies the independent content check.
+
+Each phase summary retained attention status, two error-level lines and seven
+warning-level lines, with no panic file, persistence degradation or reported
+delivery loss. Observed categories included initial WebView fetch failure, UIA
+initialization retry/password-state unavailability, optional Smart PII reduced
+coverage, missing Pi provisioning and WebView class-unregistration at exit; the
+restart also emitted the expected recovery warning. These are not an error-free
+trial claim. Actual captured-content recovery, real Pi descendants,
+historical linker expiry and production-release validation
+remain outstanding. Private evidence and the validation-only harness amendment
+are retained locally; no captured payload was examined.
+
+### Explicit Pi provisioning and bounded execution (2026-10-05–06)
+
+The owner authorized provisioning and selected the default local model. Pi
+`@earendil-works/pi-coding-agent@0.75.4` (MIT registry metadata) installed into a
+fresh private test root using existing user Bun 1.4.0. Its hash matched the bundled
+Bun, but its existing path was not subject to the runtime outbound block; no
+blocked executable was moved or rule weakened. Bun installed 123 dependencies
+and left two postinstall scripts blocked. The scoped bundled Bun returned version
+0.75.4. Existing Ollama 0.34.0 downloaded the owner-selected 6,022,236,616-byte
+`ministral-3:latest` model, digest
+`1922accd5827ebe6829e536369195db25eaf664528dc66206d646ea3bb386b71`.
+Its provider listener was independently inspected at IPv4 loopback port 11434.
+Additional exact provider rules were owner-confirmed on Oct 6 and independently
+found enforced in ActiveStore alongside the existing six GUI runtime rules.
+
+Pi's documented startup acquisition/update/telemetry opt-outs are now explicitly
+set on its managed child command. DesktopCheck passed in 2m40s with 1,084 external
+artifacts reused and zero rebuilt; its existing cache was explicitly adopted
+after the launcher refused a missing recorded baseline. The focused command-env
+regression passed (one test) in 4m31s with 921 external artifacts reused and zero
+rebuilt; the existing linked-test cache was similarly reviewed before adoption.
+DesktopBuild passed in 4m02s with 1,080 external artifacts reused and zero rebuilt.
+The release-local GUI SHA-256 is
+`2344652BAE49FDE33670273A41C7D8D32CF8DB1B83FAB247EF0906E11B2791F8`.
+The prior runtime manifest was preserved and its GUI pin updated. The direct
+Pi-file rustfmt check passed; the full DesktopFmt check failed on unrelated
+existing formatting in commands/browser/overlay files, which were left intact.
+
+The new tool-free headless RPC harness passed three Python tests and 17 native
+firewall-validator regression cases; its inert preparation and owner-confirmation
+refusal passed without inference. Pi runtime staging into a fresh GUI trial passed
+synthetic copy/version/dependency/reparse/duplicate/source-preservation checks,
+and the existing GUI harness passed after the launcher extension. The ordinary
+nonempty-directory refusal is unchanged. These are preparation results, not a
+conversation or GUI-owned process-containment pass. Runtime inference and the
+separate fresh-gated GUI normal/crash cleanup check remain pending. No inference or
+captured-content request, GUI launch, agent firewall mutation, commit or push
+occurred during this preparation.
+
+On Oct 6 the owner-run provider installer refused changed executable bytes before
+creating rules. Independent inspection confirmed a signed Ollama Inc. update
+from 0.34.0 to 0.35.1 at the same three scoped paths, unchanged model digest and
+loopback-only provider listener. Both firewall stores contained none of the
+proposed provider rules. The original installer was preserved privately and only
+its three reviewed hashes refreshed; parsing and its actual read-only precreation
+guards passed. Rule names, address ranges and restoration scope are unchanged.
+The subsequent owner confirmation was verified independently before inference;
+no automatic rule change or acquisition followed from this refresh.
+
+The first headless Pi run completed two replies, persisted its synthetic marker
+and exited normally, but the overall harness failed its zero-child assertion on
+a Windows console host. An isolated minimal Bun command reproduced the exact
+Microsoft-signed System32 helper without Pi/inference. The repaired harness
+requires its live exact image/hash, direct-parent identity, held handle and exit;
+it still rejects other children. Two further attempts failed model-format
+acceptance (a misspelled marker, then a correct integer with a terminal period).
+These failures are preserved; the revised arithmetic acceptance explicitly
+permits one terminal punctuation character and makes no exact-format claim.
+
+The final fresh headless attempt passed two completed arithmetic replies,
+ordered assistant-message persistence, zero tool events, EOF exit zero and
+verified console-host exit. Six Python regressions and 17 firewall-scope cases
+passed. All four inference executable paths had exact enforced non-loopback
+IPv4/IPv6 blocks. A fixed no-payload TCP attempt from scoped Bun failed while the
+same-endpoint unscoped control connected; final native TCP/UDP snapshots found
+zero non-loopback active connections/bindings for the scoped paths. Ollama's
+listener stayed loopback-only. This is bounded Pi RPC evidence, not a GUI Job,
+tool-execution, packet-trace or universal isolation claim; the OS console host
+was not globally firewall-blocked. The idle test model was explicitly unloaded
+afterward through the local API, leaving the Ollama service in place.
+
+A dedicated opt-in, tool-free GUI validation mode is prepared for the next
+fresh owner gate. It disables discovery and tools through CLI flags, skips bash
+setup, restricts PATH and bounds local model context/output; the launcher requires
+content capture disabled and an explicit synthetic include filter. GUI-owned
+normal/crash cleanup and advisory warnings with a separate controlled RPC remain
+untested. DesktopCheck passed after correcting a test-only missing type
+qualification (1,084 external artifacts reused, zero rebuilt); three focused
+validation-mode tests passed in 2m05s (921 reused, zero rebuilt). The GUI launcher
+regression includes 32 capture/filter combinations and staging regression passed.
+DesktopBuild passed in 4m10s (1,080 external reused, zero rebuilt). Its new
+release-local GUI SHA-256 is
+`E96DA04B05B2E6B3AC40CF5BCBC60855DA7D091FD8C873EA268BF20F8EE5207D`;
+the previous runtime manifest was preserved before repinning. Direct pi.rs
+formatting passed; the same unrelated full-DesktopFmt failures remain.
+The inert GUI preflight passed on that hash with blocked GUI probe/successful
+unscoped control, pinned 25 ms monitor and capture disabled. Provider preflight
+again verified signed hashes, three exact enforced rules, unchanged installed
+model digest and loopback listener. Fresh owner readiness is still required.
+No GUI or capture started during these background checks. The scoped
+firewall rules remain installed; no commit or push was made.
+
 ## Validated environment and important repairs
 
 The Windows x64 development baseline used Rust/Cargo 1.93.1, Visual Studio 2026
@@ -650,3 +1027,125 @@ also produced the `release-dev` desktop executable in 8m48s; its SHA-256 is
 `DB5D90E01A16D3C6D17A6F8008A4E86F13CA1766959405225B0E3C461EC5A5D9`.
 Live visual confirmation of the new Timeline wording and a real explicitly
 authorized Pi download/start remain outstanding.
+
+## GUI diagnostics and interrupted-session recovery (2026-10-05)
+
+A fresh audio-disabled `release-dev` GUI trial confirmed the allowlisted
+excluded-window explanation and the complete local Pi provisioning command.
+It exposed an explanation banner obscured by timeline navigation, a setup
+toast that expired too quickly to read, and an inherited Pi startup sweep that
+launched `taskkill.exe` and a console helper. No successful termination of an
+unrelated process was demonstrated. The banner has been moved below navigation,
+the setup message remains selectable until dismissed, and the sweep was removed.
+Native Pi inventory is count-only, best-effort and advisory; inaccessible process
+metadata is reported as incomplete rather than proof that no other RPC exists.
+
+The run lasted 240 seconds and recorded 141 captured/141 written frames in the
+last sample, with zero sampled drops, stalls, TTL/update failures, loss notices
+or acquisition failures. Missing, wrong and valid bearer credentials produced
+403/403/200. The listener was loopback-only, and the monitor observed no external
+TCP/UDP endpoint. The existing five-rule firewall group was independently
+inspected and unchanged. Tray quit completed cleanly with no scoped process or
+listener left. One startup WebView fetch error and a shutdown WebView class-
+unregistration warning remain noted; they did not prevent this run's timeline
+load or process cleanup. Audio and new positive UIA/OCR controls were not tested.
+
+The candidate adds a durable per-directory active/clean marker held with an OS
+file lock. An interrupted launch emits a closed, content-free recovery notice
+through the existing status writer independently of capture admission. Known
+capture, audio, status-writer or managed Pi cleanup failure prevents marking
+the session clean. Existing SQLite and durable audio recovery retain ownership
+of stored data; there is no automatic destructive rebuild or recovery guarantee.
+Fresh managed Windows Pi trees use a kill-on-close Job assigned before execution.
+Other or legacy RPC processes are only warned about, never killed by a sweep.
+
+Background marker tests passed eight cases, including forced synthetic process
+termination/restart, a cleanup-failure latch, content-free storage errors and a
+startup/exit race. An atomic startup lease blocks new capture/Pi setup once exit
+begins and leaves the marker incomplete if setup was still running. Native RPC classification passed
+five tests, and the synthetic GUI harness passed. Two isolated Windows Job tests
+passed, covering owned child and wrapper-descendant cleanup while leaving an
+unrelated synthetic process alive. The persistent setup-toast regression passed.
+A normal-account native snapshot recognized a hidden synthetic Bun RPC
+sleeper, excluded it when its owned child handle was supplied, and stopped only
+that sleeper. This exercised no Pi SDK, capture or network activity.
+TypeScript checking and the refreshed optimized frontend export also passed (with the
+known `unpdf` warning). The focused real-subscriber SQLite persistence test
+passed, reconstructing only fixed recovery text, as did the six existing safe
+notice tests and the closed recovery-payload regression. The settled desktop
+`cargo check --tests` passed without warnings using the canonical test cache.
+The warning-free `release-dev` build passed in 5m18s. Its GUI SHA-256 is
+`D1449C915142E43F3A66C908085C689AEA133059044C49C3F9D06277FC85EE22`.
+The refreshed normal-account non-recording preflight passed exact artifact/rule
+and process-monitor pins, a blocked GUI-originated fixed IPv4 TCP attempt and a
+successful unscoped control. It reported `recording_started: false`; audio-model
+checking was deliberately skipped for this audio-disabled follow-up.
+Live confirmation of the repaired layout/toast and the full app interruption/
+restart path needs fresh readiness. Real Pi provisioning/provider execution
+remains untested. Sessions predating marker tracking cannot be classified
+retrospectively, and the desktop marker does not add CLI lifecycle tracking.
+
+## GUI message follow-up (2026-10-05)
+
+The second audio-disabled GUI run used the preceding `D1449C91…` `release-dev`
+executable and lasted 489.1 seconds. Its last sample contained 308 captured/308
+written frames, with no reported drops, stalls, frame-link TTL/update failure,
+delivery loss, acquisition-failure placeholder or queue-capacity notice.
+Bearer checks again returned 403/403/200; sampled external TCP/UDP endpoints and
+non-loopback API listeners were zero. The five exact-path firewall rules were
+independently inspected and unchanged. Tray quit returned exit zero, left
+`clean-v1`, and left no scoped process or API endpoint. The 25 ms process monitor
+observed no unexpected shell starts. These are scoped observations, not a general
+privacy/network guarantee.
+
+The owner's supplied screenshots established two UI failures: the reason notice
+overlapped the placeholder image label, and the app's global selection CSS
+prevented selecting the Pi instructions. The notice now occupies a separate
+layout row above the measured image/video viewport. The persistent Pi notice
+now offers native clipboard copying of just the command, selectable text and a
+read-only command field; a failed copy reports a manual-copy fallback.
+The desktop embeds the standalone PowerShell provisioner and prepares it under
+the active data directory without overwriting conflicting files or following
+junctions. Its displayed command uses quoted absolute paths independently of a
+checkout. Pi remains optional for AI Chat, with explicit package acquisition,
+preinstalled Bun and separate local provider/model setup.
+
+Nine focused Vitest tests passed, as did TypeScript checking, the frontend export
+(with the known `unpdf` warning), six standalone Rust helper tests and the
+synthetic provisioner test. The canonical `DesktopCheck` passed warning-free in
+1m52s, reusing 1,084 dependency artifacts with none rebuilt. The new launcher
+initially refused the existing cache because it lacked a launcher baseline;
+after reviewing the unchanged native configuration and cache location,
+`-AllowColdCache` explicitly adopted that cache. No dependencies were downloaded
+and no cache was cleaned or moved.
+
+The linked desktop regression
+`pi::tests::missing_pi_message_gives_an_exact_recovery_command` passed through
+`Invoke-ScreenWiseBuild.ps1 -Task DesktopTest -TestFilter
+missing_pi_message_gives_an_exact_recovery_command -AllowColdCache`. This run
+took 6m15s, reused 919 dependency artifacts and compiled two missing Windows
+dependency variants; no unexpected dependency invalidation was reported.
+After moving the Copy command action above the potentially long instructions,
+the nine focused frontend tests and TypeScript check passed again.
+
+Startup WebView fetch failure, one UIA privacy-initialization retry and one
+optional smart-PII reduced-coverage notice remain noted. UI automation returned
+incomplete controls/background pixels, so the owner's screenshots supplied
+visual evidence; further screenshots were avoided. Audio, new privacy positive
+controls, full-app crash/restart, real Pi/provider execution, and the repaired
+banner/copy-button visual check were not performed in this follow-up.
+
+The refreshed frontend export and settled canonical
+`Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -AllowColdCache` passed. The
+warning-free `release-dev` build took 5m57s and reused 1,080 dependency artifacts
+with none rebuilt. Its desktop SHA-256 is
+`0C50DB401F4EA1B2CD985E2422BCA5689341D44BD716D3E7ADEB064C913EEDD4`.
+The ignored runtime manifest now pins this candidate at the existing exact
+executable path; this is not a production-release or installer validation.
+The normal-account, non-recording preflight passed against that hash: all five
+existing exact-path rules and the process-monitor pin matched, the GUI-originated
+fixed IPv4 TCP probe was blocked, and the unscoped control succeeded. It reported
+`recording_started: false`; audio models were deliberately not checked for this
+audio-disabled follow-up. A fresh owner readiness gate is required before the
+prepared banner/native-copy GUI check starts. No package download, firewall
+change, new capture session, commit or push occurred during these repairs.

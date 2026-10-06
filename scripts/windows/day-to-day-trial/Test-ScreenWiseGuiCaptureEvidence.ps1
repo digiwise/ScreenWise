@@ -4,6 +4,7 @@
 
 [CmdletBinding()]
 param(
+    [ValidateSet('release-local', 'release')] [string]$BuildProfile = 'release-local',
     [string]$DataDir,
     [ValidateRange(1, 65535)][int]$Port = 3030,
     [string]$CliExecutablePath,
@@ -32,10 +33,13 @@ if ([string]::IsNullOrWhiteSpace($DataDir)) { throw 'DataDir is required outside
 if ([string]::IsNullOrWhiteSpace($CliExecutablePath)) {
     $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
     $repoRoot = (Resolve-Path (Join-Path $scriptRoot '..\..\..')).Path
-    $CliExecutablePath = Join-Path $repoRoot 'target\release\screenpipe.exe'
+    $CliExecutablePath = Join-Path $repoRoot "target\$BuildProfile\screenpipe.exe"
 }
 $resolvedDataDir = (Resolve-Path -LiteralPath $DataDir).Path
 $resolvedCli = (Resolve-Path -LiteralPath $CliExecutablePath).Path
+if ((Split-Path -Leaf (Split-Path -Parent $resolvedCli)) -ine $BuildProfile) {
+    throw 'The recorder executable directory does not match -BuildProfile.'
+}
 $token = (& $resolvedCli auth token --data-dir $resolvedDataDir 2>$null | Select-Object -Last 1).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) { throw 'Could not obtain the local API bearer token' }
 

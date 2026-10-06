@@ -51,6 +51,11 @@ app.py
 *.pyo
 *.pyd
 *.py
+!scripts/windows/day-to-day-trial/check_recovery_rows.py
+!scripts/windows/day-to-day-trial/test_recovery_rows.py
+!scripts/windows/day-to-day-trial/pi_rpc_smoke.py
+!scripts/windows/day-to-day-trial/pi_console_host.py
+!scripts/windows/day-to-day-trial/test_pi_rpc_smoke.py
 *.pyw
 *.pyz
 *.py3

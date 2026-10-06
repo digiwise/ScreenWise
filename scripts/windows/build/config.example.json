@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "developer_shell": "C:\\Program Files\\Microsoft Visual Studio\\18\\Professional\\Common7\\Tools\\Launch-VsDevShell.ps1",
+  "openblas_path": "C:\\Dependencies\\OpenBLAS\\win64",
+  "ort_lib_location": "C:\\Dependencies\\onnxruntime-win-x64-1.22.0"
+}

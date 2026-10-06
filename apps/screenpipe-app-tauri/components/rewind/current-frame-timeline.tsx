@@ -17,6 +17,7 @@ import { useLiveText } from "@/components/rewind/hooks/use-live-text";
 import { useFrameActions } from "@/components/rewind/hooks/use-frame-actions";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { getFrameCaptureNotice } from "@/components/rewind/frame-capture-notice";
+import { FrameCaptureLayout } from "@/components/rewind/frame-capture-layout";
 
 export interface DetectedUrl {
 	normalized: string;
@@ -338,9 +339,9 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 	);
 
 	return (
-		<div
+		<FrameCaptureLayout
 			ref={containerRef}
-			className="absolute inset-0 w-full h-full bg-black outline-none"
+			notice={frameCaptureNotice}
 			onContextMenu={handleContextMenu}
 			tabIndex={0}
 		>
@@ -469,16 +470,6 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 				/>
 			)}
 
-			{frameCaptureNotice && (
-				<div
-					className="absolute left-1/2 top-4 z-20 max-w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 border border-amber-400/50 bg-background/95 px-4 py-2 text-center text-sm text-foreground shadow"
-					role="status"
-					data-testid="frame-capture-notice"
-				>
-					{frameCaptureNotice}
-				</div>
-			)}
-
 			{/* Browser URL bar moved to parent timeline.tsx at z-[45] so it's clickable above controls */}
 
 			{/* Search highlights + URL links (pointer-events: none wrapper, links have auto)
@@ -527,6 +518,6 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 				</div>
 			)}
 
-		</div>
+		</FrameCaptureLayout>
 	);
 };

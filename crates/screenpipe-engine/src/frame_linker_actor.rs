@@ -52,6 +52,16 @@ pub struct LinkerMetrics {
     pub dropped_lagged: u64,
     pub dropped_capture_error: u64,
     pub dropped_other: u64,
+    /// Failed nonblocking sends to the linker actor, split by message class
+    /// and confirmed channel outcome. Counts contain no event identifiers.
+    pub send_frame_captured_full: u64,
+    pub send_frame_captured_closed: u64,
+    pub send_event_persisted_full: u64,
+    pub send_event_persisted_closed: u64,
+    pub send_events_discarded_full: u64,
+    pub send_events_discarded_closed: u64,
+    pub send_trigger_dropped_full: u64,
+    pub send_trigger_dropped_closed: u64,
 }
 
 static PAIRS_EMITTED: AtomicU64 = AtomicU64::new(0);
@@ -66,10 +76,174 @@ static DROPPED_LAGGED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_CAPTURE_ERROR: AtomicU64 = AtomicU64::new(0);
 static DROPPED_OTHER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy)]
+enum LinkerMessageKind {
+    FrameCaptured,
+    EventPersisted,
+    EventsDiscarded,
+    TriggerDropped,
+}
+
+impl LinkerMessageKind {
+    fn from_message(message: &LinkerMessage) -> Self {
+        match message {
+            LinkerMessage::FrameCaptured(_) => Self::FrameCaptured,
+            LinkerMessage::EventPersisted(_) => Self::EventPersisted,
+            LinkerMessage::EventsDiscarded { .. } => Self::EventsDiscarded,
+            LinkerMessage::TriggerDropped { .. } => Self::TriggerDropped,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FrameCaptured => "frame_captured",
+            Self::EventPersisted => "event_persisted",
+            Self::EventsDiscarded => "events_discarded",
+            Self::TriggerDropped => "trigger_dropped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LinkerSendOutcome {
+    Full,
+    Closed,
+}
+
+impl LinkerSendOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+/// Returned when a nonblocking linker send cannot be queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkerSendFailure {
+    Full,
+    Closed,
+}
+
+#[derive(Default)]
+struct LinkerSendFailureCounters {
+    frame_captured_full: AtomicU64,
+    frame_captured_closed: AtomicU64,
+    event_persisted_full: AtomicU64,
+    event_persisted_closed: AtomicU64,
+    events_discarded_full: AtomicU64,
+    events_discarded_closed: AtomicU64,
+    trigger_dropped_full: AtomicU64,
+    trigger_dropped_closed: AtomicU64,
+}
+
+impl LinkerSendFailureCounters {
+    fn counter(&self, kind: LinkerMessageKind, outcome: LinkerSendOutcome) -> &AtomicU64 {
+        match (kind, outcome) {
+            (LinkerMessageKind::FrameCaptured, LinkerSendOutcome::Full) => {
+                &self.frame_captured_full
+            }
+            (LinkerMessageKind::FrameCaptured, LinkerSendOutcome::Closed) => {
+                &self.frame_captured_closed
+            }
+            (LinkerMessageKind::EventPersisted, LinkerSendOutcome::Full) => {
+                &self.event_persisted_full
+            }
+            (LinkerMessageKind::EventPersisted, LinkerSendOutcome::Closed) => {
+                &self.event_persisted_closed
+            }
+            (LinkerMessageKind::EventsDiscarded, LinkerSendOutcome::Full) => {
+                &self.events_discarded_full
+            }
+            (LinkerMessageKind::EventsDiscarded, LinkerSendOutcome::Closed) => {
+                &self.events_discarded_closed
+            }
+            (LinkerMessageKind::TriggerDropped, LinkerSendOutcome::Full) => {
+                &self.trigger_dropped_full
+            }
+            (LinkerMessageKind::TriggerDropped, LinkerSendOutcome::Closed) => {
+                &self.trigger_dropped_closed
+            }
+        }
+    }
+
+    fn snapshot(&self, metrics: &mut LinkerMetrics) {
+        metrics.send_frame_captured_full = self.frame_captured_full.load(Ordering::Relaxed);
+        metrics.send_frame_captured_closed = self.frame_captured_closed.load(Ordering::Relaxed);
+        metrics.send_event_persisted_full = self.event_persisted_full.load(Ordering::Relaxed);
+        metrics.send_event_persisted_closed = self.event_persisted_closed.load(Ordering::Relaxed);
+        metrics.send_events_discarded_full = self.events_discarded_full.load(Ordering::Relaxed);
+        metrics.send_events_discarded_closed = self.events_discarded_closed.load(Ordering::Relaxed);
+        metrics.send_trigger_dropped_full = self.trigger_dropped_full.load(Ordering::Relaxed);
+        metrics.send_trigger_dropped_closed = self.trigger_dropped_closed.load(Ordering::Relaxed);
+    }
+}
+
+static LINKER_SEND_FAILURES: LinkerSendFailureCounters = LinkerSendFailureCounters {
+    frame_captured_full: AtomicU64::new(0),
+    frame_captured_closed: AtomicU64::new(0),
+    event_persisted_full: AtomicU64::new(0),
+    event_persisted_closed: AtomicU64::new(0),
+    events_discarded_full: AtomicU64::new(0),
+    events_discarded_closed: AtomicU64::new(0),
+    trigger_dropped_full: AtomicU64::new(0),
+    trigger_dropped_closed: AtomicU64::new(0),
+};
+
+/// Queue a linker message without blocking. A failed attempt records only
+/// its fixed message class and whether the channel was full or closed.
+pub fn try_send_linker_message(
+    sender: &LinkerSender,
+    message: LinkerMessage,
+) -> Result<(), LinkerSendFailure> {
+    try_send_linker_message_with_counters(sender, message, &LINKER_SEND_FAILURES)
+}
+
+fn try_send_linker_message_with_counters(
+    sender: &LinkerSender,
+    message: LinkerMessage,
+    counters: &LinkerSendFailureCounters,
+) -> Result<(), LinkerSendFailure> {
+    let kind = LinkerMessageKind::from_message(&message);
+    match sender.try_send(message) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            record_linker_send_failure(counters, kind, LinkerSendOutcome::Full);
+            Err(LinkerSendFailure::Full)
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            record_linker_send_failure(counters, kind, LinkerSendOutcome::Closed);
+            Err(LinkerSendFailure::Closed)
+        }
+    }
+}
+
+fn record_linker_send_failure(
+    counters: &LinkerSendFailureCounters,
+    kind: LinkerMessageKind,
+    outcome: LinkerSendOutcome,
+) {
+    let failures = counters
+        .counter(kind, outcome)
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    // Power-of-two reminders keep logs useful during pressure without
+    // producing one warning per lost notification.
+    if failures.is_power_of_two() {
+        warn!(
+            message_class = kind.as_str(),
+            channel_outcome = outcome.as_str(),
+            failures,
+            "frame_linker: nonblocking message delivery failed"
+        );
+    }
+}
+
 /// Read a point-in-time snapshot of the linker counters. Process-wide
 /// (the actor itself is a singleton inside `VisionManager`).
 pub fn linker_metrics_snapshot() -> LinkerMetrics {
-    LinkerMetrics {
+    let mut metrics = LinkerMetrics {
         pairs_emitted: PAIRS_EMITTED.load(Ordering::Relaxed),
         updates_failed: UPDATES_FAILED.load(Ordering::Relaxed),
         evicted_ttl: EVICTED_TTL.load(Ordering::Relaxed),
@@ -83,7 +257,10 @@ pub fn linker_metrics_snapshot() -> LinkerMetrics {
         dropped_lagged: DROPPED_LAGGED.load(Ordering::Relaxed),
         dropped_capture_error: DROPPED_CAPTURE_ERROR.load(Ordering::Relaxed),
         dropped_other: DROPPED_OTHER.load(Ordering::Relaxed),
-    }
+        ..LinkerMetrics::default()
+    };
+    LINKER_SEND_FAILURES.snapshot(&mut metrics);
+    metrics
 }
 
 fn drop_reason_counter(reason: DropReason) -> &'static AtomicU64 {
@@ -366,5 +543,74 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn linker_send_failure_counters_distinguish_full_closed_and_success() {
+        let counters = LinkerSendFailureCounters::default();
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        assert_eq!(
+            try_send_linker_message_with_counters(
+                &sender,
+                LinkerMessage::FrameCaptured(FrameCaptured {
+                    frame_id: 10,
+                    correlation_ids: vec![1],
+                }),
+                &counters,
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(LinkerMessage::FrameCaptured(_))
+        ));
+
+        // Occupy the single slot, then verify a different message class gets
+        // an exact Full classification without recording the message data.
+        sender
+            .try_send(LinkerMessage::TriggerDropped {
+                correlation_ids: Vec::new(),
+                reason: DropReason::Other,
+            })
+            .unwrap();
+        assert_eq!(
+            try_send_linker_message_with_counters(
+                &sender,
+                LinkerMessage::EventsDiscarded {
+                    correlation_ids: vec![2],
+                },
+                &counters,
+            ),
+            Err(LinkerSendFailure::Full)
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(LinkerMessage::TriggerDropped { .. })
+        ));
+
+        drop(receiver);
+        assert_eq!(
+            try_send_linker_message_with_counters(
+                &sender,
+                LinkerMessage::EventPersisted(EventPersisted {
+                    correlation_id: 3,
+                    row_id: 30,
+                }),
+                &counters,
+            ),
+            Err(LinkerSendFailure::Closed)
+        );
+
+        let mut metrics = LinkerMetrics::default();
+        counters.snapshot(&mut metrics);
+        assert_eq!(metrics.send_frame_captured_full, 0);
+        assert_eq!(metrics.send_frame_captured_closed, 0);
+        assert_eq!(metrics.send_event_persisted_full, 0);
+        assert_eq!(metrics.send_event_persisted_closed, 1);
+        assert_eq!(metrics.send_events_discarded_full, 1);
+        assert_eq!(metrics.send_events_discarded_closed, 0);
+        assert_eq!(metrics.send_trigger_dropped_full, 0);
+        assert_eq!(metrics.send_trigger_dropped_closed, 0);
     }
 }

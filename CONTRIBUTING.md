@@ -48,16 +48,20 @@ lockfiles. Use `--locked`; add `--offline` after required caches are provisioned
 Keep changes focused and preserve unrelated work. For Rust source changes:
 
 ```powershell
-cargo fmt --all -- --check
-# Run targeted tests using the native environment in docs/WINDOWS_SETUP.md.
-# For meaningful runtime/build changes, switch back to Ninja and run:
-cargo build --release --locked
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootFmt
+# Run targeted tests through RootTest or DesktopTest; see the launcher guide.
+# Functional builds default to release-local. Adopt the new cache once with
+# -AllowColdCache after reviewing -PlanOnly; keep subsequent invocations stable.
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild
 
 git diff --check
 git diff -- Cargo.lock apps/screenpipe-app-tauri/src-tauri/Cargo.lock
 ```
 
 Check the separate desktop workspace and frontend when a change affects them.
+Use the [canonical launcher](scripts/windows/build/README.md) for supported Windows
+Cargo tasks. Choose `-BuildProfile release` for production/performance evidence and
+the release milestones in AGENTS.md; it is not the routine iteration profile.
 Do not substitute a unit test for a live capture, audio or OS-firewall claim.
 Record exact tested scope and outstanding checks in
 [VALIDATION_REGISTER.md](VALIDATION_REGISTER.md). Build/signing/publishing actions

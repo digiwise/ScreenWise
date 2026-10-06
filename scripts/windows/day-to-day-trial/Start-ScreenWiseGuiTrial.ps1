@@ -6,6 +6,7 @@
 
 [CmdletBinding()]
 param(
+    [ValidateSet('release-local', 'release')] [string]$BuildProfile = 'release-local',
     [string]$DataDir,
     [string]$GuiExecutablePath,
     [string]$CliExecutablePath,
@@ -13,13 +14,25 @@ param(
     [Parameter(Mandatory)] [string]$FirewallGroup,
     [ValidateRange(1, 65535)] [int]$Port = 31579,
     [string[]]$IgnoredWindow = @(),
+    [string[]]$IncludedWindow = @(),
     [string[]]$IgnoredUrl = @(),
     [ValidateSet('parakeet', 'disabled')] [string]$TranscriptionEngine = 'parakeet',
     [switch]$DisableAudio,
+    [switch]$DisableVision,
+    [switch]$DisableInputContent,
+    [string]$RecoveryReceiptPath,
+    [string]$ProvisionedPiSource,
+    [switch]$ToolFreePiValidation,
     [switch]$PreflightOnly
 )
 
 $ErrorActionPreference = 'Stop'
+function Test-ToolFreePiValidationScope([bool]$Requested,[bool]$AudioDisabled,[bool]$VisionDisabled,[bool]$InputDisabled,[bool]$HasInclude) {
+    return (!$Requested -or ($AudioDisabled -and $VisionDisabled -and $InputDisabled -and $HasInclude))
+}
+if (!(Test-ToolFreePiValidationScope $ToolFreePiValidation $DisableAudio $DisableVision $DisableInputContent (@($IncludedWindow).Count -gt 0))) {
+    throw 'Tool-free Pi validation requires disabled audio, vision and input content, plus an explicit synthetic window include filter.'
+}
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 if ([string]::IsNullOrWhiteSpace($RuntimeManifestPath)) {
     $RuntimeManifestPath = Join-Path $repoRoot '.local\gui-trial-runtime\runtime.json'
@@ -31,9 +44,17 @@ if ("$($runtime.schema)" -ne 'screenwise.gui-trial-runtime.v1') {
     throw 'The GUI trial runtime manifest has an unsupported schema.'
 }
 if ([string]::IsNullOrWhiteSpace($GuiExecutablePath)) { $GuiExecutablePath = [string]$runtime.gui_executable }
-if ([string]::IsNullOrWhiteSpace($CliExecutablePath)) { $CliExecutablePath = Join-Path $repoRoot 'target\release\screenpipe.exe' }
+if ([string]::IsNullOrWhiteSpace($CliExecutablePath)) { $CliExecutablePath = Join-Path $repoRoot "target\$BuildProfile\screenpipe.exe" }
+if ([string]$runtime.build_profile -ne $BuildProfile) {
+    throw 'The GUI runtime is not prepared for the selected build profile; run Prepare-ScreenWiseGuiTrialRuntime.ps1 with the same -BuildProfile and review its firewall paths.'
+}
 $GuiExecutablePath = (Resolve-Path -LiteralPath $GuiExecutablePath).Path
 $CliExecutablePath = (Resolve-Path -LiteralPath $CliExecutablePath).Path
+foreach ($selectedExecutable in @($GuiExecutablePath, $CliExecutablePath)) {
+    if ((Split-Path -Leaf (Split-Path -Parent $selectedExecutable)) -ine $BuildProfile) {
+        throw 'The GUI or recorder executable directory does not match -BuildProfile.'
+    }
+}
 $webViewDirectory = (Resolve-Path -LiteralPath ([string]$runtime.webview2_runtime_directory)).Path
 $webViewExecutable = (Resolve-Path -LiteralPath ([string]$runtime.webview2_executable)).Path
 $ffmpegExecutable = (Resolve-Path -LiteralPath ([string]$runtime.ffmpeg_executable)).Path
@@ -171,6 +192,7 @@ if ($PreflightOnly) {
     [pscustomobject]@{
         status = 'ready'
         gui_executable = $GuiExecutablePath
+        build_profile = $BuildProfile
         gui_sha256 = (Get-FileHash -LiteralPath $GuiExecutablePath -Algorithm SHA256).Hash
         firewall_group = $FirewallGroup
         scoped_executable_count = $scopedPaths.Count
@@ -195,10 +217,29 @@ $allowedDataRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.local\gui-trial
 if (-not $DataDir.StartsWith($allowedDataRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "GUI trial data must use a fresh directory under $allowedDataRoot."
 }
-if (Test-Path -LiteralPath $DataDir) {
+$recoveryResume = $false
+if (-not [string]::IsNullOrWhiteSpace($ProvisionedPiSource) -and $RecoveryReceiptPath) {
+    throw 'Provisioned Pi staging is not allowed while resuming a controlled recovery trial.'
+}
+if ($RecoveryReceiptPath) {
+    if (-not $DisableAudio -or -not $DisableVision -or -not $DisableInputContent) { throw 'Controlled recovery requires audio, vision and input content disabled.' }
+    Import-Module (Join-Path $PSScriptRoot 'GuiRecoveryValidation.psm1') -Force
+    $receipt = Assert-RecoveryResume -DataDir $DataDir -ReceiptPath $RecoveryReceiptPath -PrivateRoot $allowedDataRoot `
+        -GuiExecutable $GuiExecutablePath -GuiHash ([string]$runtime.gui_sha256) -Profile $BuildProfile -Port $Port
+    $receipt.phase = 'consumed'
+    $receipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $RecoveryReceiptPath -Encoding utf8
+    $recoveryResume = $true
+}
+if ((Test-Path -LiteralPath $DataDir) -and -not $recoveryResume) {
     if (@(Get-ChildItem -LiteralPath $DataDir -Force).Count -ne 0) {
         throw "Refusing to use non-empty trial directory: $DataDir"
     }
+}
+$piRuntimeStaged = $false
+if (-not [string]::IsNullOrWhiteSpace($ProvisionedPiSource)) {
+    Import-Module (Join-Path $PSScriptRoot 'PiRuntimeStaging.psm1') -Force
+    $piRuntimeStage = Copy-ScreenWisePiRuntime -ProvisionedPiSource $ProvisionedPiSource -DataDir $DataDir
+    $piRuntimeStaged = $true
 }
 [IO.Directory]::CreateDirectory($DataDir) | Out-Null
 $webViewUserDataDir = Join-Path $DataDir '.webview2-profile'
@@ -222,19 +263,20 @@ $settings = [ordered]@{
     transcriptionMode = 'batch'
     audioDevices = @('default')
     useSystemDefaultAudio = $true
-    disableVision = $false
+    disableVision = [bool]$DisableVision
     useAllMonitors = $true
     monitorIds = @('default')
     usePiiRemoval = $true
     asyncPiiRedaction = $true
     pauseOnDrmContent = $true
     recordWhileLocked = $false
-    disableKeyboardCapture = $false
-    disableClipboardCapture = $false
-    captureOnKeystroke = $true
-    captureOnClipboard = $true
+    disableKeyboardCapture = [bool]$DisableInputContent
+    disableClipboardCapture = [bool]$DisableInputContent
+    captureOnKeystroke = (-not $DisableInputContent)
+    captureOnClipboard = (-not $DisableInputContent)
     ignoreIncognitoWindows = $true
     ignoredWindows = $allIgnoredWindows
+    includedWindows = @($IncludedWindow)
     ignoredUrls = @($IgnoredUrl)
 }
 $store = [ordered]@{
@@ -246,13 +288,19 @@ $store = [ordered]@{
     }
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
-[IO.File]::WriteAllText((Join-Path $DataDir 'store.bin'), ($store | ConvertTo-Json -Depth 8), $utf8)
+if (-not $recoveryResume) {
+    [IO.File]::WriteAllText((Join-Path $DataDir 'store.bin'), ($store | ConvertTo-Json -Depth 8), $utf8)
+}
 
 $auditRoot = Join-Path $DataDir '.trial-audit'
 $sessionName = '{0}-{1}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'), ([Guid]::NewGuid().ToString('N').Substring(0, 8))
 $sessionDir = Join-Path $auditRoot $sessionName
 [IO.Directory]::CreateDirectory($sessionDir) | Out-Null
 $startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+$recorderLogOffsets = [ordered]@{}
+foreach ($log in @(Get-ChildItem -LiteralPath $DataDir -Filter 'screenpipe*.log' -File -ErrorAction SilentlyContinue)) {
+    $recorderLogOffsets[$log.FullName] = $log.Length
+}
 
 $psi = [Diagnostics.ProcessStartInfo]::new()
 $psi.FileName = $GuiExecutablePath
@@ -260,6 +308,11 @@ $psi.WorkingDirectory = Split-Path -Parent $GuiExecutablePath
 $psi.UseShellExecute = $false
 $psi.EnvironmentVariables['SCREENPIPE_DATA_DIR'] = $DataDir
 $psi.EnvironmentVariables['SCREENPIPE_PORT'] = "$Port"
+if ($ToolFreePiValidation) {
+    $psi.EnvironmentVariables['SCREENWISE_PI_VALIDATION_NO_TOOLS'] = '1'
+} else {
+    $psi.EnvironmentVariables.Remove('SCREENWISE_PI_VALIDATION_NO_TOOLS')
+}
 $psi.EnvironmentVariables['WEBVIEW2_BROWSER_EXECUTABLE_FOLDER'] = $webViewDirectory
 $psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $webViewUserDataDir
 $psi.EnvironmentVariables['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = '--disable-background-networking --disable-component-update --disable-domain-reliability --disable-sync --no-first-run'
@@ -270,6 +323,7 @@ if (-not $guiProcess.Start()) { throw 'Failed to start the ScreenWise GUI.' }
 
 $launch = [ordered]@{
     schema = 'screenwise.day-to-day-trial-launch.v3'
+    build_profile = $BuildProfile
     mode = 'gui'
     started_at_utc = $startedAtUtc
     gui_executable_path = $GuiExecutablePath
@@ -284,8 +338,10 @@ $launch = [ordered]@{
     process_monitor_executable_path = $processMonitorExecutable
     process_monitor_executable_sha256 = [string]$processMonitorRuntime.executable_sha256
     log_patterns = @('screenpipe*.log')
-    keyboard_capture_requested = $true
-    clipboard_capture_requested = $true
+    keyboard_capture_requested = (-not $DisableInputContent)
+    clipboard_capture_requested = (-not $DisableInputContent)
+    vision_capture_requested = (-not $DisableVision)
+    controlled_recovery_resume = $recoveryResume
     system_default_audio_requested = (-not $DisableAudio)
     transcription_engine = $TranscriptionEngine
     audio_capture_requested = (-not $DisableAudio)
@@ -296,16 +352,19 @@ $launch = [ordered]@{
         use_pii_removal = $true
         async_pii_redaction = $true
         pause_on_drm_content = $true
-        keyboard_content_capture = $true
-        clipboard_content_capture = $true
-        capture_on_keystroke = $true
-        capture_on_clipboard = $true
+        keyboard_content_capture = (-not $DisableInputContent)
+        clipboard_content_capture = (-not $DisableInputContent)
+        capture_on_keystroke = (-not $DisableInputContent)
+        capture_on_clipboard = (-not $DisableInputContent)
         use_all_monitors = $true
         use_system_default_audio = $true
         ignored_window_pattern_count = $allIgnoredWindows.Count
         ignored_url_pattern_count = @($IgnoredUrl).Count
     }
-    recorder_log_offsets = [ordered]@{}
+    pi_runtime_staged = $piRuntimeStaged
+    pi_tool_free_validation = [bool]$ToolFreePiValidation
+    pi_runtime_version = if ($piRuntimeStaged) { '0.75.4' } else { $null }
+    recorder_log_offsets = $recorderLogOffsets
 }
 $launch | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $sessionDir 'launch.json') -Encoding utf8
 
@@ -328,6 +387,9 @@ finally {
         $reader = $null
         try {
             $stream = [IO.File]::Open($log.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            if ($recorderLogOffsets.Contains($log.FullName) -and $stream.Length -ge [long]$recorderLogOffsets[$log.FullName]) {
+                [void]$stream.Seek([long]$recorderLogOffsets[$log.FullName], [IO.SeekOrigin]::Begin)
+            }
             $reader = [IO.StreamReader]::new($stream)
             $text = $reader.ReadToEnd() -replace "`e\[[0-9;]*m", ''
             if ($text -match '(?m)screenpipe-app:\s+shutdown complete\s*$') {
@@ -358,6 +420,8 @@ finally {
         Write-Host "Content-free trial summary: $summaryPath"
     }
     catch { Write-Warning "Content-free trial summary failed: $($_.Exception.Message)" }
+    [ordered]@{ completed_at_utc = [DateTime]::UtcNow.ToString('o') } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sessionDir 'launcher-complete.json') -Encoding utf8
 }
 
 exit $(if ($null -eq $exitCode) { 1 } else { $exitCode })

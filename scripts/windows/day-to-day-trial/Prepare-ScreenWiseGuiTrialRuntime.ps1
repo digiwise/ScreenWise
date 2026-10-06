@@ -6,6 +6,7 @@
 
 [CmdletBinding()]
 param(
+    [ValidateSet('release-local', 'release')] [string]$BuildProfile = 'release-local',
     [string]$GuiExecutablePath,
     [string]$SupportDirectory,
     [string]$DestinationRoot
@@ -14,10 +15,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 if ([string]::IsNullOrWhiteSpace($GuiExecutablePath)) {
-    $GuiExecutablePath = Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\target\release\screenpipe-app.exe'
+    $GuiExecutablePath = Join-Path $repoRoot "apps\screenpipe-app-tauri\src-tauri\target\$BuildProfile\screenpipe-app.exe"
 }
 if ([string]::IsNullOrWhiteSpace($SupportDirectory)) {
-    $SupportDirectory = Join-Path $repoRoot 'target\release'
+    $SupportDirectory = Join-Path $repoRoot "target\$BuildProfile"
 }
 if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
     $DestinationRoot = Join-Path $repoRoot '.local\gui-trial-runtime'
@@ -25,6 +26,10 @@ if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
 
 $GuiExecutablePath = (Resolve-Path -LiteralPath $GuiExecutablePath).Path
 $SupportDirectory = (Resolve-Path -LiteralPath $SupportDirectory).Path
+if ((Split-Path -Leaf (Split-Path -Parent $GuiExecutablePath)) -ine $BuildProfile -or
+    (Split-Path -Leaf $SupportDirectory) -ine $BuildProfile) {
+    throw 'The GUI executable or support directory does not match -BuildProfile.'
+}
 $DestinationRoot = [IO.Path]::GetFullPath($DestinationRoot)
 $allowedDestinationRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.local'))
 if (-not $DestinationRoot.StartsWith($allowedDestinationRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -64,6 +69,7 @@ Copy-Item -LiteralPath $bunSource -Destination $bunDestination -Force
 
 $runtime = [ordered]@{
     schema = 'screenwise.gui-trial-runtime.v1'
+    build_profile = $BuildProfile
     prepared_at_utc = (Get-Date).ToUniversalTime().ToString('o')
     gui_executable = $GuiExecutablePath
     gui_sha256 = (Get-FileHash -LiteralPath $GuiExecutablePath -Algorithm SHA256).Hash

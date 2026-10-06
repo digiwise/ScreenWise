@@ -294,6 +294,7 @@ impl CaptureSession {
         // Stop audio recording (but don't shutdown — keep the Arc valid for queries)
         if !self.audio_disabled {
             if let Err(e) = self.audio_manager.stop().await {
+                crate::crash_recovery::note_shutdown_incomplete();
                 warn!("Error stopping audio manager: {:?}", e);
             }
         }
@@ -306,8 +307,12 @@ impl CaptureSession {
             info!("Waiting for VisionManager shutdown...");
             match tokio::time::timeout(Duration::from_secs(10), &mut vision_task).await {
                 Ok(Ok(())) => info!("VisionManager shutdown finished cleanly"),
-                Ok(Err(e)) => warn!("VisionManager shutdown task failed: {}", e),
+                Ok(Err(e)) => {
+                    crate::crash_recovery::note_shutdown_incomplete();
+                    warn!("VisionManager shutdown task failed: {}", e);
+                }
                 Err(_) => {
+                    crate::crash_recovery::note_shutdown_incomplete();
                     warn!("VisionManager shutdown did not finish within 10s; aborting task");
                     vision_task.abort();
                     let _ = vision_task.await;
@@ -322,7 +327,10 @@ impl CaptureSession {
             info!("Waiting for UI recorder tasks to finish...");
             match tokio::time::timeout(Duration::from_secs(5), ui_handle.join()).await {
                 Ok(()) => info!("UI recorder tasks finished cleanly"),
-                Err(_) => warn!("UI recorder tasks did not finish within 5s"),
+                Err(_) => {
+                    crate::crash_recovery::note_shutdown_incomplete();
+                    warn!("UI recorder tasks did not finish within 5s");
+                }
             }
         }
 
@@ -343,8 +351,14 @@ async fn invalidate_macos_screen_streams(reason: &str) {
 
     match result {
         Ok(Ok(())) => info!("macOS ScreenCaptureKit screenshot streams invalidated"),
-        Ok(Err(e)) => warn!("macOS ScreenCaptureKit invalidation task failed: {}", e),
-        Err(_) => warn!("macOS ScreenCaptureKit stream invalidation timed out after 5s"),
+        Ok(Err(e)) => {
+            crate::crash_recovery::note_shutdown_incomplete();
+            warn!("macOS ScreenCaptureKit invalidation task failed: {}", e);
+        }
+        Err(_) => {
+            crate::crash_recovery::note_shutdown_incomplete();
+            warn!("macOS ScreenCaptureKit stream invalidation timed out after 5s");
+        }
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;

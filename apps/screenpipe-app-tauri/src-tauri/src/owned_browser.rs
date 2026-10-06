@@ -1480,27 +1480,12 @@ async fn browser_session_decision_for_url(
     {
         let already_granted = GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst);
 
-    // macOS: a persisted app-level grant is not enough to avoid surprise.
-    // The first Safe Storage read after app launch can still trigger a macOS
-    // Keychain prompt, so require an in-app confirmation once per process
-    // before reading Keychain.
-    #[cfg(target_os = "macos")]
-    if already_granted {
-        if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
-            return BrowserSessionDecision::UseBrowserSession;
-        }
-        if !crate::owned_browser_cookies::safe_storage_likely_prompts_for_host(&host_key).await {
-            SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
-            return BrowserSessionDecision::UseBrowserSession;
-        }
-    }
-
-    // If a prompt is already on screen (concurrent navigations), wait for it
-    // instead of spawning a second card. compare_exchange makes prompt ownership
-    // atomic so two parallel navigations can't both show cards.
-    loop {
+        // macOS: a persisted app-level grant is not enough to avoid surprise.
+        // The first Safe Storage read after app launch can still trigger a macOS
+        // Keychain prompt, so require an in-app confirmation once per process
+        // before reading Keychain.
         #[cfg(target_os = "macos")]
-        if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
+        if already_granted {
             if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
                 return BrowserSessionDecision::UseBrowserSession;
             }
@@ -1510,14 +1495,11 @@ async fn browser_session_decision_for_url(
                 return BrowserSessionDecision::UseBrowserSession;
             }
         }
-        if SESSION_ACCESS_PROMPT_IN_FLIGHT
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            break;
-        }
-        let wait_deadline = Instant::now() + SESSION_ACCESS_TIMEOUT;
-        while SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst) {
+
+        // If a prompt is already on screen (concurrent navigations), wait for it
+        // instead of spawning a second card. compare_exchange makes prompt ownership
+        // atomic so two parallel navigations can't both show cards.
+        loop {
             #[cfg(target_os = "macos")]
             if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
                 if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
@@ -1530,71 +1512,93 @@ async fn browser_session_decision_for_url(
                     return BrowserSessionDecision::UseBrowserSession;
                 }
             }
-            if Instant::now() >= wait_deadline {
+            if SESSION_ACCESS_PROMPT_IN_FLIGHT
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+            let wait_deadline = Instant::now() + SESSION_ACCESS_TIMEOUT;
+            while SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst) {
+                #[cfg(target_os = "macos")]
+                if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
+                    if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
+                        return BrowserSessionDecision::UseBrowserSession;
+                    }
+                    if !crate::owned_browser_cookies::safe_storage_likely_prompts_for_host(
+                        &host_key,
+                    )
+                    .await
+                    {
+                        SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
+                        return BrowserSessionDecision::UseBrowserSession;
+                    }
+                }
+                if Instant::now() >= wait_deadline {
+                    warn!(
+                        host = host_key.as_str(),
+                        "owned-browser session access: timed out waiting for in-flight prompt"
+                    );
+                    return BrowserSessionDecision::ContinueLoggedOut;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        let state = browser_state();
+        if let Some(active) = state.active().await {
+            let _ = active.hide();
+            state.set_visible(false).await;
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        pending_session_access()
+            .lock()
+            .await
+            .insert(request_id.clone(), tx);
+
+        let payload = BrowserSessionAccessRequestPayload {
+            request_id: request_id.clone(),
+            url: url.as_str().to_string(),
+            host: host_key.clone(),
+            already_granted,
+            owner: browser_state().pending_owner(),
+        };
+
+        if let Err(e) = app.emit(SESSION_ACCESS_REQUEST_EVENT, payload) {
+            pending_session_access().lock().await.remove(&request_id);
+            SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
+            warn!("owned-browser session access: failed to emit request: {e}");
+            return BrowserSessionDecision::ContinueLoggedOut;
+        }
+
+        let decision = match tokio::time::timeout(SESSION_ACCESS_TIMEOUT, rx).await {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(_)) => BrowserSessionDecision::ContinueLoggedOut,
+            Err(_) => {
+                pending_session_access().lock().await.remove(&request_id);
                 warn!(
                     host = host_key.as_str(),
-                    "owned-browser session access: timed out waiting for in-flight prompt"
+                    "owned-browser session access: user prompt timed out"
                 );
-                return BrowserSessionDecision::ContinueLoggedOut;
+                BrowserSessionDecision::ContinueLoggedOut
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
+        };
 
-    let state = browser_state();
-    if let Some(active) = state.active().await {
-        let _ = active.hide();
-        state.set_visible(false).await;
-    }
-
-    let request_id = Uuid::new_v4().to_string();
-    let (tx, rx) = oneshot::channel();
-    pending_session_access()
-        .lock()
-        .await
-        .insert(request_id.clone(), tx);
-
-    let payload = BrowserSessionAccessRequestPayload {
-        request_id: request_id.clone(),
-        url: url.as_str().to_string(),
-        host: host_key.clone(),
-        already_granted,
-        owner: browser_state().pending_owner(),
-    };
-
-    if let Err(e) = app.emit(SESSION_ACCESS_REQUEST_EVENT, payload) {
-        pending_session_access().lock().await.remove(&request_id);
         SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
-        warn!("owned-browser session access: failed to emit request: {e}");
-        return BrowserSessionDecision::ContinueLoggedOut;
-    }
-
-    let decision = match tokio::time::timeout(SESSION_ACCESS_TIMEOUT, rx).await {
-        Ok(Ok(decision)) => decision,
-        Ok(Err(_)) => BrowserSessionDecision::ContinueLoggedOut,
-        Err(_) => {
-            pending_session_access().lock().await.remove(&request_id);
-            warn!(
-                host = host_key.as_str(),
-                "owned-browser session access: user prompt timed out"
-            );
-            BrowserSessionDecision::ContinueLoggedOut
+        if decision == BrowserSessionDecision::UseBrowserSession {
+            // Set the global runtime flag — frontend is responsible for
+            // persisting to the store and calling set_browser_cookie_access_granted.
+            GLOBAL_SESSION_ACCESS_GRANTED.store(true, Ordering::SeqCst);
+            GLOBAL_SESSION_ACCESS_DISABLED.store(false, Ordering::SeqCst);
+            SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
+        } else {
+            // First-time "Continue logged out" is a real preference: don't keep
+            // prompting. User can enable cookies later from the cookie menu.
+            GLOBAL_SESSION_ACCESS_GRANTED.store(false, Ordering::SeqCst);
+            GLOBAL_SESSION_ACCESS_DISABLED.store(true, Ordering::SeqCst);
         }
-    };
-
-    SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
-    if decision == BrowserSessionDecision::UseBrowserSession {
-        // Set the global runtime flag — frontend is responsible for
-        // persisting to the store and calling set_browser_cookie_access_granted.
-        GLOBAL_SESSION_ACCESS_GRANTED.store(true, Ordering::SeqCst);
-        GLOBAL_SESSION_ACCESS_DISABLED.store(false, Ordering::SeqCst);
-        SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
-    } else {
-        // First-time "Continue logged out" is a real preference: don't keep
-        // prompting. User can enable cookies later from the cookie menu.
-        GLOBAL_SESSION_ACCESS_GRANTED.store(false, Ordering::SeqCst);
-        GLOBAL_SESSION_ACCESS_DISABLED.store(true, Ordering::SeqCst);
-    }
         decision
     }
 }

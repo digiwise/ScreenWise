@@ -287,7 +287,6 @@ fn check_package_bin(pkg_dir: std::path::PathBuf, bin_name: &str) -> Option<Stri
 
 const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.75.4";
 const PI_NAMESPACE_DIR: &str = "@earendil-works";
-const PI_WINDOWS_PROVISION_SCRIPT: &str = r".\scripts\windows\Provision-ScreenWisePi.ps1";
 const LOCAL_OLLAMA_URL: &str = "http://localhost:11434/v1";
 const LOCAL_OLLAMA_MODEL: &str = "ministral-3:latest";
 
@@ -355,6 +354,8 @@ type PendingResponses = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Rpc
 #[allow(dead_code)]
 pub struct PiManager {
     child: Option<Child>,
+    #[cfg(windows)]
+    job: Option<crate::pi_job_containment::PiJob>,
     stdin: Option<ChildStdin>,
     project_dir: Option<String>,
     app_handle: AppHandle,
@@ -376,6 +377,8 @@ impl PiManager {
     pub fn new(app_handle: AppHandle) -> Self {
         Self {
             child: None,
+            #[cfg(windows)]
+            job: None,
             stdin: None,
             project_dir: None,
             app_handle,
@@ -403,6 +406,8 @@ impl PiManager {
                     );
                     self.child = None;
                     self.stdin = None;
+                    #[cfg(windows)]
+                    self.stop_owned_job();
                     false
                 }
                 Ok(None) => true, // Still running
@@ -439,6 +444,11 @@ impl PiManager {
         }
         self.queue_handle = None;
 
+        // Only this manager's freshly spawned process tree is terminated.
+        // Closing the non-inherited job also covers a crashed wrapper/root.
+        #[cfg(windows)]
+        self.stop_owned_job();
+
         if let Some(mut child) = self.child.take() {
             // Send abort command before killing
             if let Some(ref mut stdin) = self.stdin {
@@ -446,10 +456,16 @@ impl PiManager {
             }
 
             // Kill the process
-            if let Err(e) = child.kill() {
-                error!("Failed to kill pi child process: {}", e);
+            if !matches!(child.try_wait(), Ok(Some(_))) {
+                if child.kill().is_err() {
+                    crate::crash_recovery::note_shutdown_incomplete();
+                    error!("Could not stop the managed Pi process; shutdown is incomplete.");
+                }
             }
-            let _ = child.wait();
+            if child.wait().is_err() {
+                crate::crash_recovery::note_shutdown_incomplete();
+                error!("Could not confirm managed Pi process exit; shutdown is incomplete.");
+            }
         }
         self.stdin = None;
         self.project_dir = None;
@@ -459,6 +475,18 @@ impl PiManager {
 
     pub fn is_running(&mut self) -> bool {
         self.check_alive()
+    }
+
+    #[cfg(windows)]
+    fn stop_owned_job(&mut self) {
+        if let Some(job) = self.job.take() {
+            if job.terminate().is_err() {
+                crate::crash_recovery::note_shutdown_incomplete();
+                error!("Managed Pi process-tree termination could not be confirmed; closing its owned job.");
+            }
+            // Kill-on-close applies even if explicit termination failed.
+            drop(job);
+        }
     }
 }
 
@@ -485,12 +513,19 @@ fn pi_provisioning_instructions(install_dir: &Path, problem: Option<&str>) -> St
 
     #[cfg(windows)]
     {
-        format!(
-            "Pi is not provisioned{detail}. Close ScreenWise, open PowerShell in the ScreenWise repository, and run:\n& {} -DataDir \"{}\"\nThis explicitly downloads the pinned {} runtime and dependencies. Restart ScreenWise after the command succeeds; ScreenWise will not download Pi automatically.",
-            PI_WINDOWS_PROVISION_SCRIPT,
-            data_dir.display(),
-            PI_PACKAGE
-        )
+        match crate::pi_provisioning::materialize_windows_provisioner(data_dir) {
+            Ok(script_path) => {
+                let command = crate::pi_provisioning::windows_command(&script_path, data_dir)
+                    .unwrap_or_else(|error| format!("<could not build command: {error}>"));
+                format!(
+                    "Pi is not provisioned{detail}. Close ScreenWise, then copy and run this command in PowerShell:\n{command}\nThis explicitly downloads the pinned {} runtime and dependencies. Bun must be available on PATH or supplied with -BunExecutable; provisioning can fail if the selected bun.exe is blocked by your firewall. Restart ScreenWise after the command succeeds. A local AI provider and model, such as Ollama, must be configured separately. Pi is optional and only needed for AI Chat; ScreenWise will not download Pi automatically.",
+                    PI_PACKAGE
+                )
+            }
+            Err(error) => format!(
+                "Pi is not provisioned{detail}, and ScreenWise could not prepare its setup helper: {error}. No Pi runtime was downloaded or changed. Pi is optional and only needed for AI Chat."
+            ),
+        }
     }
 
     #[cfg(not(windows))]
@@ -694,14 +729,66 @@ async fn build_models_json(provider_config: Option<&PiProviderConfig>) -> serde_
     }})
 }
 
+/// Force the managed runtime's startup network opt-outs.
+fn configure_pi_local_startup(cmd: &mut Command) {
+    // Pi 0.75.4 otherwise permits startup update/tool acquisition and install
+    // telemetry. Override inherited opt-ins for the ScreenWise-owned runtime.
+    // This does not block its explicitly configured loopback inference endpoint.
+    cmd.env("PI_OFFLINE", "1")
+        .env("PI_SKIP_VERSION_CHECK", "1")
+        .env("PI_TELEMETRY", "0");
+}
+
+/// Explicit developer mode for bounded GUI lifecycle validation. A model's
+/// instruction adherence is not used to authorize tool execution.
+fn pi_validation_mode(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err("Invalid Pi validation mode; no agent was started".to_string()),
+    }
+}
+
+fn configure_pi_tool_free_validation(cmd: &mut Command, bun_path: &str) -> Result<(), String> {
+    let bun_dir = Path::new(bun_path)
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| "Pi validation requires the provisioned Bun path".to_string())?;
+    cmd.env("PATH", bun_dir).args([
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--system-prompt",
+        "Answer the synthetic test exactly as requested.",
+    ]);
+    Ok(())
+}
+
+fn bound_pi_validation_model(models: &mut serde_json::Value) {
+    let model = &mut models["providers"]["ollama"]["models"][0];
+    model["contextWindow"] = json!(8192);
+    model["maxTokens"] = json!(64);
+    model["input"] = json!(["text"]);
+}
+
 /// Write the complete local-only Pi provider configuration.
-async fn ensure_pi_config(provider_config: Option<&PiProviderConfig>) -> Result<(), String> {
+async fn ensure_pi_config(
+    provider_config: Option<&PiProviderConfig>,
+    tool_free_validation: bool,
+) -> Result<(), String> {
     let config_dir = get_pi_config_dir()?;
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("Failed to create pi config dir: {}", e))?;
 
     let models_path = config_dir.join("models.json");
-    let models_str = serde_json::to_string_pretty(&build_models_json(provider_config).await)
+    let mut models = build_models_json(provider_config).await;
+    if tool_free_validation {
+        bound_pi_validation_model(&mut models);
+    }
+    let models_str = serde_json::to_string_pretty(&models)
         .map_err(|e| format!("Failed to serialize models config: {}", e))?;
     std::fs::write(&models_path, models_str)
         .map_err(|e| format!("Failed to write pi models config: {}", e))?;
@@ -768,56 +855,6 @@ pub async fn pi_start(
     pi_start_inner(app, &state, &sid, project_dir, provider_config).await
 }
 
-/// Kill orphan Pi RPC processes left over from a previous app crash.
-/// Only kills if the managed child is dead or absent.
-fn kill_orphan_pi_processes(managed_alive: bool) {
-    if managed_alive {
-        debug!("Managed Pi child is alive, skipping orphan cleanup");
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        match Command::new("pkill").args(["-f", "pi --mode rpc"]).output() {
-            Ok(output) => {
-                if output.status.success() {
-                    info!("Killed orphan Pi RPC processes");
-                } else {
-                    debug!(
-                        "No orphan Pi RPC processes found (pkill exit={})",
-                        output.status
-                    );
-                }
-            }
-            Err(e) => {
-                warn!("Failed to run pkill for orphan cleanup: {}", e);
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        match Command::new("taskkill")
-            .args(["/F", "/FI", "COMMANDLINE eq *pi --mode rpc*"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            Ok(output) => {
-                if output.status.success() {
-                    info!("Killed orphan Pi RPC processes (Windows)");
-                } else {
-                    debug!("No orphan Pi RPC processes found (Windows)");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to run taskkill for orphan cleanup: {}", e);
-            }
-        }
-    }
-}
-
 /// Max time to wait for Pi to emit its first stdout line (readiness handshake).
 /// Pi RPC mode doesn't emit anything until it receives a command, so this
 /// always times out — it's just a grace period to let bun finish loading before
@@ -836,6 +873,60 @@ const PI_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2
 /// while still preventing a runaway loop from melting the machine.
 const MAX_PI_SESSIONS: usize = 20;
 
+// Repeated chat/title startup attempts must not flood operational logs with an
+// unchanged advisory. This is a snapshot warning, not a background monitor.
+static LAST_PI_RPC_INVENTORY: std::sync::Mutex<
+    Option<Result<crate::pi_rpc_inventory::PiRpcInventory, ()>>,
+> = std::sync::Mutex::new(None);
+
+/// Advisory at app startup and before chat startup. Never terminate an unknown
+/// process; exclude live manager handles and their snapshot descendants.
+pub async fn warn_other_pi_rpc_processes(state: &PiState) {
+    // Advisory only: another runtime may belong to another app or ScreenWise
+    // instance. Never infer ownership or terminate it from a snapshot match.
+    let owned_pids: Vec<u32> = state
+        .0
+        .lock()
+        .await
+        .sessions
+        .values_mut()
+        .filter_map(|manager| {
+            if manager.is_running() {
+                manager.child.as_ref().map(|child| child.id())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let inventory = tokio::task::spawn_blocking(move || {
+        crate::pi_rpc_inventory::inspect_other_rpc_processes(&owned_pids)
+    })
+    .await;
+    let inventory = inventory.unwrap_or(Err(()));
+    let changed = match LAST_PI_RPC_INVENTORY.lock() {
+        Ok(mut previous) => {
+            let changed = *previous != Some(inventory);
+            *previous = Some(inventory);
+            changed
+        }
+        Err(_) => true,
+    };
+    match inventory {
+        Ok(summary) if changed => {
+            if summary.other_rpc_process_count > 0 {
+                warn!(count = summary.other_rpc_process_count, "Other Pi RPC process candidates detected; ownership is unverified and they were left running");
+            }
+            if summary.uninspectable_runtime_count > 0 {
+                warn!(count = summary.uninspectable_runtime_count, "Pi RPC process inventory is incomplete; some runtime metadata is unavailable and no process was terminated");
+            }
+        }
+        Err(()) if changed => {
+            warn!("Pi RPC process inventory is unavailable; no process was terminated")
+        }
+        _ => {}
+    }
+}
+
 /// Core Pi start logic — callable from both Tauri commands and Rust boot code.
 pub async fn pi_start_inner(
     app: AppHandle,
@@ -844,23 +935,48 @@ pub async fn pi_start_inner(
     project_dir: String,
     provider_config: Option<PiProviderConfig>,
 ) -> Result<PiInfo, String> {
+    let _startup_guard = crate::crash_recovery::StartupGuard::begin().map_err(str::to_string)?;
+    let validation_value = std::env::var("SCREENWISE_PI_VALIDATION_NO_TOOLS")
+        .map(Some)
+        .or_else(|error| match error {
+            std::env::VarError::NotPresent => Ok(None),
+            _ => Err("Invalid Pi validation mode; no agent was started".to_string()),
+        })?;
+    let tool_free_validation = pi_validation_mode(validation_value.as_deref())?;
     let project_dir = project_dir.trim().to_string();
     if project_dir.is_empty() {
         return Err("Project directory is required".to_string());
     }
+    warn_other_pi_rpc_processes(state).await;
+
+    // Fail before changing the session pool or writing configuration when the
+    // explicitly provisioned runtime is unavailable.
+    let pi_path = find_pi_executable().ok_or_else(|| {
+        take_pi_install_error().unwrap_or_else(|| {
+            pi_local_install_dir()
+                .map(|dir| pi_provisioning_instructions(&dir, None))
+                .unwrap_or_else(|| {
+                    format!(
+                        "Pi is not provisioned. Install the pinned {} runtime and dependencies under <data-dir>/pi-agent; ScreenWise will not download Pi automatically.",
+                        PI_PACKAGE
+                    )
+                })
+        })
+    })?;
 
     // Create project directory if it doesn't exist
     std::fs::create_dir_all(&project_dir)
         .map_err(|e| format!("Failed to create project directory: {}", e))?;
 
     // Ensure screenpipe skills exist in project
-    ensure_screenpipe_skill(&project_dir)?;
-
-    remove_web_search_extension(&project_dir)?;
-    remove_mcp_bridge_extension(&project_dir)?;
+    if !tool_free_validation {
+        ensure_screenpipe_skill(&project_dir)?;
+        remove_web_search_extension(&project_dir)?;
+        remove_mcp_bridge_extension(&project_dir)?;
+    }
 
     // Ensure Pi is configured with the user's provider
-    ensure_pi_config(provider_config.as_ref()).await?;
+    ensure_pi_config(provider_config.as_ref(), tool_free_validation).await?;
 
     let pi_provider = "ollama".to_string();
     let pi_model = provider_config
@@ -873,7 +989,6 @@ pub async fn pi_start_inner(
     let mut pool = state.0.lock().await;
 
     // Stop existing instance for this session if running
-    let mut any_alive = false;
     if let Some(m) = pool.sessions.get_mut(&sid) {
         if m.is_running() {
             let old_pid = m.child.as_ref().map(|c| c.id());
@@ -885,16 +1000,8 @@ pub async fn pi_start_inner(
         }
     }
 
-    // Check if any session has a live process (for orphan cleanup decision)
-    for m in pool.sessions.values_mut() {
-        if m.is_running() {
-            any_alive = true;
-            break;
-        }
-    }
-
-    // Only kill orphans when pool has no live sessions (app startup scenario)
-    kill_orphan_pi_processes(any_alive);
+    // Only stop children held by this pool. A process-name/command-line sweep
+    // cannot establish ownership after a crash and can kill another app's Pi.
 
     // Evict least-recently-active idle session if at capacity. Two safety
     // properties beyond the prior LRU-only scheme:
@@ -953,26 +1060,6 @@ pub async fn pi_start_inner(
     pool.sessions
         .insert(sid.clone(), PiManager::new(app.clone()));
 
-    // Find the explicitly provisioned Pi executable.
-    let pi_path = match find_pi_executable() {
-        Some(p) => p,
-        None => {
-            find_pi_executable()
-                .ok_or_else(|| {
-                    take_pi_install_error().unwrap_or_else(|| {
-                        pi_local_install_dir()
-                            .map(|dir| pi_provisioning_instructions(&dir, None))
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "Pi is not provisioned. Install the pinned {} runtime and dependencies under <data-dir>/pi-agent; ScreenWise will not download Pi automatically.",
-                                    PI_PACKAGE
-                                )
-                            })
-                    })
-                })?
-        }
-    };
-
     let bun_path = find_bun_executable().unwrap_or_else(|| "NOT FOUND".to_string());
     info!(
         "Starting pi from {} in dir: {} with provider: {} model: {} bun: {}",
@@ -1002,7 +1089,9 @@ pub async fn pi_start_inner(
 
             // On Windows, discover the user-provisioned bash used by Pi's bash tool.
             #[cfg(windows)]
-            let new_path = {
+            let new_path = if tool_free_validation {
+                bun_dir.to_string_lossy().to_string()
+            } else {
                 let mut path = new_path;
                 let bash_result =
                     tokio::task::spawn_blocking(screenpipe_core::agents::pi::ensure_bash_available)
@@ -1078,18 +1167,23 @@ pub async fn pi_start_inner(
     // For local Ollama models, explicitly tell them to read the
     // screenpipe-api skill file — they often skip reading skills on their own.
     let is_local_model = pi_provider == "ollama";
-    if is_local_model {
+    if is_local_model && !tool_free_validation {
         let api_hint = "IMPORTANT: You MUST read the screenpipe-api skill file BEFORE making any API calls. It contains authentication instructions, endpoint docs, and examples. Without reading it first, your API calls will fail with 403 unauthorized.";
         cmd.args(["--append-system-prompt", api_hint]);
     }
 
     // Append the user's AI preset system prompt.
-    if let Some(ref config) = provider_config {
+    if let Some(ref config) = provider_config.as_ref().filter(|_| !tool_free_validation) {
         if let Some(ref prompt) = config.system_prompt {
             if !prompt.is_empty() {
                 cmd.args(["--append-system-prompt", prompt]);
             }
         }
+    }
+
+    if tool_free_validation {
+        configure_pi_tool_free_validation(&mut cmd, &bun_path)?;
+        info!("Pi synthetic validation active: tools and resource discovery disabled; bounded text-only local inference");
     }
 
     // Bun 1.3+ fixed the readline pipe bug (bun 1.2 needed a PTY workaround).
@@ -1142,6 +1236,7 @@ pub async fn pi_start_inner(
 
     let pi_config_dir = get_pi_config_dir()?;
     cmd.env("PI_CODING_AGENT_DIR", pi_config_dir);
+    configure_pi_local_startup(&mut cmd);
     for key in [
         "ANTHROPIC_API_KEY",
         "COHERE_API_KEY",
@@ -1158,6 +1253,10 @@ pub async fn pi_start_inner(
     }
 
     // Spawn process
+    #[cfg(windows)]
+    let (mut child, job) = crate::pi_job_containment::spawn_contained(&mut cmd)
+        .map_err(|_| "Could not safely start the managed Pi process tree.".to_string())?;
+    #[cfg(not(windows))]
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn pi: {}", e))?;
@@ -1194,6 +1293,10 @@ pub async fn pi_start_inner(
         m.queue_task = Some(queue_task);
 
         m.child = Some(child);
+        #[cfg(windows)]
+        {
+            m.job = Some(job);
+        }
         m.stdin = None; // stdin is now owned by the queue
         m.project_dir = Some(project_dir.clone());
         m.last_activity = std::time::Instant::now();
@@ -2079,15 +2182,20 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn missing_pi_message_gives_an_exact_recovery_command() {
-        let install_dir = std::path::PathBuf::from(r"C:\ScreenWise Test Data\pi-agent");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("ScreenWise Test Data");
+        let install_dir = data_dir.join("pi-agent");
         let message =
             super::pi_provisioning_instructions(&install_dir, Some("missing Pi entrypoint"));
 
         assert!(message.contains("Close ScreenWise"));
-        assert!(message.contains(super::PI_WINDOWS_PROVISION_SCRIPT));
-        assert!(message.contains("-DataDir \"C:\\ScreenWise Test Data\""));
+        assert!(message.contains("Provision-ScreenWisePi.ps1"));
+        assert!(message.contains(&format!("-DataDir '{}'", data_dir.display())));
         assert!(message.contains(super::PI_PACKAGE));
         assert!(message.contains("Restart ScreenWise"));
+        assert!(message.contains("blocked by your firewall"));
+        assert!(message.contains("configured separately"));
+        assert!(message.contains("optional and only needed for AI Chat"));
         assert!(message.contains("will not download Pi automatically"));
         assert!(!message.contains("<data-dir>"));
     }
@@ -2379,22 +2487,6 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// Test that kill_orphan_pi_processes doesn't crash when no processes exist.
-    /// Ignored by default because pkill interferes with parallel tests.
-    #[test]
-    #[ignore]
-    fn test_kill_orphan_noop_when_none() {
-        // Should not panic or error when there are no orphan processes
-        super::kill_orphan_pi_processes(false);
-    }
-
-    /// Test that kill_orphan_pi_processes skips cleanup when managed child is alive
-    #[test]
-    fn test_kill_orphan_skips_when_alive() {
-        // Should not attempt to kill anything when managed_alive=true
-        super::kill_orphan_pi_processes(true);
-    }
-
     /// Test PI_READY_TIMEOUT constant is sensible
     #[test]
     fn test_ready_timeout_constant() {
@@ -2538,6 +2630,78 @@ mod tests {
             max_tokens: 4096,
             system_prompt: None,
         }
+    }
+
+    #[test]
+    fn test_pi_local_startup_overrides_network_opt_ins() {
+        let mut cmd = std::process::Command::new("unused-test-executable");
+        cmd.env("PI_OFFLINE", "0")
+            .env("PI_SKIP_VERSION_CHECK", "0")
+            .env("PI_TELEMETRY", "1");
+        super::configure_pi_local_startup(&mut cmd);
+        for (key, expected) in [
+            ("PI_OFFLINE", "1"),
+            ("PI_SKIP_VERSION_CHECK", "1"),
+            ("PI_TELEMETRY", "0"),
+        ] {
+            let actual = cmd
+                .get_envs()
+                .find(|(name, _)| *name == std::ffi::OsStr::new(key))
+                .and_then(|(_, value)| value);
+            assert_eq!(actual, Some(std::ffi::OsStr::new(expected)), "{key}");
+        }
+    }
+
+    #[test]
+    fn test_pi_validation_requires_explicit_valid_opt_in() {
+        assert!(!super::pi_validation_mode(None).unwrap());
+        assert!(super::pi_validation_mode(Some("1")).unwrap());
+        for value in ["", "0", "true", "unexpected"] {
+            assert!(super::pi_validation_mode(Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn test_pi_validation_disables_tools_discovery_and_unrelated_path() {
+        let mut cmd = std::process::Command::new("unused-test-executable");
+        cmd.env("PATH", "unrelated-synthetic-path");
+        let bun = std::path::Path::new("synthetic-runtime").join("bun.exe");
+        super::configure_pi_tool_free_validation(&mut cmd, bun.to_str().unwrap()).unwrap();
+        let args: Vec<_> = cmd.get_args().collect();
+        for flag in [
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+        ] {
+            assert!(args.contains(&std::ffi::OsStr::new(flag)), "{flag}");
+        }
+        let path = cmd
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value);
+        assert_eq!(path, Some(std::ffi::OsStr::new("synthetic-runtime")));
+        assert!(super::configure_pi_tool_free_validation(&mut cmd, "NOT FOUND").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pi_validation_bounds_only_its_local_model() {
+        let ordinary = build_models_json(None).await;
+        let mut bounded = ordinary.clone();
+        super::bound_pi_validation_model(&mut bounded);
+        let model = &bounded["providers"]["ollama"]["models"][0];
+        assert_eq!(model["contextWindow"], 8192);
+        assert_eq!(model["maxTokens"], 64);
+        assert_eq!(model["input"], json!(["text"]));
+        assert_eq!(model["id"], LOCAL_OLLAMA_MODEL);
+        assert_eq!(bounded["providers"]["ollama"]["baseUrl"], LOCAL_OLLAMA_URL);
+        assert!(ordinary["providers"]["ollama"]["models"][0]["contextWindow"].is_null());
+        assert_eq!(
+            ordinary["providers"]["ollama"]["models"][0]["maxTokens"],
+            4096
+        );
     }
 
     #[tokio::test]

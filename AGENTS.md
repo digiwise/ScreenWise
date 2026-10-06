@@ -63,6 +63,12 @@ classification requires inspection and monitoring, not owner approval.
 
 - Before expensive work, inspect existing processes, caches, outputs and
   repository conventions. Reuse the canonical path and configuration.
+- Reuse explicitly configured, verified model stores across trials; do not copy
+  model weights into each trial directory. Keep trial configuration and evidence
+  isolated. Before reclaiming duplicate staging files, establish the canonical
+  consumer and non-use, and preserve active models and private archives. For
+  disposable-copy cleanup, compare paths, sizes and timestamps without expensive
+  full-file hashing; this does not replace provisioning/runtime integrity checks.
 - Do not silently cross an established resource boundary to bypass capacity,
   permission or tooling problems. Diagnose first; reclaim only clearly
   disposable generated state. Ask the owner before crossing the boundary.
@@ -82,11 +88,17 @@ classification requires inspection and monitoring, not owner approval.
   application after every hypothesis. For Windows UIA, keyboard hooks and
   privacy admission, first use `screenpipe-a11y` unit tests and use or add a
   narrowly scoped Windows-only live integration test. Use the incremental
-  `release-dev` profile for intermediate optimized builds and ordinary
-  interactive/manual trial iterations: `cargo build --profile release-dev
-  --locked`. A `release-dev` run may support a clearly labelled, scoped
+  `release-local` profile for intermediate functional builds and ordinary
+  interactive/manual trial iterations: run
+  `scripts/windows/build/Invoke-ScreenWiseBuild.ps1 -Task RootBuild` or
+  `-Task DesktopBuild` for the affected workspace. These presets default to
+  `release-local` and include `--locked --offline`. A `release-local` run may support
+  a clearly labelled, scoped
   full-application behavior claim, but it does not validate the production
-  release artifact or release-profile performance. Ensure executable paths,
+  release artifact or release-profile performance. Use explicit `-BuildProfile release`
+  for timing, throughput, overload or sustained-resource measurements intended to
+  represent production. The former `release-dev` profile is retired; do not recreate
+  it or reuse its executable as current validation. Ensure executable paths,
   runtime manifests, hashes, sidecars and firewall rules match the exact profile.
   Any focused live test that takes focus or generates input still requires the
   interactive-validation readiness gate.
@@ -97,21 +109,69 @@ classification requires inspection and monitoring, not owner approval.
   crate's suite unless they provide distinct required evidence. Reuse one stable
   Developer PowerShell environment, and do not repeat a successful suite unless
   relevant source, features, profile, toolchain or native configuration changed.
-  For intermediate desktop Rust edits, run `cargo check -p screenpipe-app --tests
-  --locked` before paying for a linked test binary; it does not replace the
+  For intermediate desktop Rust edits, run the canonical launcher with
+  `-Task DesktopCheck` before paying for a linked test binary; it does not replace
+  the
   focused tests required for a settled candidate. Reuse a stable, locally chosen
   `CARGO_TARGET_DIR` for desktop tests across turns instead of creating a fresh
   target directory per run. Keep this machine-local cache outside tracked source,
   allow for several gigabytes, and never clear it while a build is active.
-- Run `cargo build --release --locked` only for a settled candidate when preparing
+- For supported Windows Cargo checks, tests, Clippy, formatting, graph inspection
+  and builds, including full release
+  builds, use [the canonical launcher](scripts/windows/build/README.md) instead
+  of repeating Developer PowerShell setup and direct Cargo commands. Inspect
+  `-PlanOnly`
+  before changing an invocation. It preserves the established workspace/profile
+  cache paths; use `-Diagnostics` on the next already necessary run when identical
+  commands unexpectedly rebuild unchanged dependencies. Do not add a build solely
+  to gather diagnostics or warm a different variant while other work is active.
+  After one-time ignored machine configuration, use a single `-Task` preset such
+  as `DesktopBuild`; the launcher initializes Developer PowerShell and native paths.
+  Use `-TestTarget` for a named integration-test binary or `-Bin` for a binary
+  target; these are separate from `-TestFilter`. `RootClippy`/`DesktopClippy` use
+  the existing check cache. `RootFmt`/`DesktopFmt` check formatting without changing
+  source; the `Tree`/`Metadata` presets provide offline inspection. These lightweight
+  presets need no native setup. See the guide for supported selectors and options.
+- Compiling presets refuse a missing matching successful cache baseline or missing
+  recorded dependency artifacts before invoking Cargo. Use `-AllowColdCache` only
+  after reviewing the selected path/profile/target and explaining why initial
+  cache adoption, a new variant or rewarming is expected. Existing caches that
+  predate launcher history need that flag once; it does not itself clear a cache.
+  Do not add the flag mechanically or bypass this gate with a direct Cargo command.
+  Artifact presence and recorded identity are preflight evidence, not a guarantee
+  that Cargo's full fingerprint will be fresh.
+- Every compiling run reports external/workspace reuse and rebuild counts and
+  captures dirty-fingerprint reasons. For an unexpected external rebuild, identify
+  the first dirty dependency and cause, distinguish new variants/source changes
+  from avoidable invalidation, then make a scoped launcher/configuration fix.
+  Add a regression check where practical and update the relevant build instructions
+  with the cause and remedy. Verify reuse on the next already necessary equivalent
+  run; do not pay for an extra build solely to verify cache reuse. The live warning
+  does not kill an in-progress build; apply the existing resource-aware diagnosis
+  rule to decide whether stopping is useful.
+- Run a full release build through the canonical launcher with
+  `-Task RootBuild -BuildProfile release` or
+  `-Task DesktopBuild -BuildProfile release`, for the affected workspace,
+  only for a settled candidate when preparing
   a public push, package, distribution, tag or release; validating behavior
   specifically attributed to the production release artifact; changing Cargo
   profiles, release-only configuration, build scripts, native linkage, packaging,
   sidecar layout, signing or installer behavior; or when the owner explicitly
   requests it. Meaningful runtime changes may be committed after appropriate
-  targeted tests and a successful `release-dev` build. Batch related commits and
+  targeted tests and a successful `release-local` build. Batch related commits and
   perform one full release build at the final applicable milestone; do not repeat
   it unless relevant source or production-build inputs changed.
+- Direct Cargo invocation is appropriate for explicitly scoped operations the
+  launcher does not support (for example custom features/platform targets/profiles,
+  additional inspection options, applying formatting edits, benchmarks or docs);
+  diagnosing the launcher itself; non-Windows development; and commands required
+  by an existing packaging driver. State the reason for bypassing the launcher,
+  retain the established cache/toolchain/native configuration where applicable,
+  and record the exact command. This is not permission to bypass a rejected
+  override without diagnosis, relax release milestones, run `cargo update`,
+  acquire dependencies implicitly or clear/move active caches. Explicit dependency
+  provisioning or narrowly scoped native-cache repair remains subject to the
+  existing acquisition and cleanup rules in docs/WINDOWS_SETUP.md.
 - Do not casually change dependency versions or either Rust lockfile. Earlier
   hardening intentionally changed lockfile graphs; compare against pre-task HEAD,
   not the obsolete claim that they still equal the upstream baseline.
@@ -166,6 +226,17 @@ windows hidden/closed while waiting. Old gates/evidence never imply current cons
 Use compact synthetic fixtures, no real credentials, and minimal owner time.
 Spoken fixed cues are opt-in per run and must not contaminate audio measurements.
 
+For future Pi-package tests, replace per-trial package copying with one verified,
+versioned shared runtime before preparing another run. Supply its path explicitly
+and retain the existing path/integrity checks; do not bypass them to enable reuse.
+Keep each trial's configuration, chats and session data in its own isolated root,
+and treat the shared package as immutable. Add regressions for isolation and
+runtime integrity. This is future work, not a change to an already approved run.
+Only after reuse is validated may redundant, inactive Pi package copies be removed.
+Verify exact resolved cleanup paths and non-use first; preserve all trial logs,
+databases, chats, captures and evidence. Never clean an active or uncertain copy
+or remove its containing trial directory.
+
 Launch Windows GUI fixtures on the owner's active interactive desktop; an OS
 `IsWindowVisible` result does not prove that the owner can see the window. Keep
 the fixture UI thread pumping while UIA inspects it, verify the exact foreground
@@ -183,12 +254,15 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
 
 ## Before committing or publishing
 
-1. Run `cargo fmt --all -- --check` for Rust changes and appropriate targeted tests.
+1. Run the canonical launcher's `-Task RootFmt` for Rust changes and
+   `-Task DesktopFmt` when desktop Rust changes, plus appropriate targeted tests.
 2. Before committing meaningful runtime changes, run an appropriately scoped
-   smoke test and `cargo build --profile release-dev --locked` in Developer
-   PowerShell. Apply the full-release milestone rules above to build-system
+   smoke test and the canonical launcher's `-Task RootBuild` or
+   `-Task DesktopBuild` for the affected workspace (default `release-local`).
+   The launcher initializes the configured Developer PowerShell environment.
+   Apply the full-release milestone rules above to build-system
    changes and production-artifact claims; ordinary commits and clearly labelled
-   `release-dev` validation do not require full LTO.
+   `release-local` functional validation do not require full LTO.
 3. Inspect the full diff and `git diff --check`; check both Rust lockfiles.
 4. Update concise setup/validation documentation, including failures and limits.
 5. Inspect the exact staged paths; never include private notes, captures, logs,

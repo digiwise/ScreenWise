@@ -210,6 +210,14 @@ pub struct PipelineHealthInfo {
     pub frame_link_dropped_lagged: u64,
     pub frame_link_dropped_capture_error: u64,
     pub frame_link_dropped_other: u64,
+    pub frame_link_send_frame_captured_full: u64,
+    pub frame_link_send_frame_captured_closed: u64,
+    pub frame_link_send_event_persisted_full: u64,
+    pub frame_link_send_event_persisted_closed: u64,
+    pub frame_link_send_events_discarded_full: u64,
+    pub frame_link_send_events_discarded_closed: u64,
+    pub frame_link_send_trigger_dropped_full: u64,
+    pub frame_link_send_trigger_dropped_closed: u64,
 }
 
 fn transcription_runtime_availability(
@@ -930,6 +938,14 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             frame_link_dropped_lagged: linker.dropped_lagged,
             frame_link_dropped_capture_error: linker.dropped_capture_error,
             frame_link_dropped_other: linker.dropped_other,
+            frame_link_send_frame_captured_full: linker.send_frame_captured_full,
+            frame_link_send_frame_captured_closed: linker.send_frame_captured_closed,
+            frame_link_send_event_persisted_full: linker.send_event_persisted_full,
+            frame_link_send_event_persisted_closed: linker.send_event_persisted_closed,
+            frame_link_send_events_discarded_full: linker.send_events_discarded_full,
+            frame_link_send_events_discarded_closed: linker.send_events_discarded_closed,
+            frame_link_send_trigger_dropped_full: linker.send_trigger_dropped_full,
+            frame_link_send_trigger_dropped_closed: linker.send_trigger_dropped_closed,
         })
     } else {
         None

@@ -54,7 +54,7 @@ function TimelineErrorFallback({
             variant="outline"
             onClick={() => openFeedback(`Timeline crashed: ${error?.message || "unknown error"}`)}
           >
-            report crash
+            view crash details
           </Button>
         </div>
       </div>
@@ -230,7 +230,7 @@ export default function OverlayPage() {
               className="underline underline-offset-2 text-inherit opacity-80 hover:opacity-100"
               onClick={() => openFeedback(`Server restart failed: ${error instanceof Error ? error.message : String(error)}`)}
             >
-              report issue
+              view error details
             </button>
           </span>
         ),

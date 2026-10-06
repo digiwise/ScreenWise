@@ -577,13 +577,23 @@ impl ServerCore {
         match tokio::time::timeout(Duration::from_secs(15), self.audio_manager.shutdown()).await {
             Ok(Ok(())) => info!("Audio manager shut down cleanly"),
             Ok(Err(_)) => {
+                crate::crash_recovery::note_shutdown_incomplete();
                 if !screenpipe_events::audio_shutdown_attempt_degraded() {
-                    screenpipe_events::report_audio_shutdown_issue(screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed);
+                    screenpipe_events::report_audio_shutdown_issue(
+                        screenpipe_events::AudioShutdownIssue::ConsumerDrainFailed,
+                    );
                 }
-            },
-            Err(_) => screenpipe_events::report_audio_shutdown_issue(screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout),
+            }
+            Err(_) => {
+                crate::crash_recovery::note_shutdown_incomplete();
+                screenpipe_events::report_audio_shutdown_issue(
+                    screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
+                );
+            }
         }
         // Keep the writer alive until audio has emitted its final safe status.
-        self.privacy_notice_recorder.stop().await;
+        if !self.privacy_notice_recorder.stop().await {
+            crate::crash_recovery::note_shutdown_incomplete();
+        }
     }
 }

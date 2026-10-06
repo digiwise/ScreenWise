@@ -23,27 +23,61 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { buildPiHistoryPrompt, type PiHistoryMessage } from "../chat/history-prompt";
 
-// Faithful port of the post-fix injection branch.
+// Exercise the production helper used by both direct and queued sends.
 function buildPromptForPi(args: {
   userMessage: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: PiHistoryMessage[];
   piSessionSyncedRef: { current: boolean };
 }): string {
   const { userMessage, messages, piSessionSyncedRef } = args;
-  let promptMessage = userMessage;
-  if (messages.length > 0) {
-    const historyLines = messages
-      .slice(-40)
-      .map((m) => `${m.role}: ${m.content || ""}`)
-      .join("\n");
-    promptMessage = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
-  }
+  const promptMessage = buildPiHistoryPrompt(userMessage, messages);
   piSessionSyncedRef.current = true;
   return promptMessage;
 }
 
 describe("conversation history injection (issue #3636 — post-fix contract)", () => {
+  it("includes a persisted assistant reply once when display blocks mirror its text", () => {
+    const reply = "**Response:**\n---\n12\n---\n**[End of response.]**";
+    const prompt = buildPiHistoryPrompt("next question", [{
+      role: "assistant", content: reply,
+      contentBlocks: [{ type: "text", text: reply }],
+    }]);
+    expect(prompt.split(reply)).toHaveLength(2);
+  });
+
+  it("retains tool context without appending mirrored text or private thinking", () => {
+    const prompt = buildPiHistoryPrompt("next", [{
+      role: "assistant", content: "before\nafter",
+      contentBlocks: [
+        { type: "text", text: "before" },
+        { type: "tool", toolCall: { toolName: "local_lookup", args: { limit: 1 }, result: "x".repeat(600) } },
+        { type: "thinking", text: "thinking marker" },
+        { type: "text", text: "after" },
+      ],
+    }]);
+    expect(prompt).toContain('assistant: before\nafter\n[tool: local_lookup]({"limit":1}) → ' + "x".repeat(500));
+    expect(prompt).not.toContain("x".repeat(501));
+    expect(prompt).not.toContain("thinking marker");
+    expect(prompt.split("before")).toHaveLength(2);
+  });
+
+  it("recovers text from blocks when the plain-text field is empty", () => {
+    expect(buildPiHistoryPrompt("next", [{
+      role: "assistant", content: "",
+      contentBlocks: [{ type: "text", text: "first" }, { type: "text", text: "second" }],
+    }])).toContain("assistant: first\nsecond");
+  });
+
+  it("preserves deliberate repetition within a reply and across turns", () => {
+    const prompt = buildPiHistoryPrompt("next", [
+      { role: "assistant", content: "echo\necho", contentBlocks: [{ type: "text", text: "echo\necho" }] },
+      { role: "assistant", content: "echo" },
+    ]);
+    expect(prompt.split("echo")).toHaveLength(4);
+  });
+
   it("injects history when Pi was just restarted (synced=false, messages present)", () => {
     const piSessionSyncedRef = { current: false };
     const messages = [

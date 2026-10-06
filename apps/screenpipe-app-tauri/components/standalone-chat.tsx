@@ -21,6 +21,7 @@ import { Loader2, Send, Square, Settings, ExternalLink, X, ImageIcon, History, S
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
+import { showPiStartFailure } from "@/lib/pi/start-failure";
 import { motion, AnimatePresence } from "framer-motion";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -70,7 +71,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
-import { homeDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
+import { getAppDataDir } from "@/lib/app-data-dir";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -97,6 +99,7 @@ import {
   PI_MAX_RATE_LIMIT_RETRIES,
 } from "@/lib/chat/quota-errors";
 import { buildSystemPrompt } from "@/lib/chat/system-prompt";
+import { buildPiHistoryPrompt } from "@/lib/chat/history-prompt";
 import {
   classifyCurl,
   endpointFamily,
@@ -385,8 +388,7 @@ async function externalizeLargeContextIfNeeded(
   const filePart = sanitizeLargeContextFilePart(task.slice(0, 60));
   const contextDirName = `${createdAt}-${filePart}`;
   const fileName = "full.txt";
-  const home = await homeDir();
-  const dir = await join(home, ".screenpipe", "pi-chat", "large-context", sessionPart, contextDirName);
+  const dir = await join(await getAppDataDir(), "pi-chat", "large-context", sessionPart, contextDirName);
   await mkdir(dir, { recursive: true });
   const filePath = await join(dir, fileName);
   await writeTextFile(filePath, text);
@@ -1579,7 +1581,7 @@ function MessageContent({
         onClick={() => openFeedback(`AI error in chat: ${message.content.slice(0, 300)}`)}
         className="ml-auto flex items-center gap-1 text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
       >
-        report issue
+        view error details
       </button>
     </div>
   ) : isErrorMessage ? (
@@ -1590,7 +1592,7 @@ function MessageContent({
         onClick={() => openFeedback(`AI error in chat: ${message.content.slice(0, 300)}`)}
         className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
       >
-        report issue
+        view error details
       </button>
     </div>
   ) : null;
@@ -3949,8 +3951,7 @@ export function StandaloneChat({
       piStoppedIntentionallyRef.current = true;
     }
 
-    const home = await homeDir();
-    const dir = await join(home, ".screenpipe", "pi-chat");
+    const dir = await join(await getAppDataDir(), "pi-chat");
     const result = await commands.piStart(
       piSessionIdRef.current,
       dir,
@@ -4943,8 +4944,7 @@ export function StandaloneChat({
             console.log("[Pi] Auto-restarting after crash");
             try {
               const providerConfig = buildProviderConfig();
-              const home = await homeDir();
-              const dir = await join(home, ".screenpipe", "pi-chat");
+              const dir = await join(await getAppDataDir(), "pi-chat");
               const result = await commands.piStart(piSessionIdRef.current, dir, providerConfig);
               if (result.status === "ok") {
                 setPiInfo(result.data);
@@ -5258,34 +5258,7 @@ export function StandaloneChat({
     // was still in-flight, follow-ups routed here got the bare user
     // message, and any Pi state divergence in between manifested as
     // "chat suddenly forgot what we were talking about."
-    let queuedPrompt = userMessage;
-    if (messages.length > 0) {
-      const historyLines = messages
-        .slice(-40)
-        .map((m) => {
-          let text = m.content || "";
-          if (m.contentBlocks?.length) {
-            const blockTexts = m.contentBlocks
-              .map((b: any) => {
-                if (b.type === "text" && b.text) return b.text;
-                if (b.type === "tool" && b.toolCall) {
-                  const tc = b.toolCall;
-                  let s = `[tool: ${tc.toolName}](${JSON.stringify(tc.args)})`;
-                  if (tc.result) s += ` → ${tc.result.slice(0, 500)}`;
-                  return s;
-                }
-                return "";
-              })
-              .filter(Boolean)
-              .join("\n");
-            if (blockTexts && !text) text = blockTexts;
-            else if (blockTexts) text += "\n" + blockTexts;
-          }
-          return `${m.role}: ${text}`;
-        })
-        .join("\n");
-      queuedPrompt = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
-    }
+    const queuedPrompt = buildPiHistoryPrompt(userMessage, messages);
 
     // E2E test hook — capture queued prompts for context-loss assertions
     {
@@ -5402,8 +5375,7 @@ export function StandaloneChat({
         setPiStarting(true);
         const providerConfig = buildProviderConfig();
         try {
-          const home = await homeDir();
-          const dir = await join(home, ".screenpipe", "pi-chat");
+          const dir = await join(await getAppDataDir(), "pi-chat");
           const result = await commands.piStart(piSessionIdRef.current, dir, providerConfig);
           if (result.status === "ok" && result.data.running) {
             setPiInfo(result.data);
@@ -5415,14 +5387,12 @@ export function StandaloneChat({
             }
           } else {
             const detail = result.status === "error" ? result.error : "Unknown error";
-            console.error("[Pi] Failed to start AI assistant:", detail);
-            toast({ title: "failed to start AI assistant", description: detail, variant: "destructive" });
+            showPiStartFailure(detail);
             return;
           }
         } catch (e) {
           const detail = String(e);
-          console.error("[Pi] Failed to start AI assistant:", detail);
-          toast({ title: "failed to start AI assistant", description: detail, variant: "destructive" });
+          showPiStartFailure(detail);
           return;
         } finally {
           setPiStarting(false);
@@ -5627,32 +5597,7 @@ export function StandaloneChat({
       // `piSessionSyncedRef` is kept around because other code paths
       // (preset change, reauth, the conversation-load handler) still
       // toggle it for diagnostics, but it no longer gates injection.
-      let promptMessage = userMessage;
-      if (messages.length > 0) {
-        const historyLines = messages
-          .slice(-40)
-          .map(m => {
-            let text = m.content || "";
-            // Include contentBlocks info (tool calls, results) for richer context
-            if (m.contentBlocks?.length) {
-              const blockTexts = m.contentBlocks.map((b: any) => {
-                if (b.type === "text" && b.text) return b.text;
-                if (b.type === "tool" && b.toolCall) {
-                  const tc = b.toolCall;
-                  let s = `[tool: ${tc.toolName}](${JSON.stringify(tc.args)})`;
-                  if (tc.result) s += ` → ${tc.result.slice(0, 500)}`;
-                  return s;
-                }
-                return "";
-              }).filter(Boolean).join("\n");
-              if (blockTexts && !text) text = blockTexts;
-              else if (blockTexts) text += "\n" + blockTexts;
-            }
-            return `${m.role}: ${text}`;
-          })
-          .join("\n");
-        promptMessage = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
-      }
+      const promptMessage = buildPiHistoryPrompt(userMessage, messages);
       piSessionSyncedRef.current = true;
 
       // E2E test hook — write to __e2ePiPromptCaptures when the recorder is installed
@@ -5680,8 +5625,7 @@ export function StandaloneChat({
       if (result.status === "error" && result.error.includes("Pi not initialized")) {
         console.log("[Pi] session not registered yet — auto-spawning and retrying");
         try {
-          const home = await homeDir();
-          const dir = await join(home, ".screenpipe", "pi-chat");
+          const dir = await join(await getAppDataDir(), "pi-chat");
           const providerConfig = buildProviderConfig();
           const startRes = await commands.piStart(
             piSessionIdRef.current,

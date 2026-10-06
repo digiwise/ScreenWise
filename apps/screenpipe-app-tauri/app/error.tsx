@@ -66,7 +66,7 @@ export default function GlobalError({
             onClick={() => openFeedback(`App crashed: ${error.message || "unknown error"}`)}
             className="px-4 py-2 bg-neutral-800 text-white rounded-md text-sm font-medium hover:bg-neutral-700 transition-colors"
           >
-            report crash
+            view crash details
           </button>
         </div>
       </div>

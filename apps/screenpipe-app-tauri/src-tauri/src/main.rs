@@ -18,6 +18,7 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_fs::FsExt;
 use tracing::{debug, error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::prelude::*;
@@ -48,12 +49,18 @@ mod owned_browser;
 // injects via WKHTTPCookieStore; other platforms compile to a stub
 // `cookies_for_host` that returns empty until Windows (DPAPI + AES-256-
 // GCM + WebView2) and Linux (libsecret + webkit2gtk) readers land.
+mod crash_recovery;
 mod engine_events;
 mod monitor_events;
 mod owned_browser_cookies;
 mod permissions;
 mod pi;
 mod pi_command_queue;
+#[cfg(windows)]
+mod pi_job_containment;
+#[cfg(windows)]
+mod pi_provisioning;
+mod pi_rpc_inventory;
 mod recording;
 mod retention;
 mod secrets;
@@ -81,6 +88,94 @@ mod config;
 pub use config::get_base_dir;
 
 pub use commands::set_tray_health_icon;
+
+struct SessionRecoveryEntry {
+    marker: crash_recovery::SessionMarker,
+    previous: crash_recovery::PreviousRun,
+    notice_emitted: bool,
+}
+
+#[derive(Default)]
+struct SessionRecoveryState(
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, SessionRecoveryEntry>>,
+);
+
+pub(crate) fn prepare_session_recovery(
+    app: &tauri::AppHandle,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
+    // Multiple spellings/junction aliases can identify our existing lock.
+    let data_dir = std::fs::canonicalize(data_dir).map_err(|_| {
+        "ScreenWise could not resolve the recording directory for session recovery.".to_string()
+    })?;
+    let state = app.state::<SessionRecoveryState>();
+    let mut entries = state
+        .0
+        .lock()
+        .map_err(|_| "ScreenWise session recovery state is unavailable.".to_string())?;
+    if entries.contains_key(&data_dir) {
+        return Ok(());
+    }
+    let (marker, previous) = crash_recovery::SessionMarker::begin(&data_dir).map_err(|error| {
+        error!(reason_code = error.reason_code(), "{}", error.message());
+        error.message().to_string()
+    })?;
+    match previous {
+        crash_recovery::PreviousRun::Interrupted | crash_recovery::PreviousRun::Unknown => warn!(
+            reason_code = previous.reason_code(),
+            "{}",
+            previous.message()
+        ),
+        _ => info!(
+            reason_code = previous.reason_code(),
+            "{}",
+            previous.message()
+        ),
+    }
+    entries.insert(
+        data_dir,
+        SessionRecoveryEntry {
+            marker,
+            previous,
+            notice_emitted: false,
+        },
+    );
+    Ok(())
+}
+
+pub(crate) fn publish_session_recovery_notice(app: &tauri::AppHandle, data_dir: &std::path::Path) {
+    let Ok(data_dir) = std::fs::canonicalize(data_dir) else {
+        crash_recovery::note_shutdown_incomplete();
+        screenpipe_events::report_session_recovery_issue(
+            screenpipe_events::SessionRecoveryIssue::RecoveryChecksFailed,
+        );
+        return;
+    };
+    let state = app.state::<SessionRecoveryState>();
+    let Ok(mut entries) = state.0.lock() else {
+        error!("ScreenWise startup recovery notice is unavailable.");
+        return;
+    };
+    let Some(entry) = entries.get_mut(&data_dir) else {
+        return;
+    };
+    if entry.notice_emitted {
+        return;
+    }
+    entry.notice_emitted = true;
+    let issue = match entry.previous {
+        crash_recovery::PreviousRun::Interrupted => {
+            Some(screenpipe_events::SessionRecoveryIssue::PreviousShutdownInterrupted)
+        }
+        crash_recovery::PreviousRun::Unknown => {
+            Some(screenpipe_events::SessionRecoveryIssue::PreviousStateUnknown)
+        }
+        _ => None,
+    };
+    if let Some(issue) = issue {
+        screenpipe_events::report_session_recovery_issue(issue);
+    }
+}
 pub use commands::set_tray_unhealth_icon;
 pub use commands::write_browser_log;
 pub use commands::write_browser_logs;
@@ -630,6 +725,7 @@ async fn main() {
 
     let app = app.manage(recording_state)
         .manage(pi_state)
+        .manage(SessionRecoveryState::default())
         .manage(suggestions_state)
         .invoke_handler(tauri_helper::tauri_collect_commands!())
         .setup(move |app| {
@@ -711,6 +807,14 @@ async fn main() {
             app.asset_protocol_scope()
                 .allow_directory(base_dir.join("data"), true)?;
 
+            // Renderer chat persistence follows the native app store root.
+            // Grant only its metadata/work folders for isolated data roots,
+            // rather than granting the entire root or relying on global HOME.
+            for folder in ["chats", "pi-chat"] {
+                app.fs_scope()
+                    .allow_directory(base_dir.join(folder), true)?;
+            }
+
             // Set up rolling file appender
             let log_dir = get_screenpipe_data_dir(app.handle())
                 .unwrap_or_else(|_| screenpipe_core::paths::default_screenpipe_data_dir());
@@ -779,6 +883,12 @@ async fn main() {
 
             // Validate optional local Pi provisioning without acquiring packages.
             crate::pi::validate_pi_provisioning();
+            let app_pi_inventory = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = app_pi_inventory.try_state::<pi::PiState>() {
+                    pi::warn_other_pi_rpc_processes(&state).await;
+                }
+            });
 
             info!("App version: {}", env!("CARGO_PKG_VERSION"));
             info!("Local data directory: {}", base_dir.display());
@@ -825,6 +935,7 @@ async fn main() {
 
             // Resolve data directory from user setting (custom dir or ~/.screenpipe)
             let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir);
+            prepare_session_recovery(app_handle, &data_dir).map_err(std::io::Error::other)?;
             info!("Recording data directory: {}", data_dir.display());
             if data_dir_fell_back {
                 let app_handle_fb = app_handle.clone();
@@ -960,6 +1071,7 @@ async fn main() {
             // to avoid competing with Tauri's UI runtime.
             // Two-phase startup: ServerCore (DB + HTTP) then CaptureSession (vision + audio).
             {
+                let startup_guard = crash_recovery::StartupGuard::begin().map_err(std::io::Error::other)?;
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
                 let recording_state = app_handle.state::<RecordingState>();
@@ -1095,6 +1207,8 @@ async fn main() {
                                 }
                             };
 
+                            publish_session_recovery_notice(&app_for_owned, &server.data_dir);
+
                             // Phase 2: Start capture session
                             let capture = match capture_session::CaptureSession::start(&server, &config, true).await {
                                 Ok(c) => c,
@@ -1118,6 +1232,7 @@ async fn main() {
                                 let mut guard = capture_arc.lock().await;
                                 *guard = Some(capture);
                             }
+                            drop(startup_guard);
 
                             // Keep runtime alive as long as server exists
                             loop {
@@ -1238,7 +1353,10 @@ async fn main() {
             // Start calendar events publisher (publishes to event bus for meeting detection)
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                calendar::start_calendar_events_publisher().await;
+                // A synthetic no-tools/no-capture Pi run must not read calendars.
+                if std::env::var_os("SCREENWISE_PI_VALIDATION_NO_TOOLS").is_none() {
+                    calendar::start_calendar_events_publisher().await;
+                }
             });
 
             // Auto-start local data retention if it was enabled
@@ -1281,6 +1399,10 @@ async fn main() {
                 }
 
                 tauri::RunEvent::Exit => {
+                    tray::QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                    if crash_recovery::begin_shutdown() {
+                        warn!("ScreenWise startup was still in progress at exit; clean shutdown cannot be confirmed.");
+                    }
                     info!("App exiting — running cleanup");
 
                     // Shut down embedded server (incl. audio manager / ggml Metal cleanup)
@@ -1290,7 +1412,7 @@ async fn main() {
                     // Run on a dedicated thread to avoid "Cannot start a runtime from within
                     // a runtime" panic when the Exit event fires from a tokio async context.
                     let app_handle_shutdown = app_handle.app_handle().clone();
-                    let _ = std::thread::spawn(move || {
+                    let shutdown_result = std::thread::spawn(move || {
                         tauri::async_runtime::block_on(async move {
                             if let Some(recording_state) =
                                 app_handle_shutdown.try_state::<recording::RecordingState>()
@@ -1303,6 +1425,9 @@ async fn main() {
                                     server.shutdown().await;
                                 }
                             }
+                            if let Some(pi_state) = app_handle_shutdown.try_state::<pi::PiState>() {
+                                pi::cleanup_pi(&pi_state).await;
+                            }
                         })
                     })
                     .join();
@@ -1311,15 +1436,27 @@ async fn main() {
                     // trial monitor. It is emitted only after the embedded
                     // capture session and authenticated loopback server have
                     // completed their synchronous shutdown path.
-                    info!("screenpipe-app: shutdown complete");
-
-                    // Cleanup Pi sidecar
-                    let app_handle_pi = app_handle.app_handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Some(pi_state) = app_handle_pi.try_state::<pi::PiState>() {
-                            pi::cleanup_pi(&pi_state).await;
+                    if shutdown_result.is_err() {
+                        crash_recovery::note_shutdown_incomplete();
+                        error!("ScreenWise shutdown cleanup failed; the next startup will report interrupted recovery.");
+                    }
+                    let mut marked_clean = false;
+                    if let Some(state) = app_handle.try_state::<SessionRecoveryState>() {
+                        match state.0.lock() {
+                            Ok(mut entries) => {
+                                marked_clean = !entries.is_empty();
+                                for entry in entries.values_mut() {
+                                    if entry.marker.finish_clean().is_err() { marked_clean = false; }
+                                }
+                            }
+                            Err(_) => error!("ScreenWise session marker is unavailable; clean shutdown was not confirmed."),
                         }
-                    });
+                    }
+                    if marked_clean {
+                        info!("screenpipe-app: shutdown complete");
+                    } else {
+                        error!("ScreenWise could not confirm a clean session marker; the next startup will report interrupted recovery.");
+                    }
                 }
 
                 tauri::RunEvent::WindowEvent {

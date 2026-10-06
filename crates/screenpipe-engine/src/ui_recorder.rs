@@ -80,14 +80,10 @@ fn report_events_discarded(linker_tx: Option<&LinkerSender>, correlation_ids: Ve
         return;
     }
     if let Some(linker) = linker_tx {
-        if linker
-            .try_send(LinkerMessage::EventsDiscarded { correlation_ids })
-            .is_err()
-        {
-            warn!(
-                "frame linker channel full or closed; discarded UI rows may remain as unpaired frame diagnostics"
-            );
-        }
+        let _ = crate::frame_linker_actor::try_send_linker_message(
+            linker,
+            LinkerMessage::EventsDiscarded { correlation_ids },
+        );
     }
 }
 
@@ -869,10 +865,13 @@ pub async fn start_ui_recording(
                         .is_err();
                     if send_failed {
                         if let Some(ref linker) = linker_tx {
-                            let _ = linker.try_send(LinkerMessage::TriggerDropped {
-                                correlation_ids: vec![corr_id],
-                                reason: crate::frame_linker::DropReason::Other,
-                            });
+                            let _ = crate::frame_linker_actor::try_send_linker_message(
+                                linker,
+                                LinkerMessage::TriggerDropped {
+                                    correlation_ids: vec![corr_id],
+                                    reason: crate::frame_linker::DropReason::Other,
+                                },
+                            );
                         }
                     }
                 }
@@ -966,18 +965,13 @@ async fn flush_batch(
                         // the recorder. Frame linkage is best-effort —
                         // dropped pairs become NULL rows, which is the
                         // documented behavior for "could not link."
-                        if linker
-                            .try_send(LinkerMessage::EventPersisted(EventPersisted {
+                        let _ = crate::frame_linker_actor::try_send_linker_message(
+                            linker,
+                            LinkerMessage::EventPersisted(EventPersisted {
                                 correlation_id: *corr_id,
                                 row_id: *row_id,
-                            }))
-                            .is_err()
-                        {
-                            warn!(
-                                "frame linker channel full or closed; dropping event persisted (row_id={}, corr_id={})",
-                                row_id, corr_id
-                            );
-                        }
+                            }),
+                        );
                     }
                 }
             }

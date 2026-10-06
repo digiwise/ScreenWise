@@ -17,7 +17,8 @@ use futures::StreamExt;
 use screenpipe_db::{DatabaseManager, InsertUiEvent, UiEventType};
 use screenpipe_events::{
     AudioDeliveryCondition, AudioDeliveryStatusEvent, AudioShutdownStatusEvent,
-    AUDIO_DELIVERY_STATUS_EVENT, AUDIO_SHUTDOWN_STATUS_EVENT,
+    SessionRecoveryStatusEvent, AUDIO_DELIVERY_STATUS_EVENT, AUDIO_SHUTDOWN_STATUS_EVENT,
+    SESSION_RECOVERY_STATUS_EVENT,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -36,6 +37,7 @@ enum SafeNoticeEvent {
     Lock(WindowsLockStatusEvent),
     AudioShutdown(AudioShutdownStatusEvent),
     AudioDelivery(AudioDeliveryStatusEvent),
+    SessionRecovery(SessionRecoveryStatusEvent),
 }
 
 impl From<WindowsLockStatusEvent> for SafeNoticeEvent {
@@ -53,12 +55,18 @@ impl From<AudioDeliveryStatusEvent> for SafeNoticeEvent {
         Self::AudioDelivery(event)
     }
 }
+impl From<SessionRecoveryStatusEvent> for SafeNoticeEvent {
+    fn from(event: SessionRecoveryStatusEvent) -> Self {
+        Self::SessionRecovery(event)
+    }
+}
 impl SafeNoticeEvent {
     fn code(self) -> &'static str {
         match self {
             Self::Lock(event) => event.reason.code(),
             Self::AudioShutdown(event) => event.issue.code(),
             Self::AudioDelivery(event) => event.code(),
+            Self::SessionRecovery(event) => event.session_recovery_issue.code(),
         }
     }
     fn message(self) -> String {
@@ -66,6 +74,7 @@ impl SafeNoticeEvent {
             Self::Lock(event) => event.reason.message().to_string(),
             Self::AudioShutdown(event) => event.issue.message().to_string(),
             Self::AudioDelivery(event) => event.message(),
+            Self::SessionRecovery(event) => event.session_recovery_issue.message().to_string(),
         }
     }
     fn state(self) -> &'static str {
@@ -82,6 +91,7 @@ impl SafeNoticeEvent {
                 AudioDeliveryCondition::PossibleLoss => "recording_at_risk",
                 AudioDeliveryCondition::ConfirmedLoss => "recording_degraded",
             },
+            Self::SessionRecovery(event) => event.session_recovery_issue.state(),
         }
     }
 }
@@ -122,7 +132,8 @@ pub struct PrivacyNoticeRecorder {
     degraded: Arc<AtomicBool>,
 }
 impl PrivacyNoticeRecorder {
-    pub async fn stop(mut self) {
+    /// Returns false if persistence or the writer's shutdown was degraded.
+    pub async fn stop(mut self) -> bool {
         self.stop.notify_one();
         if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
@@ -139,6 +150,7 @@ impl PrivacyNoticeRecorder {
                 }
             }
         }
+        !self.degraded.load(Ordering::Relaxed)
     }
 }
 impl Drop for PrivacyNoticeRecorder {
@@ -179,6 +191,10 @@ fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> Pri
                 AUDIO_DELIVERY_STATUS_EVENT => {
                     serde_json::from_value::<AudioDeliveryStatusEvent>(event.data)
                         .map(SafeNoticeEvent::AudioDelivery)
+                }
+                SESSION_RECOVERY_STATUS_EVENT => {
+                    serde_json::from_value::<SessionRecoveryStatusEvent>(event.data)
+                        .map(SafeNoticeEvent::SessionRecovery)
                 }
                 _ => continue,
             };
@@ -304,6 +320,7 @@ pub async fn capture_events(
 mod tests {
     use super::*;
     use crate::sleep_monitor::WindowsLockNoticeReason;
+    use screenpipe_events::SessionRecoveryIssue;
 
     #[test]
     fn privacy_notice_has_no_captured_context() {
@@ -334,6 +351,58 @@ mod tests {
             "{\"reason\":\"captured password\"}"
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn interrupted_session_notice_persists_and_reconstructs_fixed_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                temp.path().join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let now = Utc::now();
+        let writer = start(db.clone());
+        let issue = SessionRecoveryIssue::PreviousShutdownInterrupted;
+        screenpipe_events::report_session_recovery_issue(issue);
+        writer.stop().await;
+
+        let result = query_notices(
+            &db,
+            &NoticeRange {
+                start_time: now - chrono::Duration::seconds(1),
+                end_time: Utc::now() + chrono::Duration::seconds(1),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.data.iter().any(|notice| {
+            notice.reason_code == issue.code()
+                && notice.message == issue.message()
+                && notice.state == issue.state()
+        }));
+
+        let row = notice_row(
+            SessionRecoveryStatusEvent {
+                session_recovery_issue: issue,
+            },
+            now,
+        );
+        assert_eq!(
+            row.text_content.as_deref(),
+            Some(r#"{"session_recovery_issue":"previous_shutdown_interrupted"}"#)
+        );
+        assert!(
+            row.app_name.is_none()
+                && row.window_title.is_none()
+                && row.browser_url.is_none()
+                && row.element_value.is_none()
+                && row.key_code.is_none()
+        );
     }
 
     #[tokio::test]

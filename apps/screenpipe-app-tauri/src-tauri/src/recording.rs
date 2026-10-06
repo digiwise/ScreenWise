@@ -398,6 +398,7 @@ pub async fn start_capture(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     info!("Starting capture session");
+    let _startup_guard = crate::crash_recovery::StartupGuard::begin().map_err(str::to_string)?;
     // Race guard: short-circuit duplicate invocations.
     //
     // `<DeeplinkHandler />` is mounted in every non-overlay webview, and the
@@ -531,6 +532,7 @@ pub async fn spawn_screenpipe(
     _override_args: Option<Vec<String>>,
 ) -> Result<(), String> {
     info!("spawn_screenpipe: starting server + capture");
+    let _startup_guard = crate::crash_recovery::StartupGuard::begin().map_err(str::to_string)?;
 
     // --- Cooldown enforcement ---
     let now_epoch = std::time::SystemTime::now()
@@ -723,12 +725,9 @@ pub async fn spawn_screenpipe(
     // Never discover or terminate a different process merely because it owns the
     // configured port: ownership cannot be proven from a port number alone.
     let max_poll_iters = if cfg!(windows) { 40 } else { 20 };
-    if let Err(error) = wait_for_loopback_port_release(
-        port,
-        max_poll_iters,
-        std::time::Duration::from_millis(250),
-    )
-    .await
+    if let Err(error) =
+        wait_for_loopback_port_release(port, max_poll_iters, std::time::Duration::from_millis(250))
+            .await
     {
         state.is_starting.store(false, Ordering::SeqCst);
         state.is_starting_capture.store(false, Ordering::SeqCst);
@@ -770,6 +769,12 @@ pub async fn spawn_screenpipe(
     );
 
     let (data_dir, fell_back) = config::resolve_data_dir(&store.data_dir);
+    if let Err(error) = crate::prepare_session_recovery(&app, &data_dir) {
+        state.is_starting.store(false, Ordering::SeqCst);
+        state.is_starting_capture.store(false, Ordering::SeqCst);
+        crate::health::set_boot_error(&error);
+        return Err(error);
+    }
     if fell_back {
         warn!(
             "Custom data dir '{}' unavailable, using default: {}",
@@ -818,11 +823,19 @@ pub async fn spawn_screenpipe(
     );
     // Oneshot for result
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let app_recovery = app.clone();
 
     // Spawn dedicated thread with its own runtime
     std::thread::Builder::new()
         .name("screenpipe-server".to_string())
         .spawn(move || {
+            let worker_startup = match crate::crash_recovery::StartupGuard::begin() {
+                Ok(guard) => guard,
+                Err(message) => {
+                    let _ = result_tx.send(Err(message.to_string()));
+                    return;
+                }
+            };
             let server_runtime = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(16)
                 .thread_name("screenpipe-worker")
@@ -849,6 +862,8 @@ pub async fn spawn_screenpipe(
                     }
                 };
 
+                crate::publish_session_recovery_notice(&app_recovery, &server.data_dir);
+
                 // Phase 2: Start capture
                 let capture = match CaptureSession::start(&server, &recording_config, true).await {
                     Ok(c) => c,
@@ -874,6 +889,7 @@ pub async fn spawn_screenpipe(
                     let mut guard = capture_arc.lock().await;
                     *guard = Some(capture);
                 }
+                drop(worker_startup);
                 let _ = result_tx.send(Ok(()));
 
                 // Keep runtime alive as long as server exists
@@ -953,6 +969,7 @@ async fn wait_for_loopback_port_release(
     max_attempts: usize,
     retry_delay: std::time::Duration,
 ) -> Result<(), String> {
+    let _startup_guard = crate::crash_recovery::StartupGuard::begin().map_err(str::to_string)?;
     let attempts = max_attempts.max(1);
     for attempt in 0..attempts {
         match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
@@ -995,7 +1012,10 @@ mod port_release_tests {
 
         assert!(error.contains(&format!("port {port}")));
         assert!(error.contains("will not terminate the owning process"));
-        assert!(owner.local_addr().is_ok(), "the port owner must remain alive");
+        assert!(
+            owner.local_addr().is_ok(),
+            "the port owner must remain alive"
+        );
     }
 
     #[tokio::test]
