@@ -56,6 +56,12 @@ timestamp when known. Full frame context is normally fetched on demand by
 DigiTrack; opt into it with `-IncludeFrameContext` under the same request budget.
 No raw image/audio is fetched. Missing timestamps remain uncertain.
 
+Audio references prefer the background `transcription_id`; live audio uses the
+negative chunk ID. For older API responses, references also include chunk,
+offset and segment start/end. Multiple transcript rows can share a chunk and
+offset, so deduplicating by those two fields alone loses retained text. The
+legacy fallback remains unable to distinguish identical segment metadata.
+
 `-PageSize` defaults to 100 (maximum 100), `-MaxPages` to 100 per paginated
 modality, and `-MaxRequests` to 500 globally. Search offsets advance by requested
 limit even when a page is empty; original totals are used. Meeting listing omits

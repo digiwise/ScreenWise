@@ -143,7 +143,11 @@ function Get-ScreenWiseEvidence {
         $id = switch ($kind) {
             'screen_text' { "frame:$($c.frame_id)" }
             'elements' { "element:$($c.id):frame:$($c.frame_id)" }
-            'audio' { "audio:$($c.chunk_id):offset:$($c.offset_index)" }
+            'audio' {
+                if ($c.transcription_id) { "audio-transcription:$($c.transcription_id)" }
+                elseif ($c.chunk_id -lt 0) { "live-audio:$($c.chunk_id)" }
+                else { "audio:$($c.chunk_id):offset:$($c.offset_index):start:$($c.start_time):end:$($c.end_time)" }
+            }
             'input' { "input:$($c.id)" }
             'meetings' { "meeting:$($c.id)" }
             'meeting_transcripts' { "meeting-transcript:$($c.id):meeting:$($c.meetingId)" }

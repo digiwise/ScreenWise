@@ -53,7 +53,7 @@ an instruction to load every element and full frame context for every period.
 |---|---|---|
 | Screen text and frame references | `/search?content_type=ocr` | `{data:[{type:"OCR",content:{...}}],pagination:{limit,offset,total}}`; `frame_id`, `timestamp`, `text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused`, `device_name`, `capture_privacy`; optional `active_monitor=true` for known active-monitor frames, including redactions |
 | Individual retained accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence`; add visibility/source filters when needed |
-| Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; `chunk_id`, `offset_index`, `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
+| Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; optional `transcription_id`, `chunk_id`, `offset_index`, `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
 | Optional retained input events | `/search?content_type=input` | `type:"Input"`; `id`, `timestamp`, `event_type`, optional app/window/context, `text_content` and `frame_id` |
 | Frame timestamp for a reference | `/frames/{frame_id}/metadata` | `{frame_id,timestamp}`; returns 404 when the frame is absent |
 | Full retained frame context on demand | `/frames/{frame_id}/context` | `{frame_id,text,nodes,urls,text_source,capture_privacy}`; accessibility first, OCR fallback |
@@ -253,7 +253,7 @@ GET /search?content_type=audio&start_time=2026-10-06T00:00:00Z&end_time=2026-10-
 ```json
 {
   "data": [{"type": "Audio", "content": {
-    "chunk_id": 700, "offset_index": 0, "timestamp": "2026-10-06T00:16:00Z",
+    "transcription_id": 701, "chunk_id": 700, "offset_index": 0, "timestamp": "2026-10-06T00:16:00Z",
     "transcription": "Let us review the Planner permissions.",
     "text": "Let us review the Planner permissions.",
     "device_name": "Example USB microphone", "device_type": "Input",
@@ -439,22 +439,27 @@ Search responses have a 60-second cache TTL, and their range cache key uses
 whole-second timestamps. Distinct subsecond ranges can therefore share a key.
 Use whole-second query boundaries for the prototype and filter exact instants
 on the client; do not assume a rapid repeated query sees newly persisted data.
-Stable ordering/snapshot retrieval and subsecond cache-key precision are API
-follow-up items for stronger completeness claims.
+Audio ties now have stable segment ordering; snapshot retrieval and subsecond
+cache-key precision remain follow-up items for stronger completeness claims.
 
 Use references scoped to a locally configured **source-instance identity**, not
-the base URL alone: frame ID; element ID plus frame ID; audio chunk ID plus offset
-index; input-event ID; meeting ID; meeting-transcript ID; notice ID. Frame/audio
+the base URL alone: frame ID; element ID plus frame ID; background audio
+transcription ID (live audio uses its negative chunk ID); input-event ID; meeting
+ID; meeting-transcript ID; notice ID. Frame/audio
 IDs can collide across recording directories. The reviewed API does not expose
 an authoritative recording-store UUID or reset generation. Require explicit
 reconnection/new identity when the recording directory changes; a local label
 cannot detect an unannounced database replacement at the same URL.
 
-Audio search groups by `(audio_chunk_id, offset_index)` and does not expose the
-transcription row ID. Retain its timestamp, segment fields and provenance with
-the reference; chunk ID alone is insufficient. Numeric `start_time`/`end_time`
-are seconds within audio processing, not RFC3339 wall-clock bounds. Do not derive
-exact work duration from them without validating the capture/provider anchoring.
+Audio search returns individual transcription rows, including those sharing a
+chunk and offset. `q` filters the matching transcription row; counts use the same
+speaker/hallucination admission filters. Ordering uses timestamp, chunk, segment
+start and row identity. Legacy APIs without transcription IDs require timestamp
+and segment fields in references; chunk/offset alone can collapse distinct rows.
+Numeric `start_time`/`end_time` are seconds within audio processing, not RFC3339
+wall-clock bounds. Pi's local segment display adds that offset to the retained
+capture timestamp in code. Do not derive exact word timing or work duration
+without validating the capture/provider anchoring.
 Transcripts can arrive late, be reconciled, be absent, or change after explicit
 retranscription. An unavailable transcript is not evidence of silence.
 

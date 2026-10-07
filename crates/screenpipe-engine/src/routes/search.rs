@@ -237,6 +237,7 @@ pub fn search_result_to_content_item(
         SearchResult::Audio(audio) => {
             let transcription = truncate(audio.transcription.clone());
             ContentItem::Audio(AudioContent {
+                transcription_id: audio.transcription_id,
                 chunk_id: audio.audio_chunk_id,
                 transcription: transcription.clone(),
                 text: transcription,
@@ -727,6 +728,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_segment_reference_survives_public_api_conversion() {
+        let audio: screenpipe_db::AudioResult = serde_json::from_value(json!({
+            "transcription_id": 17, "audio_chunk_id": 4, "offset_index": 0,
+            "transcription": "synthetic segment", "timestamp": "2025-06-12T01:00:00Z",
+            "file_path": "synthetic.wav", "transcription_engine": "synthetic",
+            "tags": [], "device_name": "fixture microphone", "device_type": "Input",
+            "speaker_provisional": false, "start_time": 3.0, "end_time": 5.0
+        }))
+        .unwrap();
+        let content = search_result_to_content_item(&SearchResult::Audio(audio), None);
+        let value = serde_json::to_value(content).unwrap();
+        assert_eq!(value["content"]["transcription_id"], 17);
+        assert_eq!(value["content"]["chunk_id"], 4);
+        assert_eq!(value["content"]["start_time"], 3.0);
+        assert_eq!(value["content"]["text"], value["content"]["transcription"]);
+    }
 
     #[test]
     fn capture_privacy_search_api_preserves_structured_metadata_and_legacy_null() {

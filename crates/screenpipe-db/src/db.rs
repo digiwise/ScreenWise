@@ -3965,7 +3965,19 @@ impl DatabaseManager {
         )?;
 
         background_results.append(&mut live_results);
-        background_results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // A capture timestamp and offset can be shared by many transcript segments.
+        // Stable tie breakers are essential when paging the merged background/live stream.
+        background_results.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.audio_chunk_id.cmp(&a.audio_chunk_id))
+                .then_with(|| {
+                    b.start_time
+                        .unwrap_or(0.0)
+                        .total_cmp(&a.start_time.unwrap_or(0.0))
+                })
+                .then_with(|| b.transcription_id.cmp(&a.transcription_id))
+        });
         Ok(background_results
             .into_iter()
             .skip(offset as usize)
@@ -3992,6 +4004,7 @@ impl DatabaseManager {
         // base query for audio search
         let base_sql = String::from(
             "SELECT
+                audio_transcriptions.id AS transcription_id,
                 audio_transcriptions.audio_chunk_id,
                 audio_transcriptions.transcription,
                 audio_transcriptions.timestamp,
@@ -4073,7 +4086,7 @@ impl DatabaseManager {
         // build where clause conditions in order
         let mut conditions = Vec::new();
         if !query.is_empty() {
-            conditions.push("audio_transcriptions.audio_chunk_id IN (SELECT at_inner.audio_chunk_id FROM audio_transcriptions_fts JOIN audio_transcriptions at_inner ON at_inner.id = audio_transcriptions_fts.rowid WHERE audio_transcriptions_fts MATCH ? ORDER BY audio_transcriptions_fts.rank LIMIT 5000)");
+            conditions.push("audio_transcriptions.id IN (SELECT rowid FROM audio_transcriptions_fts WHERE audio_transcriptions_fts MATCH ?)");
         }
         if start_time.is_some() {
             conditions.push("audio_transcriptions.timestamp >= ?");
@@ -4131,9 +4144,9 @@ impl DatabaseManager {
             format!("WHERE {}", conditions.join(" AND "))
         };
 
-        // complete sql with group, order, limit and offset
+        // Collapse only the tag join, never distinct segments sharing a chunk/offset.
         let sql = format!(
-            "{} {} GROUP BY audio_transcriptions.audio_chunk_id, audio_transcriptions.offset_index ORDER BY audio_transcriptions.timestamp DESC LIMIT ? OFFSET ?",
+            "{} {} GROUP BY audio_transcriptions.id ORDER BY audio_transcriptions.timestamp DESC, audio_transcriptions.audio_chunk_id DESC, COALESCE(audio_transcriptions.start_time, 0) DESC, audio_transcriptions.id DESC LIMIT ? OFFSET ?",
             base_sql, where_clause
         );
 
@@ -4210,6 +4223,7 @@ impl DatabaseManager {
                 };
 
                 Ok::<AudioResult, sqlx::Error>(AudioResult {
+                    transcription_id: Some(raw.transcription_id),
                     audio_chunk_id: raw.audio_chunk_id,
                     transcription: raw.transcription,
                     timestamp: raw.timestamp,
@@ -4306,7 +4320,7 @@ impl DatabaseManager {
               AND (?5 IS NULL OR LENGTH(transcript) <= ?5)
               AND (?6 IS NULL OR speaker_name LIKE '%' || ?6 || '%' COLLATE NOCASE)
               AND (?7 IS NULL OR device_name LIKE '%' || ?7 || '%' COLLATE NOCASE)
-            ORDER BY julianday(captured_at) DESC, id DESC
+            ORDER BY julianday(captured_at) DESC, id ASC
             LIMIT ?8 OFFSET ?9
             "#,
         )
@@ -4336,6 +4350,7 @@ impl DatabaseManager {
                     .and_then(|name| (!name.trim().is_empty()).then(|| name.clone()));
                 let speaker_provisional = speaker_label.is_some();
                 AudioResult {
+                    transcription_id: None,
                     audio_chunk_id: -raw.id,
                     transcription: raw.transcription,
                     timestamp,
@@ -4959,8 +4974,10 @@ impl DatabaseManager {
             ContentType::Audio => format!(
                 r#"SELECT COUNT(DISTINCT audio_transcriptions.id)
                    FROM {table}
+                   JOIN audio_chunks ON audio_chunks.id = audio_transcriptions.audio_chunk_id
                    {speaker_join}
                    WHERE {match_condition}
+                       AND (speakers.id IS NULL OR speakers.hallucination = 0)
                        AND (?2 IS NULL OR audio_transcriptions.timestamp >= ?2)
                        AND (?3 IS NULL OR audio_transcriptions.timestamp <= ?3)
                        AND (?4 IS NULL OR COALESCE(audio_transcriptions.text_length, LENGTH(audio_transcriptions.transcription)) >= ?4)
@@ -4974,13 +4991,19 @@ impl DatabaseManager {
                 } else {
                     "audio_transcriptions_fts JOIN audio_transcriptions ON audio_transcriptions.id = audio_transcriptions_fts.rowid"
                 },
-                speaker_join = if speaker_name.is_some() {
-                    "LEFT JOIN speakers ON audio_transcriptions.speaker_id = speakers.id"
-                } else {
-                    ""
-                },
+                speaker_join =
+                    "LEFT JOIN speakers ON audio_transcriptions.speaker_id = speakers.id",
                 speaker_name_condition = if speaker_name.is_some() {
-                    "AND speakers.name LIKE '%' || ?7 || '%' COLLATE NOCASE"
+                    "AND (speakers.name LIKE '%' || ?7 || '%' COLLATE NOCASE
+                        OR EXISTS (
+                            SELECT 1 FROM diarization_segments ds_name
+                            WHERE ds_name.audio_chunk_id = audio_transcriptions.audio_chunk_id
+                              AND audio_transcriptions.start_time IS NOT NULL
+                              AND audio_transcriptions.end_time IS NOT NULL
+                              AND ABS(ds_name.start_time - audio_transcriptions.start_time) < 0.05
+                              AND ABS(ds_name.end_time - audio_transcriptions.end_time) < 0.05
+                              AND ds_name.provider_speaker_label LIKE '%' || ?7 || '%' COLLATE NOCASE
+                        ))"
                 } else {
                     ""
                 },

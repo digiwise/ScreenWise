@@ -56,6 +56,20 @@ Check ($e.modalities.frame_metadata.count -eq 1) 'Missing OCR metadata fetched'
 Check ($e.modalities.frame_context.status -eq 'unknown') 'Context optional'
 Check ($e.modalities.initial_status.initial_state -eq 'unknown') 'Initial state unknown'
 Check ($e.modalities.capture_events.current_process_diagnostics.persistence_degraded) 'Current diagnostics preserved'
+$segments={param($path,$q)
+    if ($path -eq '/search' -and $q.content_type -eq 'audio') {
+        return @{data=@(
+            @{content=@{transcription_id=101;chunk_id=7;offset_index=0;timestamp=$a;transcription='synthetic first'}},
+            @{content=@{transcription_id=102;chunk_id=7;offset_index=0;timestamp=$a;transcription='synthetic second'}}
+        );pagination=@{total=2}}
+    }
+    if ($path -eq '/meetings') {return @()}
+    if ($path -eq '/capture-events') {return @{data=@();has_more=$false}}
+    return @{data=@();pagination=@{total=0}}
+}.GetNewClosure()
+$segmentEvidence=Get-ScreenWiseEvidence -Start $a -End $b -Request $segments -SourceLabel synthetic -DataDir synthetic
+Check ($segmentEvidence.modalities.audio.count -eq 2) 'Segments sharing chunk and offset must not be deduplicated'
+Check ($segmentEvidence.modalities.audio.references[0] -ne $segmentEvidence.modalities.audio.references[1]) 'Audio segment references are unique'
 $bad=Get-ScreenWiseEvidence -Start $a -End $b -Request {throw 'Bearer synthetic-secret captured content'} -SourceLabel synthetic -DataDir synthetic
 Check ($bad.modalities.screen_text.status -eq 'error') 'Auth error distinct from empty'
 Check (!(($bad|ConvertTo-Json -Depth 100).Contains('synthetic-secret'))) 'Errors cannot leak token'

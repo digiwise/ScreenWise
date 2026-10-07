@@ -153,6 +153,7 @@ pub enum ContentType {
 
 #[derive(FromRow)]
 pub struct AudioResultRaw {
+    pub transcription_id: i64,
     pub audio_chunk_id: i64,
     pub transcription: String,
     pub timestamp: DateTime<Utc>,
@@ -332,6 +333,9 @@ pub enum DeviceType {
 
 #[derive(OaSchema, Debug, Serialize, Deserialize)]
 pub struct AudioResult {
+    /// Background transcription row identity; live segments use their negative chunk ID.
+    #[serde(default)]
+    pub transcription_id: Option<i64>,
     pub audio_chunk_id: i64,
     pub transcription: String,
     pub timestamp: DateTime<Utc>,

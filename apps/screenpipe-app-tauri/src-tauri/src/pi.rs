@@ -64,6 +64,42 @@ fn assistant_text_delta(event: &Value) -> Option<&str> {
     assistant_event.get("delta").and_then(|d| d.as_str())
 }
 
+fn hold_recording_draft(recording_mode: bool, event: &Value) -> bool {
+    // The recording extension guards completed messages. Do not expose the
+    // unguarded draft through text/thinking/tool-argument streaming first.
+    recording_mode && event.get("type").and_then(Value::as_str) == Some("message_update")
+}
+
+fn guarded_recording_delta(recording_mode: bool, event: &Value) -> Option<Value> {
+    if !recording_mode || event.get("type")?.as_str()? != "message_end" {
+        return None;
+    }
+    let message = event.get("message")?;
+    if message.get("role")?.as_str()? != "assistant"
+        || !matches!(message.get("stopReason")?.as_str()?, "stop" | "length")
+    {
+        return None;
+    }
+    let text = message
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return None;
+    }
+    // Foreground and background consumers persist deltas. Deliver the guarded
+    // completed answer once through that existing path, before message_end.
+    Some(json!({
+        "type": "message_update",
+        "message": message,
+        "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": text, "partial": message}
+    }))
+}
+
 fn set_assistant_text_delta(event: &mut Value, delta: String) {
     if let Some(assistant_event) = event
         .get_mut("assistantMessageEvent")
@@ -1451,6 +1487,13 @@ pub async fn pi_start_inner(
                 ready_signalled = true;
             }
 
+            if parsed
+                .as_ref()
+                .is_some_and(|event| hold_recording_draft(recording_tools_only, event))
+            {
+                continue;
+            }
+
             // Signal the command queue when the SDK's agent loop finishes.
             //
             // pi-mono SDK event types that matter for queue synchronization:
@@ -1562,6 +1605,11 @@ pub async fn pi_start_inner(
                         }
                     } else {
                         flush_pending_text_delta(&app_handle, &sid_clone, &mut pending_text_delta);
+                        if let Some(delta) = guarded_recording_delta(recording_tools_only, &event) {
+                            if let Err(e) = emit_agent_event(&app_handle, &sid_clone, delta) {
+                                error!("Failed to emit guarded recording answer: {}", e);
+                            }
+                        }
                         // Frontend subscribes via the agent-event bus
                         // (`apps/screenpipe-app-tauri/lib/events/bus.ts`).
                         // Stage 5 cleanup: legacy `pi_event` topic removed
@@ -2206,6 +2254,51 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn recording_drafts_wait_for_guarded_messages_without_hiding_progress() {
+        let draft = json!({"type": "message_update", "assistantMessageEvent": {
+            "type": "text_delta", "delta": "unsupported draft"
+        }});
+        assert!(super::hold_recording_draft(true, &draft));
+        assert!(!super::hold_recording_draft(false, &draft));
+        for event_type in [
+            "message_end",
+            "tool_execution_start",
+            "tool_execution_end",
+            "agent_end",
+            "response",
+        ] {
+            assert!(!super::hold_recording_draft(
+                true,
+                &json!({"type": event_type})
+            ));
+        }
+    }
+
+    #[test]
+    fn recording_completion_delivers_only_guarded_text_to_both_chat_consumers() {
+        let final_event = json!({"type": "message_end", "message": {
+            "role": "assistant", "stopReason": "stop", "content": [
+                {"type": "thinking", "thinking": "unverified thought"},
+                {"type": "text", "text": "stored synthetic wording"}
+            ]
+        }});
+        let delta = super::guarded_recording_delta(true, &final_event).unwrap();
+        assert_eq!(
+            super::assistant_text_delta(&delta),
+            Some("stored synthetic wording")
+        );
+        assert!(super::guarded_recording_delta(false, &final_event).is_none());
+        for reason in ["toolUse", "error", "aborted"] {
+            let mut event = final_event.clone();
+            event["message"]["stopReason"] = json!(reason);
+            assert!(super::guarded_recording_delta(true, &event).is_none());
+        }
+        let mut empty = final_event;
+        empty["message"]["content"] = json!([]);
+        assert!(super::guarded_recording_delta(true, &empty).is_none());
+    }
 
     fn write_package_json(package_dir: &std::path::Path, name: &str, version: &str) {
         std::fs::create_dir_all(package_dir).expect("create package dir");

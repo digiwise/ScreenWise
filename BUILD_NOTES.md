@@ -4,6 +4,75 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Audio segment retrieval and Pi grounding (2026-10-08)
+
+Use the canonical locked/offline launcher and established caches. Focused
+unoptimized tests exercise SQLite segment identity, FTS matches, count admission,
+stable background/live paging and the authenticated search router:
+
+```powershell
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-db -TestTarget audio_segment_search_test
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-engine -Lib -TestFilter routes::search::tests
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootTest -Package screenpipe-engine -TestTarget audio_search_api_test
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopCheck
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopTest -Bin screenpipe-app -TestFilter recording_
+```
+
+The first three selections passed four, ten and one synthetic tests respectively;
+the opt-in API fixture server is ignored in the ordinary integration run. They
+reused all 399/685/685 external artifacts with no dependency rebuilds. The initial
+API fixture target required explicit new-target cache adoption and failed on a
+Windows socket-address type; using `SocketAddr` repaired it. The corrected run
+passed in 59s. No lockfile or dependency upgrade was needed.
+
+Twenty-five mocked JavaScript transport/guard tests, pinned Pi SDK registration,
+tool/message-hook checks and 74 PowerShell evidence-export checks passed. Three
+opt-in local-model checks passed for synthetic matching context, empty success
+and HTTP failure. Five inert Python checks cover shared-runtime identity,
+missing dependencies/entrypoint and isolated fresh output. Prompt-only trials
+had inconsistent quotation, timing and
+error interpretation; the settled candidate uses bounded variant retrieval and
+completed-message guards. Trials reuse the provisioned packages/model and read
+`recording-prompt.txt` directly without app rebuilds. See the
+[Pi test guide](scripts/windows/deployment/pi/README.md) for commands and limits.
+
+The recorder `release-local` build passed in 3m58s, reusing 785 external artifacts
+and rebuilding seven workspace artifacts. Root and desktop format checks passed.
+Desktop checking passed in 2m54s, and in 2m22s after the completed-answer routing
+correction; each reused 1,084 external artifacts. The initial default desktop
+test selection compiled the normal app and test executable (7m59s, nine selected
+checks passed). The settled `-Bin screenpipe-app` selection passed ten checks in
+2m46s, reusing 921 external artifacts and rebuilding only the application test
+artifact. Prefer that narrower selection for this change; filters alone do not
+avoid compiling the normal executable for integration tests. No external
+dependency rebuilds or new variants occurred. The existing cache also had a
+matching binary-selector baseline. Recorder version/top-level help/record-help
+smoke checks passed without capture; recording flags are on the subcommand.
+The desktop `release-local` build passed in 6m49s, reusing 1,080 external artifacts
+and rebuilding seven workspace artifacts. No new external variants or unexpected
+dependency rebuilds occurred.
+The subsequent extension-only title correction passed the 25 transport/guard
+tests, pinned SDK hooks and four final local inference cases (title, context,
+empty and request failure). The model initially used retrieval for a title and
+sent a keyword array; the SDK now disables title tools and the adapter accepts
+bounded lists by searching the first term. These trials required no app build.
+The final release GUI embeds the corrected extension pair and settled prompt.
+The full recorder release build passed in 12m16s, reusing all 785 external
+artifacts and rebuilding seven workspace artifacts. No new variants or unexpected
+external rebuilds occurred. Its version/help/record-help checks passed without
+starting capture; the expected macOS-only Swift skip warning remains.
+The full desktop release passed in 19m35s, reusing all 1,080 external artifacts
+and rebuilding seven workspace artifacts. Both full builds had zero new external
+variants or unexpected rebuilds. Matching owned Pi assets were staged only in
+the ignored release build output and checked against source. All 504 final
+Rust/manifest/lockfile/Pi input sizes and UTC timestamps stayed unchanged through
+the desktop release build. Artifact verification used sizes/timestamps; no
+artifact hashes were calculated. The existing running deployment was not updated,
+and no new GUI/capture session was started.
+The candidate requires matching GUI and recorder binaries plus the owned Pi
+extension assets; a stale asset pair is rejected at runtime. These are synthetic
+and local inference checks, not a new live capture or firewall/privacy validation.
+
 ## Foreground blockers and active-monitor filter (2026-10-06)
 
 The additive metadata/filter changes use the existing canonical caches and

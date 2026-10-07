@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-06. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-08. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -9,6 +9,47 @@ Updated 2026-10-06. **Partial validation, not a completed privacy/firewall certi
 This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
+
+## Audio segment search and Pi evidence guards, 2026-10-08
+
+Audio search now returns individual background transcription rows rather than
+collapsing rows sharing a chunk/offset. Exact FTS matches select the matching row,
+and tied segment ordering is stable across merged live/background pages. The API
+adds an optional background `transcription_id`; live references retain negative
+chunk IDs. Counts use the same speaker/hallucination admission filters. Exporter
+references preserve distinct segments instead of deduplicating them by chunk.
+
+Pi exposes bounded audio/text/input `q` searches. An empty exact audio search
+scans at most ten pages/1,000 rows under the same time range and request deadline
+for possible spelling/spacing variants and nearby text. Approximation and
+unfiltered candidates are explicitly labelled. The tool computes displayed
+segment timestamps and returns one text copy per reference. Completed-message
+guards preserve stored quotations and replace unsupported error/empty claims
+with uncertainty. Recording-mode draft streaming waits for this guard. Explicit
+supported English date/time ranges constrain requests; other date wording,
+summary accuracy and relevance still depend on model behavior. Approximate
+matches, retained offsets and speech recognition do not establish exact words
+spoken, word timing, call apps, participants, speakerphone status or completeness.
+
+Passed synthetic checks: four SQLite regressions, ten search/API unit tests, one
+authenticated router integration, 25 JavaScript retrieval/guard tests, pinned SDK
+registration/tool/message hooks and 74 exporter checks. Local inference passed
+matching-context, empty-success and request-failure fixtures using the existing
+model/runtime. The final four-case run also checked automatic titles with zero
+recording requests. Five inert Python runtime/output-isolation checks passed.
+Prompt-only trials exposed inconsistent quotes and error claims;
+the final guards address those tested paths. No packages/models were downloaded,
+recording started or firewall rules changed. Both Rust lockfiles are unchanged.
+Build commands, cache observations and artifact milestones are recorded in
+[BUILD_NOTES.md](BUILD_NOTES.md).
+Quick recorder/desktop builds passed in 3m58s/6m49s. Full recorder/desktop releases
+passed in 12m16s/19m35s, reusing all 785/1,080 external artifacts and rebuilding
+seven workspace artifacts each. Ten final desktop recording/runtime/event-routing
+tests passed. The final extension-only title/list-argument amendments passed
+their direct SDK/JavaScript/local-model checks and are embedded in the full GUI
+release. Matching Pi assets are in the ignored release output; the running
+deployment remains unchanged. Release recorder version/help checks passed without
+capture. These builds do not establish live GUI/capture or privacy/firewall behavior.
 
 ## Global foreground blockers and active-monitor queries, 2026-10-06
 
