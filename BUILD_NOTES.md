@@ -1,6 +1,6 @@
 # ScreenWise Windows build notes
 
-The latest source/artifact milestone is [trustworthy live status](#trustworthy-live-status-release-validation-2026-10-08). Earlier release entries describe their historical candidates.
+The latest source/artifact milestone is [audio activity](#audio-activity-release-validation-2026-10-09). Earlier release entries describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
@@ -1593,3 +1593,46 @@ live data stores/APIs, recording, deployment, restart or firewall change occurre
 Secondary HD/reconciliation/import/live-provider paths remain incompletely
 instrumented; OCR/interface capture evidence is conservative at paired persistence.
 Retention/pending-review implementation remains separate.
+
+## Audio activity release validation (2026-10-09)
+
+The owner authorized per-device audio activity and transcription throughput
+through production release builds and commit. The settled increment adds bounded,
+content-free rolling sample/silence, raw VAD speech/uncertainty, stored words/results,
+pre-VAD deferral and active inference-task observations. Existing capture
+admission, denoise and speech-threshold decisions remain unchanged. See
+[measurement semantics](docs/RECORDING_STATUS_UI.md#audio-activity-and-transcription-throughput).
+
+- RootFmt passed; both Rust lockfiles/manifests are unchanged.
+- Config `audio_activity` selection passed six tests; 52 external reused, zero
+  rebuilt; one workspace rebuilt. The raw classifier observation test passed;
+  552 external reused, zero rebuilt; three workspace reused, three rebuilt.
+- The same audio test binary then passed 15 recorder pipeline tests covering
+  silence, mono shape, privacy gates, flushes and delivery loss; all 552 external
+  and six workspace artifacts reused. These use synthetic streams, not hardware.
+- The standalone audio target required reviewed one-time `-AllowColdCache`
+  adoption: its recorded signature predated earlier manifest/build changes.
+  No dependencies were rebuilt, acquired, cleared or moved.
+- Frontend: 59 focused checks passed (26 existing status parser, 15 audio parser,
+  18 dialog). The 33 affected checks and TypeScript no-emit passed after final
+  wording changes. Telemetry-disabled direct local Next production build/export
+  passed, retaining the existing unpdf warning and avoiding acquisition scripts.
+- Independent source review corrected duration flooring, raw classifier versus
+  denoise accounting, bounded aggregation and whole-task estimate wording.
+
+- `RootBuild -BuildProfile release -Jobs 2` passed in 6m01s; 785 external reused,
+  zero rebuilt; 11 workspace reused, eight rebuilt. Inert version/help/record-help
+  checks passed. Recorder SHA256:
+  `5166523ABA076862CCB8E54EABA638B0625EC79F2F93F5837AA7C638CF6163A3`.
+
+- `DesktopBuild -BuildProfile release -Jobs 2` passed in 11m30s; 1,080 external
+  reused, zero rebuilt; ten workspace reused, eight rebuilt. Desktop SHA256:
+  `C16B067938A550D5941B7924A49250E6EBEEB7396C948503D001CE34D8E6582D`.
+  Both release caches had matching baselines. Heavy builds were sequential;
+  no additional release-local or warm-up build was needed.
+
+These are source, synthetic pipeline/UI and production compilation results.
+No captured data/API read, new recording, deployment/restart, desktop launch,
+hardware/GUI trial or firewall change occurred. Secondary audio paths and complete
+queue/segment tracing remain incompletely instrumented. Retention/pending-review
+implementation and approved live validation remain separate milestones.

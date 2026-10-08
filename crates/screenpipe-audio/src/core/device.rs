@@ -153,6 +153,15 @@ impl AudioDevice {
         }
     }
 
+    pub fn diagnostic_channel(&self) -> screenpipe_config::capture_diagnostics::CaptureChannel {
+        match self.device_type {
+            DeviceType::Input => screenpipe_config::capture_diagnostics::CaptureChannel::Microphone,
+            DeviceType::Output => {
+                screenpipe_config::capture_diagnostics::CaptureChannel::OutputAudio
+            }
+        }
+    }
+
     pub fn report_transcription(
         &self,
         condition: screenpipe_config::capture_diagnostics::CaptureCondition,

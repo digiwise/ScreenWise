@@ -6,7 +6,7 @@ use crate::core::device::AudioDevice;
 use crate::metrics::AudioPipelineMetrics;
 use crate::speaker::embedding::EmbeddingExtractor;
 use crate::speaker::embedding_manager::EmbeddingManager;
-use crate::speaker::prepare_segments;
+use crate::speaker::prepare_segments_with_observation;
 use crate::speaker::segment::SpeechSegment;
 use crate::transcription::engine::TranscriptionSession;
 use crate::utils::audio::resample;
@@ -102,7 +102,7 @@ pub async fn process_audio_input(
         capture_timestamp: audio.capture_timestamp,
     };
     let is_output_device = audio.device.device_type == crate::core::device::DeviceType::Output;
-    let (mut segments, speech_ratio_ok, speech_ratio) = prepare_segments(
+    let prepared = prepare_segments_with_observation(
         &audio_data,
         vad_engine,
         segmentation_model_path.as_ref(),
@@ -112,14 +112,62 @@ pub async fn process_audio_input(
         is_output_device,
         filter_music,
     )
-    .await?;
+    .await;
+    let (mut segments, speech_ratio_ok, speech_ratio, vad_observation) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
+            screenpipe_config::audio_activity::vad_failed(
+                audio.device.diagnostic_channel(),
+                audio.device.diagnostic_id(),
+            );
+            return Err(error);
+        }
+    };
     metrics.record_vad_result(speech_ratio_ok, speech_ratio);
+    if !privacy.is_current() {
+        return Ok(());
+    }
+    // prepare_segments operates on resampled mono16k frames. Never divide by the
+    // original hardware channel count; these durations weight partial frames.
+    let duration_ns = screenpipe_config::audio_activity::sample_duration_ns(
+        vad_observation.processed_samples,
+        SAMPLE_RATE,
+        1,
+    )
+    .unwrap_or(0);
+    let detected_ns = screenpipe_config::audio_activity::sample_duration_ns(
+        vad_observation.speech_samples,
+        SAMPLE_RATE,
+        1,
+    )
+    .unwrap_or(0);
+    let uncertain_ns = screenpipe_config::audio_activity::sample_duration_ns(
+        vad_observation.uncertain_samples,
+        SAMPLE_RATE,
+        1,
+    )
+    .unwrap_or(0);
+    screenpipe_config::audio_activity::vad(
+        audio.device.diagnostic_channel(),
+        audio.device.diagnostic_id(),
+        duration_ns,
+        detected_ns,
+        uncertain_ns,
+        !vad_observation.detector_failed,
+    );
     if !speech_ratio_ok {
         return Ok(());
     }
     if !privacy.is_current() {
         return Ok(());
     }
+    // Scope is known VAD-positive work in this processing task, not raw queues,
+    // persistent deferred audio, or results awaiting database insertion.
+    let _pending_speech = screenpipe_config::audio_activity::pending(
+        audio.device.diagnostic_channel(),
+        audio.device.diagnostic_id(),
+        detected_ns / 1_000_000,
+    );
     let file_path = if let Some(path) = pre_written_path {
         path
     } else {

@@ -18,6 +18,26 @@ use super::{
     embedding::EmbeddingExtractor, embedding_manager::EmbeddingManager, segment::SpeechSegment,
 };
 
+/// Raw classifier observations, separate from existing denoise/threshold admission.
+#[derive(Default)]
+pub struct VadObservation {
+    pub processed_samples: usize,
+    pub speech_samples: usize,
+    pub uncertain_samples: usize,
+    pub detector_failed: bool,
+}
+impl VadObservation {
+    fn record(&mut self, samples: usize, status: &Result<VadStatus>) {
+        self.processed_samples += samples;
+        match status {
+            Ok(VadStatus::Speech) => self.speech_samples += samples,
+            Ok(VadStatus::Unknown) => self.uncertain_samples += samples,
+            Err(_) => self.detector_failed = true,
+            _ => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn prepare_segments(
     audio_data: &[f32],
@@ -29,6 +49,36 @@ pub async fn prepare_segments(
     is_output_device: bool,
     filter_music: bool,
 ) -> Result<(tokio::sync::mpsc::Receiver<SpeechSegment>, bool, f32)> {
+    let (segments, accepted, ratio, _) = prepare_segments_with_observation(
+        audio_data,
+        vad_engine,
+        segmentation_model_path,
+        embedding_manager,
+        embedding_extractor,
+        device,
+        is_output_device,
+        filter_music,
+    )
+    .await?;
+    Ok((segments, accepted, ratio))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_segments_with_observation(
+    audio_data: &[f32],
+    vad_engine: Arc<Mutex<Box<dyn VadEngine + Send>>>,
+    segmentation_model_path: Option<&PathBuf>,
+    embedding_manager: Arc<StdMutex<EmbeddingManager>>,
+    embedding_extractor: Option<Arc<StdMutex<EmbeddingExtractor>>>,
+    device: &str,
+    is_output_device: bool,
+    filter_music: bool,
+) -> Result<(
+    tokio::sync::mpsc::Receiver<SpeechSegment>,
+    bool,
+    f32,
+    VadObservation,
+)> {
     let mut audio_data = normalize_v2(audio_data);
 
     if filter_music {
@@ -59,12 +109,14 @@ pub async fn prepare_segments(
     let mut audio_frames = Vec::new();
     let mut total_frames = 0;
     let mut speech_frame_count = 0;
+    let mut observation = VadObservation::default();
 
     for chunk in audio_data.chunks(frame_size) {
         total_frames += 1;
 
         let mut new_chunk = chunk.to_vec();
         let status = vad_engine.lock().await.audio_type(chunk);
+        observation.record(chunk.len(), &status);
         match status {
             Ok(VadStatus::Speech) => {
                 if let Ok(processed_audio) = spectral_subtraction(chunk, noise) {
@@ -118,7 +170,7 @@ pub async fn prepare_segments(
             {
                 debug!("fallback speech segment sent for {}", device);
             }
-            return Ok((rx, threshold_met, speech_ratio));
+            return Ok((rx, threshold_met, speech_ratio, observation));
         }
 
         let segmentation_model_path = segmentation_model_path.unwrap();
@@ -150,5 +202,21 @@ pub async fn prepare_segments(
         }
     }
 
-    Ok((rx, threshold_met, speech_ratio))
+    Ok((rx, threshold_met, speech_ratio, observation))
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn classifier_observations_weight_partial_frames_without_reusing_denoise_success() {
+        let mut observation = VadObservation::default();
+        observation.record(512, &Ok(VadStatus::Speech));
+        observation.record(100, &Ok(VadStatus::Unknown));
+        observation.record(20, &Err(anyhow::anyhow!("synthetic detector failure")));
+        assert_eq!(observation.processed_samples, 632);
+        assert_eq!(observation.speech_samples, 512);
+        assert_eq!(observation.uncertain_samples, 100);
+        assert!(observation.detector_failed);
+    }
 }

@@ -436,6 +436,23 @@ async fn recv_audio_chunk(
             metrics.update_audio_level_for_device(device_name, &chunk.samples);
             if !chunk.samples.is_empty() {
                 audio_stream.device.report_live_success(false);
+                let duration_ns = screenpipe_config::audio_activity::sample_duration_ns(
+                    chunk.samples.len(),
+                    audio_stream.device_config.sample_rate().0,
+                    RECORDER_OUTPUT_CHANNELS,
+                );
+                if let Some(duration_ns) =
+                    duration_ns.filter(|_| chunk.samples.iter().all(|sample| sample.is_finite()))
+                {
+                    screenpipe_config::audio_activity::samples(
+                        audio_stream.device.diagnostic_channel(),
+                        audio_stream.device.diagnostic_id(),
+                        duration_ns,
+                        is_silent_buffer(&chunk.samples),
+                    );
+                } else {
+                    screenpipe_config::audio_activity::mark_unavailable();
+                }
             }
 
             if !is_silent_buffer(&chunk.samples) {

@@ -86,6 +86,22 @@ fn log_audio_process_error(e: &anyhow::Error) {
     }
 }
 
+fn report_deferred_audio_activity(audio: &AudioInput) {
+    if let Some(duration_ns) = screenpipe_config::audio_activity::sample_duration_ns(
+        audio.data.len(),
+        audio.sample_rate,
+        audio.channels,
+    ) {
+        screenpipe_config::audio_activity::deferred(
+            audio.device.diagnostic_channel(),
+            audio.device.diagnostic_id(),
+            duration_ns,
+        );
+    } else {
+        screenpipe_config::audio_activity::mark_unavailable();
+    }
+}
+
 async fn compensate_privacy_invalidated_audio_file(
     db: &DatabaseManager,
     chunk_id: Option<i64>,
@@ -1479,6 +1495,7 @@ impl AudioManager {
                 // chunk was already written above; background transcription
                 // resumes when the live session ends.
                 if meeting_audio_tap.background_suppressed() {
+                    report_deferred_audio_activity(&audio);
                     audio
                         .device
                         .report_transcription(CC::Deferred, CR::TranscriptionDeferred);
@@ -1541,6 +1558,7 @@ impl AudioManager {
                             }
                             had_deferred_segments = true;
                             metrics.record_segment_deferred();
+                            report_deferred_audio_activity(&audio);
                             debug!("batch mode: in audio session, deferring transcription");
                         } else {
                             // Not in an audio session — transcribe immediately like realtime

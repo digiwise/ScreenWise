@@ -81,6 +81,8 @@ pub mod embedding_manager;
 pub mod models;
 mod prepare_segments;
 pub use prepare_segments::prepare_segments;
+pub use prepare_segments::prepare_segments_with_observation;
+pub use prepare_segments::VadObservation;
 pub mod segment;
 
 #[cfg(test)]

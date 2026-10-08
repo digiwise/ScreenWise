@@ -65,6 +65,7 @@ pub struct IntervalCheck {
 }
 #[derive(Serialize)]
 pub struct LiveStatus {
+    pub audio_activity: crate::audio_activity::AudioActivity,
     pub schema_version: u8,
     pub snapshot_at_ms: u64,
     pub session_started_at_ms: u64,
@@ -75,6 +76,7 @@ pub struct LiveStatus {
 }
 /// Called once before recording producers start. Never reads historical database rows.
 pub fn start_session() {
+    crate::audio_activity::start_session();
     if let Ok(mut state) = store().lock() {
         *state = Store::default();
     }
@@ -123,6 +125,7 @@ pub fn stored(channel: CaptureChannel, scope: CaptureScope) {
 }
 pub fn snapshot() -> LiveStatus {
     let mut output = LiveStatus {
+        audio_activity: crate::audio_activity::snapshot(),
         schema_version: 1,
         snapshot_at_ms: now_ms(),
         session_started_at_ms: 0,
@@ -196,6 +199,9 @@ mod tests {
     use super::*;
     #[test]
     fn live_evidence_separates_stages_and_resets_session() {
+        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap();
         start_session();
         captured(CaptureChannel::Microphone, CaptureScope::Device(42));
         let snapshot_before = snapshot();

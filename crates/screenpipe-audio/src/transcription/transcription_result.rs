@@ -201,6 +201,11 @@ pub async fn process_transcription_result(
                         result.input.device.diagnostic_id(),
                     ),
                 );
+                screenpipe_config::audio_activity::words_stored(
+                    result.input.device.diagnostic_channel(),
+                    result.input.device.diagnostic_id(),
+                    transcription.split_whitespace().count() as u64,
+                );
                 let segments =
                     diarization_segments_for_insert(&result, speaker_id, use_pii_removal);
                 let provider = result.diarization_provider.as_deref().unwrap_or(

@@ -1,6 +1,6 @@
 # Captured data control decisions and next steps
 
-Discussion record updated 8 October 2026. This records the owner's agreed
+Discussion record updated 9 October 2026. This records the owner's agreed
 direction, proposals and unresolved details. It is not a claim that the described
 controls are implemented, nor authorization to deploy, start recording or change
 firewall settings. Implementation readiness belongs in the validation register.
@@ -393,3 +393,25 @@ silently resolved, and live recording/installed artifacts were unchanged.
 
 Final test, release-artifact and source commit records are maintained in
 [the validation register](../VALIDATION_REGISTER.md).
+
+### Audio activity increment
+
+The owner authorized the next usable audio-status increment through release
+builds and commit. It adds per-device measurements for microphone audio and
+computer audio output: recent sample duration split into silent/non-silent,
+raw VAD speech and uncertainty, stored transcript words/results, audio deferred
+before VAD, and whole active inference tasks with their oldest age.
+
+These are current-session, content-free stage observations over a rolling minute,
+not an aligned transcript-quality score. Non-silent samples do not establish
+speech, and sparse stored words alongside detected speech can reflect ongoing
+or deferred processing. Active-task speech estimates include any segments already
+processed; they do not measure exact remaining work or the entire queue. No
+conversation/one-sided-call classifier was introduced. See
+[the status specification](RECORDING_STATUS_UI.md#audio-activity-and-transcription-throughput)
+for coverage, freshness and uncertainty semantics.
+
+This improves diagnosis before the separate retention/pending-review milestone.
+Capture admission and installed recording remain unchanged. Deployment and a
+freshly authorized live GUI/audio trial remain the next validation steps after
+the release milestone; full retention remains separate.

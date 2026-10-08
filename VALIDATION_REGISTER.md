@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-08. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-09. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -10,7 +10,7 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest artifacts and validation: [trustworthy live status](#trustworthy-live-status-release-validation-2026-10-08). Earlier hashes below belong to their historical candidates.
+Latest artifacts and validation: [audio activity](#audio-activity-release-validation-2026-10-09). Earlier hashes below belong to their historical candidates.
 
 ## Production release build milestone, 2026-10-08
 
@@ -1105,3 +1105,48 @@ live data stores/APIs, recording, deployment, restart or firewall change occurre
 Secondary HD/reconciliation/import/live-provider paths remain incompletely
 instrumented; OCR/interface capture evidence is conservative at paired persistence.
 Retention/pending-review implementation remains separate.
+
+## Audio activity release validation (2026-10-09)
+
+The owner-authorized increment reports rolling observations separately for
+microphone audio and computer audio output, with numeric device scope. Silent
+and non-silent samples, raw VAD speech and uncertainty, accepted transcript
+words/results stored, pre-VAD deferred audio and active inference tasks remain
+distinct. Null/unavailable stages do not become zero activity. Bounded 100 ms
+buckets preserve fractional callback duration until aggregate conversion, and
+recent detector failures withhold VAD estimates until the failure ages out.
+
+Stage windows count observation/completion time, not aligned captured audio.
+Words are whitespace throughput counts, not accuracy. Active-task estimates
+include already processed segments; neither their duration nor task age is an
+exact remaining backlog. The sparse-output hint reports observations without
+diagnosing a fault or classifying a one-sided conversation. See
+[coverage](docs/RECORDING_STATUS_UI.md#audio-activity-and-transcription-throughput).
+
+RootFmt, six config tests, one classifier test and 15 synthetic recorder pipeline
+tests passed. Config reused 52 external artifacts; audio reused 552, with zero
+external rebuilds. Reviewed standalone-audio cache adoption was needed because
+its old baseline signature predated earlier build changes; the second audio
+selection reused all artifacts. No dependency/lockfile change or acquisition.
+Frontend 59 focused checks passed; 33 affected checks plus TypeScript passed
+after final wording changes, and production Next export passed with only the
+existing unpdf warning. Independent source review reported no remaining blocker
+after measurement and wording corrections.
+
+Canonical `RootBuild -BuildProfile release -Jobs 2` passed in 6m01s, with 785
+external reused/zero rebuilt and 11 workspace reused/eight rebuilt. Inert
+version/help/record-help passed without starting capture. Recorder SHA256:
+`5166523ABA076862CCB8E54EABA638B0625EC79F2F93F5837AA7C638CF6163A3`.
+
+Canonical `DesktopBuild -BuildProfile release -Jobs 2` passed in 11m30s, with
+1,080 external reused/zero rebuilt and ten workspace reused/eight rebuilt.
+Desktop SHA256:
+`C16B067938A550D5941B7924A49250E6EBEEB7396C948503D001CE34D8E6582D`.
+Both release caches had matching baselines. Builds were sequential for memory
+headroom; no redundant release-local or warm-up build was run.
+
+No capture, live data/API read, deployment/restart, desktop launch, hardware/GUI
+trial or firewall change occurred. This is compilation and synthetic evidence,
+not live transcription-quality validation. Secondary audio paths and complete
+queue/segment tracing remain incompletely instrumented. Retention/pending-review
+implementation and freshly authorized live validation remain separate milestones.

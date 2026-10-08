@@ -105,3 +105,52 @@ silence, API failures, suspended/late requests, visibility changes, backward clo
 changes, request-latency accounting, global capability versus scoped success and
 session replacement. TypeScript no-emit check passed. Static export and both production release builds passed; exact artifact results are in the validation register. No GUI, live recording, deployment or production
 data read occurred in these tests.
+
+## Audio activity and transcription throughput
+
+`live_status.audio_activity` schema version 1 adds a bounded 60-second reporting
+window per microphone/computer audio output and numeric device. It separates
+sample duration, silent/non-silent sample duration, VAD-processed audio,
+VAD-detected speech, uncertain classification, accepted transcript words/results
+stored, and audio deferred before VAD. Non-silent samples are not a speech
+detector result. VAD speech measures samples classified as speech by the existing
+detector; it is not proof that speech was transcribed correctly. Detector errors
+make VAD coverage unavailable, and uncertain classification remains separate
+from silence. Stored words use whitespace counting; their counts describe
+throughput, are language-dependent and are not accuracy scores.
+
+The window counts stages when observed, processed or committed, rather than
+following an aligned capture timeline. Different stage counters can represent
+different audio. Delayed processing can contribute more than one minute of audio
+duration to the reporting window; the UI does not silently clamp values or
+calculate a transcript-to-speech ratio. A newly started recorder reports its
+shorter observed window. Null counters mean a stage has not been observed or
+its VAD coverage was invalidated after a detector failure;
+they display unavailable/partial coverage rather than zero or silent recording.
+Missing or unavailable bounded reports do not reuse earlier counters. Aggregates
+use 100 ms buckets, so the window boundary has bucket resolution. Device
+zero remains unknown, and mic/output devices are not aggregated or paired.
+
+Estimated speech in active inference tasks describes whole active VAD-positive
+processing tasks. A task can contain several segments; its full classified speech
+duration may include speech already partly processed, so this is not exact remaining
+speech duration or a complete backlog. These tasks exclude
+pre-VAD queues, audio deferred before VAD and results waiting for database
+storage. Thus zero pending inference does not establish an empty transcription
+pipeline. The oldest active task age includes conservative request elapsed time and
+advances while a snapshot remains fresh; rolling durations/counts stay the
+reported snapshot values until the next response.
+
+With at least 30 seconds of observed window, available VAD classification,
+at least ten seconds of detected speech and no more than three stored words,
+an informational hint says: **Observed VAD speech; little transcription stored.
+Results may still be processing or deferred.** It makes no same-audio, fault,
+transcript accuracy or one-sided-conversation claim. Existing producer reasons,
+silence and delivery loss remain independent evidence. Stale snapshots, failed
+requests, visibility changes and invalid counters hide audio metrics under the
+same freshness rules.
+
+Focused parser/UI checks cover separate devices/input/output, missing/partial
+coverage, stage distinction, delayed durations, bounded safe numeric fields,
+private field rejection, informational hint thresholds and stale metric hiding.
+Final validation results for this increment are recorded with its release milestone.

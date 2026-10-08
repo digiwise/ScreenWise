@@ -20,6 +20,7 @@
 //! or a TOML config file. Both paths produce the same type that the
 //! engine consumes.
 
+pub mod audio_activity;
 pub mod capture_diagnostics;
 mod defaults;
 pub mod live_capture_status;
