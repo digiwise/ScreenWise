@@ -12,6 +12,154 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 
 Latest integration and validation: [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier hashes below belong to their historical candidates.
 
+Latest open review findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## System-wide source review and owner priorities (2026-10-09)
+
+**Owner priorities: SW-R04, SW-R06, SW-R08, SW-R12 and SW-R15** (original review
+findings **4, 6, 8, 12 and the timezone rewrite**). These are the owner's selected
+priorities because of the features they use and the practical impact on them;
+no relative ordering within this group was specified. They take precedence for
+follow-up planning over the review's generic P1/P2 ranking. The other findings
+remain recorded and open, rather than being accepted as harmless or closed.
+
+| Priority ID | Practical issue | First verification / repair direction |
+|---|---|---|
+| SW-R04 | Failed media eviction forgets the file path, leaving recordings on disk without a retry job. | Simulate a locked/inaccessible file; retain durable deletion jobs and verify successful retry after the failure clears. |
+| SW-R06 | Retention is not restored after a full backend restart. | Enable retention in a synthetic store, restart the backend, and check active policy; restore saved policy after every successful startup and retry initial startup failures. |
+| SW-R08 | Windows audio format fallback leaves downstream sample-rate metadata unchanged. | Simulate preferred-format rejection and a different accepted rate; propagate the actual opened configuration through a startup handshake. |
+| SW-R12 | CORS accepts lookalike localhost domains; unauthenticated health exposes detailed metadata. | Test exact origin parsing and the unauthenticated response contract; separate minimal readiness from authenticated detailed health. Browser loopback restrictions remain a separate boundary. |
+| SW-R15 | Timezone conversion changes timestamp-shaped captured text. | Pass synthetic OCR/transcript/text values through response conversion; preserve content verbatim and convert only explicitly identified timestamp metadata. |
+
+### Scope and evidence
+
+The review covered the main capture, input, audio/transcription, storage/retention,
+API/authentication, timeline, scheduling, settings, lifecycle, chat/AI and deployment
+paths. It began on `screenwise` at `33e794ebe`, including then-pending audio recovery
+and deployment edits. This record was added at `0f8829b61`; it is a record of that
+review, not a new exhaustive audit of intervening changes or every inherited module.
+
+**All entries below are open source-review findings.** Caller/data-flow tracing
+supports the described triggers; hardware reproduction and finding-specific
+regressions remain outstanding. Existing frontend checks passed: **98 tests in
+11 files**, using the installed Vitest runner with one worker. Those checks cover
+source citations, Pi event routing, chat storage/queue controls, recording status,
+network policy, settings snapshots, recording controls, deletion-result handling,
+API URL boundaries and timeline cache isolation. Passing these existing tests does
+not validate or close the newly identified gaps. No native build, capture session,
+private recording inspection, deployment or firewall change was part of the review.
+This documentation update makes no runtime repair or additional test claim.
+
+### Findings and suggested follow-up
+
+IDs SW-R01 through SW-R12 preserve the original numbered review. SW-R13 through
+SW-R15 identify its three additional findings. P1/P2 are the original generic
+review priorities, separate from the owner's practical priorities above.
+
+1. **SW-R01 — P1: URL exclusions omit UI input capture.** `ignored_urls` reaches
+   vision configuration but not input admission; typing or pasting into an excluded
+   browser page can still persist text in `ui_events`. Extend URL policy to input
+   capture and test ordinary text/clipboard input on an excluded synthetic page.
+   Sources: [recording configuration](crates/screenpipe-engine/src/recording_config.rs),
+   [Windows input hooks](crates/screenpipe-a11y/src/platform/windows.rs).
+2. **SW-R02 — P1: Schedule modality choices are not enforced.** The monitor sets
+   one global pause flag; `current_record_mode()` has no callers. An active
+   audio-only or screen-only rule therefore permits both otherwise-enabled
+   modalities. Apply and test separate modality gates, including rule transitions.
+   Source: [schedule monitor](crates/screenpipe-engine/src/schedule_monitor.rs).
+3. **SW-R03 — P1: Monitor selection can broaden to all displays.** Deselecting
+   the last tile produces an empty list that the engine treats as all monitors.
+   A separate deliberate compatibility fallback also starts all monitors when no
+   selected monitor starts. Preserve the user's scope and report unavailable
+   selections; test empty selection, disconnects and capture-start failure.
+   Sources: [recording settings](apps/screenpipe-app-tauri/components/settings/recording-settings.tsx),
+   [vision manager](crates/screenpipe-engine/src/vision_manager/manager.rs).
+4. **SW-R04 — P1; OWNER PRIORITY: Failed media eviction loses the file's retry path.** Database
+   paths are cleared before unlinking. A locked/inaccessible file can remain on
+   disk without a reference or retry job, in manual eviction and media-only
+   retention. Reuse durable deletion jobs and test unlink failure and later retry.
+   Sources: [database eviction](crates/screenpipe-db/src/db.rs),
+   [data routes](crates/screenpipe-engine/src/routes/data.rs),
+   [retention](crates/screenpipe-engine/src/retention.rs).
+5. **SW-R05 — P2: Screenshot copies outlive eviction/deletion.** Eviction misses
+   the extracted-frame cache, which can serve a previously extracted file before
+   checking the database for up to 30 minutes; background retention also misses
+   cache invalidation. Separately, frame responses permit public caching for seven
+   days. Invalidate derived files/caches and review private/no-store response policy;
+   test previously viewed frames after eviction and deletion.
+   Sources: [frame routes](crates/screenpipe-engine/src/routes/frames.rs),
+   [data routes](crates/screenpipe-engine/src/routes/data.rs),
+   [retention](crates/screenpipe-engine/src/retention.rs).
+6. **SW-R06 — P2; OWNER PRIORITY: Retention is lost on backend restart.** Desktop
+   startup applies saved retention once after a 20-second delay. A later full
+   backend restart creates disabled retention state without reapplying it, while
+   the UI's selected mode still comes from saved preferences. Restore policy on
+   each backend startup and make initial readiness failures retryable.
+   Sources: [desktop startup](apps/screenpipe-app-tauri/src-tauri/src/main.rs),
+   [retention startup](apps/screenpipe-app-tauri/src-tauri/src/retention.rs),
+   [server state](crates/screenpipe-engine/src/server.rs).
+7. **SW-R07 — P2: Cancellation during recovery merge can duplicate audio.** The
+   reconciliation task can be aborted while its blocking merge continues. The
+   primary recording is replaced before its recovery journal is written, leaving
+   merged primary and original secondary chunks eligible for another concatenation.
+   Establish durable merge state before replacement and test cancellation at that
+   boundary, including restart recovery.
+   Sources: [reconciliation](crates/screenpipe-audio/src/audio_manager/reconciliation.rs),
+   [audio manager shutdown](crates/screenpipe-audio/src/audio_manager/manager.rs).
+8. **SW-R08 — P2; OWNER PRIORITY: Windows fallback reports the preferred format.**
+   WASAPI fallback can open a different sample rate while returned metadata still
+   describes the rejected preferred configuration. Durations, playback speed and
+   transcription input can then be wrong. Return the configuration actually opened
+   and verify downstream sample counts/resampling with different synthetic rates.
+   Source: [audio stream startup](crates/screenpipe-audio/src/core/stream.rs).
+9. **SW-R09 — P2: Delayed audio startup can outlive capture stop.** An unowned
+   task sleeps one second before starting audio; session stop does not cancel/join
+   it. A quick stop can leave devices/workers starting afterward. The manual pause
+   gate still denies samples, so this finding does not establish captured-content
+   leakage. Own startup and cancel/join it before stopping the manager.
+   Source: [capture session](apps/screenpipe-app-tauri/src-tauri/src/capture_session.rs).
+10. **SW-R10 — P2: Chat deletion suppresses filesystem failures.**
+    `deleteConversationFile()` catches errors, while callers depend on rejection
+    to report failed deletion. A locked/inaccessible chat can remain while the UI
+    treats it as deleted. Propagate failure and test retry/reporting behavior.
+    Sources: [chat storage](apps/screenpipe-app-tauri/lib/chat-storage.ts),
+    [history view](apps/screenpipe-app-tauri/components/chat/chat-history-view.tsx).
+11. **SW-R11 — P2: An in-flight save can recreate a deleted chat.** Streaming
+    autosave and deletion lack a shared write barrier/tombstone. A save underway
+    can finish after removal. Serialize deletion with saves, invalidate outstanding
+    writers and test deletion during a response with delayed filesystem operations.
+    Source: [conversation persistence](apps/screenpipe-app-tauri/components/hooks/use-chat-conversations.ts).
+12. **SW-R12 — P2; OWNER PRIORITY: CORS matches localhost prefixes.** Origins such
+    as `https://localhost.attacker.example` pass the prefix check. Unauthenticated
+    `/health` includes hostname, device details and meeting status. Cross-origin
+    exploitation depends on browser loopback protections; the application's origin
+    predicate itself is incorrect. Match exact parsed origins and reduce the
+    unauthenticated response, preserving authenticated detailed status consumers.
+    Sources: [server CORS/auth](crates/screenpipe-engine/src/server.rs),
+    [health response](crates/screenpipe-engine/src/routes/health.rs).
+13. **SW-R13 — Additional; macOS: Audio fallback drops app exclusions.** Process
+    Tap startup failure falls back to SCK capture without the tap's per-app audio
+    exclusions. Fail closed when exclusions cannot be enforced, or provide an
+    equivalent fallback. Windows relevance is limited; platform testing is pending.
+    Source: [audio stream startup](crates/screenpipe-audio/src/core/stream.rs).
+14. **SW-R14 — Additional: Always On has a daily gap.** The preset ends at
+    `23:59`, but schedule end times are exclusive. The final minute of each day is
+    excluded, with observed pause timing subject to polling. Represent a complete
+    day explicitly and test both sides of midnight.
+    Sources: [schedule settings](apps/screenpipe-app-tauri/components/settings/schedule-settings.tsx),
+    [schedule monitor](crates/screenpipe-engine/src/schedule_monitor.rs).
+15. **SW-R15 — Additional; OWNER PRIORITY: Timezone rewriting changes content.**
+    Recursive JSON conversion interprets every timestamp-shaped string, regardless
+    of field, so an exact timestamp appearing as captured text can be rewritten in
+    API output. Preserve text payloads verbatim and convert only timestamp metadata;
+    test RFC3339 and bare SQLite-shaped strings in both content and metadata fields.
+    Source: [timezone middleware](crates/screenpipe-engine/src/routes/timezone.rs).
+
+Microphone acquisition already uses a permit separate from foreground visual
+protection. Historical transcription reconciliation remains conservatively
+output-gated; this is the existing documented limitation in
+[capture diagnostics](docs/CAPTURE_DIAGNOSTICS.md), not another new review finding.
+
 ## Realtime recovery and local deployment (2026-10-09)
 
 Integrated realtime/batch recovery worker ownership, corrected batch descriptions,
