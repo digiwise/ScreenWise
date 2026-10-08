@@ -259,8 +259,7 @@ The separate builder work is committed as `16aee39a9` on
 `codex/windows-build-concurrency` in an isolated worktree. Its opt-in `-Concurrent`
 supports root/desktop overlap while preserving same-cache and desktop-staging
 exclusion and default serialization. Synthetic checks passed: 12 lock, 97 launcher,
-18 cache and 84 trial-profile assertions. It has not been integrated into this
-checkout or used for the production builds above. Real-build speedup and PowerShell
+18 cache and 84 trial-profile assertions. It is now merged into the main checkout as `6938fd9af`; all 211 assertions passed again. The concurrent warm root release check passed; desktop remains in progress with a generated-asset relink. It was not used for the original production builds above. Real-build speedup and PowerShell
 5.1 execution remain unvalidated. Integration review is separate from deployment.
 
 ## Suggested next steps
