@@ -35,6 +35,12 @@ $capture = Join-Path $data 'preserved.synthetic'
 $exe = Join-Path $source 'screenpipe-app.exe'
 [IO.File]::WriteAllText($exe, 'synthetic runtime version one; never execute')
 $copies = @([pscustomobject]@{Name='screenpipe-app.exe'; Source=$exe})
+$thirdPartyNames = @('bun.exe', 'ffmpeg.exe', 'ffprobe.exe', 'libopenblas.dll', 'onnxruntime.dll')
+foreach ($name in $thirdPartyNames) {
+    $file = Join-Path $source $name
+    [IO.File]::WriteAllText($file, 'synthetic third-party runtime; never execute')
+    $copies += [pscustomobject]@{Name=$name; Source=$file}
+}
 Publish-DeploymentFiles $binary $copies
 Check ((Get-Content -Raw -LiteralPath (Join-Path $binary 'screenpipe-app.exe')) -like '*one*') 'initial stage'
 Reject { Publish-DeploymentFiles $binary $copies @((Join-Path $binary 'screenpipe-app.exe')) } 'running instance update'
@@ -44,6 +50,12 @@ Publish-DeploymentFiles $binary $copies @('C:\unrelated\program.exe')
 Check ((Get-Content -Raw -LiteralPath (Join-Path $binary 'screenpipe-app.exe')) -like '*two*') 'update publishes new runtime'
 Check ((Get-Content -Raw -LiteralPath $capture) -ceq 'synthetic valuable data') 'update preserves data'
 Check (@(Get-ChildItem -LiteralPath $root -Directory -Filter 'release-previous-*').Count -eq 1) 'previous runtime retained'
+$previous = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'release-previous-*')[0].FullName
+Check ((Get-Content -Raw -LiteralPath (Join-Path $previous 'screenpipe-app.exe')) -like '*one*') 'previous application retained'
+foreach ($name in $thirdPartyNames) {
+    Check (!(Test-Path -LiteralPath (Join-Path $previous $name))) "archive excludes $name"
+    Check ((Get-Content -Raw -LiteralPath (Join-Path $binary $name)) -ceq 'synthetic third-party runtime; never execute') "deployment retains $name"
+}
 Reject { Publish-DeploymentFiles $binary @([pscustomobject]@{Name='screenpipe-app.exe'; Source=(Join-Path $source 'missing.exe')}) } 'missing source rejected'
 Check ((Get-Content -Raw -LiteralPath (Join-Path $binary 'screenpipe-app.exe')) -like '*two*') 'failed staging preserves installed version'
 Check ((Get-Content -Raw -LiteralPath $capture) -ceq 'synthetic valuable data') 'failed staging preserves data'

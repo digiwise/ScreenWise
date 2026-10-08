@@ -130,7 +130,12 @@ To rebuild and update later, quit the deployed app first, then:
 `-Build` refreshes the frontend and invokes the canonical locked/offline root and
 desktop release builds, with `-PlanOnly` before each. Dependency provisioning is
 separate. Running installed processes prevent an update; the script never kills
-them. Existing data and the previous binary directory are retained. To reuse the
+them. Existing data and previous application binaries/assets are retained. After
+a successful replacement, `release-previous-*` archives exclude `bun.exe`,
+`ffmpeg.exe`, `ffprobe.exe`, `libopenblas.dll` and `onnxruntime.dll`. Failed
+replacement restores the complete previous runtime; manual rollback from a
+retained archive requires separately provisioning those third-party binaries.
+To reuse the
 installation at Windows login, explicitly pass `-RegisterStartup`; it registers
 the same fail-closed launcher under your HKCU Run key, using the console
 PowerShell executable that ran deployment. It refuses a restricted/AllSigned

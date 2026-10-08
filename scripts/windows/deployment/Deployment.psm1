@@ -206,8 +206,16 @@ function Publish-DeploymentFiles {
         }
         throw
     }
-    # Previous binaries are retained for rollback. No recording data is moved/deleted.
-    if ($hadPrevious) { Write-Host "Previous binaries retained: $backup" }
+    # Keep the complete old runtime until publication succeeds so failure recovery
+    # above can restore it. Archives retain application binaries/assets only;
+    # third-party runtime binaries must be reprovisioned for a manual rollback.
+    if ($hadPrevious) {
+        foreach ($name in @('bun.exe', 'ffmpeg.exe', 'ffprobe.exe', 'libopenblas.dll', 'onnxruntime.dll')) {
+            $file = Join-Path $backup $name
+            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -ErrorAction Stop }
+        }
+        Write-Host "Previous application binaries/assets retained (third-party binaries excluded): $backup"
+    }
 }
 
 Export-ModuleMember -Function Assert-DeploymentPath, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
