@@ -142,7 +142,8 @@ function Read-DeploymentManifest {
     param([string]$Path, [string]$PrivateRoot, [switch]$SkipRuntimeValidation)
     $Path = Assert-DeploymentPath $Path $PrivateRoot
     $m = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
-    if ($m.schema -notin @('screenwise.local-deployment.v1','screenwise.local-deployment.v2') -or $m.profile -cne 'release') { throw 'Unsupported deployment manifest.' }
+    if ($m.schema -notin @('screenwise.local-deployment.v1','screenwise.local-deployment.v2') -or
+        $m.profile -cnotin @('release-local','release')) { throw 'Unsupported deployment manifest.' }
     $binaryRoot = Assert-DeploymentPath $m.binary_directory $PrivateRoot
     $dataRoot = Assert-DeploymentPath $m.data_directory $PrivateRoot
     if ($binaryRoot -ieq $dataRoot -or $dataRoot.StartsWith($binaryRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or

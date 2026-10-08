@@ -12,6 +12,7 @@ param(
     [switch]$ProvisionPi,
     [ValidateRange(1,65535)][int]$Port = 31579,
     [string[]]$IgnoredWindow = @('firefox::', 'excel::'),
+    [ValidateSet('release-local', 'release')][string]$BuildProfile = 'release-local',
     [switch]$Build,
     [switch]$RegisterStartup,
     [switch]$Launch,
@@ -35,11 +36,12 @@ if ($DataDirectory -ieq $DeploymentDirectory -or
 }
 $binary = Join-Path $DeploymentDirectory 'release'
 $manifestPath = Join-Path $DeploymentDirectory 'deployment.json'
-$guiBuild = Join-Path $repo 'apps\screenpipe-app-tauri\src-tauri\target\release'
-$cliBuild = Join-Path $repo 'target\release'
+$guiBuild = Join-Path $repo "apps\screenpipe-app-tauri\src-tauri\target\$BuildProfile"
+$cliBuild = Join-Path $repo "target\$BuildProfile"
 $launchScript = Join-Path $PSScriptRoot 'Start-ScreenWise.ps1'
 if ($PlanOnly) {
-    [pscustomobject]@{ build_requested = [bool]$Build; profile = 'release'; deployment = $binary;
+    [pscustomobject]@{ build_requested = [bool]$Build; profile = $BuildProfile; deployment = $binary;
+        gui_source = $guiBuild; recorder_source = $cliBuild;
         data = $DataDirectory; port = $Port; register_startup = [bool]$RegisterStartup;
         launch = [bool]$Launch; webview_manifest = $RuntimeManifestPath; pi_included = $true;
         pi_runtime = $PiRuntimePath; pi_tool_mode = 'recording-api-only'; provision_pi = [bool]$ProvisionPi } | ConvertTo-Json
@@ -99,12 +101,13 @@ if ($Build) {
     $frontend = Join-Path $repo 'apps\screenpipe-app-tauri'
     Push-Location $frontend
     try {
-        & bun run build
+        # Export with provisioned packages; skip acquisition-capable prebuild hooks.
+        & node node_modules/next/dist/bin/next build
         if ($LASTEXITCODE -ne 0) { throw 'Frontend export failed.' }
     } finally { Pop-Location }
     foreach ($task in @('RootBuild', 'DesktopBuild')) {
-        & $builder -Task $task -BuildProfile release -PlanOnly
-        & $builder -Task $task -BuildProfile release
+        & $builder -Task $task -BuildProfile $BuildProfile -PlanOnly
+        & $builder -Task $task -BuildProfile $BuildProfile
     }
 }
 # Refuse a build that predates the explicit shared-runtime/tool implementation.
@@ -113,7 +116,7 @@ foreach ($input in @('apps\screenpipe-app-tauri\src-tauri\src\pi.rs',
     'apps\screenpipe-app-tauri\src-tauri\src\pi_runtime.rs',
     'scripts\windows\deployment\pi\recording-api.ts','scripts\windows\deployment\pi\recording-api-core.mjs')) {
     if ((Get-Item -LiteralPath (Join-Path $repo $input)).LastWriteTimeUtc -gt $guiFile.LastWriteTimeUtc) {
-        throw 'The release GUI predates Pi deployment support. Build the settled candidate before deploying (-Build).'
+        throw 'The selected GUI predates Pi deployment support. Build the settled candidate before deploying (-Build).'
     }
 }
 $runtime = Get-Content -Raw -LiteralPath $RuntimeManifestPath | ConvertFrom-Json
@@ -160,7 +163,7 @@ foreach ($file in @($piItems | Where-Object { !$_.PSIsContainer }) + @(Get-Item 
     $files += [ordered]@{ path=$file.FullName; length=$file.Length; modified_utc=$file.LastWriteTimeUtc.ToString('o') }
 }
 $manifest = [ordered]@{
-    schema='screenwise.local-deployment.v2'; profile='release'; deployed_utc=[DateTime]::UtcNow.ToString('o');
+    schema='screenwise.local-deployment.v2'; profile=$BuildProfile; deployed_utc=[DateTime]::UtcNow.ToString('o');
     binary_directory=$binary; data_directory=$DataDirectory; port=$Port; firewall_group=$group;
     gui_executable=(Join-Path $binary 'screenpipe-app.exe'); cli_executable=(Join-Path $binary 'screenpipe.exe');
     bun_executable=(Join-Path $binary 'bun.exe'); ffmpeg_executable=(Join-Path $binary 'ffmpeg.exe');
@@ -187,7 +190,7 @@ if ($RegisterStartup) {
     $null = New-Item -Path $key -Force
     Set-ItemProperty -LiteralPath $key -Name $name -Value $value
 }
-Write-Host "Deployed release binaries: $binary"
+Write-Host "Deployed $BuildProfile binaries: $binary"
 Write-Host "Persistent recording data: $DataDirectory"
 Write-Host "Shared Pi 0.75.4 (reused, not copied): $PiRuntimePath"
 Write-Host "Install firewall rules in elevated PowerShell:"

@@ -10,7 +10,42 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest artifacts and validation: [named sources and floating status](#named-sources-and-floating-status-validation-2026-10-09). Earlier hashes below belong to their historical candidates.
+Latest integration and validation: [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier hashes below belong to their historical candidates.
+
+## Realtime recovery and local deployment (2026-10-09)
+
+Integrated realtime/batch recovery worker ownership, corrected batch descriptions,
+new-store realtime defaults and profile-aware local deployment/startup scripts.
+Existing saved transcription settings are preserved. The installation directory
+keeps its legacy name; manifest profile and source artifact paths identify the
+actual build. Profile selection does not weaken authentication, runtime checks,
+firewall validation, data separation, process guards or rollback.
+
+63 deployment checks, three focused audio recovery tests, formatting and the final
+frontend export/type check passed. Commands, cache adoption and warnings are in
+[build notes](BUILD_NOTES.md#realtime-recovery-and-local-deployment-2026-10-09).
+Prior status milestone checks remain applicable to unchanged status/control code.
+No dependency, toolchain, profile definition or lockfile changes were made.
+
+Recorder `release-local` build passed in 3m54s (785 external reused/zero rebuilt;
+nine workspace reused/ten rebuilt), followed by inert CLI checks. Recorder SHA256:
+`68B1A83FEB800EA910E001B8AA15355A6EC3409DC42414089F28BE31104A4FED`.
+
+Desktop `release-local` build passed in 9m05s (1,065 external reused, 15 new
+variants, zero unexpected rebuilds; nine workspace reused/nine rebuilt).
+Desktop SHA256:
+`40568A99DBD9AFE5DBF18BFDD9874C7E0E588AFE5C76069958292A20F2E245EB`.
+The selected OpenBLAS/ONNX Runtime DLLs match provisioned inputs; other required
+sidecars/assets are present. Candidate inventory reuses these build outputs,
+without copying models or replacing the installed runtime. Deployment/startup
+preflight against the installed runtime remains an owner-run step.
+
+Preparation does not validate installed GUI appearance, live audio/transcription
+latency, resource use during a call or OS notification delivery. No installed
+runtime was replaced, startup registered, capture started, live settings edited,
+private recording inspected or firewall changed. The desktop is not launched by
+these checks. Existing stores using batch mode need an explicit settings change
+at an agreed interruption point to use normal realtime processing.
 
 ## Named sources and floating status validation (2026-10-09)
 

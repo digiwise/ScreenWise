@@ -2513,9 +2513,9 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   <div>
                     <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                       Batch Transcription
-                      <HelpTooltip text="Accumulates longer audio chunks (30s-5min) using silence-gap detection before sending to Whisper. Gives the model more context for better transcription quality and speaker diarization." />
+                      <HelpTooltip text="Defers transcription during detected audio sessions until they end. Background processing only selects recordings older than ten minutes. Turn off to process completed audio chunks during calls as well; this does not enable live captions." />
                     </h3>
-                    <p className="text-xs text-muted-foreground">Longer audio chunks for better transcription quality</p>
+                    <p className="text-xs text-muted-foreground">Defer transcription until detected audio sessions end</p>
                   </div>
                 </div>
                 <Switch

@@ -94,6 +94,25 @@ $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 $valid = Read-DeploymentManifest $manifestPath $private
 Check ($valid.data_directory -eq $data) 'manifest preserves separate recording directory'
 Check (@(Get-DeploymentRules $valid).Count -eq 6) 'all executable scopes inventoried'
+$releaseRules = @(Get-DeploymentRules $valid)
+$manifest.profile = 'release-local'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+$localProfile = Read-DeploymentManifest $manifestPath $private
+Check ($localProfile.profile -ceq 'release-local') 'release-local manifest accepted'
+Check (!(Compare-Object @($releaseRules | ForEach-Object Program) @(Get-DeploymentRules $localProfile | ForEach-Object Program))) 'profile switch preserves firewall executable paths'
+$manifest.profile = 'debug'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+Reject { Read-DeploymentManifest $manifestPath $private } 'unsupported deployment profile rejected'
+$manifest.profile = 'release'
+foreach ($selectedProfile in @('release-local', 'release')) {
+    $planArgs = @{PlanOnly=$true}
+    if ($selectedProfile -eq 'release') { $planArgs.BuildProfile = $selectedProfile }
+    $plan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') @planArgs | Out-String | ConvertFrom-Json)
+    Check ($plan.profile -ceq $selectedProfile) "deployment selects $selectedProfile"
+    Check ($plan.gui_source -eq (Join-Path $repo "apps\screenpipe-app-tauri\src-tauri\target\$selectedProfile") -and
+        $plan.recorder_source -eq (Join-Path $repo "target\$selectedProfile")) "matched $selectedProfile source paths"
+    Check ($plan.deployment -eq (Join-Path $private 'deployment\release')) "stable $selectedProfile deployed directory"
+}
 $manifest.data_directory=Join-Path $binary 'recordings'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 Reject { Read-DeploymentManifest $manifestPath $private } 'manifest data under binaries rejected'

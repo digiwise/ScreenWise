@@ -546,100 +546,8 @@ impl AudioManager {
             }
         }
 
-        // Spawn reconciliation sweep for orphaned audio chunks (batch mode only)
-        if self.options.read().await.transcription_mode == TranscriptionMode::Batch {
-            let db = self.db.clone();
-            let engine_ref = self.engine.clone();
-            let on_insert_bg = self.on_transcription_insert.clone();
-            let options_ref = self.options.clone();
-            let seg_mgr = self.segmentation_manager.clone();
-            let output_path_bg = self.options.read().await.output_path.clone();
-            let metrics_bg = self.metrics.clone();
-            let meeting_detector_bg = self.meeting_detector().await;
-            let stop_requested = self.reconciliation_stop_requested.clone();
-            let reconciliation_wake = self.reconciliation_wake.clone();
-            let handle = tokio::spawn(async move {
-                // Wait for model to load + initial recordings
-                if wait_for_stop_or_wake(
-                    &stop_requested,
-                    &reconciliation_wake,
-                    Duration::from_secs(120),
-                )
-                .await
-                {
-                    return;
-                }
-                loop {
-                    // Contain a panic inside a sweep so it cannot kill this
-                    // long-lived worker (issue #3498: a single panic used to
-                    // stop the loop permanently, silently piling up pending
-                    // chunks until the app was restarted). The sweep stays on
-                    // this task, so shutdown still cancels an in-flight sweep at
-                    // its next await. The locks it holds are tokio::sync locks,
-                    // which do not poison, so a caught panic releases them
-                    // cleanly.
-                    let swept = AssertUnwindSafe(async {
-                        if let Some(detector) = &meeting_detector_bg {
-                            detector.check_grace_period().await;
-                            if detector.is_in_audio_session() {
-                                debug!(
-                                    "reconciliation: skipping background sweep during active audio session"
-                                );
-                                return;
-                            }
-                        }
-
-                        let engine_guard = engine_ref.read().await;
-                        if let Some(ref transcription_engine) = *engine_guard {
-                            let opts = options_ref.read().await;
-                            let audio_engine = opts.transcription_engine.clone();
-                            let batch_max_dur = opts.batch_max_duration_secs;
-                            let use_pii_removal = opts.use_pii_removal;
-                            drop(opts);
-
-                            let count = super::reconciliation::reconcile_untranscribed(
-                                &db,
-                                transcription_engine,
-                                on_insert_bg.as_ref(),
-                                audio_engine,
-                                Some(seg_mgr.clone()),
-                                output_path_bg.as_deref(),
-                                batch_max_dur,
-                                use_pii_removal,
-                                Some(metrics_bg.clone()),
-                            )
-                            .await;
-                            if count > 0 {
-                                info!("reconciliation: transcribed {} orphaned chunks", count);
-                            }
-                        }
-                    })
-                    .catch_unwind()
-                    .await;
-                    if let Err(panic) = swept {
-                        let reason = panic
-                            .downcast_ref::<&str>()
-                            .copied()
-                            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                            .unwrap_or("unknown cause");
-                        error!(
-                            "reconciliation: sweep panicked, worker continues: {}",
-                            reason
-                        );
-                    }
-                    if wait_for_stop_or_wake(
-                        &stop_requested,
-                        &reconciliation_wake,
-                        Duration::from_secs(120),
-                    )
-                    .await
-                    {
-                        return;
-                    }
-                }
-            });
-            *self.reconciliation_handle.write().await = Some(handle);
-        }
+        // Immediate processing and batch deferral both need durable recovery.
+        self.start_reconciliation_worker().await;
 
         start_device_monitor(self_arc.clone(), self.device_manager.clone()).await?;
 
@@ -658,6 +566,102 @@ impl AudioManager {
         info!("audio manager started");
 
         Ok(())
+    }
+
+    /// Start the existing recovery loop independently of the normal processing mode.
+    /// The caller owns lifecycle ordering; stop joins this worker before restart.
+    async fn start_reconciliation_worker(&self) {
+        let db = self.db.clone();
+        let engine_ref = self.engine.clone();
+        let on_insert_bg = self.on_transcription_insert.clone();
+        let options_ref = self.options.clone();
+        let seg_mgr = self.segmentation_manager.clone();
+        let output_path_bg = self.options.read().await.output_path.clone();
+        let metrics_bg = self.metrics.clone();
+        let meeting_detector_bg = self.meeting_detector().await;
+        let stop_requested = self.reconciliation_stop_requested.clone();
+        let reconciliation_wake = self.reconciliation_wake.clone();
+        let handle = tokio::spawn(async move {
+            // Wait for model to load + initial recordings
+            if wait_for_stop_or_wake(
+                &stop_requested,
+                &reconciliation_wake,
+                Duration::from_secs(120),
+            )
+            .await
+            {
+                return;
+            }
+            loop {
+                // Contain a panic inside a sweep so it cannot kill this
+                // long-lived worker (issue #3498: a single panic used to
+                // stop the loop permanently, silently piling up pending
+                // chunks until the app was restarted). The sweep stays on
+                // this task, so shutdown still cancels an in-flight sweep at
+                // its next await. The locks it holds are tokio::sync locks,
+                // which do not poison, so a caught panic releases them
+                // cleanly.
+                let swept = AssertUnwindSafe(async {
+                    if let Some(detector) = &meeting_detector_bg {
+                        detector.check_grace_period().await;
+                        if detector.is_in_audio_session() {
+                            debug!(
+                                "reconciliation: skipping background sweep during active audio session"
+                            );
+                            return;
+                        }
+                    }
+
+                    let engine_guard = engine_ref.read().await;
+                    if let Some(ref transcription_engine) = *engine_guard {
+                        let opts = options_ref.read().await;
+                        let audio_engine = opts.transcription_engine.clone();
+                        let batch_max_dur = opts.batch_max_duration_secs;
+                        let use_pii_removal = opts.use_pii_removal;
+                        drop(opts);
+
+                        let count = super::reconciliation::reconcile_untranscribed(
+                            &db,
+                            transcription_engine,
+                            on_insert_bg.as_ref(),
+                            audio_engine,
+                            Some(seg_mgr.clone()),
+                            output_path_bg.as_deref(),
+                            batch_max_dur,
+                            use_pii_removal,
+                            Some(metrics_bg.clone()),
+                        )
+                        .await;
+                        if count > 0 {
+                            info!("reconciliation: transcribed {} orphaned chunks", count);
+                        }
+                    }
+                })
+                .catch_unwind()
+                .await;
+                if let Err(panic) = swept {
+                    let reason = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown cause");
+                    error!(
+                        "reconciliation: sweep panicked, worker continues: {}",
+                        reason
+                    );
+                }
+                if wait_for_stop_or_wake(
+                    &stop_requested,
+                    &reconciliation_wake,
+                    Duration::from_secs(120),
+                )
+                .await
+                {
+                    return;
+                }
+            }
+        });
+        *self.reconciliation_handle.write().await = Some(handle);
     }
 
     pub async fn restart(&self) -> Result<()> {
@@ -2376,6 +2380,43 @@ mod tests {
             .expect("consumer did not finish after in-flight work")
             .expect("consumer task failed");
         assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_worker_is_owned_and_stoppable_in_both_modes() {
+        for mode in [TranscriptionMode::Realtime, TranscriptionMode::Batch] {
+            let db = Arc::new(
+                DatabaseManager::new("sqlite::memory:", Default::default())
+                    .await
+                    .unwrap(),
+            );
+            // Construct inert state: no hardware polling, capture or model loading.
+            let options = AudioManagerOptions {
+                is_disabled: true,
+                transcription_mode: mode.clone(),
+                ..Default::default()
+            };
+            let manager = AudioManager::new(options, db).await.unwrap();
+            manager.start_reconciliation_worker().await;
+            assert!(
+                manager.reconciliation_handle.read().await.is_some(),
+                "{mode:?}"
+            );
+            manager
+                .reconciliation_stop_requested
+                .store(true, Ordering::Release);
+            manager.reconciliation_wake.notify_one();
+            assert_eq!(
+                finish_reconciliation_worker(
+                    &manager.reconciliation_handle,
+                    Duration::from_secs(1),
+                )
+                .await,
+                ConsumerFinishOutcome::Completed,
+                "{mode:?}",
+            );
+            assert!(manager.reconciliation_handle.read().await.is_none());
+        }
     }
 
     #[tokio::test]

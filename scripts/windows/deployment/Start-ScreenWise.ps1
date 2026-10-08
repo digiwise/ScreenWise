@@ -84,7 +84,7 @@ if (!(Test-Path -LiteralPath $storePath)) {
     $settings = [ordered]@{
         dataDir=$m.data_directory; port=[int]$m.port; autoStartEnabled=$false;
         showShortcutOverlay=$false; minimizeToTrayOnClose=$false;
-        disableAudio=$false; audioTranscriptionEngine='parakeet'; transcriptionMode='batch';
+        disableAudio=$false; audioTranscriptionEngine='parakeet'; transcriptionMode='realtime';
         audioDevices=@('default'); useSystemDefaultAudio=$true; disableVision=$false;
         useAllMonitors=$true; monitorIds=@('default'); usePiiRemoval=$true; asyncPiiRedaction=$true;
         pauseOnDrmContent=$true; recordWhileLocked=$false; disableKeyboardCapture=$false;
@@ -118,6 +118,6 @@ $process = [Diagnostics.Process]::new()
 $process.StartInfo = $psi
 try {
     if (!$process.Start()) { throw 'ScreenWise did not start.' }
-    Write-Host "Started deployed release GUI (PID $($process.Id)); data: $($m.data_directory); API port: $($m.port)."
+    Write-Host "Started deployed $($m.profile) GUI (PID $($process.Id)); data: $($m.data_directory); API port: $($m.port)."
     Write-Host 'Quit from the tray to finish cleanly. Closing PowerShell does not stop recording.'
 } finally { $process.Dispose() }

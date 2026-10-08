@@ -1,10 +1,54 @@
 # ScreenWise Windows build notes
 
-The latest source/artifact milestone is [named sources and floating status](#named-sources-and-floating-status-validation-2026-10-09). Earlier release entries describe their historical candidates.
+The latest integration milestone is [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier release entries describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
+
+## Realtime recovery and local deployment (2026-10-09)
+
+Integrated the pending `codex/realtime-audio-recovery` worktree edits into the
+main development branch. The existing reconciliation worker now starts in both
+realtime and batch modes; timing, active-session deferral, privacy gates and model
+serialization remain unchanged. New deployment stores select realtime; existing
+settings are preserved. Settings text now describes actual batch deferral.
+The preserved deletion, desktop-context and status-UI worktree commits have stable
+patch IDs identical to their already-integrated counterparts, so were not reapplied.
+
+Deployment defaults to `release-local` with explicit `-BuildProfile release`
+support. Build arguments, source directories and manifest profile agree. Installed
+paths retain `.local/deployment/release` for startup/firewall compatibility; startup
+accepts either allowed profile. Frontend export skips acquisition prebuild hooks.
+The canonical builder already defaults to `release-local` and needed no change.
+
+- 63 synthetic deployment checks passed, including matched source paths, profile
+  validation, preserved firewall paths and existing rollback/data separation.
+- `RootTest -Package screenpipe-audio -Lib -TestFilter reconciliation_ -Jobs 2`
+  passed three tests in 1m39s: worker ownership/stop in both modes, wake handling
+  and cancellation. 552 external artifacts reused, zero rebuilt; three workspace
+  artifacts reused, three rebuilt. The existing unused `sample_rate` warning remains.
+- `RootFmt` and the final 16-page Next export/type check passed. The existing
+  `unpdf` import-meta warning remains. No package acquisition was invoked.
+- Root and desktop `release-local` preflights initially refused missing matching successful
+  launcher baseline. Existing profile artifacts and the canonical plan were
+  inspected, then `-AllowColdCache` explicitly adopted the existing cache. No cache
+  was cleared, moved or silently substituted; dependency reporting remains enabled.
+- `RootBuild -Jobs 2 -AllowColdCache` passed in 3m54s, reusing all 785 external
+  artifacts with zero rebuilt; nine workspace artifacts reused, ten rebuilt.
+  Inert CLI version/help/record-help checks passed without starting capture.
+- `DesktopBuild -Jobs 2 -AllowColdCache` passed in 9m05s: 1,065 external artifacts
+  reused, 15 new variants built and zero unexpected rebuilds; nine workspace
+  artifacts reused, nine rebuilt. The first missing external variant was
+  `tauri-build` with `codegen`, absent from the old local-profile cache. This adopts
+  the earlier context-generation change in this profile; no dependencies changed.
+  The desktop executable was hashed without launching it.
+- Selected recorder runtime DLLs match the configured provisioned inputs. Bun,
+  FFmpeg, FFprobe and desktop assets are present. Deployment plan-only selects the
+  new local-profile outputs with launch, startup registration and provisioning off.
+
+Artifact results and deployment limits are recorded in the
+[validation register](VALIDATION_REGISTER.md#realtime-recovery-and-local-deployment-2026-10-09).
 
 ## Local iteration and deployment policy (2026-10-09)
 
@@ -17,9 +61,10 @@ least as well; measured claims still identify the tested profile. Required check
 remain unchanged. Historical release records below describe their actual builds.
 
 The named-source dashboard release was completed before this policy change.
-Deployment/startup scripts remain unchanged until the owner deploys that release;
-their later migration must consistently select executable, DLL/sidecar and
-artifact-validation paths. This documentation change starts no capture and deploys
+At policy approval, deployment/startup scripts were left unchanged pending that
+deployment. The later integration milestone above implements profile selection
+consistently across executable, DLL/sidecar and artifact-validation paths.
+The original documentation change started no capture and deployed
 nothing. Documentation consistency and `git diff --check` were checked; no rebuild
 was needed for the policy text.
 

@@ -5,7 +5,7 @@
 From the repository root, quit any deployed ScreenWise instance, then run:
 
 ```powershell
-# Ordinary PowerShell: reuse built release binaries and the provisioned shared Pi.
+# Ordinary PowerShell: reuse built release-local binaries and the shared Pi.
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1
 # Elevated PowerShell: install/verify the nine exact executable block rules.
 & .\scripts\windows\deployment\Set-ScreenWiseDeploymentFirewall.ps1
@@ -39,7 +39,9 @@ model calls or uploads. [Exporter options and limits](../evidence-review/README.
 ## Full deployment guide
 
 `Deploy-ScreenWise.ps1` prepares a persistent developer installation from the
-production `release` outputs, separate from Cargo build directories. It is not
+selected build outputs, separate from Cargo build directories. The default is
+`release-local`; use `-BuildProfile release` to select an explicitly requested
+full release candidate. It is not
 an installer or a claim of production readiness. See the repository README and
 validation register for the experimental/support boundaries.
 
@@ -50,11 +52,16 @@ From the repository root in ordinary PowerShell:
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1
 ```
 
-By default this reuses already-built release artifacts. It copies the GUI,
+By default this reuses already-built `release-local` artifacts. It copies the GUI,
 recorder, Bun, FFmpeg/FFprobe, native DLLs and GUI assets to
 `.local/deployment/release`. It reuses the private WebView2 directory from the
 existing `.local/gui-trial-runtime/runtime.json`, without copying it. Required
 artifacts must have been explicitly provisioned; nothing is downloaded.
+The deployed directory keeps its existing name for compatibility: the manifest
+records the actual build profile. Switching profile preserves installed executable
+paths, startup registration and firewall rule identities. Both legacy `release`
+and new `release-local` manifests are accepted; there is no fallback to another
+profile if an artifact is missing. Inspect `-PlanOnly` for the selected source paths.
 Models are reused from the application's existing model stores, never copied.
 Pi **is included** through an explicit shared package path, pinned to 0.75.4.
 Deployment reuses the previous deployment's path, the versioned shared store
@@ -127,8 +134,11 @@ To rebuild and update later, quit the deployed app first, then:
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1 -Build
 ```
 
-`-Build` refreshes the frontend and invokes the canonical locked/offline root and
-desktop release builds, with `-PlanOnly` before each. Dependency provisioning is
+`-Build` exports the frontend with provisioned Node/packages, skipping acquisition
+prebuild hooks, and invokes the canonical locked/offline root and desktop builds
+with the selected `-BuildProfile` and `-PlanOnly` before each. Full release builds
+are reserved for explicit owner requests or inadequate local-profile performance;
+ordinary deployment does not require them. Dependency provisioning is
 separate. Running installed processes prevent an update; the script never kills
 them. Existing data and previous application binaries/assets are retained. After
 a successful replacement, `release-previous-*` archives exclude `bun.exe`,
@@ -160,3 +170,29 @@ registration, model downloads or GUI launch):
 ```powershell
 & .\scripts\windows\deployment\Test-ScreenWiseDeployment.ps1
 ```
+
+## Prompt Parakeet transcription
+
+New deployment stores use `transcriptionMode: "realtime"` with the existing
+Parakeet engine and 30-second audio chunks. Completed chunks are processed during
+calls as well as outside audio sessions. Parakeet inference shares the existing
+model mutex; this does not enable the separate live-meeting provider or add a
+second model. Longer audio is still split into 30-second inference windows.
+
+Existing stores keep their explicit settings. To select this behaviour in an
+existing deployment, turn **Batch Transcription** off in Recording settings;
+the existing settings flow applies the change through a recording restart.
+Keep Parakeet, the 30-second duration and the disabled live-meeting provider.
+Do this at an agreed interruption point, after deploying the recovery change.
+Editing a running application's `store.bin` directly is not part of this procedure.
+
+Both realtime and batch modes own the same durable recovery worker. It skips
+active audio sessions, considers unfinished chunks older than ten minutes and
+waits two minutes between sweeps. The ten-minute threshold affects fallback
+recovery, not the normal realtime attempt. Existing stop/restart ownership,
+privacy checks, candidate limits and model serialization remain in place.
+This deliberately adds no adaptive CPU policy, larger batches or new queue.
+
+The worker lifecycle regression exercises both modes without hardware capture or
+model loading when run. Live call quality, CPU peaks and end-to-end transcript latency
+require a freshly authorised representative call; compilation is not that evidence.

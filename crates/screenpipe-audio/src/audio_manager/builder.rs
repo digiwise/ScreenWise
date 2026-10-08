@@ -62,14 +62,14 @@ pub(crate) async fn ensure_system_default_device_types(
     }
 }
 
-/// Controls when Whisper transcription runs.
+/// Controls when local transcription runs.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptionMode {
     /// Transcribe immediately as audio is captured.
     Realtime,
     /// Defer transcription during audio sessions (meetings, YouTube, etc.)
-    /// and batch-transcribe when the session ends or every 2 min.
-    /// Lower CPU during calls, better Whisper context, crash-safe.
+    /// and wake background reconciliation when the session ends. Recovery only
+    /// selects chunks older than ten minutes and waits two minutes between sweeps.
     #[default]
     #[serde(alias = "Smart")]
     Batch,
