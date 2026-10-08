@@ -241,9 +241,12 @@ does not by itself solve accepted-data deletion or previously exposed consumer c
 
 ## Suggested next steps
 
-1. Finish the authorized diagnostics, unaffected-monitor capture and microphone
-   independence work, including regression checks and independent review. Keep
-   local commits at validated milestones; deployment remains separate.
+1. Capture-policy implementation is committed as `3ea64c8c7`, including diagnostics,
+   unaffected-monitor capture and microphone independence. Focused checks,
+   independent Astra High review, frontend checks and both `release-local` builds
+   completed. Both production release builds and 54 synthetic deployment-script
+   checks have now passed; see [validation](../VALIDATION_REGISTER.md). Deployment,
+   hardware microphone signal and live transition validation remain separate.
 2. Review the completed audit's coverage matrix and reconcile it with settled
    capture-policy source. Resolve its shared-media, derivative, cleanup and monitor
    attribution gaps in the design; assess separate review storage and granular

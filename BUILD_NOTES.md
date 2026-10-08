@@ -4,6 +4,31 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Production release validation (2026-10-08)
+
+The settled capture-policy candidate `3ea64c8c7` now has production release
+builds in addition to the focused and `release-local` checks below. Reviewed
+`-PlanOnly` for `RootBuild` and `DesktopBuild` with `-BuildProfile release`, then
+ran both sequentially using the existing canonical caches, locked/offline setup
+and four-job default. No cold-cache override, cache reset or acquisition was needed.
+
+- `RootBuild -BuildProfile release`: passed in 8m24s; 785 external artifacts
+  reused, zero rebuilt; 11 workspace artifacts reused, eight rebuilt.
+- `DesktopBuild -BuildProfile release`: passed in 13m34s; 1,080 external artifacts
+  reused, zero rebuilt; ten workspace artifacts reused, eight rebuilt.
+- `Test-ScreenWiseDeployment.ps1`: 54 synthetic checks passed. Rebuilt recorder
+  `--version`, `--help` and `record --help` passed. Both lockfiles remain unchanged.
+
+Reuse the already successful frontend type/export and focused test results;
+no relevant source changed. These are compilation, synthetic deployment-script
+and inert CLI results, not live hardware or installed-package validation. No
+desktop app/capture session was launched and the running deployment was unchanged.
+
+The existing launcher has a global compilation lock and refuses concurrent
+invocations. An isolated-worktree concurrency improvement is being developed
+separately; it was not used for these builds. Review shared staging and cache
+boundaries before overlapping independent root/desktop builds.
+
 ## Microphone admission and lifecycle ordering (2026-10-08)
 
 The settled policy separates microphone permits from visual exclusions and

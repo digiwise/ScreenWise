@@ -10,6 +10,32 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Production release build milestone, 2026-10-08
+
+Capture-policy implementation `3ea64c8c7` passed canonical `RootBuild` and
+`DesktopBuild`, each with `-BuildProfile release`, after plan inspection. Root
+completed in 8m24s (785 external reused/zero rebuilt, 11 workspace reused/eight
+rebuilt); desktop completed in 13m34s (1,080 external reused/zero rebuilt, ten
+workspace reused/eight rebuilt). Both observations were complete, with no new
+external variants or unexpected rebuilds. Existing caches/native setup were reused
+without cold-cache override, acquisition or cleanup.
+
+The 54 synthetic deployment-script checks passed. The rebuilt release recorder
+passed inert version/help/record-help checks; the desktop executable was not
+launched. Existing frontend export/type and focused-test results remain applicable.
+Both lockfiles were unchanged. Release artifact SHA256 identities:
+
+| Artifact | SHA256 |
+|---|---|
+| `target/release/screenpipe.exe` | `C6D77DCDA3D095EDD6B2F0FE87ACBA53C06FE2E17255BF76E5990126B890E397` |
+| `apps/screenpipe-app-tauri/src-tauri/target/release/screenpipe-app.exe` | `0687C07EAD7B791DD0435BB8839697B7F58C1DF209BD1694EB58767659B12ECB` |
+
+No live capture, interactive validation, production-data read, firewall change,
+deployment or restart occurred. The active installation still runs its previous
+artifacts. Installed-package preflight, hardware microphone signal and live
+transition behaviour remain separate validation steps; compilation does not
+resolve the previously observed silent microphone input.
+
 ## Microphone admission and pause ordering, 2026-10-08
 
 Microphone acquisition, queued/background/live transcription, SQLite writes and
