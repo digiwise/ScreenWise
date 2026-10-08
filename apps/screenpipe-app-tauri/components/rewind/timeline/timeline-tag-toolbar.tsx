@@ -21,6 +21,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { MessageSquare } from "lucide-react";
+import { incompleteDeletionMessage } from "@/lib/deletion-result";
 import { localFetch } from "@/lib/api";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { AnimatePresence, motion } from "framer-motion";
@@ -184,7 +185,15 @@ export function TimelineTagToolbar({ anchorRect, onAskAI }: TimelineTagToolbarPr
 					end: selectionRange.end.toISOString(),
 				}),
 			});
-			if (!resp.ok) throw new Error(await resp.text());
+			if (!resp.ok) {
+                const errorBody = await resp.json().catch(() => ({}));
+                const incomplete = incompleteDeletionMessage(errorBody);
+                if (incomplete) {
+                    clearTextCache(); await clearTimelineCache(); setShowDeleteConfirm(false);
+                    throw new Error(incomplete);
+                }
+                throw new Error("Deletion request failed; no complete deletion was confirmed.");
+            }
 			const data = await resp.json();
 			toast({
 				title: "deleted",

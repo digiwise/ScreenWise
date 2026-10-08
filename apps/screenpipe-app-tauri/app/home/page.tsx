@@ -46,6 +46,7 @@ import {
 } from "@/components/chat-sidebar";
 import { ChatHistoryView } from "@/components/chat/chat-history-view";
 import { mountPiEventRouter } from "@/lib/stores/pi-event-router";
+import { RecordingStatusButton } from "@/components/status/recording-status-dialog";
 import { NotificationBell } from "@/components/notification-bell";
 import Timeline from "@/components/rewind/timeline";
 import { useQueryState } from "nuqs";
@@ -987,6 +988,7 @@ function HomeContent() {
                       );
                     })}
                     <div className="w-px h-3 bg-border mx-0.5" />
+                    <RecordingStatusButton />
                     <NotificationBell />
                     <Tooltip>
                       <TooltipTrigger asChild>

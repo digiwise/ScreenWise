@@ -32,6 +32,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { incompleteDeletionMessage } from "@/lib/deletion-result";
 import { localFetch } from "@/lib/api";
 
 type RetentionMode = "media" | "all";
@@ -248,14 +249,16 @@ export function RetentionSettings() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `request failed (${res.status})`);
+        const incomplete = incompleteDeletionMessage(err);
+        if (incomplete) { fetchStatus(); throw new Error(incomplete); }
+        throw new Error("Deletion request failed; no complete deletion was confirmed.");
       }
       const r = await res.json();
       const total =
         (r.frames_deleted || 0) +
         (r.audio_transcriptions_deleted || 0) +
         (r.ui_events_deleted || 0);
-      const files = (r.video_files_deleted || 0) + (r.audio_files_deleted || 0);
+      const files = (r.video_files_deleted || 0) + (r.audio_files_deleted || 0) + (r.snapshot_files_deleted || 0);
       toast({
         title: `deleted last ${minutes} min`,
         description: `${total.toLocaleString()} records, ${files} files removed from disk`,
