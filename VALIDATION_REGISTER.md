@@ -10,6 +10,17 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Launcher concurrency, 2026-10-08
+
+Opt-in root/desktop overlap retains same-cache, desktop shared-staging and default
+serial exclusion. Synthetic isolated-worktree validation passed 12 OS-lock,
+97 launcher, 18 cache and 84 trial-profile assertions. The two-launcher test held
+root stub Cargo while desktop stub Cargo completed, with independent evidence.
+Same-cache/evidence-override, desktop staging and junction refusals plus failure
+release passed. See [exact commands and limits](BUILD_NOTES.md#launcher-concurrency-protocol-2026-10-08).
+Real parallel production builds, resource/speedup measurements and Windows
+PowerShell 5.1 execution remain unvalidated; active production caches were untouched.
+
 ## Microphone admission and pause ordering, 2026-10-08
 
 Microphone acquisition, queued/background/live transcription, SQLite writes and

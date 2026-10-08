@@ -4,6 +4,42 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Launcher concurrency protocol (2026-10-08)
+
+The launcher now accepts explicit `-Concurrent` on both root and desktop runs.
+Default serial scheduling, same-cache exclusion and all cache/native gates remain.
+Desktop compiling runs additionally exclude other desktop caches because Tauri
+writes shared staging/generated files. Evidence roots no longer select locks.
+See the [launcher guide](scripts/windows/build/README.md) for the source-staging
+audit, resource budget and operations outside the protocol.
+
+Validation used an isolated worktree and only synthetic tools/state:
+
+```powershell
+.\scripts\windows\build\Test-BuildLocks.ps1
+.\scripts\windows\build\Test-ScreenWiseBuildLauncher.ps1
+.\scripts\windows\build\Test-CargoCache.ps1
+.\scripts\windows\build\Test-TrialBuildProfiles.ps1
+git diff --check
+git diff -- Cargo.lock apps/screenpipe-app-tauri/src-tauri/Cargo.lock
+```
+
+PowerShell 7 passed 12 lock, 97 launcher, 18 cache and 84 trial-profile assertions.
+Two separate stubbed launcher processes exercised overlap, completion/evidence
+isolation, same-cache refusal and serial exclusion. OS-handle tests additionally
+refused concurrent desktop staging across different caches and junction aliases.
+Failure-path tests verified partial-lock and Cargo-failure release. No real Rust
+or native build, download, application launch, recording or firewall operation ran.
+Production builds were active in a different checkout and were untouched.
+
+Remaining validation: after those builds finish and integration is reviewed,
+observe the next already necessary settled-candidate root/desktop production
+builds with `-Concurrent`, a reviewed combined job budget and unchanged warm
+caches. Compare reuse counts, native staging, outputs and total elapsed/resource
+use against their sequential observations. No real speedup, production artifact
+equivalence or Windows PowerShell 5.1 execution is claimed by these synthetic
+checks. Do not add full builds solely to warm or benchmark a new worktree cache.
+
 ## Microphone admission and lifecycle ordering (2026-10-08)
 
 The settled policy separates microphone permits from visual exclusions and

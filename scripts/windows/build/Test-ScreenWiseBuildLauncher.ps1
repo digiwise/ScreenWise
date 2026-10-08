@@ -44,6 +44,11 @@ try {
     Assert-Build ($desktopBuild.target_directory -eq (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\target')) 'Desktop build preserves executable/runtime paths.'
     Assert-Build ($desktopBuild.profile -eq 'release-local' -and ($desktopBuild.cargo_arguments -join '|').Contains('--profile|release-local')) 'Desktop functional builds default to release-local.'
     $rootBuild = & $launcher -Task RootBuild -PlanOnly
+    $concurrentRoot = & $launcher -Task RootBuild -Concurrent -PlanOnly
+    $concurrentDesktop = & $launcher -Task DesktopBuild -Concurrent -PlanOnly
+    Assert-Build ($concurrentRoot.build_locks[0].shared -and $concurrentDesktop.build_locks[0].shared -and -not $rootBuild.build_locks[0].shared) 'Concurrency requires explicit opt-in; default scheduling remains exclusive.'
+    Assert-Build ($concurrentRoot.build_locks[1].path -ne $concurrentDesktop.build_locks[1].path -and $concurrentDesktop.build_locks.Count -eq 3) 'Different workspace caches have distinct locks and desktop also protects shared staging.'
+    Assert-Rejected { & $launcher -Task RootFmt -Concurrent -PlanOnly } 'require a compiling mode'
     Assert-Build ($rootBuild.profile -eq 'release-local' -and $rootBuild.target_directory -eq (Join-Path $repoRoot 'target')) 'Root functional builds use release-local in the existing root target.'
     foreach ($buildTask in @('RootBuild', 'DesktopBuild')) {
         $production = & $launcher -Task $buildTask -BuildProfile release -PlanOnly
@@ -129,6 +134,8 @@ echo stub configurations=%CMAKE_CONFIGURATION_TYPES%
 echo stub diagnostics=%CARGO_LOG%
 echo stub native stderr 1>&2
 if not "%SCREENWISE_STUB_VS_INITIALIZED%"=="yes" exit /b 99
+if defined SCREENWISE_BUILD_STUB_WAIT_SCRIPT "%SCREENWISE_BUILD_STUB_SHELL%" -NoProfile -File "%SCREENWISE_BUILD_STUB_WAIT_SCRIPT%"
+if errorlevel 1 exit /b %errorlevel%
 if defined SCREENWISE_BUILD_STUB_MESSAGES type "%SCREENWISE_BUILD_STUB_MESSAGES%"
 if defined SCREENWISE_BUILD_STUB_EXIT exit /b %SCREENWISE_BUILD_STUB_EXIT%
 exit /b 0
@@ -212,6 +219,12 @@ $env:SCREENWISE_STUB_VS_INITIALIZED = 'yes'
     Assert-Build (-not $env:VSCMD_ARG_TGT_ARCH -and -not $env:SCREENWISE_STUB_VS_INITIALIZED) 'Developer initialization runs automatically and its added variables are removed afterward.'
     Assert-Build ($env:CARGO_NET_OFFLINE -eq 'false' -and $env:RUSTUP_AUTO_INSTALL -eq '1') 'Dependency/toolchain acquisition guards are set for the child and restored for the caller.'
     & $launcher -Task DesktopCheck -ConfigPath $fixtureConfig -EvidenceDirectory $fixtureEvidence -Jobs 1
+    $heldCache = [IO.File]::Open((Join-Path $env:SCREENWISE_DESKTOP_CARGO_TARGET_DIR '.screenwise-launcher.lock'), 'Open', 'ReadWrite', 'None')
+    try {
+        Assert-Rejected { & $launcher -Task DesktopCheck -Concurrent -ConfigPath $fixtureConfig -EvidenceDirectory (Join-Path $fixtureRoot 'other-evidence') } 'selected Cargo cache'
+    } finally { $heldCache.Dispose() }
+    $isolatedRecords = @(Get-ChildItem (Join-Path $fixtureRoot 'other-evidence') -Directory)
+    Assert-Build ($isolatedRecords.Count -eq 1 -and (Test-Path (Join-Path $isolatedRecords[0].FullName 'build-locks.json')) -and -not (Test-Path (Join-Path $isolatedRecords[0].FullName 'cargo.log'))) 'Evidence overrides cannot evade cache locks and refused runs retain separate evidence.'
     Assert-Build ((Get-Content -LiteralPath $env:SCREENWISE_BUILD_STUB_CALL_FILE).Count -eq 2) 'A successful matching baseline permits the next run without approval, regardless of job count or diagnostics.'
     $callsBefore = (Get-Item -LiteralPath $env:SCREENWISE_BUILD_STUB_CALL_FILE).Length
     Assert-Rejected { & $launcher -Task DesktopCheck -ConfigPath $fixtureConfig -EvidenceDirectory $fixtureEvidence -TestTarget new_target } 'Cache preflight refused compilation'
@@ -232,6 +245,51 @@ $env:SCREENWISE_STUB_VS_INITIALIZED = 'yes'
     Assert-Build (-not $env:VSCMD_ARG_TGT_ARCH -and -not $env:SCREENWISE_STUB_VS_INITIALIZED) 'Failure restores the pre-initialization environment.'
     Assert-Build ((Get-Location).Path -eq $originalLocation) 'The caller location is restored.'
     [Environment]::SetEnvironmentVariable('SCREENWISE_BUILD_STUB_EXIT', $null, 'Process')
+    & $launcher -Task DesktopCheck -Concurrent -ConfigPath $fixtureConfig -EvidenceDirectory $fixtureEvidence
+    Assert-Build (-not $env:VSCMD_ARG_TGT_ARCH) 'Launcher failure releases every build lock, allowing the next matching run.'
+    $readyFile = Join-Path $fixtureRoot 'child-cargo-ready'
+    $releaseFile = Join-Path $fixtureRoot 'child-cargo-release'
+    $waitScript = Join-Path $toolsRoot 'Wait-StubCargo.ps1'
+    @'
+[IO.File]::WriteAllText($env:SCREENWISE_BUILD_STUB_READY, 'synthetic Cargo is running')
+$deadline = [DateTime]::UtcNow.AddSeconds(20)
+while (-not [IO.File]::Exists($env:SCREENWISE_BUILD_STUB_RELEASE)) {
+    if ([DateTime]::UtcNow -gt $deadline) { exit 95 }
+    Start-Sleep -Milliseconds 50
+}
+'@ | Set-Content $waitScript -Encoding UTF8
+    $childScript = Join-Path $toolsRoot 'Run-StubRoot.ps1'
+    @'
+param($Launcher, $Config, $Evidence, $WaitScript, $Shell, $Ready, $Release)
+$ErrorActionPreference = 'Stop'
+$env:SCREENWISE_BUILD_STUB_WAIT_SCRIPT = $WaitScript
+$env:SCREENWISE_BUILD_STUB_SHELL = $Shell
+$env:SCREENWISE_BUILD_STUB_READY = $Ready
+$env:SCREENWISE_BUILD_STUB_RELEASE = $Release
+& $Launcher -Task RootCheck -Concurrent -ConfigPath $Config -EvidenceDirectory $Evidence -AllowColdCache
+'@ | Set-Content $childScript -Encoding UTF8
+    $shellPath = (Get-Process -Id $PID).Path
+    $childEvidence = Join-Path $fixtureRoot 'child-evidence'
+    $childArgs = @('-NoProfile', '-File', $childScript, '-Launcher', $launcher, '-Config', $fixtureConfig, '-Evidence', $childEvidence,
+        '-WaitScript', $waitScript, '-Shell', $shellPath, '-Ready', $readyFile, '-Release', $releaseFile) | ForEach-Object { '"' + $_ + '"' }
+    $child = Start-Process $shellPath -ArgumentList $childArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $fixtureRoot 'child.out') -RedirectStandardError (Join-Path $fixtureRoot 'child.err')
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not [IO.File]::Exists($readyFile)) {
+            if ($child.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw "Stub launcher failed: $(Get-Content (Join-Path $fixtureRoot 'child.err') -Raw)" }
+            Start-Sleep -Milliseconds 50
+        }
+        & $launcher -Task DesktopCheck -Concurrent -ConfigPath $fixtureConfig -EvidenceDirectory $fixtureEvidence -Jobs 1
+        Assert-Build (-not $child.HasExited) 'Desktop launcher completes while root stub Cargo is still running.'
+        Assert-Rejected { & $launcher -Task RootCheck -Concurrent -ConfigPath $fixtureConfig -EvidenceDirectory $fixtureEvidence } 'selected Cargo cache'
+        Assert-Rejected { & $launcher -Task DesktopCheck -ConfigPath $fixtureConfig -EvidenceDirectory $fixtureEvidence } 'repository scheduling'
+    } finally {
+        [IO.File]::WriteAllText($releaseFile, 'release stub Cargo')
+        $child.WaitForExit(10000) | Out-Null
+    }
+    Assert-Build ($child.HasExited -and $child.ExitCode -eq 0) 'Concurrent root launcher finishes cleanly after release.'
+    $childRuns = @(Get-ChildItem $childEvidence -Directory)
+    Assert-Build ($childRuns.Count -eq 1 -and (Test-Path (Join-Path $childRuns[0].FullName 'result.json')) -and (Test-Path (Join-Path $childRuns[0].FullName 'cache-summary.json'))) 'Concurrent processes retain independent completion and cache evidence.'
     [Environment]::SetEnvironmentVariable('OPENBLAS_PATH', $null, 'Process')
     [Environment]::SetEnvironmentVariable('ORT_LIB_LOCATION', $null, 'Process')
     foreach ($lightTask in @('RootFmt', 'RootTree', 'RootMetadata')) {
