@@ -604,3 +604,13 @@ separately authorized synthetic manifest/ledger and media-isolation prototype.
 It depends on reconciled capture-policy source, explicit legacy/backup scope and
 a complete gated-reader plan. App controls, captured-data migration and fine-grained
 retention implementation are subsequent milestones, not authorized by this file.
+
+## Related implementation after the design milestone (2026-10-08)
+
+The owner authorized a status-only desktop milestone and repairs to existing
+time-range deletion, documented in [recording status](RECORDING_STATUS_UI.md)
+and [deletion repairs](DELETION_REPAIRS.md). Existing-store media cleanup jobs
+provide durable retry ownership for eligible selected files. They do not implement
+this contract's review state, access-release gate, complete lineage, durable Discard
+fence, restore freshness or external-copy erasure. Those owner decisions and
+acceptance criteria remain open. These repairs do not authorize content migration.

@@ -10,6 +10,8 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+Latest artifacts and validation: [status and deletion integration](#status-and-deletion-integration-release-validation-2026-10-08). The earlier hashes below belong to the previous candidate.
+
 ## Production release build milestone, 2026-10-08
 
 Capture-policy implementation `3ea64c8c7` passed canonical `RootBuild` and
@@ -47,7 +49,8 @@ release passed. See [exact commands and limits](BUILD_NOTES.md#launcher-concurre
 Integration repeated all 211 assertions successfully. Real concurrent release
 operations used the existing caches with two jobs each: root passed in 33.83s
 with 785 external and 19 workspace artifacts reused, none rebuilt. Desktop
-remains in progress after a generated Tauri asset timestamp forced relinking.
+passed in 11m52s after a generated Tauri asset timestamp forced one workspace
+relink (1,080 external reused/zero rebuilt, 17 workspace reused/one rebuilt).
 Speedup measurements and Windows PowerShell 5.1 execution remain unvalidated.
 
 ## Microphone admission and pause ordering, 2026-10-08
@@ -1030,3 +1033,30 @@ The batch made no deliberate browser-originated outbound attempt and collected n
 packet-drop evidence (`outbound_attempt_samples` was zero), so this result must
 not be described as proof that Chrome was offline. Only aggregate counts for
 fixed synthetic markers were inspected; captured contents were not read.
+
+## Status and deletion integration release validation, 2026-10-08
+
+Twenty-four frontend tests, type checking/static export, three synthetic database
+byte/store tests, five context-ordering fixture checks, both formatting presets
+and DesktopCheck passed. Source review corrections cover delivery/shutdown alerts,
+request-scoped cleanup results, unknown outcomes and cache invalidation.
+
+Settled production builds passed with existing caches and reviewed baseline
+adoption for the pinned Tauri feature change. Root: 6m31s, 785 external reused/
+zero rebuilt, 12 workspace reused/seven rebuilt. Desktop: 11m01s, 1,065 external
+reused/15 expected new variants, ten workspace reused/eight rebuilt, zero unexpected
+rebuilds. Low memory headroom required staggered heavy builds despite opt-in
+concurrency. The actual Tauri generated context and all 494 asset outputs predate
+the application's dependency reference; next-run cache freshness is not claimed.
+
+| Artifact | SHA256 |
+|---|---|
+| Recorder release | 7F6F38C2F3292A8B0F9C691A8C360C54DD7F01D47476AA856DC5D61CC05DEB2E |
+| Desktop release | 5855BE901559CC9DD727603B2B3A2E2C7AE391DB5D894BA789D7388142616B9F |
+
+The rebuilt recorder passed inert CLI checks. No desktop launch, live capture,
+production-store read/migration, deployment, restart or firewall change occurred.
+Runtime microphone signal, monitor transitions and installed-package preflight
+remain unvalidated. Complete permanent Discard and pending-review access control
+remain outside these scoped repairs. See the three milestone documents and the
+updated data control discussion. No production performance or PS5.1 claim is made.

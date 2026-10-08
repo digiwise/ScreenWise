@@ -1,5 +1,7 @@
 # ScreenWise Windows build notes
 
+The latest source/artifact milestone is [status, deletion and context generation](#status-deletion-and-context-generation-release-milestone-2026-10-08). Earlier release entries describe their historical candidates.
+
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
@@ -38,7 +40,7 @@ writes shared staging/generated files. Evidence roots no longer select locks.
 See the [launcher guide](scripts/windows/build/README.md) for the source-staging
 audit, resource budget and operations outside the protocol.
 
-Validation used an isolated worktree and only synthetic tools/state:
+Initial builder validation used an isolated worktree and only synthetic tools/state:
 
 ```powershell
 .\scripts\windows\build\Test-BuildLocks.ps1
@@ -57,13 +59,7 @@ Failure-path tests verified partial-lock and Cargo-failure release. No real Rust
 or native build, download, application launch, recording or firewall operation ran.
 Production builds were active in a different checkout and were untouched.
 
-Remaining validation: after those builds finish and integration is reviewed,
-observe the next already necessary settled-candidate root/desktop production
-builds with `-Concurrent`, a reviewed combined job budget and unchanged warm
-caches. Compare reuse counts, native staging, outputs and total elapsed/resource
-use against their sequential observations. No real speedup, production artifact
-equivalence or Windows PowerShell 5.1 execution is claimed by these synthetic
-checks. Do not add full builds solely to warm or benchmark a new worktree cache.
+Subsequent integration repeated the synthetic checks and exercised overlapping real launchers in the main warm caches; the results and final source builds are recorded below. Speedup measurement and Windows PowerShell 5.1 remain unvalidated. Observe reuse and resource use on the next necessary equivalent build, without adding full builds solely to warm or benchmark a worktree cache.
 
 ## Microphone admission and lifecycle ordering (2026-10-08)
 
@@ -1511,9 +1507,44 @@ Merged the scoped concurrency builder into the main checkout, preserving both
 documentation histories. All 211 synthetic assertions passed again here.
 Reviewed root/desktop release plans and started both with -Concurrent -Jobs 2
 using the established warm caches. Root passed in 33.83s with all 785 external
-and 19 workspace artifacts reused, none rebuilt. Desktop is still running:
+and 19 workspace artifacts reused, none rebuilt. Desktop passed in 11m52s:
 Cargo identified a generated Tauri HTML asset timestamp newer than the prior
-binary fingerprint, causing a workspace-only relink. No external rebuild has
-appeared. This is not yet a speedup or completed desktop validation claim.
+binary fingerprint, causing a workspace-only relink. All 1,080 external artifacts were reused,
+none rebuilt; 17 workspace artifacts reused and one rebuilt. No speedup claim
+is made from these unequal workloads. Desktop SHA256 after this relink:
+594BCDAB146DF04E97ECCD7FD2F306911982398B83F03D7C25087C071A880A19.
 The unnecessary generated-asset invalidation requires a scoped follow-up; do
 not reset caches or add repeated production builds solely for measurement.
+
+## Status, deletion and context-generation release milestone (2026-10-08)
+
+Settled source includes the status-only UI, durable existing-delete cleanup jobs
+and supported build-script Tauri context generation. Twenty-four focused frontend
+tests, type checking, final static export, three synthetic DB byte/store regressions,
+five context-ordering fixture checks and canonical RootFmt/DesktopFmt passed.
+Independent source review findings were resolved. DesktopCheck passed in 1m31s:
+1,069 external reused, 15 expected new Tauri variants, zero unexpected rebuilds.
+
+Plans retained established release caches, locked/offline configuration and two
+jobs per build. Both commands opted into -Concurrent, but memory headroom near
+5.6 GiB required staggering the heavy runs (available memory later reached
+about 1.5 GiB under desktop optimisation). No other app/service was changed.
+Reviewed -AllowColdCache adopted deliberate new preflight signatures: desktop
+codegen changes the pinned feature graph; root preflight also hashes the desktop
+manifest/lockfile conservatively, despite its unchanged dependency graph.
+
+- RootBuild -BuildProfile release -Concurrent -Jobs 2 -AllowColdCache passed
+  in 6m31s: 785 external reused/zero rebuilt; 12 workspace reused/seven rebuilt.
+- DesktopBuild -BuildProfile release -Concurrent -Jobs 2 -AllowColdCache passed
+  in 11m01s: 1,065 external reused/15 expected variants; ten workspace reused/
+  eight rebuilt; zero unexpected external rebuilds.
+- The root executable passed inert version/help/record-help. Desktop was not
+  launched. Actual context plus 494 generated asset files predated the application's
+  dependency reference, addressing the observed extra-relink cause. Observe reuse
+  on the next necessary equivalent run; no extra full build was paid for that.
+
+No additional release-local build was needed after these settled production
+builds. Existing unchanged deployment-script checks remain applicable. No capture,
+installed-data migration, deployment/restart, firewall operation or GUI/hardware
+validation occurred. There is no speedup claim from these unequal workloads.
+Full Discard, pending review and consumer-copy erasure remain contract milestones.

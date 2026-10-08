@@ -259,7 +259,7 @@ The separate builder work is committed as `16aee39a9` on
 `codex/windows-build-concurrency` in an isolated worktree. Its opt-in `-Concurrent`
 supports root/desktop overlap while preserving same-cache and desktop-staging
 exclusion and default serialization. Synthetic checks passed: 12 lock, 97 launcher,
-18 cache and 84 trial-profile assertions. It is now merged into the main checkout as `6938fd9af`; all 211 assertions passed again. The concurrent warm root release check passed; desktop remains in progress with a generated-asset relink. It was not used for the original production builds above. Real-build speedup and PowerShell
+18 cache and 84 trial-profile assertions. It is now merged into the main checkout as `6938fd9af`; all 211 assertions passed again. The concurrent warm root release check passed; desktop also passed in 11m52s with all external artifacts reused and one generated-asset-triggered workspace relink. It was not used for the original production builds above. Real-build speedup and PowerShell
 5.1 execution remain unvalidated. Integration review is separate from deployment.
 
 ## Suggested next steps
@@ -283,8 +283,9 @@ exclusion and default serialization. Synthetic checks passed: 12 lock, 97 launch
    permanent Discard confirmation; settle expiry/startup behaviour, reminder
    persistence, shared-file deletion and best-effort overwrite limitations.
 5. Define explicit policy/rule scopes and the Codex-assisted migration procedure.
-6. Design the tray status/review interaction against these contracts; implement
-   the retention backend before presenting controls that promise enforcement.
+6. The status-only GUI is implemented independently of retention. Tray or
+   always-on-top status refinements can proceed separately. Implement the
+   retention backend before review or Keep/Discard controls promise enforcement.
 7. Assess storage pressure separately using existing mechanisms, including alerts,
    stopped-recording persistence, voluntary cleanup and interaction with deadlines.
 
@@ -310,3 +311,51 @@ safe reasons and avoid claiming unimplemented retention enforcement. Deletion
 repairs preserve existing selection scope; material storage/access architecture
 changes remain decisions in the contract. Desktop build inputs must remain
 unchanged until the running build finishes.
+
+## Status and deletion implementation progress (2026-10-08)
+
+A status-only desktop dialog is integrated behind the home Status button and
+existing status entry points. It shows ten instrumented data types, numeric
+monitor/device or global scope, safe reasons and rule references. Open admission
+is labelled Capture permitted; missing observers and delivery/shutdown degradation
+are explicit. It does not claim continuous heartbeat or saved-data confirmation.
+Twenty-four focused frontend tests, type checking and final static export passed.
+Approval, review storage, Keep/Discard policies and always-on-top/notification
+features remain separate milestones. See [status UI](RECORDING_STATUS_UI.md).
+
+Existing deletion now preserves unrelated orphan pointers and records eligible
+file cleanup transactionally for bounded, fair retries after restart. Known live
+references block unlink. Incomplete/unknown outcomes retain committed counts and
+clear hot/search/image caches. Three synthetic store/byte regressions passed;
+complete permanent Discard remains blocked by shared bytes, uncertain derivatives,
+filesystem-only writers, historical orphans and previously delivered copies.
+See [scoped repairs](DELETION_REPAIRS.md) and the reconciled audit addendum.
+
+The desktop rebuild fix uses supported build-script Tauri context generation so
+new assets predate application compilation. No versions changed; the desktop
+lockfile adds two existing dependency edges. Five ordering/cache fixture checks
+and DesktopCheck passed. The check reused 1,069 external artifacts and built
+15 expected new Tauri variants; no unexpected rebuilds. The launcher conservatively
+hashes both workspace manifests/lockfiles, so that desktop-only change also
+required a reviewed new root preflight baseline; this does not clear Cargo caches.
+
+Both final production builds passed with settled source: root in 6m31s
+(785 external reused/zero rebuilt), desktop in 11m01s (1,065 reused/15
+expected new Tauri variants, zero unexpected rebuilds). Memory headroom was
+about 5.6 GiB, so heavy builds were staggered; overlap is conditional on
+capacity. No deployment, live capture, hardware validation or installed-store
+migration has occurred. The next owner session can review the compiled milestone
+and plan deployment/preflight/live microphone checks. The optional retention
+upgrade still needs the contract decisions before its synthetic prototype.
+
+Final release hashes and exact build limits are in the validation register.
+The recorder also passed inert version/help/record-help checks. Actual generated
+Tauri asset timestamps now predate the application dependency reference; no
+extra full build was added solely to measure reuse. Independent source review
+resolved missing delivery/shutdown alerts and deletion result/caching findings.
+
+Committed source milestones: durable cleanup fc6ca946b; Tauri context ordering
+e25968736; recording-status GUI 92f81aa65. Builder merge remains 6938fd9af.
+The implementation and final build records are committed locally; no push or
+deployment is implied. Further source work on full retention remains dependent
+on the explicit contract choices, not on the status GUI.

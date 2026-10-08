@@ -211,3 +211,16 @@ They do not establish storage-pressure stop/alert coverage. Review state, remind
 snooze, expiry/startup semantics, API shape, local review trust, undo, fine-grained
 exceptions, conversation membership and mixed-source derivative handling remain
 unresolved. No existing age worker should silently be converted into these policies.
+
+## Post-audit scoped repairs (2026-10-08)
+
+The owner subsequently authorized status UI and concrete existing-deletion repairs.
+See [deletion repairs](DELETION_REPAIRS.md): selected-only orphan-row cleanup,
+transactional media cleanup ownership, bounded fair restart retries, live-reference
+checks, safe incomplete/unknown responses and cache invalidation now have three
+passing synthetic byte/store regressions. The historical audit above remains the
+inspection record; its line anchors are not current source positions. Shared media
+bytes, uncertain derivative lineage, raw untranscribed range selection, historical
+orphans, consumer copies and filesystem-only writer coordination remain gaps.
+The cleanup table is not a retention approval ledger or an anti-resurrection fence.
+Production build validation is recorded separately in the validation register.
