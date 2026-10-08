@@ -10,7 +10,7 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest artifacts and validation: [status and deletion integration](#status-and-deletion-integration-release-validation-2026-10-08). The earlier hashes below belong to the previous candidate.
+Latest artifacts and validation: [trustworthy live status](#trustworthy-live-status-release-validation-2026-10-08). Earlier hashes below belong to their historical candidates.
 
 ## Production release build milestone, 2026-10-08
 
@@ -1060,3 +1060,48 @@ Runtime microphone signal, monitor transitions and installed-package preflight
 remain unvalidated. Complete permanent Discard and pending-review access control
 remain outside these scoped repairs. See the three milestone documents and the
 updated data control discussion. No production performance or PS5.1 claim is made.
+
+## Trustworthy live status release validation (2026-10-08)
+
+The owner authorized usable recording status through release builds and commits.
+The panel now separates gate observations, actual sample/capture completion and
+successful storage, with current-session evidence and monotonic producer ages.
+Missing/stale checks, response latency, visibility changes and clock anomalies
+cannot promote old observations into current recording claims. See
+[status coverage](docs/RECORDING_STATUS_UI.md#evidence-coverage-and-limits).
+
+Validation used existing locked/offline caches and the canonical launcher:
+
+- RootFmt passed; no Rust manifest, dependency or lockfile changes.
+- `RootTest -Package screenpipe-config -Lib -TestFilter capture_` passed eight
+  tests; 52 external artifacts reused, zero rebuilt; one workspace rebuilt.
+- `RootTest -Package screenpipe-engine -Lib -TestFilter privacy_notices::tests`
+  passed 11 tests; 685 external reused, zero rebuilt; nine workspace reused,
+  seven rebuilt. `-TestFilter live_evidence_` then passed the typed-input test
+  with all 685 external and 16 workspace artifacts reused.
+- The config/engine test targets needed one-time reviewed `-AllowColdCache`
+  adoption because their prior launcher signatures predated the earlier desktop
+  manifest/lock change. All external dependencies were reused. No acquisition,
+  reset or cache relocation occurred.
+- TypeScript no-emit and 39 frontend regressions passed (26 parser, 13 dialog).
+  Direct `node node_modules/next/dist/bin/next build` with telemetry disabled
+  passed static export/type checking, retaining the existing unpdf warning and
+  avoiding acquisition/staging prebuild scripts.
+- `RootBuild -BuildProfile release -Jobs 2` passed in 6m04s; 785 external reused,
+  zero rebuilt; 11 workspace reused, eight rebuilt. Inert version/help/record-help
+  checks passed. Recorder SHA256:
+  `61F9B38C181D56C2BEC5D3890615BD733BF9C5A069D45C4C3CCC4FA6B27929EC`.
+- `DesktopBuild -BuildProfile release -Jobs 2` passed in 11m13s; 1,080 external
+  reused, zero rebuilt; ten workspace reused, eight rebuilt. Desktop SHA256:
+  `5EEE938B099BB9DAB75AD5C334196362279929687F369D4A6F25F9226D77F3B7`.
+  Both release caches had matching baselines; no cold-cache flag was needed.
+  Heavy builds were sequential to preserve memory headroom.
+
+Independent read-only source review corrected stale producer gating, conservative
+request-latency accounting, evidence-capacity/truncation handling and latest-report
+wording, with no remaining actionable blocker reported. This is source/synthetic
+and compilation evidence, not live GUI/hardware validation. No captured contents,
+live data stores/APIs, recording, deployment, restart or firewall change occurred.
+Secondary HD/reconciliation/import/live-provider paths remain incompletely
+instrumented; OCR/interface capture evidence is conservative at paired persistence.
+Retention/pending-review implementation remains separate.

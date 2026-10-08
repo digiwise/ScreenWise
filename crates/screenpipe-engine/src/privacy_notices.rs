@@ -262,6 +262,7 @@ impl Drop for PrivacyNoticeRecorder {
 /// Subscribe synchronously BEFORE starting the lock monitor, so its initial
 /// diagnosis cannot disappear before the async writer gets scheduled.
 pub fn start(db: Arc<DatabaseManager>) -> PrivacyNoticeRecorder {
+    screenpipe_config::live_capture_status::start_session();
     start_with_status(db, PERSISTENCE_DEGRADED.clone())
 }
 
@@ -465,6 +466,7 @@ pub struct TimelineNotice {
 }
 #[derive(Serialize)]
 pub struct NoticeResponse {
+    live_status: screenpipe_config::live_capture_status::LiveStatus,
     data: Vec<TimelineNotice>,
     has_more: bool,
     persistence_degraded: bool,
@@ -534,6 +536,7 @@ async fn query_notices(db: &DatabaseManager, range: &NoticeRange) -> Result<Noti
     }
     let audio_shutdown_issues = screenpipe_events::audio_shutdown_issues();
     Ok(NoticeResponse {
+        live_status: screenpipe_config::live_capture_status::snapshot(),
         data,
         has_more,
         persistence_degraded: invalid_rows

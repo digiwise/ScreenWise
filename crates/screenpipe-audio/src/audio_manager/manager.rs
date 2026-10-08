@@ -1450,6 +1450,8 @@ impl AudioManager {
                                     audio_chunk_path = %path,
                                     "audio chunk DB insert failed after 3 retries, data may be missing from timeline"
                                 );
+                            } else {
+                                audio.device.report_live_success(true);
                             }
                             Some(path)
                         }

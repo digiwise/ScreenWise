@@ -22,6 +22,7 @@
 
 pub mod capture_diagnostics;
 mod defaults;
+pub mod live_capture_status;
 mod persistence;
 mod recording;
 pub mod screen_lock;

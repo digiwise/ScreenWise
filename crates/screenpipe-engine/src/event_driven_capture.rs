@@ -2198,6 +2198,11 @@ async fn do_capture(
         });
     }
 
+    screenpipe_config::live_capture_status::captured(
+        screenpipe_config::capture_diagnostics::CaptureChannel::Screen,
+        screenpipe_config::capture_diagnostics::CaptureScope::Monitor(params.monitor_id),
+    );
+
     // The shared wrapper already verifies after pixel acquisition. Verify once
     // more immediately before UIA so a newly focused excluded window never has
     // its accessibility tree paired with the previously safe bitmap.
@@ -2709,6 +2714,26 @@ async fn do_capture(
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
+    // Real paired-capture success only: privacy placeholders and dedup/no-write paths
+    // deliberately do not establish capture or storage evidence.
+    if result.text_source.as_deref() != Some("privacy_placeholder") {
+        use screenpipe_config::capture_diagnostics::{CaptureChannel as C, CaptureScope};
+        let scope = CaptureScope::Monitor(params.monitor_id);
+        if !result.snapshot_path.is_empty() {
+            screenpipe_config::live_capture_status::stored(C::ScreenStorage, scope);
+        }
+        if matches!(result.text_source.as_deref(), Some("ocr" | "hybrid")) {
+            screenpipe_config::live_capture_status::captured(C::Ocr, scope);
+            screenpipe_config::live_capture_status::stored(C::Ocr, scope);
+        }
+        if matches!(
+            result.text_source.as_deref(),
+            Some("accessibility" | "hybrid")
+        ) {
+            screenpipe_config::live_capture_status::captured(C::Accessibility, scope);
+            screenpipe_config::live_capture_status::stored(C::Accessibility, scope);
+        }
+    }
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.

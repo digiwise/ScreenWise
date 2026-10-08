@@ -370,3 +370,26 @@ canonical results. All worktrees are clean; private generated evidence is
 preserved. These are archival branch commits, requiring no duplicate merge or
 rebuild. Deployment/live checks and the remaining retention decisions are still
 pending as described above.
+
+### Trustworthy live status implementation
+
+The owner authorized finishing usable recording status through release builds
+and commits unattended. This increment adds current-session, content-free
+capture/sample and successful-storage evidence to the authenticated status
+snapshot, independently of permission. Producer-check freshness is separate
+from condition onset; repeated checks update observation age without duplicate
+transition events. Stale/missing observations and old-recorder schemas are
+explicitly unavailable. Delayed responses, visibility changes and clock
+changes cannot refresh an old gate by merely fetching it again.
+
+The desktop retains independent data types and monitor/device scope, safe
+reasons/rule references, silence and delivery-loss explanations. Silent samples
+prove sample receipt, not a functioning microphone or speech. Last storage
+success is history, not proof data remains retained. See
+[coverage and limits](RECORDING_STATUS_UI.md#evidence-coverage-and-limits):
+primary capture, queued audio and typed input are instrumented; secondary paths
+and fine-grained retention remain separate work. No retention decisions were
+silently resolved, and live recording/installed artifacts were unchanged.
+
+Final test, release-artifact and source commit records are maintained in
+[the validation register](../VALIDATION_REGISTER.md).

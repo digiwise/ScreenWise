@@ -414,12 +414,13 @@ impl Diagnostics {
         event.reasons.sort_unstable();
         event.reasons.dedup();
         let key = (event.channel, event.source, event.scope);
-        if let Some(previous) = self.current.get(&key) {
+        if let Some(previous) = self.current.get_mut(&key) {
             if previous.condition == event.condition
                 && previous.reasons == event.reasons
                 && previous.rules == event.rules
                 && previous.excluded_apps == event.excluded_apps
             {
+                previous.observed_at_ms = event.observed_at_ms;
                 return Vec::new();
             }
             event.previous_since_ms = Some(previous.since_ms);
@@ -447,6 +448,7 @@ pub fn observe(
     reasons: Vec<CaptureReason>,
     rules: Vec<RuleReference>,
 ) {
+    crate::live_capture_status::checked(channel, source, scope);
     let now = now_ms();
     let notices = match store().lock() {
         Ok(mut store) => store.observe(CaptureDiagnostic {
@@ -478,6 +480,7 @@ pub fn observe_window(
     rules: Vec<RuleReference>,
     mut excluded_apps: Vec<String>,
 ) {
+    crate::live_capture_status::checked(channel, DiagnosticSource::WindowPolicy, scope);
     excluded_apps.retain(|app| {
         app.len() <= 120
             && app.ends_with(".exe")
@@ -568,6 +571,30 @@ pub fn close_source(scope: CaptureScope, source: DiagnosticSource, reason: Captu
 mod tests {
     use super::*;
     static DELIVERY_NOTICES: Mutex<Vec<DiagnosticDeliveryNotice>> = Mutex::new(Vec::new());
+    #[test]
+    fn repeated_check_refreshes_observation_without_new_transition() {
+        let mut diagnostics = Diagnostics::default();
+        let mut event = CaptureDiagnostic {
+            channel: CaptureChannel::Screen,
+            source: DiagnosticSource::CaptureOperation,
+            scope: CaptureScope::Monitor(1),
+            condition: CaptureCondition::Admitted,
+            reasons: vec![CaptureReason::GateOpen],
+            rules: Vec::new(),
+            excluded_apps: Vec::new(),
+            observed_at_ms: 10,
+            since_ms: 10,
+            previous_since_ms: None,
+        };
+        diagnostics.observe(event.clone());
+        event.observed_at_ms = 20;
+        event.since_ms = 20;
+        diagnostics.observe(event);
+        let current = diagnostics.current.values().next().unwrap();
+        assert_eq!(current.observed_at_ms, 20);
+        assert_eq!(current.since_ms, 10);
+        assert_eq!(diagnostics.pending.len(), 1);
+    }
     fn record_delivery_notice(notice: DiagnosticDeliveryNotice) {
         assert!(
             store().try_lock().is_ok(),

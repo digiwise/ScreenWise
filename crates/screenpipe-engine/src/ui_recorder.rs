@@ -27,6 +27,20 @@ fn privacy_persistence_paused() -> bool {
     !screenpipe_config::audio_privacy::visual_capture_allowed()
 }
 
+fn live_input_channel(
+    event_type: &screenpipe_db::UiEventType,
+) -> Option<screenpipe_config::capture_diagnostics::CaptureChannel> {
+    use screenpipe_config::capture_diagnostics::CaptureChannel as C;
+    use screenpipe_db::UiEventType as E;
+    match event_type {
+        E::Key | E::Text => Some(C::Keyboard),
+        E::Clipboard => Some(C::Clipboard),
+        E::Click | E::Move | E::Scroll => Some(C::Pointer),
+        // Focus/activity metadata alone does not prove interface-text capture.
+        E::AppSwitch | E::WindowFocus | E::PrivacyNotice => None,
+    }
+}
+
 /// A batched UI event plus an optional correlation id. Events that
 /// won't trigger a capture (Move, Idle, filtered-out targets) leave
 /// `correlation_id` as `None` — those rows stay `frame_id = NULL`.
@@ -852,6 +866,12 @@ pub async fn start_ui_recording(
                     if should_record_event {
                         let db_event =
                             event.to_db_insert(Some(session_id.clone()), config.apply_pii_removal);
+                        if let Some(channel) = live_input_channel(&db_event.event_type) {
+                            screenpipe_config::live_capture_status::captured(
+                                channel,
+                                screenpipe_config::capture_diagnostics::CaptureScope::Global,
+                            );
+                        }
                         batch.push(db_event, correlation_id);
                     }
 
@@ -1023,6 +1043,14 @@ async fn flush_batch(
     // row_ids afterwards.
     match db.insert_ui_events_batch(&batch.events).await {
         Ok(row_ids) => {
+            for event in batch.events.iter().take(row_ids.len()) {
+                if let Some(channel) = live_input_channel(&event.event_type) {
+                    screenpipe_config::live_capture_status::stored(
+                        channel,
+                        screenpipe_config::capture_diagnostics::CaptureScope::Global,
+                    );
+                }
+            }
             {
                 use screenpipe_config::capture_diagnostics::*;
                 for channel in [
@@ -1675,6 +1703,24 @@ mod scroll_burst_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_evidence_uses_actual_input_type_not_other_events_in_batch() {
+        use screenpipe_config::capture_diagnostics::CaptureChannel as C;
+        use screenpipe_db::UiEventType as E;
+        for (kind, expected) in [
+            (E::Key, Some(C::Keyboard)),
+            (E::Text, Some(C::Keyboard)),
+            (E::Clipboard, Some(C::Clipboard)),
+            (E::Move, Some(C::Pointer)),
+            (E::Click, Some(C::Pointer)),
+            (E::Scroll, Some(C::Pointer)),
+            (E::AppSwitch, None),
+            (E::WindowFocus, None),
+            (E::PrivacyNotice, None),
+        ] {
+            assert_eq!(live_input_channel(&kind), expected);
+        }
+    }
     use super::*;
 
     #[test]

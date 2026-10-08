@@ -434,6 +434,9 @@ async fn recv_audio_chunk(
             }
             metrics.update_audio_level(&chunk.samples);
             metrics.update_audio_level_for_device(device_name, &chunk.samples);
+            if !chunk.samples.is_empty() {
+                audio_stream.device.report_live_success(false);
+            }
 
             if !is_silent_buffer(&chunk.samples) {
                 audio_stream.device.report_diagnostic(

@@ -138,6 +138,21 @@ impl AudioDevice {
         }
     }
 
+    /// Content-free evidence from actual admitted samples or completed file+DB storage.
+    pub fn report_live_success(&self, stored: bool) {
+        use screenpipe_config::capture_diagnostics::*;
+        let channel = match self.device_type {
+            DeviceType::Input => CaptureChannel::Microphone,
+            DeviceType::Output => CaptureChannel::OutputAudio,
+        };
+        let scope = CaptureScope::Device(self.diagnostic_id());
+        if stored {
+            screenpipe_config::live_capture_status::stored(channel, scope);
+        } else {
+            screenpipe_config::live_capture_status::captured(channel, scope);
+        }
+    }
+
     pub fn report_transcription(
         &self,
         condition: screenpipe_config::capture_diagnostics::CaptureCondition,

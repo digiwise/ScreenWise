@@ -20,12 +20,64 @@ const QUEUES: Record<string, string> = { device_capture: "Audio device capture b
 const SHUTDOWN = new Set(["producer_stop_timeout", "producer_stop_failed", "consumer_drain_timeout", "consumer_drain_failed", "queued_work_discarded", "worker_completion_unconfirmed"]);
 const words = (value: string) => value.replaceAll("_", " ");
 const integer = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-export type StatusObservation = { key: string; channel: string; source: string; scope: string; condition: string; status: string; reasons: string[]; rules: string[]; since: number; observed: number };
+export type StatusObservation = { key: string; channel: string; source: string; scope: string; condition: string; status: string; reasons: string[]; rules: string[]; since: number; observed: number; checkedAge: number | null };
+export type CaptureEvidence = { key: string; channel: string; scope: string; global: boolean; captureSupported: boolean; storageSupported: boolean; captured: number | null; stored: number | null; captureAge: number | null; storageAge: number | null };
+export const STATUS_MAX_AGE_MS = 15000;
+export function statusScope(raw: unknown): string {
+  if (raw === "global") return "All sources (global scope; individual monitor attribution unavailable)";
+  if (raw && typeof raw === "object" && Object.keys(raw).length === 1) {
+    const value = raw as Record<string, unknown>;
+    if (integer(value.monitor)) return `Monitor ${value.monitor}`;
+    if (integer(value.device)) return value.device === 0 ? "Device unknown" : `Device ${value.device}`;
+  }
+  throw new Error("Invalid scope");
+}
+export function evidenceAge(age: number | null, elapsed = 0): string {
+  if (age === null) return "No success observed in this recorder session";
+  const seconds = Math.floor((age + Math.max(0, elapsed)) / 1000);
+  return seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ${seconds % 60}s ago`;
+}
+export function parseLiveStatus(body: unknown): { evidence: CaptureEvidence[]; snapshot: number; session: number } {
+  if (!body || typeof body !== "object") throw new Error("Live status unavailable");
+  const live = (body as Record<string, unknown>).live_status as Record<string, unknown>;
+  if (!live || live.schema_version !== 1 || typeof live.evidence_available !== "boolean" || !integer(live.session_uptime_ms) || !integer(live.snapshot_at_ms) || !integer(live.session_started_at_ms)
+    || !Array.isArray(live.evidence) || live.evidence.length > 4096) throw new Error("Live status unavailable");
+  const seen = new Set<string>();
+  const evidence = live.evidence.map((raw): CaptureEvidence => {
+    if (!raw || typeof raw !== "object") throw new Error("Invalid evidence");
+    const row = raw as Record<string, unknown>;
+    if (typeof row.channel !== "string" || !Object.hasOwn(DATA_TYPES, row.channel)
+      || typeof row.capture_supported !== "boolean" || typeof row.storage_supported !== "boolean") throw new Error("Invalid evidence");
+    for (const [supported, time, age] of [[row.capture_supported, row.last_capture_at_ms, row.capture_age_ms], [row.storage_supported, row.last_storage_at_ms, row.storage_age_ms]]) {
+      if ((time === null) !== (age === null) || (time !== null && (!integer(time) || !integer(age)))
+        || (!supported && time !== null)) throw new Error("Invalid evidence");
+    }
+    const scope = statusScope(row.scope), key = `${row.channel}:${scope}`;
+    if (seen.has(key)) throw new Error("Duplicate evidence");
+    seen.add(key);
+    return { key, channel: row.channel, scope, global: row.scope === "global", captureSupported: row.capture_supported, storageSupported: row.storage_supported,
+      captured: row.last_capture_at_ms as number | null, stored: row.last_storage_at_ms as number | null,
+      captureAge: row.capture_age_ms as number | null, storageAge: row.storage_age_ms as number | null };
+  });
+  return { evidence: live.evidence_available ? evidence : [], snapshot: live.snapshot_at_ms, session: live.session_started_at_ms };
+}
 
 // Validate every displayed field; never render arbitrary server messages, app identities or matching text.
 export function parseRecordingStatus(body: unknown): { rows: StatusObservation[]; degraded: boolean; alerts: string[] } {
   if (!body || typeof body !== "object") throw new Error("Invalid status");
   const response = body as Record<string, unknown>;
+  const checks = (response.live_status as Record<string, unknown> | undefined)?.interval_checks;
+  if (checks !== undefined && (!Array.isArray(checks) || checks.length > 4096)) throw new Error("Invalid producer checks");
+  const checkAges = new Map<string, number>();
+  for (const raw of (checks ?? []) as unknown[]) {
+    if (!raw || typeof raw !== "object") throw new Error("Invalid producer check");
+    const check = raw as Record<string, unknown>;
+    if (typeof check.channel !== "string" || !Object.hasOwn(DATA_TYPES, check.channel) || typeof check.source !== "string" || !SOURCES.has(check.source)
+      || !integer(check.checked_at_ms) || !integer(check.checked_age_ms)) throw new Error("Invalid producer check");
+    const key = `${check.channel}:${check.source}:${statusScope(check.scope)}`;
+    if (checkAges.has(key)) throw new Error("Duplicate producer check");
+    checkAges.set(key, check.checked_age_ms);
+  }
   if (!Array.isArray(response.active_intervals) || response.active_intervals.length > 4096 || typeof response.persistence_degraded !== "boolean") throw new Error("Invalid status");
   const rows = response.active_intervals.map((raw): StatusObservation => {
     if (!raw || typeof raw !== "object") throw new Error("Invalid observation");
@@ -38,14 +90,7 @@ export function parseRecordingStatus(body: unknown): { rows: StatusObservation[]
       || !Array.isArray(row.reasons) || row.reasons.length > 100
       || !row.reasons.every((reason) => typeof reason === "string" && REASONS.has(reason))
       || !Array.isArray(row.rules) || row.rules.length > 100) throw new Error("Invalid observation");
-    let scope: string;
-    if (row.scope === "global") scope = "All sources (global scope; individual monitor attribution unavailable)";
-    else if (row.scope && typeof row.scope === "object" && Object.keys(row.scope).length === 1) {
-      const value = row.scope as Record<string, unknown>;
-      if (integer(value.monitor)) scope = `Monitor ${value.monitor}`;
-      else if (integer(value.device)) scope = value.device === 0 ? "Device unknown" : `Device ${value.device}`;
-      else throw new Error("Invalid scope");
-    } else throw new Error("Invalid scope");
+    const scope = statusScope(row.scope);
     const rules = row.rules.map((rawRule) => {
       if (!rawRule || typeof rawRule !== "object") throw new Error("Invalid rule");
       const rule = rawRule as Record<string, unknown>;
@@ -54,7 +99,7 @@ export function parseRecordingStatus(body: unknown): { rows: StatusObservation[]
     });
     return { key: `${row.channel}:${row.source}:${scope}`, channel: row.channel, source: words(row.source), scope,
       condition: row.condition, status: CONDITIONS[row.condition], reasons: row.reasons.map((reason: string) => words(reason)),
-      rules, since: row.since_ms, observed: row.observed_at_ms };
+      rules, since: row.since_ms, observed: row.observed_at_ms, checkedAge: checkAges.get(`${row.channel}:${row.source}:${scope}`) ?? null };
   });
   let degraded = response.persistence_degraded;
   const alerts: string[] = [];

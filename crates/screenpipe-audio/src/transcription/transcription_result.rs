@@ -110,6 +110,12 @@ pub async fn process_transcription_result(
     };
 
     let raw_transcription = result.transcription.clone().unwrap();
+    screenpipe_config::live_capture_status::captured(
+        screenpipe_config::capture_diagnostics::CaptureChannel::Transcription,
+        screenpipe_config::capture_diagnostics::CaptureScope::Device(
+            result.input.device.diagnostic_id(),
+        ),
+    );
     // Apply PII removal if enabled
     let transcription = if use_pii_removal {
         remove_pii(&raw_transcription)
@@ -189,6 +195,12 @@ pub async fn process_transcription_result(
                 {
                     return Ok(None);
                 }
+                screenpipe_config::live_capture_status::stored(
+                    screenpipe_config::capture_diagnostics::CaptureChannel::Transcription,
+                    screenpipe_config::capture_diagnostics::CaptureScope::Device(
+                        result.input.device.diagnostic_id(),
+                    ),
+                );
                 let segments =
                     diarization_segments_for_insert(&result, speaker_id, use_pii_removal);
                 let provider = result.diarization_provider.as_deref().unwrap_or(

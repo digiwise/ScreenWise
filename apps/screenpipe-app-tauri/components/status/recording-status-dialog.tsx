@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { localFetch } from "@/lib/api";
 import { useStatusDialog } from "@/lib/hooks/use-status-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { parseRecordingStatus, DATA_TYPES, type StatusObservation } from "@/lib/recording-status";
+import { parseRecordingStatus, parseLiveStatus, evidenceAge, STATUS_MAX_AGE_MS, DATA_TYPES, type StatusObservation, type CaptureEvidence } from "@/lib/recording-status";
 
 export function RecordingStatusButton() {
   const open = useStatusDialog((state) => state.open);
@@ -21,50 +21,83 @@ export function RecordingStatusDialog() {
   const [checked, setChecked] = useState<number | null>(null);
   const [degraded, setDegraded] = useState(false);
   const [alerts, setAlerts] = useState<string[]>([]);
+  const [evidence, setEvidence] = useState<CaptureEvidence[]>([]);
+  const [session, setSession] = useState<number | null>(null);
+  const [tick, setTick] = useState(Date.now());
+  const [receivedMonotonic, setReceivedMonotonic] = useState<number | null>(null);
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     let controller: AbortController;
-    setRows([]); setAlerts([]); setChecked(null); setError(null);
+    let visibilityGeneration = 0;
+    setRows([]); setEvidence([]); setAlerts([]); setSession(null); setChecked(null); setError(null); setReceivedMonotonic(null);
+    const invalidate = () => { visibilityGeneration++; controller?.abort(); setChecked(null); setRows([]); setEvidence([]); setAlerts([]); setError("Recording status unavailable after visibility change. Waiting for a fresh recorder response."); };
+    const visibility = () => invalidate();
+    document.addEventListener("visibilitychange", visibility);
+    const freshnessTimer = setInterval(() => setTick(Date.now()), 1000);
     const load = async () => {
       controller = new AbortController();
+      const started = Date.now(), startedMonotonic = performance.now();
+      const requestGeneration = visibilityGeneration;
       const timeout = setTimeout(() => controller.abort(), 8000);
       try {
         const now = new Date();
         const params = new URLSearchParams({ start_time: new Date(now.getTime() - 60000).toISOString(), end_time: now.toISOString(), limit: "1" });
         const response = await localFetch(`/capture-events?${params}`, { signal: controller.signal });
         if (!response.ok) throw new Error("Unavailable");
-        const status = parseRecordingStatus(await response.json());
+        const body = await response.json();
+        const status = parseRecordingStatus(body), live = parseLiveStatus(body);
+        const received = Date.now(), elapsed = received - started;
+        const monotonicElapsed = performance.now() - startedMonotonic;
+        if (requestGeneration !== visibilityGeneration || elapsed < 0 || elapsed > STATUS_MAX_AGE_MS || monotonicElapsed > STATUS_MAX_AGE_MS || Math.abs(elapsed - monotonicElapsed) > 2000) throw new Error("Expired response");
         if (cancelled) return;
-        setRows(status.rows); setAlerts(status.alerts); setDegraded(status.degraded); setChecked(Date.now()); setError(null);
+        const requestAge = Math.ceil(Math.max(elapsed, monotonicElapsed));
+        setRows(status.rows.map((row) => ({ ...row, checkedAge: row.checkedAge === null ? null : row.checkedAge + requestAge })));
+        setEvidence(live.evidence.map((row) => ({ ...row, captureAge: row.captureAge === null ? null : row.captureAge + requestAge,
+          storageAge: row.storageAge === null ? null : row.storageAge + requestAge })));
+        setSession(live.session); setAlerts(status.alerts); setDegraded(status.degraded); setChecked(received); setReceivedMonotonic(performance.now()); setTick(received); setError(null);
       } catch {
-        if (!cancelled) { setRows([]); setAlerts([]); setError("Recording status unavailable. Retrying; recording cannot be confirmed."); }
+        if (!cancelled) { setRows([]); setEvidence([]); setAlerts([]); setChecked(null); setError("Recording status unavailable. Retrying; recording cannot be confirmed."); }
       } finally {
         clearTimeout(timeout);
         if (!cancelled) timer = setTimeout(() => void load(), 5000);
       }
     };
     void load();
-    return () => { cancelled = true; clearTimeout(timer); controller?.abort(); };
+    return () => { cancelled = true; clearTimeout(timer); clearInterval(freshnessTimer); document.removeEventListener("visibilitychange", visibility); controller?.abort(); };
   }, [isOpen]);
+  const elapsed = checked === null ? 0 : tick - checked;
+  const monotonicElapsed = receivedMonotonic === null ? elapsed : performance.now() - receivedMonotonic;
+  const stale = checked !== null && (elapsed < 0 || elapsed > STATUS_MAX_AGE_MS || monotonicElapsed > STATUS_MAX_AGE_MS || Math.abs(elapsed - monotonicElapsed) > 2000);
+  const unavailable = error ?? (stale ? "Recording status unavailable — the recorder response is stale. Waiting for a fresh response." : null);
   return <Dialog open={isOpen} onOpenChange={(open) => { if (!open) close(); }}>
     <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
-      <DialogHeader><DialogTitle>Recording status</DialogTitle><DialogDescription>Captured data by data type and source. Capture permitted is an open gate, not confirmation that data was saved. Observations describe the latest reported condition; they do not provide a continuous recording heartbeat.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Recording status</DialogTitle><DialogDescription>Permission, capture and storage are independent. Capture permitted is an open gate, not proof of recording. Last successes describe this recorder session; idle input and silence do not imply a failure. Last storage success does not confirm data is still retained.</DialogDescription></DialogHeader>
       <div className="text-xs text-muted-foreground">{checked ? `Last checked ${new Date(checked).toLocaleTimeString()}` : "Checking recorder…"}</div>
-      {error && <p role="alert" className="text-destructive">{error}</p>}
-      {degraded && !error && <p role="alert" className="text-amber-600">Recording diagnostics are degraded; some explanations may be missing.</p>}
-      {!error && alerts.map((alert) => <p role="alert" className="text-amber-600 text-sm" key={alert}>{alert}</p>)}
-      {!error && alerts.length > 0 && <p className="text-xs text-muted-foreground">Loss counts and shutdown issues are recorded observations, including earlier incidents in this recorder session; they do not prove loss is continuing now.</p>}
+      {session !== null && !unavailable && <div className="text-xs text-muted-foreground">Recorder session started {new Date(session).toLocaleString()}</div>}
+      {unavailable && <p role="alert" className="text-destructive">{unavailable}</p>}
+      {degraded && !unavailable && <p role="alert" className="text-amber-600">Recording diagnostics are degraded; some explanations may be missing.</p>}
+      {!unavailable && alerts.map((alert) => <p role="alert" className="text-amber-600 text-sm" key={alert}>{alert}</p>)}
+      {!unavailable && alerts.length > 0 && <p className="text-xs text-muted-foreground">Loss counts and shutdown issues are recorded observations, including earlier incidents in this recorder session; they do not prove loss is continuing now.</p>}
       <div className="space-y-3">{Object.entries(DATA_TYPES).map(([channel, label]) => {
-        const observations = rows.filter((row) => row.channel === channel);
+        const observations = unavailable ? [] : rows.filter((row) => row.channel === channel);
+        const channelEvidence = unavailable ? [] : evidence.filter((row) => row.channel === channel);
+        const scopedSuccess = channelEvidence.some((row) => !row.global && (row.captured !== null || row.stored !== null));
+        const successes = channelEvidence.filter((row) => !(scopedSuccess && row.global && row.captured === null && row.stored === null));
         return <section key={channel} className="border rounded p-3"><h3 className="font-medium">{label}</h3>
           {!observations.length && <p className="text-sm text-muted-foreground">Status unavailable — no current observation.</p>}
+          {!successes.length && <p className="text-sm text-muted-foreground">Capture and storage evidence unavailable — no instrumented source reported.</p>}
+          {successes.map((row) => <div key={row.key} className="text-sm mt-2 border-l-2 pl-2">
+            <div>{row.global && row.captured === null && row.stored === null ? "Instrumentation coverage — no source-specific evidence reported" : row.scope}</div>
+            <div>{channel === "microphone" || channel === "output_audio" ? "Last samples received" : "Last captured"}: {row.captureSupported ? evidenceAge(row.captureAge, elapsed) : "Status unavailable — capture not instrumented"}</div>
+            <div>Last stored: {row.storageSupported ? evidenceAge(row.storageAge, elapsed) : "Status unavailable — storage not instrumented"}</div>
+          </div>)}
           {observations.map((row) => <div key={row.key} className="text-sm mt-2">
-            <div className={row.condition === "admitted" ? "text-muted-foreground" : "text-amber-600"}>{row.scope} · {row.status}</div>
+            <div className={row.condition === "admitted" ? "text-muted-foreground" : "text-amber-600"}>{row.scope} · {row.checkedAge === null || row.checkedAge + elapsed > STATUS_MAX_AGE_MS ? `Status unavailable — last reported: ${row.status}` : row.status}</div>
             <div>{row.reasons.join("; ")}</div>
             {row.rules.map((rule) => <div key={rule} className="text-xs">{rule}</div>)}
-            <div className="text-xs text-muted-foreground">Observer: {row.source} · since {new Date(row.since).toLocaleString()} · last change {new Date(row.observed).toLocaleString()}</div>
+            <div className="text-xs text-muted-foreground">Observer: {row.source} · condition since {new Date(row.since).toLocaleString()} · last report {new Date(row.observed).toLocaleString()} · last producer check: {row.checkedAge === null ? "unavailable" : evidenceAge(row.checkedAge, elapsed)}</div>
           </div>)}
         </section>;
       })}</div>
