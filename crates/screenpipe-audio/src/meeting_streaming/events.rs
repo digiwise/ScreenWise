@@ -107,7 +107,7 @@ impl MeetingAudioFrame {
     ) -> Self {
         Self {
             samples,
-            privacy: screenpipe_config::AudioPrivacyPermit::current(),
+            privacy: device.privacy_context().current(),
             device_name: device.name.clone(),
             device_type: device.device_type.clone(),
             sample_rate,

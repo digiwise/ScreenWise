@@ -17,6 +17,26 @@ function response(body: unknown): Response {
 
 describe("PrivacyNoticeTrack", () => {
 	beforeEach(() => localFetchMock.mockReset());
+	it("shows diagnostic capacity and observed loss without captured content", async () => {
+		localFetchMock.mockResolvedValue(response({ data: [], diagnostic_delivery: { near_capacity: true, dropped_observations: 2 } }));
+		render(<PrivacyNoticeTrack currentDate={new Date("2026-10-08T12:00:00+10:00")} />);
+		expect(await screen.findByText("Capture diagnostic storage is approaching capacity.")).toBeVisible();
+		expect(screen.getByText("Capture diagnostic observations lost: 2.")).toBeVisible();
+	});
+
+	it("retains an open interval whose onset predates the selected day", async () => {
+		localFetchMock.mockResolvedValue(response({ data: [], active_notices: [{ id: -1, timestamp: "2026-10-07T23:00:00Z", state: "capture_suppressed", reason_code: "capture_schedule_paused", message: "Screen Monitor(2): Suppressed; capture_schedule_paused." }] }));
+		render(<PrivacyNoticeTrack currentDate={new Date("2026-10-08T12:00:00+10:00")} />);
+		fireEvent.click(await screen.findByRole("button", { name: /Recording status \(1\)/ }));
+		expect(screen.getByText("Screen Monitor(2): Suppressed; capture_schedule_paused.")).toBeVisible();
+	});
+
+	it.each(["capture_suppressed", "capture_gate_cleared", "capture_redacted", "capture_partially_redacted", "capture_active_window_only", "processing_deferred", "capture_silent_input", "capture_no_callbacks", "capture_stopped"])("renders content protection state %s", async (state) => {
+		localFetchMock.mockResolvedValue(response({ data: [{ id: 99, timestamp: "2026-10-08T03:00:00Z", state, reason_code: "audio_browser_url_unverified", message: "Microphone and output capture remains suppressed: foreground browser URL unverified." }] }));
+		render(<PrivacyNoticeTrack currentDate={new Date("2026-10-08T12:00:00+10:00")} />);
+		fireEvent.click(await screen.findByRole("button", { name: /Recording status \(1\)/ }));
+		expect(screen.getByText("Microphone and output capture remains suppressed: foreground browser URL unverified.")).toBeVisible();
+	});
 
 	it("shows the fixed audio shutdown warning even with an empty notice queue", async () => {
 		localFetchMock.mockResolvedValue(response({

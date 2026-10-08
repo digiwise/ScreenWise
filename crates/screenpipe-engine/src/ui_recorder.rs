@@ -616,6 +616,36 @@ pub async fn start_ui_recording(
     // storms. Supports both legacy unscoped strings and `App::Title` scoped
     // patterns (see `screenpipe-core::window_pattern`).
     let ignored_patterns = WindowPattern::parse_list(&ignored_windows);
+    let diagnostic_rules = ignored_windows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, raw)| WindowPattern::parse(raw).map(|rule| (index as u32, rule)))
+        .collect::<Vec<_>>();
+    {
+        use screenpipe_config::capture_diagnostics::*;
+        for (channel, enabled) in [
+            (CaptureChannel::Keyboard, record_keyboard_events),
+            (CaptureChannel::Clipboard, config.capture_clipboard_content),
+            (CaptureChannel::Pointer, record_input_events),
+        ] {
+            observe(
+                channel,
+                DiagnosticSource::UserPreference,
+                CaptureScope::Global,
+                if enabled {
+                    CaptureCondition::Admitted
+                } else {
+                    CaptureCondition::Suppressed
+                },
+                vec![if enabled {
+                    CaptureReason::GateOpen
+                } else {
+                    CaptureReason::Disabled
+                }],
+                Vec::new(),
+            );
+        }
+    }
 
     // Spawn the event processing task
     let task_handle = tokio::spawn(async move {
@@ -711,6 +741,48 @@ pub async fn start_ui_recording(
                         .to_lowercase();
                     let is_ignored =
                         window_pattern::matches_any(&ignored_patterns, &app_lower, &title_lower);
+                    {
+                        use screenpipe_config::capture_diagnostics::*;
+                        let rules = diagnostic_rules
+                            .iter()
+                            .filter(|(_, rule)| rule.matches(&app_lower, &title_lower))
+                            .map(|(index, rule)| RuleReference {
+                                origin: RuleOrigin::IgnoredWindows,
+                                index: *index,
+                                kind: if rule.app.is_some() {
+                                    if rule.title.is_empty() {
+                                        RuleKind::AppSubstring
+                                    } else {
+                                        RuleKind::AppAndTitleSubstring
+                                    }
+                                } else {
+                                    RuleKind::AppOrTitleSubstring
+                                },
+                            })
+                            .collect::<Vec<_>>();
+                        for channel in [
+                            CaptureChannel::Keyboard,
+                            CaptureChannel::Clipboard,
+                            CaptureChannel::Pointer,
+                        ] {
+                            observe(
+                                channel,
+                                DiagnosticSource::WindowPolicy,
+                                CaptureScope::Global,
+                                if is_ignored {
+                                    CaptureCondition::Suppressed
+                                } else {
+                                    CaptureCondition::Admitted
+                                },
+                                vec![if is_ignored {
+                                    CaptureReason::ExcludedForeground
+                                } else {
+                                    CaptureReason::GateOpen
+                                }],
+                                rules.clone(),
+                            );
+                        }
+                    }
                     let should_record_event = record_input_events
                         && !is_ignored
                         && should_record_input_event(
@@ -951,6 +1023,24 @@ async fn flush_batch(
     // row_ids afterwards.
     match db.insert_ui_events_batch(&batch.events).await {
         Ok(row_ids) => {
+            {
+                use screenpipe_config::capture_diagnostics::*;
+                for channel in [
+                    CaptureChannel::Accessibility,
+                    CaptureChannel::Keyboard,
+                    CaptureChannel::Clipboard,
+                    CaptureChannel::Pointer,
+                ] {
+                    observe(
+                        channel,
+                        DiagnosticSource::Persistence,
+                        CaptureScope::Global,
+                        CaptureCondition::Admitted,
+                        vec![CaptureReason::GateOpen],
+                        Vec::new(),
+                    );
+                }
+            }
             debug!("Flushed {} UI events to database", row_ids.len());
             record_ui_event_flush(row_ids.len() as u64);
             *consecutive_failures = 0;
@@ -976,15 +1066,33 @@ async fn flush_batch(
                 }
             }
         }
-        Err(e) => {
+        Err(_e) => {
+            {
+                use screenpipe_config::capture_diagnostics::*;
+                for channel in [
+                    CaptureChannel::Accessibility,
+                    CaptureChannel::Keyboard,
+                    CaptureChannel::Clipboard,
+                    CaptureChannel::Pointer,
+                ] {
+                    observe(
+                        channel,
+                        DiagnosticSource::Persistence,
+                        CaptureScope::Global,
+                        CaptureCondition::Failed,
+                        vec![CaptureReason::CaptureFailure],
+                        Vec::new(),
+                    );
+                }
+            }
             *consecutive_failures += 1;
             if *consecutive_failures <= 3 {
-                error!("Failed to insert UI events batch: {}", e);
+                error!("Failed to insert UI events batch; captured context omitted.");
             } else {
                 // Reduce log spam during contention storms
                 debug!(
-                    "Failed to insert UI events batch (failure #{}): {}",
-                    consecutive_failures, e
+                    "Failed to insert UI events batch (failure #{}); captured context omitted.",
+                    consecutive_failures
                 );
             }
         }

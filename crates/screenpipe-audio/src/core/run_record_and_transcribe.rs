@@ -193,13 +193,14 @@ pub async fn run_record_and_transcribe(
     let mut segment_count: u64 = 0;
 
     let mut was_paused_for_lock = false;
-    let mut segment_privacy = AudioPrivacyPermit::current();
+    let privacy_context = audio_stream.device.privacy_context();
+    let mut segment_privacy = privacy_context.current();
     let mut was_privacy_paused = false;
 
     while is_running.load(Ordering::Relaxed)
         && !audio_stream.is_disconnected.load(Ordering::Relaxed)
     {
-        let current_privacy = AudioPrivacyPermit::current();
+        let current_privacy = privacy_context.current();
         if current_privacy != segment_privacy || current_privacy.is_none() {
             if current_privacy != segment_privacy {
                 info!("audio privacy generation changed; buffered samples and overlap discarded");
@@ -400,13 +401,16 @@ async fn recv_audio_chunk(
     stream_start: &Instant,
     last_non_zero_at: &mut Option<Instant>,
 ) -> Result<Option<CapturedAudio>> {
+    use screenpipe_config::capture_diagnostics::{
+        CaptureCondition as CC, CaptureReason as CR, DiagnosticSource as DS,
+    };
     let delivery = screenpipe_events::audio_delivery_reporter();
     delivery.sample_queue(
         AudioQueueKind::DeviceCapture,
         receiver.len(),
         AUDIO_STREAM_BUFFER_CAPACITY,
     );
-    let Some(privacy) = AudioPrivacyPermit::current() else {
+    let Some(privacy) = audio_stream.device.privacy_context().current() else {
         return Ok(None);
     };
     let recv_result = tokio::select! {
@@ -432,6 +436,11 @@ async fn recv_audio_chunk(
             metrics.update_audio_level_for_device(device_name, &chunk.samples);
 
             if !is_silent_buffer(&chunk.samples) {
+                audio_stream.device.report_diagnostic(
+                    DS::AudioProcessing,
+                    CC::Admitted,
+                    CR::GateOpen,
+                );
                 *last_non_zero_at = Some(Instant::now());
                 // Only tick "device is delivering data" on real audio so
                 // the UI / health endpoint cannot show green during a
@@ -440,6 +449,9 @@ async fn recv_audio_chunk(
                 return Ok(Some(chunk));
             }
 
+            audio_stream
+                .device
+                .report_diagnostic(DS::AudioProcessing, CC::Silent, CR::SilentInput);
             // Silent buffer. Only declare the stream hijacked if we had
             // confirmed real audio earlier — i.e. the stream WAS healthy
             // and went silent. Input devices only; output devices
@@ -485,6 +497,11 @@ async fn recv_audio_chunk(
             Ok(None)
         }
         Ok(Err(e)) => {
+            audio_stream.device.report_diagnostic(
+                DS::AudioDevice,
+                CC::Failed,
+                CR::DeviceStreamFailed,
+            );
             error!("error receiving audio data: {}", e);
             Err(anyhow!("Audio stream error: {}", e))
         }
@@ -513,6 +530,11 @@ async fn recv_audio_chunk(
             {
                 use crate::core::device::DeviceType;
                 if audio_stream.device.device_type == DeviceType::Output {
+                    audio_stream.device.report_diagnostic(
+                        DS::AudioProcessing,
+                        CC::NoCallbacks,
+                        CR::NoAudioCallbacks,
+                    );
                     debug!(
                         "no audio from output device {} for {}s (nothing playing), continuing",
                         device_name, AUDIO_RECEIVE_TIMEOUT_SECS
@@ -522,6 +544,11 @@ async fn recv_audio_chunk(
             }
 
             // For input devices (all platforms) and output devices (Linux):
+            audio_stream.device.report_diagnostic(
+                DS::AudioDevice,
+                CC::Failed,
+                CR::DeviceStreamFailed,
+            );
             // a 30s timeout means the OS stream genuinely stopped producing data.
             warn!(
                 "no audio received from {} for {}s - stream dead, triggering reconnect",
@@ -654,6 +681,190 @@ async fn flush_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ResetPrivacy;
+    impl Drop for ResetPrivacy {
+        fn drop(&mut self) {
+            use screenpipe_config::audio_privacy::*;
+            set_drm_paused(false);
+            set_screen_locked(false);
+            set_schedule_paused(false);
+            set_all_recording_paused(false);
+            set_audio_disabled(false);
+            set_record_while_locked(false);
+        }
+    }
+
+    // These global-policy tests run with --test-threads=1. Sources are synthetic
+    // broadcast streams; no endpoint, model or captured content is opened.
+    #[tokio::test]
+    async fn privacy_microphone_producer_keeps_running_through_visual_protection() {
+        let _reset = ResetPrivacy;
+        let device = Arc::new(AudioDevice::new(
+            "synthetic-independent-mic".into(),
+            DeviceType::Input,
+        ));
+        let (stream, tx) = AudioStream::from_sender_for_test(device.clone(), 16_000, 1);
+        let (queue_tx, queue_rx) = crossbeam::channel::bounded(4);
+        let (tap_tx, _) = broadcast::channel(8);
+        let tap = MeetingAudioTap::new(tap_tx, Arc::new(AtomicBool::new(false)));
+        tap.set_active(true);
+        let mut frames = tap.subscribe();
+        let running = Arc::new(AtomicBool::new(true));
+        let worker = tokio::spawn(run_record_and_transcribe(
+            Arc::new(stream),
+            Duration::from_secs(60),
+            Arc::new(queue_tx),
+            running.clone(),
+            Arc::new(AudioPipelineMetrics::new()),
+            Some(tap),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("synthetic producer subscribed");
+        let original = device.privacy_context().current().unwrap();
+        screenpipe_config::audio_privacy::set_drm_paused(true);
+        assert!(
+            screenpipe_config::AudioPrivacyPermit::current().is_none(),
+            "output must remain suppressed"
+        );
+        assert!(
+            original.is_current(),
+            "visual uncertainty must not revoke microphone work"
+        );
+        for sample in [0.25, 0.5] {
+            tx.send(CapturedAudio::for_device(vec![sample; 1600], &device))
+                .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(1), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.privacy, Some(original));
+            assert!(frame.samples.iter().all(|value| *value == sample));
+            assert!(!worker.is_finished());
+        }
+        running.store(false, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let queued = queue_rx.try_recv().unwrap();
+        assert_eq!(queued.data.len(), 3200);
+        assert!(queued.privacy.unwrap().is_current());
+        let restored: AudioPrivacyPermit =
+            serde_json::from_value(serde_json::to_value(queued.privacy.unwrap()).unwrap()).unwrap();
+        assert!(restored.is_current());
+    }
+
+    #[tokio::test]
+    async fn privacy_common_pauses_and_device_disable_revoke_buffered_tail_and_recovery() {
+        let _reset = ResetPrivacy;
+        use screenpipe_config::audio_privacy::*;
+        let gates: [fn(bool); 4] = [
+            set_screen_locked,
+            set_schedule_paused,
+            set_all_recording_paused,
+            set_audio_disabled,
+        ];
+        for (index, gate) in gates.into_iter().enumerate() {
+            let device = Arc::new(AudioDevice::new(
+                format!("synthetic-pause-{index}"),
+                DeviceType::Input,
+            ));
+            let context = device.privacy_context();
+            let old = context.current().unwrap();
+            let (stream, tx) = AudioStream::from_sender_for_test(device.clone(), 16_000, 1);
+            let (queue_tx, queue_rx) = crossbeam::channel::bounded(4);
+            let (tap_tx, _) = broadcast::channel(8);
+            let tap = MeetingAudioTap::new(tap_tx, Arc::new(AtomicBool::new(false)));
+            tap.set_active(true);
+            let mut frames = tap.subscribe();
+            let running = Arc::new(AtomicBool::new(true));
+            let stream = Arc::new(stream);
+            let sender = Arc::new(queue_tx);
+            let worker = tokio::spawn(run_record_and_transcribe(
+                stream.clone(),
+                Duration::from_secs(60),
+                sender.clone(),
+                running.clone(),
+                Arc::new(AudioPipelineMetrics::new()),
+                Some(tap),
+            ));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while tx.receiver_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("synthetic producer subscribed");
+            tx.send(CapturedAudio::for_device(vec![0.25; 1600], &device))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            gate(true);
+            assert!(context.current().is_none());
+            assert!(CapturedAudio::for_device(vec![0.75; 1600], &device)
+                .samples
+                .is_empty());
+            running.store(false, Ordering::Release);
+            tokio::time::timeout(Duration::from_secs(1), worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                queue_rx.is_empty(),
+                "privacy pause leaked buffered producer tail"
+            );
+            gate(false);
+            assert!(
+                !old.is_current(),
+                "pause/resume revived queued acquisition permit"
+            );
+            let mut stale = vec![0.25; 1600];
+            flush_audio(
+                &mut stale,
+                0,
+                1234,
+                &stream,
+                &sender,
+                "synthetic",
+                &Arc::new(AudioPipelineMetrics::new()),
+                Some(old),
+            )
+            .await
+            .unwrap();
+            assert!(stale.is_empty());
+            assert!(queue_rx.is_empty());
+            let mut fresh = vec![0.75; 1600];
+            flush_audio(
+                &mut fresh,
+                0,
+                1235,
+                &stream,
+                &sender,
+                "synthetic",
+                &Arc::new(AudioPipelineMetrics::new()),
+                context.current(),
+            )
+            .await
+            .unwrap();
+            let recovered = queue_rx.try_recv().unwrap();
+            assert!(recovered.data.iter().all(|sample| *sample == 0.75));
+            context.set_disabled(true);
+            assert!(!recovered.privacy.unwrap().is_current());
+            context.set_disabled(false);
+            assert!(context.current().unwrap().is_current());
+            assert!(!recovered.privacy.unwrap().is_current());
+        }
+    }
     use crate::core::device::AudioDevice;
 
     #[test]
@@ -692,7 +903,7 @@ mod tests {
         disconnect_consumer: bool,
     ) -> (Result<()>, Vec<AudioInput>) {
         let device = Arc::new(AudioDevice::new("tail-unit".to_string(), DeviceType::Input));
-        let (stream, tx) = AudioStream::from_sender_for_test(device, 16_000, 1);
+        let (stream, tx) = AudioStream::from_sender_for_test(device.clone(), 16_000, 1);
         let (meeting_tx, _) = broadcast::channel(8);
         let tap = MeetingAudioTap::new(meeting_tx, Arc::new(AtomicBool::new(false)));
         tap.set_active(true);
@@ -720,7 +931,8 @@ mod tests {
         })
         .await
         .expect("producer did not subscribe");
-        tx.send(vec![0.25; sample_count].into()).unwrap();
+        tx.send(CapturedAudio::for_device(vec![0.25; sample_count], &device))
+            .unwrap();
         let frame = tokio::time::timeout(Duration::from_secs(1), observed.recv())
             .await
             .expect("producer did not consume samples")
@@ -762,7 +974,7 @@ mod tests {
             "privacy-test".to_string(),
             DeviceType::Input,
         ));
-        let (stream, _) = AudioStream::from_sender_for_test(device, 16_000, 1);
+        let (stream, _) = AudioStream::from_sender_for_test(device.clone(), 16_000, 1);
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut samples = vec![0.5; 32_000];
         let metrics = Arc::new(AudioPipelineMetrics::new());
@@ -788,7 +1000,7 @@ mod tests {
             "stale-privacy-test".to_string(),
             DeviceType::Input,
         ));
-        let (stream, _) = AudioStream::from_sender_for_test(device, 16_000, 1);
+        let (stream, _) = AudioStream::from_sender_for_test(device.clone(), 16_000, 1);
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut samples = vec![0.5; 8_000];
         let metrics = Arc::new(AudioPipelineMetrics::new());
@@ -823,7 +1035,7 @@ mod tests {
             "partial-shutdown-test".to_string(),
             DeviceType::Input,
         ));
-        let (stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 1);
+        let (stream, tx) = AudioStream::from_sender_for_test(device.clone(), sample_rate, 1);
         let stream = Arc::new(stream);
         let (whisper_tx, whisper_rx) = crossbeam::channel::bounded::<AudioInput>(2);
         let is_running = Arc::new(AtomicBool::new(true));
@@ -838,7 +1050,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         for _ in 0..10 {
-            tx.send(vec![0.25; chunk_samples].into()).unwrap();
+            tx.send(CapturedAudio::for_device(
+                vec![0.25; chunk_samples],
+                &device,
+            ))
+            .unwrap();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
         is_running.store(false, Ordering::Release);
@@ -865,7 +1081,7 @@ mod tests {
             "Windows Mic Array".to_string(),
             DeviceType::Input,
         ));
-        let (audio_stream, _tx) = AudioStream::from_sender_for_test(device, 48_000, 4);
+        let (audio_stream, _tx) = AudioStream::from_sender_for_test(device.clone(), 48_000, 4);
         let samples = vec![0.1, -0.2, 0.3, -0.4];
 
         let frame = meeting_frame_from_recorder_output(
@@ -928,7 +1144,7 @@ mod tests {
             "Windows Mic Array (Simulated)".to_string(),
             DeviceType::Input,
         ));
-        let (audio_stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 4);
+        let (audio_stream, tx) = AudioStream::from_sender_for_test(device.clone(), sample_rate, 4);
         let audio_stream = Arc::new(audio_stream);
         let (meeting_tx, _) = broadcast::channel(512);
         let meeting_tap = MeetingAudioTap::new(meeting_tx, Arc::new(AtomicBool::new(false)));
@@ -967,7 +1183,7 @@ mod tests {
                     ((n as f32 / sample_rate as f32) * 440.0 * std::f32::consts::TAU).sin() * 0.2
                 })
                 .collect::<Vec<f32>>();
-            tx.send(chunk.into())
+            tx.send(CapturedAudio::for_device(chunk, &device))
                 .expect("send simulated recorder chunk");
         }
 
@@ -999,7 +1215,8 @@ mod tests {
         assert!(!audio_input.data.is_empty());
 
         is_running.store(false, Ordering::Relaxed);
-        tx.send(vec![0.1; chunk_samples].into()).ok();
+        tx.send(CapturedAudio::for_device(vec![0.1; chunk_samples], &device))
+            .ok();
         let pipeline_result = tokio::time::timeout(Duration::from_secs(5), pipeline)
             .await
             .expect("pipeline shutdown timeout")
@@ -1016,7 +1233,7 @@ mod tests {
             "Microphone Array (Intel Smart Sound Technology for Digital Microphones)".to_string(),
             DeviceType::Input,
         ));
-        let (audio_stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 2);
+        let (audio_stream, tx) = AudioStream::from_sender_for_test(device.clone(), sample_rate, 2);
         let audio_stream = Arc::new(audio_stream);
         let (whisper_tx, whisper_rx) = crossbeam::channel::bounded::<AudioInput>(8);
         let is_running = Arc::new(AtomicBool::new(true));
@@ -1048,7 +1265,8 @@ mod tests {
                     ((n as f32 / sample_rate as f32) * 440.0 * std::f32::consts::TAU).sin() * 0.2
                 })
                 .collect::<Vec<f32>>();
-            tx.send(chunk.into()).expect("send simulated speech chunk");
+            tx.send(CapturedAudio::for_device(chunk, &device))
+                .expect("send simulated speech chunk");
         }
 
         let speech_segment = tokio::task::spawn_blocking({
@@ -1063,7 +1281,7 @@ mod tests {
         assert!(!speech_segment.data.is_empty());
 
         for _ in 0..400 {
-            tx.send(vec![0.0; chunk_samples].into())
+            tx.send(CapturedAudio::for_device(vec![0.0; chunk_samples], &device))
                 .expect("send simulated zero-fill chunk");
         }
 
@@ -1091,7 +1309,8 @@ mod tests {
         assert_eq!(metrics.stream_timeouts.load(Ordering::Relaxed), 0);
 
         is_running.store(false, Ordering::Relaxed);
-        tx.send(vec![0.1; chunk_samples].into()).ok();
+        tx.send(CapturedAudio::for_device(vec![0.1; chunk_samples], &device))
+            .ok();
         let pipeline_result = tokio::time::timeout(Duration::from_secs(5), pipeline)
             .await
             .expect("pipeline shutdown timeout")

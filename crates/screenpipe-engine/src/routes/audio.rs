@@ -20,10 +20,66 @@ use std::sync::Arc;
 
 use crate::server::AppState;
 
+/// Explicit session-wide privacy pause. Clearing it does not override any
+/// lock/schedule/device preference. This route uses the normal bearer middleware.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordingPrivacy {
+    all_recording_paused: bool,
+}
+
+pub(crate) async fn recording_privacy() -> Json<RecordingPrivacy> {
+    Json(RecordingPrivacy {
+        all_recording_paused: screenpipe_config::audio_privacy::all_recording_paused(),
+    })
+}
+
+pub(crate) async fn set_recording_privacy(
+    Json(policy): Json<RecordingPrivacy>,
+) -> Json<RecordingPrivacy> {
+    screenpipe_config::audio_privacy::set_all_recording_paused(policy.all_recording_paused);
+    Json(policy)
+}
+
+#[cfg(test)]
+mod privacy_policy_tests {
+    use super::*;
+    #[tokio::test]
+    async fn explicit_all_recording_pause_does_not_clear_schedule_or_device_disablement() {
+        use screenpipe_config::audio_privacy::*;
+        let _ = set_recording_privacy(Json(RecordingPrivacy {
+            all_recording_paused: true,
+        }))
+        .await;
+        assert!(!screenpipe_config::audio_capture_allowed_for(
+            screenpipe_config::AudioCaptureKind::Microphone
+        ));
+        assert!(!visual_capture_allowed());
+        set_schedule_paused(true);
+        set_audio_disabled(true);
+        let _ = set_recording_privacy(Json(RecordingPrivacy {
+            all_recording_paused: false,
+        }))
+        .await;
+        assert!(!screenpipe_config::audio_capture_allowed_for(
+            screenpipe_config::AudioCaptureKind::Microphone
+        ));
+        assert!(schedule_paused());
+        assert!(audio_disabled());
+        set_schedule_paused(false);
+        set_audio_disabled(false);
+        assert!(serde_json::from_value::<RecordingPrivacy>(
+            json!({"all_recording_paused": false, "visual_exclusion": false})
+        )
+        .is_err());
+    }
+}
+
 #[derive(OaSchema, Serialize)]
 pub(crate) struct ListDeviceResponse {
     name: String,
     is_default: bool,
+    diagnostic_id: u64,
 }
 
 #[derive(Debug, OaSchema, Serialize)]
@@ -70,6 +126,7 @@ pub(crate) async fn api_list_audio_devices(
             ListDeviceResponse {
                 name: device.to_string(),
                 is_default,
+                diagnostic_id: device.diagnostic_id(),
             }
         })
         .collect();

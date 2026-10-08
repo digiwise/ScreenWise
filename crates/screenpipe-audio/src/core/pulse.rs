@@ -380,6 +380,7 @@ pub fn spawn_pulse_capture_thread(
     let bytes_per_read = frames_per_read * std::mem::size_of::<f32>();
 
     let device_name = device.to_string();
+    let privacy_context = device.privacy_context();
 
     Ok(tokio::task::spawn_blocking(move || {
         let simple = match create_pulse_record_stream(&device, sample_rate, channels as u8) {
@@ -402,8 +403,17 @@ pub fn spawn_pulse_capture_thread(
                     // Safety: buf is aligned to f32 since we allocated it as Vec<u8>
                     // and the size is a multiple of 4. Use bytemuck for safe casting.
                     let samples: &[f32] = bytemuck::cast_slice(&buf);
+                    let Some(privacy) = privacy_context.current() else {
+                        continue;
+                    };
                     let mono = audio_to_mono(samples, channels);
-                    if tx.send(mono.into()).is_err() {
+                    if tx
+                        .send(super::stream::CapturedAudio {
+                            samples: mono,
+                            privacy: Some(privacy),
+                        })
+                        .is_err()
+                    {
                         debug!("PulseAudio: all receivers dropped for {}", device_name);
                         break;
                     }

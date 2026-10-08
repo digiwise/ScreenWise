@@ -9,7 +9,7 @@ export type PrivacyNotice = {
 	id: number;
 	timestamp: string;
 	state: "locked" | "unlocked" | "detection_failed" | "recording_degraded"
-		| "recording_at_risk" | "recording_recovered";
+		| "recording_at_risk" | "recording_recovered" | "capture_suppressed" | "capture_gate_cleared" | "capture_partially_redacted" | "capture_redacted" | "capture_active_window_only" | "processing_deferred" | "capture_no_callbacks" | "capture_silent_input" | "capture_stopped";
 	reason_code: string;
 	message: string;
 };
@@ -24,9 +24,11 @@ type AudioShutdownIssue =
 
 type CaptureEventsResponse = {
 	data?: unknown;
+	active_notices?: unknown;
 	has_more?: unknown;
 	persistence_degraded?: unknown;
 	event_delivery?: { near_capacity?: unknown; dropped_events?: unknown };
+	diagnostic_delivery?: { near_capacity?: unknown; dropped_observations?: unknown };
 	audio_delivery?: { queues?: unknown };
 	audio_shutdown_degraded?: unknown;
 	audio_shutdown_issues?: unknown;
@@ -77,7 +79,10 @@ function isPrivacyNotice(value: unknown): value is PrivacyNotice {
 		&& Number.isFinite(Date.parse(notice.timestamp))
 		&& (notice.state === "locked" || notice.state === "unlocked" || notice.state === "detection_failed"
 			|| notice.state === "recording_degraded" || notice.state === "recording_at_risk"
-			|| notice.state === "recording_recovered")
+			|| notice.state === "recording_recovered" || notice.state === "capture_suppressed"
+			|| notice.state === "capture_gate_cleared" || notice.state === "capture_partially_redacted" || notice.state === "capture_redacted"
+            || notice.state === "capture_active_window_only" || notice.state === "processing_deferred"
+            || notice.state === "capture_no_callbacks" || notice.state === "capture_silent_input" || notice.state === "capture_stopped")
 		&& typeof notice.reason_code === "string"
 		&& typeof notice.message === "string";
 }
@@ -113,6 +118,8 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 	const [hasMore, setHasMore] = useState(false);
 	const [persistenceDegraded, setPersistenceDegraded] = useState(false);
 	const [nearCapacity, setNearCapacity] = useState(false);
+	const [diagnosticRisk, setDiagnosticRisk] = useState(false);
+	const [diagnosticLoss, setDiagnosticLoss] = useState(0);
 	const [droppedEvents, setDroppedEvents] = useState(0);
 	const [audioShutdownDegraded, setAudioShutdownDegraded] = useState(false);
 	const [audioQueueNearCapacity, setAudioQueueNearCapacity] = useState(false);
@@ -148,6 +155,14 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 					throw new Error("Invalid recording status response");
 				}
 				const delivery = body.event_delivery;
+				const diagnostics = body.diagnostic_delivery;
+				if (diagnostics !== undefined && (!diagnostics || typeof diagnostics.near_capacity !== "boolean"
+					|| typeof diagnostics.dropped_observations !== "number"
+					|| !Number.isSafeInteger(diagnostics.dropped_observations) || diagnostics.dropped_observations < 0)) {
+					throw new Error("Invalid diagnostic delivery status");
+				}
+				setDiagnosticRisk(diagnostics?.near_capacity === true);
+				setDiagnosticLoss((diagnostics?.dropped_observations as number | undefined) ?? 0);
 				if (delivery !== undefined && (!delivery || typeof delivery !== "object"
 					|| typeof delivery.near_capacity !== "boolean"
 					|| typeof delivery.dropped_events !== "number"
@@ -160,7 +175,11 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 					|| !audioDelivery.queues.every(isAudioQueueStatus))) {
 					throw new Error("Invalid audio delivery status");
 				}
-				setNotices(body.data);
+				if (body.active_notices !== undefined && (!Array.isArray(body.active_notices) || !body.active_notices.every(isPrivacyNotice))) {
+					throw new Error("Invalid capture interval notices");
+				}
+				const active = (body.active_notices ?? []) as PrivacyNotice[];
+				setNotices([...active.filter((notice) => !(body.data as PrivacyNotice[]).some((row) => row.message === notice.message)), ...body.data]);
 				setHasMore(body.has_more === true);
 				setPersistenceDegraded(body.persistence_degraded === true);
 				const candidate = delivery?.dropped_events;
@@ -189,6 +208,8 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 		setHasMore(false);
 		setPersistenceDegraded(false);
 		setNearCapacity(false);
+		setDiagnosticRisk(false);
+		setDiagnosticLoss(0);
 		setDroppedEvents(0);
 		setAudioShutdownDegraded(false);
 		setAudioQueueNearCapacity(false);
@@ -200,7 +221,7 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 		return () => { cancelled = true; request?.abort(); if (timer) clearInterval(timer); };
 	}, [dayKey]); // currentDate's calendar day is the query scope
 
-	if (!notices.length && !error && !persistenceDegraded && !nearCapacity && droppedEvents === 0
+	if (!notices.length && !error && !persistenceDegraded && !nearCapacity && !diagnosticRisk && diagnosticLoss === 0 && droppedEvents === 0
 		&& !audioShutdownDegraded && !audioQueueNearCapacity && audioDroppedDeliveries === 0
 		&& audioPossibleLostDeliveries === 0) return null;
 	return (
@@ -211,6 +232,8 @@ export function PrivacyNoticeTrack({ currentDate }: { currentDate: Date }) {
 			</button>
 			{error && <div className="mt-2 text-destructive">{error}</div>}
 			{persistenceDegraded && <div className="mt-2 text-destructive">{DEGRADED_NOTICE}</div>}
+			{diagnosticRisk && <div className="mt-2 text-amber-700 dark:text-amber-300">Capture diagnostic storage is approaching capacity.</div>}
+			{diagnosticLoss > 0 && <div className="mt-2 text-destructive">Capture diagnostic observations lost: {diagnosticLoss}.</div>}
 			{nearCapacity && <div className="mt-2 text-amber-700 dark:text-amber-300">{NEAR_CAPACITY_NOTICE}</div>}
 			{droppedEvents > 0 && <div className="mt-2 text-destructive">{DROPPED_EVENTS_NOTICE}</div>}
 			{audioShutdownDegraded && <div className="mt-2 text-destructive">{AUDIO_SHUTDOWN_NOTICE}</div>}

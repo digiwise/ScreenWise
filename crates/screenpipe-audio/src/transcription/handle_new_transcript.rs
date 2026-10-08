@@ -81,7 +81,7 @@ pub(crate) async fn handle_new_transcript_until_shutdown(
     // could incorrectly trim device B's content.
     let mut prev_transcript_by_device: HashMap<String, String> = HashMap::new();
     let mut prev_id_by_device: HashMap<String, i64> = HashMap::new();
-    let mut previous_privacy = None;
+    let mut previous_privacy_by_device = HashMap::new();
     loop {
         let mut transcription = loop {
             if let Some(capacity) = transcription_receiver.capacity() {
@@ -106,14 +106,18 @@ pub(crate) async fn handle_new_transcript_until_shutdown(
             }
         };
         let privacy = transcription.input.privacy;
-        if privacy != previous_privacy {
-            prev_transcript_by_device.clear();
-            prev_id_by_device.clear();
-            previous_privacy = privacy;
+        let device_key = transcription.input.device.to_string();
+        if previous_privacy_by_device.get(&device_key).copied() != privacy {
+            prev_transcript_by_device.remove(&device_key);
+            prev_id_by_device.remove(&device_key);
+            if let Some(permit) = privacy {
+                previous_privacy_by_device.insert(device_key.clone(), permit);
+            }
         }
         if !privacy.is_some_and(screenpipe_config::AudioPrivacyPermit::is_current) {
-            prev_transcript_by_device.clear();
-            prev_id_by_device.clear();
+            prev_transcript_by_device.remove(&device_key);
+            prev_id_by_device.remove(&device_key);
+            previous_privacy_by_device.remove(&device_key);
             info!("queued audio transcript discarded by privacy policy");
             continue;
         }
@@ -148,7 +152,6 @@ pub(crate) async fn handle_new_transcript_until_shutdown(
         );
 
         // Insert the new transcript after fetching
-        let device_key = transcription.input.device.to_string();
         let previous_transcript = prev_transcript_by_device
             .get(&device_key)
             .cloned()
@@ -321,6 +324,76 @@ mod tests {
         )
         .await;
         assert_eq!(metrics.db_inserted.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn privacy_microphone_queued_results_persist_during_visual_pause_but_not_device_pause() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                screenpipe_config::audio_privacy::set_drm_paused(false);
+            }
+        }
+        let _reset = Reset;
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let device = Arc::new(AudioDevice::new(
+            "synthetic-queued-mic".into(),
+            DeviceType::Input,
+        ));
+        let context = device.privacy_context();
+        let original = context.current().unwrap();
+        let output = screenpipe_config::AudioPrivacyPermit::current().unwrap();
+        screenpipe_config::audio_privacy::set_drm_paused(true);
+        let inserted = Arc::new(Mutex::new(Vec::new()));
+        for (permit, expected) in [(Some(original), 1), (Some(output), 0)] {
+            let (tx, rx) = crossbeam::channel::unbounded();
+            let mut result = transcription_result(Some("synthetic independent speech"), None);
+            result.input.device = device.clone();
+            result.input.privacy = permit;
+            tx.send(result).unwrap();
+            drop(tx);
+            let output_events = inserted.clone();
+            let callback: AudioInsertCallback = Arc::new(move |event| {
+                output_events.lock().unwrap().push(event);
+            });
+            let metrics = Arc::new(AudioPipelineMetrics::new());
+            handle_new_transcript(
+                db.clone(),
+                Arc::new(rx),
+                Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
+                "live",
+                false,
+                metrics.clone(),
+                Some(callback),
+            )
+            .await;
+            assert_eq!(metrics.db_inserted.load(Ordering::Relaxed), expected);
+        }
+        context.set_disabled(true);
+        context.set_disabled(false);
+        let (tx, rx) = crossbeam::channel::unbounded();
+        let mut stale = transcription_result(Some("synthetic revoked tail"), None);
+        stale.input.device = device;
+        stale.input.privacy = Some(original);
+        tx.send(stale).unwrap();
+        drop(tx);
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+        handle_new_transcript(
+            db,
+            Arc::new(rx),
+            Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
+            "live",
+            false,
+            metrics.clone(),
+            Some(Arc::new(|_| panic!("revoked queued callback"))),
+        )
+        .await;
+        assert_eq!(metrics.db_inserted.load(Ordering::Relaxed), 0);
+        assert_eq!(inserted.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

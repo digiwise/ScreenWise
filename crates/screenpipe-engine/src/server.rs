@@ -216,6 +216,34 @@ impl SCServer {
         video_quality: String,
         api_auth_key: String,
     ) -> Self {
+        screenpipe_config::audio_privacy::set_audio_disabled(audio_disabled);
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            for (channel, disabled) in [
+                (CaptureChannel::Screen, vision_disabled),
+                (CaptureChannel::ScreenStorage, vision_disabled),
+                (CaptureChannel::Ocr, vision_disabled),
+                (CaptureChannel::Microphone, audio_disabled),
+                (CaptureChannel::OutputAudio, audio_disabled),
+            ] {
+                observe(
+                    channel,
+                    DiagnosticSource::UserPreference,
+                    CaptureScope::Global,
+                    if disabled {
+                        CaptureCondition::Suppressed
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    vec![if disabled {
+                        CaptureReason::Disabled
+                    } else {
+                        CaptureReason::GateOpen
+                    }],
+                    Vec::new(),
+                );
+            }
+        }
         let audio_metrics = audio_manager.metrics.clone();
         SCServer {
             db,
@@ -558,6 +586,7 @@ impl SCServer {
         // NOTE: websockets and sse is not supported by openapi so we move it down here
         router
             .route("/capture-events", get(crate::privacy_notices::capture_events))
+            .route("/recording/privacy", get(crate::routes::audio::recording_privacy).post(crate::routes::audio::set_recording_privacy))
             .route("/stream/frames", get(stream_frames_handler))
             .route("/ws/events", get(ws_events_handler))
             .route("/ws/health", get(ws_health_handler))

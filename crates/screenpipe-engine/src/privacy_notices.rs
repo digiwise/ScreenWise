@@ -31,9 +31,75 @@ use tokio::{sync::Notify, task::JoinHandle};
 static PERSISTENCE_DEGRADED: once_cell::sync::Lazy<Arc<AtomicBool>> =
     once_cell::sync::Lazy::new(|| Arc::new(AtomicBool::new(false)));
 
+pub(crate) fn mark_persistence_degraded() {
+    PERSISTENCE_DEGRADED.store(true, Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ContentProtectionReason {
+    ProtectedContentMatched,
+    ForegroundIdentityUnavailable,
+    ForegroundIdentityChanged,
+    BrowserUrlUnverified,
+    GateCleared,
+    AccessDenied,
+    CheckFailed,
+}
+impl ContentProtectionReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::ProtectedContentMatched => "audio_protected_content_matched",
+            Self::ForegroundIdentityUnavailable => "audio_foreground_identity_unavailable",
+            Self::ForegroundIdentityChanged => "audio_foreground_identity_changed",
+            Self::BrowserUrlUnverified => "audio_browser_url_unverified",
+            Self::GateCleared => "audio_content_protection_gate_cleared",
+            Self::AccessDenied => "capture_foreground_access_denied",
+            Self::CheckFailed => "capture_foreground_check_failed",
+        }
+    }
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::ProtectedContentMatched => "Screen, microphone and output capture suppressed: protected content rule matched.",
+            Self::ForegroundIdentityUnavailable => "Screen, microphone and output capture suppressed: foreground identity unavailable.",
+            Self::ForegroundIdentityChanged => "Screen, microphone and output capture suppressed: foreground identity changed during verification.",
+            Self::BrowserUrlUnverified => "Screen, microphone and output capture remains suppressed: foreground browser URL unverified.",
+            Self::GateCleared => "Content protection gate cleared for screen, microphone and output capture; other privacy gates, device preferences and availability still apply.",
+            Self::AccessDenied => "Capture suppressed: foreground process verification access denied.",
+            Self::CheckFailed => "Capture suppressed: foreground process verification failed.",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContentProtectionNotice {
+    #[serde(default = "legacy_protection_version")]
+    pub schema_version: u8,
+    pub content_protection_reason: ContentProtectionReason,
+    pub observed_at: DateTime<Utc>,
+    pub suppression_since: Option<DateTime<Utc>>,
+}
+fn legacy_protection_version() -> u8 {
+    1
+}
+impl ContentProtectionNotice {
+    fn message(self) -> String {
+        let message = self.content_protection_reason.message();
+        if self.schema_version >= 2 {
+            message
+                .replace("microphone and output", "output")
+                .replace("Screen and audio", "Screen and output audio")
+        } else {
+            message.to_string()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum SafeNoticeEvent {
+    Capture(screenpipe_config::capture_diagnostics::CaptureDiagnostic),
+    ContentProtection(ContentProtectionNotice),
     Lock(WindowsLockStatusEvent),
     AudioShutdown(AudioShutdownStatusEvent),
     AudioDelivery(AudioDeliveryStatusEvent),
@@ -61,24 +127,55 @@ impl From<SessionRecoveryStatusEvent> for SafeNoticeEvent {
     }
 }
 impl SafeNoticeEvent {
-    fn code(self) -> &'static str {
+    fn code(&self) -> &'static str {
         match self {
+            Self::Capture(event) => event
+                .reasons
+                .first()
+                .copied()
+                .unwrap_or(screenpipe_config::capture_diagnostics::CaptureReason::GateOpen)
+                .code(),
+            Self::ContentProtection(event) => event.content_protection_reason.code(),
             Self::Lock(event) => event.reason.code(),
             Self::AudioShutdown(event) => event.issue.code(),
             Self::AudioDelivery(event) => event.code(),
             Self::SessionRecovery(event) => event.session_recovery_issue.code(),
         }
     }
-    fn message(self) -> String {
+    fn message(&self) -> String {
         match self {
+            Self::Capture(event) => event.message(),
+            Self::ContentProtection(event) => event.message(),
             Self::Lock(event) => event.reason.message().to_string(),
             Self::AudioShutdown(event) => event.issue.message().to_string(),
             Self::AudioDelivery(event) => event.message(),
             Self::SessionRecovery(event) => event.session_recovery_issue.message().to_string(),
         }
     }
-    fn state(self) -> &'static str {
+    fn state(&self) -> &'static str {
         match self {
+            Self::Capture(event) => {
+                use screenpipe_config::capture_diagnostics::CaptureCondition as C;
+                match event.condition {
+                    C::Admitted => "capture_gate_cleared",
+                    C::Suppressed => "capture_suppressed",
+                    C::Failed => "recording_degraded",
+                    C::Redacted => "capture_redacted",
+                    C::PartiallyRedacted => "capture_partially_redacted",
+                    C::ActiveWindowOnly => "capture_active_window_only",
+                    C::Deferred => "processing_deferred",
+                    C::Silent => "capture_silent_input",
+                    C::NoCallbacks => "capture_no_callbacks",
+                    C::Stopped => "capture_stopped",
+                }
+            }
+            Self::ContentProtection(event) => {
+                if event.content_protection_reason == ContentProtectionReason::GateCleared {
+                    "capture_gate_cleared"
+                } else {
+                    "capture_suppressed"
+                }
+            }
             Self::Lock(event) => match event.reason.state() {
                 WindowsLockNoticeState::Locked => "locked",
                 WindowsLockNoticeState::Unlocked => "unlocked",
@@ -134,6 +231,7 @@ pub struct PrivacyNoticeRecorder {
 impl PrivacyNoticeRecorder {
     /// Returns false if persistence or the writer's shutdown was degraded.
     pub async fn stop(mut self) -> bool {
+        screenpipe_config::capture_diagnostics::finish_session();
         self.stop.notify_one();
         if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
@@ -168,18 +266,75 @@ pub fn start(db: Arc<DatabaseManager>) -> PrivacyNoticeRecorder {
 }
 
 fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> PrivacyNoticeRecorder {
+    screenpipe_config::capture_diagnostics::set_delivery_reporter(log_diagnostic_delivery);
     let mut events = screenpipe_events::subscribe_to_all_events();
+    crate::drm_detector::initialize_pause_notice();
+    screenpipe_config::audio_privacy::report_privacy_state();
     let stop = Arc::new(Notify::new());
     let task_stop = stop.clone();
     let task_degraded = degraded.clone();
     let task = tokio::spawn(async move {
+        let mut diagnostic_poll = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             let event = tokio::select! {
                 biased;
                 event = events.next() => match event { Some(event) => event, None => break },
                 _ = task_stop.notified() => break,
+                _ = diagnostic_poll.tick() => {
+                    persist_capture_diagnostics(&db, &task_degraded).await;
+                    continue;
+                },
             };
             let event = match event.name.as_str() {
+                "permission_lost" | "permission_restored" | "permission_needed" => {
+                    if let Ok(permission) =
+                        serde_json::from_value::<screenpipe_events::PermissionEvent>(event.data)
+                    {
+                        use screenpipe_config::capture_diagnostics::*;
+                        use screenpipe_events::{PermissionKind, PermissionState};
+                        let channels: &[CaptureChannel] = match permission.kind {
+                            PermissionKind::ScreenRecording => &[CaptureChannel::Screen],
+                            PermissionKind::Microphone => &[CaptureChannel::Microphone],
+                            PermissionKind::Accessibility => &[
+                                CaptureChannel::Accessibility,
+                                CaptureChannel::Keyboard,
+                                CaptureChannel::Clipboard,
+                                CaptureChannel::Pointer,
+                            ],
+                            PermissionKind::Keychain => &[],
+                        };
+                        let admitted = permission.state == PermissionState::Restored;
+                        for channel in channels {
+                            observe(
+                                *channel,
+                                DiagnosticSource::Permission,
+                                CaptureScope::Global,
+                                if admitted {
+                                    CaptureCondition::Admitted
+                                } else {
+                                    CaptureCondition::Failed
+                                },
+                                vec![if admitted {
+                                    CaptureReason::GateOpen
+                                } else {
+                                    if permission.state == PermissionState::Needed {
+                                        CaptureReason::PermissionNeeded
+                                    } else {
+                                        CaptureReason::PermissionLost
+                                    }
+                                }],
+                                Vec::new(),
+                            );
+                        }
+                    } else {
+                        task_degraded.store(true, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                "content_protection_status" => {
+                    serde_json::from_value::<ContentProtectionNotice>(event.data)
+                        .map(SafeNoticeEvent::ContentProtection)
+                }
                 SCREEN_LOCK_STATUS_CHANGED_EVENT => {
                     serde_json::from_value::<WindowsLockStatusEvent>(event.data)
                         .map(SafeNoticeEvent::Lock)
@@ -208,7 +363,11 @@ fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> Pri
                     continue;
                 }
             };
-            let row = notice_row(event, Utc::now());
+            let timestamp = match &event {
+                SafeNoticeEvent::ContentProtection(event) => event.observed_at,
+                _ => Utc::now(),
+            };
+            let row = notice_row(event.clone(), timestamp);
             let mut saved = false;
             for attempt in 0..5 {
                 if db.insert_ui_event(&row).await.is_ok() {
@@ -224,11 +383,65 @@ fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> Pri
                 tracing::error!(reason_code=event.code(), "Recording status notice could not be saved after retries; consult the local diagnostic log.");
             }
         }
+        persist_capture_diagnostics(&db, &task_degraded).await;
     });
     PrivacyNoticeRecorder {
         stop,
         task: Some(task),
         degraded,
+    }
+}
+
+fn log_diagnostic_delivery(
+    notice: screenpipe_config::capture_diagnostics::DiagnosticDeliveryNotice,
+) {
+    use screenpipe_config::capture_diagnostics::DiagnosticDeliveryCondition as C;
+    let status = notice.status;
+    match notice.condition {
+        C::NearCapacity => tracing::warn!(
+            pending_observations=status.pending_observations, tracked_intervals=status.tracked_intervals,
+            "Capture diagnostic storage is approaching capacity."
+        ),
+        C::Recovered => tracing::info!(
+            pending_observations=status.pending_observations, tracked_intervals=status.tracked_intervals,
+            "Capture diagnostic storage pressure recovered; previously observed loss remains recorded."
+        ),
+        C::ConfirmedLoss => tracing::error!(
+            dropped_observations=status.dropped_observations,
+            "Capture diagnostic observations lost; count is confirmed rejected deliveries."
+        ),
+    }
+}
+
+async fn persist_capture_diagnostics(db: &DatabaseManager, degraded: &AtomicBool) {
+    let pending = screenpipe_config::capture_diagnostics::drain();
+    for diagnostic in &pending {
+        let event = SafeNoticeEvent::Capture(diagnostic.clone());
+        tracing::info!(reason_code=event.code(), since_ms=diagnostic.since_ms, previous_since_ms=?diagnostic.previous_since_ms, observed_at_ms=diagnostic.observed_at_ms, "{}", event.message());
+    }
+    for diagnostic in pending {
+        let Some(timestamp) = DateTime::from_timestamp_millis(diagnostic.observed_at_ms as i64)
+        else {
+            degraded.store(true, Ordering::Relaxed);
+            continue;
+        };
+        let event = SafeNoticeEvent::Capture(diagnostic);
+        let row = notice_row(event.clone(), timestamp);
+        let mut saved = false;
+        for attempt in 0..5 {
+            if db.insert_ui_event(&row).await.is_ok() {
+                saved = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
+        }
+        if !saved {
+            degraded.store(true, Ordering::Relaxed);
+            tracing::error!(
+                reason_code = event.code(),
+                "Capture interval persistence failed; consult the local diagnostic log."
+            );
+        }
     }
 }
 
@@ -245,13 +458,20 @@ pub struct TimelineNotice {
     state: &'static str,
     reason_code: &'static str,
     message: String,
+    suppression_since: Option<DateTime<Utc>>,
+    source: Option<&'static str>,
+    modalities: Option<Vec<&'static str>>,
+    diagnostic: Option<screenpipe_config::capture_diagnostics::CaptureDiagnostic>,
 }
 #[derive(Serialize)]
 pub struct NoticeResponse {
     data: Vec<TimelineNotice>,
     has_more: bool,
     persistence_degraded: bool,
+    active_intervals: Vec<screenpipe_config::capture_diagnostics::CaptureDiagnostic>,
+    active_notices: Vec<TimelineNotice>,
     event_delivery: screenpipe_events::EventDeliveryStatus,
+    diagnostic_delivery: screenpipe_config::capture_diagnostics::DiagnosticDeliveryStatus,
     audio_delivery: screenpipe_events::AudioDeliveryStatus,
     audio_shutdown_degraded: bool,
     audio_shutdown_issues: Vec<screenpipe_events::AudioShutdownIssue>,
@@ -278,20 +498,76 @@ async fn query_notices(db: &DatabaseManager, range: &NoticeRange) -> Result<Noti
             invalid_rows = true;
             continue;
         };
+        if matches!(&event, SafeNoticeEvent::Capture(event) if !event.is_safe()) {
+            invalid_rows = true;
+            continue;
+        }
+        if matches!(&event, SafeNoticeEvent::ContentProtection(event) if !matches!(event.schema_version, 1 | 2))
+        {
+            invalid_rows = true;
+            continue;
+        }
         data.push(TimelineNotice {
             id,
             timestamp,
             state: event.state(),
             reason_code: event.code(),
             message: event.message(),
+            suppression_since: match &event {
+                SafeNoticeEvent::ContentProtection(event) => event.suppression_since,
+                _ => None,
+            },
+            source: matches!(event, SafeNoticeEvent::ContentProtection(_))
+                .then_some("content_protection_gate"),
+            modalities: match &event {
+                SafeNoticeEvent::ContentProtection(event) if event.schema_version == 1 => {
+                    Some(vec!["screen", "microphone", "output_audio"])
+                }
+                SafeNoticeEvent::ContentProtection(_) => Some(vec!["screen", "output_audio"]),
+                _ => None,
+            },
+            diagnostic: match &event {
+                SafeNoticeEvent::Capture(event) => Some(event.clone()),
+                _ => None,
+            },
         });
     }
     let audio_shutdown_issues = screenpipe_events::audio_shutdown_issues();
     Ok(NoticeResponse {
         data,
         has_more,
-        persistence_degraded: invalid_rows || PERSISTENCE_DEGRADED.load(Ordering::Relaxed),
+        persistence_degraded: invalid_rows
+            || PERSISTENCE_DEGRADED.load(Ordering::Relaxed)
+            || screenpipe_config::capture_diagnostics::degraded(),
+        active_intervals: screenpipe_config::capture_diagnostics::current(),
+        active_notices: screenpipe_config::capture_diagnostics::current()
+            .into_iter()
+            .filter(|diagnostic| {
+                !matches!(
+                    diagnostic.condition,
+                    screenpipe_config::capture_diagnostics::CaptureCondition::Admitted
+                        | screenpipe_config::capture_diagnostics::CaptureCondition::Stopped
+                )
+            })
+            .enumerate()
+            .filter_map(|(index, diagnostic)| {
+                let timestamp = DateTime::from_timestamp_millis(diagnostic.since_ms as i64)?;
+                let event = SafeNoticeEvent::Capture(diagnostic.clone());
+                Some(TimelineNotice {
+                    id: -(index as i64 + 1),
+                    timestamp,
+                    state: event.state(),
+                    reason_code: event.code(),
+                    message: event.message(),
+                    suppression_since: Some(timestamp),
+                    source: Some("capture_interval"),
+                    modalities: None,
+                    diagnostic: Some(diagnostic),
+                })
+            })
+            .collect(),
         event_delivery: screenpipe_events::event_delivery_status(),
+        diagnostic_delivery: screenpipe_config::capture_diagnostics::delivery_status(),
         audio_delivery: screenpipe_events::audio_delivery_status(),
         audio_shutdown_degraded: !audio_shutdown_issues.is_empty(),
         audio_shutdown_issues,
@@ -319,8 +595,218 @@ pub async fn capture_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protection_notice_versions_preserve_history_without_claiming_microphone_suppression_now() {
+        let legacy = ContentProtectionNotice {
+            schema_version: 1,
+            content_protection_reason: ContentProtectionReason::ProtectedContentMatched,
+            observed_at: Utc::now(),
+            suppression_since: None,
+        };
+        let current = ContentProtectionNotice {
+            schema_version: 2,
+            ..legacy
+        };
+        assert!(legacy.message().contains("microphone"));
+        assert!(!current.message().contains("microphone"));
+        let decoded: ContentProtectionNotice = serde_json::from_value(serde_json::json!({
+            "content_protection_reason": "protected_content_matched", "observed_at": legacy.observed_at,
+            "suppression_since": null
+        })).unwrap();
+        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(decoded.message(), legacy.message());
+    }
     use crate::sleep_monitor::WindowsLockNoticeReason;
     use screenpipe_events::SessionRecoveryIssue;
+    static WRITER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    fn test_writer(db: Arc<DatabaseManager>) -> PrivacyNoticeRecorder {
+        // Production degradation is deliberately process-wide and latched.
+        // Other synthetic tests can trigger it; this writer owns its test status.
+        start_with_status(db, Arc::new(AtomicBool::new(false)))
+    }
+
+    #[tokio::test]
+    async fn audio_signal_and_transcription_intervals_do_not_expose_device_labels() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
+        use screenpipe_audio::core::device::{AudioDevice, DeviceType};
+        use screenpipe_config::capture_diagnostics::*;
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                temp.path().join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let writer = test_writer(db.clone());
+        let device = AudioDevice::new("synthetic-private-hardware-label".into(), DeviceType::Input);
+        let id = device.diagnostic_id();
+        assert!(id > 0);
+        assert_eq!(id, device.clone().diagnostic_id());
+        device.report_diagnostic(
+            DiagnosticSource::AudioProcessing,
+            CaptureCondition::Silent,
+            CaptureReason::SilentInput,
+        );
+        device.report_transcription(
+            CaptureCondition::Deferred,
+            CaptureReason::TranscriptionDeferred,
+        );
+        device.report_diagnostic(
+            DiagnosticSource::AudioDevice,
+            CaptureCondition::Failed,
+            CaptureReason::DeviceStreamFailed,
+        );
+        assert!(current()
+            .iter()
+            .filter(|event| event.scope == CaptureScope::Device(id)
+                && event.source == DiagnosticSource::AudioProcessing)
+            .all(|event| event.condition == CaptureCondition::Stopped));
+        assert!(writer.stop().await);
+        let result = query_notices(
+            &db,
+            &NoticeRange {
+                start_time: Utc::now() - chrono::Duration::minutes(1),
+                end_time: Utc::now() + chrono::Duration::seconds(1),
+                limit: Some(1000),
+            },
+        )
+        .await
+        .unwrap();
+        let intervals = result
+            .data
+            .iter()
+            .filter_map(|notice| notice.diagnostic.as_ref())
+            .filter(|event| event.scope == CaptureScope::Device(id))
+            .collect::<Vec<_>>();
+        assert!(intervals
+            .iter()
+            .any(|event| event.channel == CaptureChannel::Microphone
+                && event.condition == CaptureCondition::Silent));
+        assert!(intervals
+            .iter()
+            .any(|event| event.channel == CaptureChannel::Transcription
+                && event.condition == CaptureCondition::Deferred));
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("synthetic-private-hardware-label"));
+    }
+
+    #[tokio::test]
+    async fn capture_interval_survives_suppression_and_closes_at_writer_shutdown() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
+        use screenpipe_config::capture_diagnostics::*;
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                temp.path().join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let writer = test_writer(db.clone());
+        let was_paused = screenpipe_config::audio_privacy::schedule_paused();
+        screenpipe_config::audio_privacy::set_schedule_paused(true);
+        observe(
+            CaptureChannel::Screen,
+            DiagnosticSource::MonitorCapture,
+            CaptureScope::Monitor(4242),
+            CaptureCondition::Suppressed,
+            vec![CaptureReason::SchedulePaused],
+            Vec::new(),
+        );
+        assert!(writer.stop().await);
+        screenpipe_config::audio_privacy::set_schedule_paused(was_paused);
+        let result = query_notices(
+            &db,
+            &NoticeRange {
+                start_time: Utc::now() - chrono::Duration::minutes(1),
+                end_time: Utc::now() + chrono::Duration::seconds(1),
+                limit: Some(1000),
+            },
+        )
+        .await
+        .unwrap();
+        let intervals = result
+            .data
+            .iter()
+            .filter_map(|notice| notice.diagnostic.as_ref())
+            .filter(|event| event.scope == CaptureScope::Monitor(4242))
+            .collect::<Vec<_>>();
+        assert_eq!(intervals.len(), 2);
+        let start = intervals
+            .iter()
+            .find(|event| event.condition == CaptureCondition::Suppressed)
+            .unwrap();
+        let end = intervals
+            .iter()
+            .find(|event| event.condition == CaptureCondition::Stopped)
+            .unwrap();
+        assert_eq!(end.previous_since_ms, Some(start.since_ms));
+        assert!(end.observed_at_ms >= start.observed_at_ms);
+        assert!(start.excluded_apps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn content_protection_notice_persists_without_capture_context() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                temp.path().join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let now = Utc::now();
+        let writer = test_writer(db.clone());
+        for reason in [
+            ContentProtectionReason::ProtectedContentMatched,
+            ContentProtectionReason::ForegroundIdentityUnavailable,
+            ContentProtectionReason::ForegroundIdentityChanged,
+            ContentProtectionReason::BrowserUrlUnverified,
+            ContentProtectionReason::GateCleared,
+        ] {
+            let event = ContentProtectionNotice {
+                schema_version: 2,
+                content_protection_reason: reason,
+                observed_at: now,
+                suppression_since: Some(now),
+            };
+            let row = notice_row(SafeNoticeEvent::ContentProtection(event), now);
+            assert!(
+                row.app_name.is_none()
+                    && row.window_title.is_none()
+                    && row.browser_url.is_none()
+                    && row.frame_id.is_none()
+            );
+            screenpipe_events::send_event("content_protection_status", event).unwrap();
+        }
+        assert!(writer.stop().await);
+        let result = query_notices(
+            &db,
+            &NoticeRange {
+                start_time: now - chrono::Duration::seconds(1),
+                end_time: now + chrono::Duration::seconds(1),
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result
+                .data
+                .iter()
+                .filter(|notice| notice.suppression_since == Some(now))
+                .count(),
+            5
+        );
+        assert!(serde_json::from_str::<ContentProtectionNotice>(r#"{"content_protection_reason":"private title","observed_at":"2026-10-08T00:00:00Z","suppression_since":null}"#).is_err());
+    }
 
     #[test]
     fn privacy_notice_has_no_captured_context() {
@@ -355,6 +841,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_session_notice_persists_and_reconstructs_fixed_text() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let db = Arc::new(
             DatabaseManager::new(
@@ -365,7 +852,7 @@ mod tests {
             .unwrap(),
         );
         let now = Utc::now();
-        let writer = start(db.clone());
+        let writer = test_writer(db.clone());
         let issue = SessionRecoveryIssue::PreviousShutdownInterrupted;
         screenpipe_events::report_session_recovery_issue(issue);
         writer.stop().await;
@@ -407,6 +894,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_detection_notice_persists_and_returns_only_fixed_timeline_text() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let db = DatabaseManager::new(
             temp.path().join("db.sqlite").to_str().unwrap(),
@@ -437,6 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_shutdown_notice_drains_to_database_and_uses_allowlisted_text() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let db = Arc::new(
             DatabaseManager::new(
@@ -447,7 +936,7 @@ mod tests {
             .unwrap(),
         );
         let now = Utc::now();
-        let writer = start(db.clone());
+        let writer = test_writer(db.clone());
         let event = AudioShutdownStatusEvent {
             issue: screenpipe_events::AudioShutdownIssue::ConsumerDrainTimeout,
         };
@@ -484,6 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_delivery_notice_uses_only_fixed_queue_text_and_counts() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let db = DatabaseManager::new(
             temp.path().join("db.sqlite").to_str().unwrap(),
@@ -533,6 +1023,7 @@ mod tests {
 
     #[tokio::test]
     async fn forged_notice_text_is_never_returned() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let db = DatabaseManager::new(
             temp.path().join("db.sqlite").to_str().unwrap(),
@@ -578,6 +1069,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_database_write_latches_safe_degraded_status() {
+        let _writer_guard = WRITER_TEST_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let db = Arc::new(
             DatabaseManager::new(

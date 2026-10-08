@@ -89,6 +89,16 @@ impl From<Vec<f32>> for CapturedAudio {
     }
 }
 
+impl CapturedAudio {
+    pub fn for_device(mut samples: Vec<f32>, device: &AudioDevice) -> Self {
+        let privacy = device.privacy_context().current();
+        if privacy.is_none() {
+            samples.clear();
+        }
+        Self { samples, privacy }
+    }
+}
+
 #[derive(Clone)]
 pub struct AudioStream {
     pub device: Arc<AudioDevice>,
@@ -204,6 +214,7 @@ impl AudioStream {
                         tx.clone(),
                         is_running.clone(),
                         is_disconnected.clone(),
+                        device.privacy_context(),
                     ) {
                         Ok((config, thread)) => {
                             drop(stream_control_rx);
@@ -323,6 +334,7 @@ impl AudioStream {
             cpal_audio_device,
             config,
             tx,
+            device.privacy_context(),
             stream_control_rx,
             channels,
             is_running_weak,
@@ -341,6 +353,7 @@ impl AudioStream {
         device: cpal::Device,
         config: cpal::SupportedStreamConfig,
         tx: broadcast::Sender<CapturedAudio>,
+        privacy_context: screenpipe_config::DeviceAudioPrivacy,
         stream_control_rx: mpsc::Receiver<StreamControl>,
         channels: u16,
         is_running_weak: std::sync::Weak<AtomicBool>,
@@ -376,6 +389,7 @@ impl AudioStream {
                 &config,
                 channels,
                 tx.clone(),
+                privacy_context.clone(),
                 primary_cb,
                 windows_input_aec,
                 macos_input_vpio,
@@ -400,6 +414,7 @@ impl AudioStream {
                                 &fallback,
                                 fb_channels,
                                 tx.clone(),
+                                privacy_context.clone(),
                                 fallback_cb,
                                 windows_input_aec,
                                 macos_input_vpio,
@@ -426,6 +441,7 @@ impl AudioStream {
                                             &fallback,
                                             fb_channels,
                                             tx,
+                                            privacy_context.clone(),
                                             no_aec_cb,
                                             false,
                                             macos_input_vpio,
@@ -493,6 +509,7 @@ impl AudioStream {
                         &config,
                         channels,
                         tx,
+                        privacy_context.clone(),
                         fallback_cb,
                         windows_input_aec,
                         false,
@@ -685,6 +702,7 @@ impl AudioStream {
         ));
 
         let chunk_duration_ms = (CHUNK_SIZE as u64 * 1000) / TARGET_SAMPLE_RATE as u64;
+        let playback_device = device.clone();
 
         let thread = tokio::spawn(async move {
             // broadcast::Sender drops if no subscriber exists yet. Wait briefly
@@ -700,7 +718,10 @@ impl AudioStream {
                 if is_disconnected_clone.load(Ordering::Relaxed) {
                     break;
                 }
-                if tx.send(chunk.to_vec().into()).is_err() {
+                if tx
+                    .send(CapturedAudio::for_device(chunk.to_vec(), &playback_device))
+                    .is_err()
+                {
                     break;
                 }
                 if realtime {
@@ -788,6 +809,7 @@ fn build_input_stream(
     config: &cpal::SupportedStreamConfig,
     channels: u16,
     tx: broadcast::Sender<CapturedAudio>,
+    privacy_context: screenpipe_config::DeviceAudioPrivacy,
     error_callback: impl FnMut(CpalError) + Send + 'static,
     windows_input_aec: bool,
     macos_input_vpio: bool,
@@ -798,7 +820,7 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[f32], _: &_| {
-                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                let Some(privacy) = privacy_context.current() else {
                     return;
                 };
                 let mono = audio_to_mono(data, channels);
@@ -814,7 +836,7 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[i16], _: &_| {
-                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                let Some(privacy) = privacy_context.current() else {
                     return;
                 };
                 let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
@@ -831,7 +853,7 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[i32], _: &_| {
-                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                let Some(privacy) = privacy_context.current() else {
                     return;
                 };
                 let f32_data: Vec<f32> = data
@@ -851,7 +873,7 @@ fn build_input_stream(
             device,
             &stream_config,
             move |data: &[i8], _: &_| {
-                let Some(privacy) = screenpipe_config::AudioPrivacyPermit::current() else {
+                let Some(privacy) = privacy_context.current() else {
                     return;
                 };
                 let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 128.0).collect();

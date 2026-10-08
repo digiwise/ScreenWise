@@ -303,6 +303,7 @@ mod exclusions {
 
 struct TapCallbackCtx {
     tx: broadcast::Sender<super::stream::CapturedAudio>,
+    privacy_context: screenpipe_config::DeviceAudioPrivacy,
     channels: u16,
     // Deliberately no is_running — it's initialized false by device_manager
     // and only flipped true AFTER AudioStream::from_device returns, which
@@ -369,6 +370,9 @@ extern "C" fn tap_io_proc(
     if ctx.is_disconnected.load(Ordering::Relaxed) {
         return Default::default();
     }
+    let Some(privacy) = ctx.privacy_context.current() else {
+        return Default::default();
+    };
 
     if input_data.number_buffers == 0 {
         return Default::default();
@@ -413,7 +417,10 @@ extern "C" fn tap_io_proc(
     }
 
     let mono = audio_to_mono(samples, ctx.channels);
-    let _ = ctx.tx.send(mono.into());
+    let _ = ctx.tx.send(super::stream::CapturedAudio {
+        samples: mono,
+        privacy: Some(privacy),
+    });
 
     Default::default()
 }
@@ -459,6 +466,7 @@ impl Drop for ProcessTapCapture {
 fn build_capture(
     tx: broadcast::Sender<super::stream::CapturedAudio>,
     is_disconnected: Arc<AtomicBool>,
+    privacy_context: screenpipe_config::DeviceAudioPrivacy,
 ) -> Result<(
     ProcessTapCapture,
     AudioStreamConfig,
@@ -543,6 +551,7 @@ fn build_capture(
 
     let mut ctx = Box::new(TapCallbackCtx {
         tx,
+        privacy_context,
         channels,
         is_disconnected,
     });
@@ -578,10 +587,11 @@ pub fn spawn_process_tap_capture(
     tx: broadcast::Sender<super::stream::CapturedAudio>,
     _is_running: Arc<AtomicBool>,
     is_disconnected: Arc<AtomicBool>,
+    privacy_context: screenpipe_config::DeviceAudioPrivacy,
 ) -> Result<(AudioStreamConfig, tokio::task::JoinHandle<()>)> {
     info!("Creating CoreAudio Process Tap for system audio");
     let (capture, config, initial_uid, initial_snapshot) =
-        build_capture(tx.clone(), is_disconnected.clone())?;
+        build_capture(tx.clone(), is_disconnected.clone(), privacy_context.clone())?;
     info!(
         "Process Tap capture started (device: {}, exclusions: {})",
         initial_uid,
@@ -719,7 +729,7 @@ pub fn spawn_process_tap_capture(
             // a CoreAudio slot and leaks a device entry if rebuild succeeds.
             current = None;
 
-            match build_capture(tx.clone(), is_disconnected.clone()) {
+            match build_capture(tx.clone(), is_disconnected.clone(), privacy_context.clone()) {
                 Ok((cap, _cfg, uid, snapshot)) => {
                     info!(
                         "Process Tap re-anchored to '{}' (exclusions: {})",

@@ -490,7 +490,11 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
 
     let now = Utc::now();
     let now_ts = now.timestamp() as u64;
-    let audio_privacy_paused = !screenpipe_config::audio_capture_allowed();
+    let audio_privacy_paused = !screenpipe_config::audio_capture_allowed_for(
+        screenpipe_config::AudioCaptureKind::Microphone,
+    ) && !screenpipe_config::audio_capture_allowed_for(
+        screenpipe_config::AudioCaptureKind::Output,
+    );
     let audio_reconciliation_backlog = if !state.audio_disabled {
         get_audio_reconciliation_backlog(state, now).await
     } else {

@@ -78,6 +78,81 @@ impl From<screenpipe_db::AudioDevice> for AudioDevice {
 }
 
 impl AudioDevice {
+    pub fn privacy_context(&self) -> screenpipe_config::DeviceAudioPrivacy {
+        screenpipe_config::DeviceAudioPrivacy::for_device(
+            match self.device_type {
+                DeviceType::Input => screenpipe_config::AudioCaptureKind::Microphone,
+                DeviceType::Output => screenpipe_config::AudioCaptureKind::Output,
+            },
+            self.diagnostic_id(),
+        )
+    }
+    /// Session-local ordinal. Never serialize the hardware label into notices.
+    pub fn diagnostic_id(&self) -> u64 {
+        static IDS: OnceLock<std::sync::Mutex<std::collections::HashMap<AudioDevice, u64>>> =
+            OnceLock::new();
+        let Ok(mut ids) = IDS.get_or_init(Default::default).lock() else {
+            return 0;
+        };
+        if let Some(id) = ids.get(self) {
+            return *id;
+        }
+        if ids.len() >= 1024 {
+            return 0;
+        }
+        let id = ids.len() as u64 + 1;
+        ids.insert(self.clone(), id);
+        id
+    }
+
+    pub fn report_diagnostic(
+        &self,
+        source: screenpipe_config::capture_diagnostics::DiagnosticSource,
+        condition: screenpipe_config::capture_diagnostics::CaptureCondition,
+        reason: screenpipe_config::capture_diagnostics::CaptureReason,
+    ) {
+        use screenpipe_config::capture_diagnostics::*;
+        let channel = match self.device_type {
+            DeviceType::Input => CaptureChannel::Microphone,
+            DeviceType::Output => CaptureChannel::OutputAudio,
+        };
+        observe(
+            channel,
+            source,
+            CaptureScope::Device(self.diagnostic_id()),
+            condition,
+            vec![reason],
+            Vec::new(),
+        );
+        if source == DiagnosticSource::AudioDevice
+            && matches!(
+                condition,
+                CaptureCondition::Stopped | CaptureCondition::Failed
+            )
+        {
+            close_source(
+                CaptureScope::Device(self.diagnostic_id()),
+                DiagnosticSource::AudioProcessing,
+                reason,
+            );
+        }
+    }
+
+    pub fn report_transcription(
+        &self,
+        condition: screenpipe_config::capture_diagnostics::CaptureCondition,
+        reason: screenpipe_config::capture_diagnostics::CaptureReason,
+    ) {
+        use screenpipe_config::capture_diagnostics::*;
+        observe(
+            CaptureChannel::Transcription,
+            DiagnosticSource::AudioProcessing,
+            CaptureScope::Device(self.diagnostic_id()),
+            condition,
+            vec![reason],
+            Vec::new(),
+        );
+    }
     pub fn new(name: String, device_type: DeviceType) -> Self {
         AudioDevice { name, device_type }
     }

@@ -88,6 +88,8 @@ pub struct CaptureContext<'a> {
 /// Result of a paired capture operation.
 #[derive(Debug)]
 pub struct PairedCaptureResult {
+    /// Content-free indication that text or metadata was partially redacted.
+    pub pii_text_redacted: bool,
     /// Database frame ID
     pub frame_id: i64,
     /// Path to the JPEG snapshot on disk
@@ -394,6 +396,7 @@ pub async fn paired_capture(
     );
 
     Ok(PairedCaptureResult {
+        pii_text_redacted: pii_redaction_applied,
         frame_id,
         snapshot_path: snapshot_path_str,
         accessibility_text: sanitized_text,

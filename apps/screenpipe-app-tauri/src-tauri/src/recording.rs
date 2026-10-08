@@ -286,6 +286,8 @@ pub async fn stop_capture(
     _app: tauri::AppHandle,
 ) -> Result<(), String> {
     info!("Stopping capture session (server stays alive)");
+    // Revoke manual all-recording work before any awaited lifecycle step.
+    screenpipe_config::audio_privacy::set_all_recording_paused(true);
 
     remember_active_meeting_for_capture_restart(&state).await;
 
@@ -398,6 +400,7 @@ pub async fn start_capture(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     info!("Starting capture session");
+    let privacy_resume = screenpipe_config::audio_privacy::begin_all_recording_resume();
     let _startup_guard = crate::crash_recovery::StartupGuard::begin().map_err(str::to_string)?;
     // Race guard: short-circuit duplicate invocations.
     //
@@ -472,6 +475,9 @@ pub async fn start_capture(
 
     *capture_guard = Some(session);
 
+    // Only a successful explicit resume clears this gate. Other privacy and
+    // device settings still apply; failed starts leave the manual pause set.
+    privacy_resume.complete();
     info!("Capture session started");
     Ok(())
 }
@@ -998,6 +1004,25 @@ async fn wait_for_loopback_port_release(
 mod port_release_tests {
     use super::wait_for_loopback_port_release;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn recording_newer_manual_pause_survives_blocked_start_completion() {
+        use screenpipe_config::audio_privacy::*;
+        set_all_recording_paused(true);
+        let resume = begin_all_recording_resume();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let start = tokio::spawn(async move {
+            blocked.await.unwrap();
+            resume.complete()
+        });
+        // A newer manual stop or authenticated pause arrives during startup.
+        set_all_recording_paused(true);
+        release.send(()).unwrap();
+        assert!(!start.await.unwrap());
+        assert!(all_recording_paused());
+        assert!(begin_all_recording_resume().complete());
+        assert!(!all_recording_paused());
+    }
 
     #[tokio::test]
     async fn occupied_port_fails_without_terminating_the_owner() {

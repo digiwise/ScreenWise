@@ -814,8 +814,73 @@ pub async fn event_driven_capture_loop(
                 .as_ref()
                 .map(|rx| rx.borrow().capture_paused)
                 .unwrap_or(false);
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            let mut reasons = Vec::new();
+            if crate::sleep_monitor::screen_is_locked() {
+                reasons.push(CaptureReason::ScreenLocked);
+            }
+            if crate::schedule_monitor::schedule_paused() {
+                reasons.push(CaptureReason::SchedulePaused);
+            }
+            if screenpipe_config::audio_privacy::all_recording_paused() {
+                reasons.push(CaptureReason::UserPaused);
+            }
+            if crate::drm_detector::drm_content_paused() {
+                reasons.push(CaptureReason::ContentProtectionGate);
+            }
+            if power_profile_rx
+                .as_ref()
+                .is_some_and(|rx| rx.borrow().capture_paused)
+            {
+                reasons.push(CaptureReason::PowerCapturePaused);
+            }
+            if reasons.is_empty() {
+                reasons.push(CaptureReason::GateOpen);
+            }
+            for channel in [
+                CaptureChannel::Screen,
+                CaptureChannel::ScreenStorage,
+                CaptureChannel::Ocr,
+                CaptureChannel::Accessibility,
+            ] {
+                observe(
+                    channel,
+                    DiagnosticSource::MonitorCapture,
+                    CaptureScope::Monitor(monitor_id),
+                    if in_pause_state {
+                        CaptureCondition::Suppressed
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    reasons.clone(),
+                    Vec::new(),
+                );
+            }
+        }
         if in_pause_state {
             if should_release_on_pause_entry(was_in_pause_state, in_pause_state) {
+                {
+                    use screenpipe_config::capture_diagnostics::*;
+                    let reason = if crate::drm_detector::drm_content_paused() {
+                        CaptureReason::ContentProtectionGate
+                    } else if crate::sleep_monitor::screen_is_locked() {
+                        CaptureReason::ScreenLocked
+                    } else if crate::schedule_monitor::schedule_paused() {
+                        CaptureReason::SchedulePaused
+                    } else if screenpipe_config::audio_privacy::all_recording_paused() {
+                        CaptureReason::UserPaused
+                    } else {
+                        CaptureReason::PowerCapturePaused
+                    };
+                    for source in [
+                        DiagnosticSource::WindowPolicy,
+                        DiagnosticSource::CaptureOperation,
+                        DiagnosticSource::Redaction,
+                    ] {
+                        close_source(CaptureScope::Monitor(monitor_id), source, reason);
+                    }
+                }
                 info!(
                     "monitor {}: entering pause state (locked={}, power_paused={}, drm={}, schedule={}); releasing capture stream",
                     monitor_id,
@@ -863,6 +928,26 @@ pub async fn event_driven_capture_loop(
         {
             use crate::focus_aware_controller::CaptureState;
             let capture_state = focus_controller.state_for_monitor(&monitor);
+            {
+                use screenpipe_config::capture_diagnostics::*;
+                let inactive = matches!(capture_state, CaptureState::Cold);
+                observe(
+                    CaptureChannel::Screen,
+                    DiagnosticSource::UserPreference,
+                    CaptureScope::Monitor(monitor_id),
+                    if inactive {
+                        CaptureCondition::Suppressed
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    vec![if inactive {
+                        CaptureReason::MonitorInactive
+                    } else {
+                        CaptureReason::GateOpen
+                    }],
+                    Vec::new(),
+                );
+            }
 
             // Fires exactly once per focus-away transition, not every Cold
             // loop iteration, so the log line is meaningful and we don't
@@ -1027,6 +1112,25 @@ pub async fn event_driven_capture_loop(
                 visual_change_threshold = profile.visual_change_threshold;
                 visual_check_enabled = profile.visual_check_interval_ms > 0;
                 screenshot_disabled = profile.screenshot_disabled;
+                {
+                    use screenpipe_config::capture_diagnostics::*;
+                    observe(
+                        CaptureChannel::ScreenStorage,
+                        DiagnosticSource::Power,
+                        CaptureScope::Monitor(monitor_id),
+                        if screenshot_disabled {
+                            CaptureCondition::Suppressed
+                        } else {
+                            CaptureCondition::Admitted
+                        },
+                        vec![if screenshot_disabled {
+                            CaptureReason::PowerScreenshotsDisabled
+                        } else {
+                            CaptureReason::GateOpen
+                        }],
+                        Vec::new(),
+                    );
+                }
                 if profile.screenshot_disabled {
                     info!(
                         "power profile {:?}: screenshots disabled for monitor {} — a11y walk continues",
@@ -1358,6 +1462,7 @@ pub async fn event_driven_capture_loop(
 
                 match capture_result {
                     Ok(Ok(output)) => {
+                        report_monitor_operation(monitor_id, true);
                         state.mark_captured();
 
                         #[cfg(target_os = "windows")]
@@ -1384,6 +1489,28 @@ pub async fn event_driven_capture_loop(
                         }
 
                         if let Some(ref result) = output.result {
+                            {
+                                use screenpipe_config::capture_diagnostics::*;
+                                for channel in [CaptureChannel::Accessibility, CaptureChannel::Ocr]
+                                {
+                                    observe(
+                                        channel,
+                                        DiagnosticSource::Redaction,
+                                        CaptureScope::Monitor(monitor_id),
+                                        if result.pii_text_redacted {
+                                            CaptureCondition::PartiallyRedacted
+                                        } else {
+                                            CaptureCondition::Admitted
+                                        },
+                                        vec![if result.pii_text_redacted {
+                                            CaptureReason::PiiTextRedaction
+                                        } else {
+                                            CaptureReason::GateOpen
+                                        }],
+                                        Vec::new(),
+                                    );
+                                }
+                            }
                             // Full capture — update hash, metrics, cache
                             last_content_hash = result.content_hash;
                             last_frame_id = Some(result.frame_id);
@@ -1480,6 +1607,7 @@ pub async fn event_driven_capture_loop(
                         }
                     }
                     Ok(Err(e)) => {
+                        report_monitor_operation(monitor_id, false);
                         consecutive_capture_errors += 1;
 
                         // Mark captured on failure to reset idle timer — without
@@ -1530,6 +1658,7 @@ pub async fn event_driven_capture_loop(
                         }
                     }
                     Err(_timeout) => {
+                        report_monitor_operation(monitor_id, false);
                         consecutive_capture_errors += 1;
                         state.mark_captured();
                         warn!(
@@ -1724,6 +1853,7 @@ async fn persist_windows_placeholder(
     let marker = outcome
         .marker_text()
         .expect("placeholder capture outcomes always expose marker text");
+    report_windows_privacy(params.monitor_id, &privacy.clone().with_outcome(outcome));
     let notice = outcome
         .notice()
         .expect("placeholder capture outcomes always expose a disclosure notice");
@@ -1768,6 +1898,33 @@ async fn persist_windows_placeholder(
         elements_deduped: false,
         windows_outcome: outcome,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_other_monitor_tree_is_unnecessary(privacy: &WindowsCapturePrivacy) -> bool {
+    privacy.is_active_monitor == Some(false) && !privacy.foreground_monitor_changed
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_other_monitor_capture_omits_global_tree_and_foreground_labels() {
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(!windows_other_monitor_tree_is_unnecessary(&privacy));
+    privacy.is_active_monitor = Some(false);
+    assert!(windows_other_monitor_tree_is_unnecessary(&privacy));
+    let trigger = CaptureTrigger::AppSwitch {
+        app_name: "excluded.exe".into(),
+        target: None,
+    };
+    assert_eq!(
+        resolve_capture_metadata(None, &trigger, Some("excluded.exe"), false),
+        (None, None, None, None)
+    );
+    privacy.foreground_monitor_changed = true;
+    assert!(!windows_other_monitor_tree_is_unnecessary(&privacy));
+    privacy.foreground_monitor_changed = false;
+    privacy.is_active_monitor = Some(true);
+    assert!(!windows_other_monitor_tree_is_unnecessary(&privacy));
 }
 
 fn resolve_capture_metadata(
@@ -1985,6 +2142,8 @@ async fn do_capture(
         windows_capture.duration,
         windows_capture.privacy,
     );
+    #[cfg(target_os = "windows")]
+    report_windows_privacy(params.monitor_id, &windows_privacy);
 
     #[cfg(not(target_os = "windows"))]
     // Resolve ignored windows to SCK window IDs so ScreenCaptureKit
@@ -2046,6 +2205,7 @@ async fn do_capture(
     let pre_walk_outcome = match evaluate_windows_monitor_capture(params.monitor, &window_filters) {
         Ok(evaluation) => {
             windows_privacy.merge(evaluation.privacy);
+            report_windows_privacy(params.monitor_id, &windows_privacy);
             // New background exclusions invalidate an acquired full-monitor
             // bitmap. Only a fresh safe acquisition can admit it again.
             let latest = match evaluation.plan {
@@ -2057,7 +2217,13 @@ async fn do_capture(
                     WindowsCaptureOutcome::CaptureRedacted(reason)
                 }
             };
-            pre_walk_privacy_outcome(windows_outcome, latest)
+            if windows_privacy.foreground_monitor_changed {
+                Some(WindowsCaptureOutcome::CaptureRedacted(
+                    screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::InconsistentFocus,
+                ))
+            } else {
+                pre_walk_privacy_outcome(windows_outcome, latest)
+            }
         }
         Err(_) => Some(WindowsCaptureOutcome::CaptureFailed(
             WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
@@ -2158,6 +2324,18 @@ async fn do_capture(
         config.walk_timeout_override = Some(decision.timeout);
     }
 
+    #[cfg(target_os = "windows")]
+    let tree_walk_result = if windows_other_monitor_tree_is_unnecessary(&windows_privacy) {
+        // The bitmap policy already assessed local windows. Global focus must
+        // neither supply foreign text/labels nor veto an unaffected monitor.
+        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor)
+    } else {
+        tokio::task::spawn_blocking(move || {
+            screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
+        })
+        .await?
+    };
+    #[cfg(not(target_os = "windows"))]
     let tree_walk_result = tokio::task::spawn_blocking(move || {
         screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
     })
@@ -2165,6 +2343,15 @@ async fn do_capture(
 
     #[cfg(target_os = "windows")]
     windows_privacy.refresh_foreground_monitor(params.monitor_id);
+    #[cfg(target_os = "windows")]
+    if windows_privacy.foreground_monitor_changed {
+        return persist_windows_placeholder(
+            params, trigger, captured_at,
+            WindowsCaptureOutcome::CaptureRedacted(
+                screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::InconsistentFocus,
+            ), screenshot_disabled, &windows_privacy,
+        ).await;
+    }
 
     // If the window was skipped (incognito/private browsing or user filter),
     // bail out entirely — don't OCR the screenshot.
@@ -2189,6 +2376,36 @@ async fn do_capture(
         tree_walk_result,
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor)
     );
+    {
+        use screenpipe_a11y::tree::SkipReason as S;
+        use screenpipe_config::capture_diagnostics::*;
+        let (condition, reason) = match &tree_walk_result {
+            TreeWalkResult::Found(_) => (CaptureCondition::Admitted, CaptureReason::GateOpen),
+            TreeWalkResult::NotFound => {
+                (CaptureCondition::Failed, CaptureReason::CaptureCheckFailed)
+            }
+            TreeWalkResult::Skipped(reason) => (
+                CaptureCondition::Suppressed,
+                match reason {
+                    S::DifferentMonitor => CaptureReason::MonitorInactive,
+                    S::MonitorUnverified => CaptureReason::CaptureCheckFailed,
+                    S::Incognito => CaptureReason::PrivateBrowsing,
+                    S::NotInIncludeList => CaptureReason::OutsideIncludeFilter,
+                    S::UserIgnored | S::ExcludedApp | S::BlockedUrl => {
+                        CaptureReason::ExcludedForeground
+                    }
+                },
+            ),
+        };
+        observe(
+            CaptureChannel::Accessibility,
+            DiagnosticSource::WindowPolicy,
+            CaptureScope::Monitor(params.monitor_id),
+            condition,
+            vec![reason],
+            Vec::new(),
+        );
+    }
     let tree_snapshot = match tree_walk_result {
         TreeWalkResult::Found(snap) => Some(snap),
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor) => None,
@@ -3331,4 +3548,165 @@ mod tests {
         // Exit override — restore the saver baseline.
         assert_eq!(o.on_controller_state(None, 33), Some(1000));
     }
+}
+fn report_monitor_operation(monitor_id: u32, success: bool) {
+    use screenpipe_config::capture_diagnostics::*;
+    for channel in [
+        CaptureChannel::Screen,
+        CaptureChannel::ScreenStorage,
+        CaptureChannel::Ocr,
+        CaptureChannel::Accessibility,
+    ] {
+        observe(
+            channel,
+            DiagnosticSource::CaptureOperation,
+            CaptureScope::Monitor(monitor_id),
+            if success {
+                CaptureCondition::Admitted
+            } else {
+                CaptureCondition::Failed
+            },
+            vec![if success {
+                CaptureReason::GateOpen
+            } else {
+                CaptureReason::CaptureFailure
+            }],
+            Vec::new(),
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
+    use screenpipe_config::capture_diagnostics::*;
+    let condition = match privacy.outcome {
+        "full_monitor" => CaptureCondition::Admitted,
+        "active_window_only" => CaptureCondition::ActiveWindowOnly,
+        "capture_failed" => CaptureCondition::Failed,
+        _ => CaptureCondition::Redacted,
+    };
+    let mut reasons = Vec::new();
+    for blocker in &privacy.blockers {
+        for reason in &blocker.reasons {
+            reasons.push(match *reason {
+                "configured_exclusion" | "configured_url_exclusion" => {
+                    if blocker.foreground {
+                        CaptureReason::ExcludedForeground
+                    } else {
+                        CaptureReason::ExcludedBackground
+                    }
+                }
+                "outside_include_filter" => CaptureReason::OutsideIncludeFilter,
+                "browser_url_unavailable" => CaptureReason::BrowserUrlUnverified,
+                "foreground_changed_during_evaluation" => CaptureReason::ForegroundChanged,
+                "foreground_window_unavailable" => CaptureReason::ForegroundUnavailable,
+                "window_metadata_unavailable" => CaptureReason::WindowMetadataUnavailable,
+                "recorder_ui" => CaptureReason::RecorderUi,
+                "builtin_application_skip" | "builtin_exclusion" => {
+                    CaptureReason::BuiltinApplication
+                }
+                "shell_surface" => CaptureReason::ShellSurface,
+                "monitor_unverified" => CaptureReason::MonitorUnverified,
+                "private_browsing" => CaptureReason::PrivateBrowsing,
+                "ignored_window" | "blocked_url" => CaptureReason::ExcludedForeground,
+                "not_in_include_list" => CaptureReason::OutsideIncludeFilter,
+                "different_monitor" => CaptureReason::MonitorInactive,
+                _ => CaptureReason::NoSafeWindow,
+            });
+        }
+    }
+    if let Some(reason) = privacy.reason {
+        reasons.push(match reason {
+            "monitor_acquisition" => CaptureReason::MonitorAcquisitionFailed,
+            "active_window_acquisition" => CaptureReason::ActiveWindowAcquisitionFailed,
+            "post_capture_privacy_evaluation" => CaptureReason::PostCaptureCheckFailed,
+            "initial_privacy_evaluation" => CaptureReason::CaptureCheckFailed,
+            "inconsistent_focus" => CaptureReason::InconsistentFocus,
+            "excluded_background" => CaptureReason::ExcludedBackground,
+            _ => CaptureReason::NoSafeWindow,
+        });
+    }
+    if reasons.is_empty() {
+        reasons.push(CaptureReason::GateOpen);
+    }
+    if privacy.blockers_truncated {
+        reasons.push(CaptureReason::DiagnosticsTruncated);
+    }
+    let rules = privacy
+        .rule_matches
+        .iter()
+        .map(|rule| RuleReference {
+            origin: match rule.origin {
+                "ignored_urls" => RuleOrigin::IgnoredUrls,
+                "included_windows" => RuleOrigin::IncludedWindows,
+                "builtin" => RuleOrigin::Builtin,
+                _ => RuleOrigin::IgnoredWindows,
+            },
+            index: rule.index,
+            kind: match rule.kind {
+                "app_substring" => RuleKind::AppSubstring,
+                "app_and_title_substring" => RuleKind::AppAndTitleSubstring,
+                "url_domain" => RuleKind::UrlDomain,
+                "url_title_heuristic" => RuleKind::UrlTitleHeuristic,
+                "include_admission" => RuleKind::IncludeAdmission,
+                "builtin_app" => RuleKind::BuiltinApp,
+                _ => RuleKind::AppOrTitleSubstring,
+            },
+        })
+        .collect::<Vec<_>>();
+    let apps = privacy
+        .blockers
+        .iter()
+        .filter_map(|blocker| blocker.app.clone())
+        .collect::<Vec<_>>();
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        observe_window(
+            channel,
+            CaptureScope::Monitor(monitor_id),
+            condition,
+            reasons.clone(),
+            rules.clone(),
+            apps.clone(),
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_window_policy_preserves_safe_rule_and_app_provenance() {
+    use screenpipe_config::capture_diagnostics::*;
+    use screenpipe_screen::capture_screenshot_by_window::{
+        WindowsCaptureBlocker, WindowsCaptureRule,
+    };
+    let privacy = WindowsCapturePrivacy {
+        outcome: "active_window_only",
+        reason: Some("excluded_background"),
+        blockers: vec![WindowsCaptureBlocker {
+            app: Some("excel.exe".into()),
+            reasons: vec!["configured_exclusion"],
+            foreground: false,
+        }],
+        rule_matches: vec![WindowsCaptureRule {
+            origin: "ignored_windows",
+            index: 4,
+            kind: "app_and_title_substring",
+            app: Some("excel.exe".into()),
+            foreground: false,
+        }],
+        ..Default::default()
+    };
+    report_windows_privacy(9977, &privacy);
+    let event = current()
+        .into_iter()
+        .find(|event| {
+            event.channel == CaptureChannel::Screen
+                && event.source == DiagnosticSource::WindowPolicy
+                && event.scope == CaptureScope::Monitor(9977)
+        })
+        .unwrap();
+    assert_eq!(event.condition, CaptureCondition::ActiveWindowOnly);
+    assert_eq!(event.rules[0].index, 4);
+    assert_eq!(event.rules[0].kind, RuleKind::AppAndTitleSubstring);
+    assert_eq!(event.excluded_apps, ["excel.exe"]);
+    assert!(!event.message().contains("excel.exe"));
 }

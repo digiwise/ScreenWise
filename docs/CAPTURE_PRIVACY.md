@@ -1,5 +1,7 @@
 # Windows capture decision metadata
 
+Capture pauses and producer conditions now have independent [all-channel interval diagnostics](CAPTURE_DIAGNOSTICS.md), including safe exclusion-rule references. Per-frame metadata below remains a separate observation surface.
+
 New event-driven Windows frames store a JSON object in `frames.capture_privacy`.
 It is written atomically with the frame and returned as `capture_privacy` on OCR
 search results (`GET /search?content_type=ocr`) and `GET /frames/{id}/context`.
@@ -113,6 +115,18 @@ filter rejection (`outside_include_filter`), built-in exclusions
 is included to explain a match.
 
 ## Excluded background windows
+
+When the foreground excluded app belongs to monitor A, B/C can retain admitted
+monitor pixels if their own enumerated overlapping windows pass policy. A stable,
+verified other-monitor association skips the global foreground UIA tree and its
+labels; B/C use local bitmap OCR without borrowing A's app/title/text. This does
+not make inactive monitors automatically safe or enable workers disabled by
+existing capture preferences. Missing foreground enumeration, unknown native
+monitor association or inconsistent sampling produces a placeholder. Monitor
+association changes across acquisition/pre-UIA phases also withhold the bitmap.
+Configured app exclusion remains separate from global protected-content, lock
+and schedule gates. The subsequent [microphone-policy change](CAPTURE_DIAGNOSTICS.md)
+separates microphone admission from visual checks; retention policy is unchanged.
 
 Non-minimized windows overlapping a monitor conservatively affect its policy,
 even if another window appears to cover them completely. This implementation

@@ -88,9 +88,7 @@ pub async fn start_monitor_watcher(
             // This ensures macOS DRM sees no active ScreenCaptureKit usage.
             if drm_detector::drm_content_paused() {
                 if !drm_stopped {
-                    info!(
-                        "DRM content focused — stopping all vision monitors to release SCK handles"
-                    );
+                    info!("Content protection gate closed — stopping vision monitors");
                     if let Err(e) = vision_manager.stop().await {
                         warn!("failed to stop vision manager for DRM pause: {:?}", e);
                     }
@@ -114,7 +112,7 @@ pub async fn start_monitor_watcher(
             }
 
             if drm_stopped {
-                info!("DRM content no longer focused — restarting vision monitors");
+                info!("Content protection gate cleared — restarting vision monitors");
                 if let Err(e) = vision_manager.start().await {
                     warn!("failed to restart vision manager after DRM pause: {:?}", e);
                 }

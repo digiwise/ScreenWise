@@ -57,15 +57,130 @@ pub fn drm_content_paused() -> bool {
     screenpipe_config::audio_privacy::drm_content_paused()
 }
 
-/// Set the DRM pause state. Logs transitions.
+static PAUSE_NOTICE: Lazy<Mutex<Option<crate::privacy_notices::ContentProtectionNotice>>> =
+    Lazy::new(|| Mutex::new(None));
+
 pub fn set_drm_paused(paused: bool) {
-    let was_paused = drm_content_paused();
+    set_pause_reason(
+        paused,
+        crate::privacy_notices::ContentProtectionReason::ProtectedContentMatched,
+    );
+}
+
+fn set_pause_reason(paused: bool, reason: crate::privacy_notices::ContentProtectionReason) {
     screenpipe_config::audio_privacy::set_drm_paused(paused);
-    if paused && !was_paused {
-        info!("DRM content detected — pausing screen capture");
-    } else if !paused && was_paused {
-        info!("DRM content no longer focused — resuming screen capture");
+    report_pause_reason(paused, reason);
+}
+
+fn report_pause_reason(paused: bool, reason: crate::privacy_notices::ContentProtectionReason) {
+    use crate::privacy_notices::ContentProtectionReason;
+    let reason = if paused {
+        reason
+    } else {
+        ContentProtectionReason::GateCleared
+    };
+    if let Ok(mut previous) = PAUSE_NOTICE.lock() {
+        let Some(event) = next_pause_notice(*previous, reason, chrono::Utc::now()) else {
+            return;
+        };
+        let suppression_since = event.suppression_since;
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            let diagnostic_reason = match reason {
+                ContentProtectionReason::ProtectedContentMatched => {
+                    CaptureReason::ProtectedContentMatched
+                }
+                ContentProtectionReason::ForegroundIdentityUnavailable => {
+                    CaptureReason::ForegroundUnavailable
+                }
+                ContentProtectionReason::ForegroundIdentityChanged => {
+                    CaptureReason::ForegroundChanged
+                }
+                ContentProtectionReason::BrowserUrlUnverified => {
+                    CaptureReason::BrowserUrlUnverified
+                }
+                ContentProtectionReason::GateCleared => CaptureReason::GateOpen,
+                ContentProtectionReason::AccessDenied => CaptureReason::AccessDenied,
+                ContentProtectionReason::CheckFailed => CaptureReason::CaptureCheckFailed,
+            };
+            for channel in [
+                CaptureChannel::Screen,
+                CaptureChannel::ScreenStorage,
+                CaptureChannel::Ocr,
+                CaptureChannel::Accessibility,
+                CaptureChannel::Keyboard,
+                CaptureChannel::Clipboard,
+                CaptureChannel::Pointer,
+                CaptureChannel::OutputAudio,
+            ] {
+                observe(
+                    channel,
+                    DiagnosticSource::ContentProtection,
+                    CaptureScope::Global,
+                    if paused {
+                        CaptureCondition::Suppressed
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    vec![diagnostic_reason],
+                    Vec::new(),
+                );
+            }
+        }
+        tracing::info!(reason_code=reason.code(), suppression_since=?suppression_since, "{}", reason.message().replace("microphone and output", "output").replace("Screen and audio", "Screen and output audio"));
+        if tokio::runtime::Handle::try_current().is_err()
+            || screenpipe_events::send_event("content_protection_status", event).is_err()
+        {
+            crate::privacy_notices::mark_persistence_degraded();
+            tracing::error!(
+                "Content protection notice delivery failed; consult the local diagnostic log."
+            );
+        }
+        *previous = Some(event);
+    } else {
+        crate::privacy_notices::mark_persistence_degraded();
+        tracing::error!(
+            "Content protection notice state unavailable; consult the local diagnostic log."
+        );
     }
+}
+
+fn next_pause_notice(
+    previous: Option<crate::privacy_notices::ContentProtectionNotice>,
+    reason: crate::privacy_notices::ContentProtectionReason,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<crate::privacy_notices::ContentProtectionNotice> {
+    use crate::privacy_notices::{ContentProtectionNotice, ContentProtectionReason};
+    if previous.is_some_and(|event| event.content_protection_reason == reason) {
+        return None;
+    }
+    let suppression_since = if reason == ContentProtectionReason::GateCleared {
+        previous.and_then(|event| event.suppression_since)
+    } else {
+        previous
+            .filter(|event| event.content_protection_reason != ContentProtectionReason::GateCleared)
+            .and_then(|event| event.suppression_since)
+            .or(Some(now))
+    };
+    Some(ContentProtectionNotice {
+        schema_version: 2,
+        content_protection_reason: reason,
+        observed_at: now,
+        suppression_since,
+    })
+}
+
+/// Start each writer with a fresh initial diagnosis, including same-process restarts.
+pub(crate) fn initialize_pause_notice() {
+    use crate::privacy_notices::ContentProtectionReason;
+    let reason = PAUSE_NOTICE
+        .lock()
+        .ok()
+        .and_then(|mut previous| previous.take())
+        .map(|event| event.content_protection_reason)
+        .filter(|reason| *reason != ContentProtectionReason::GateCleared)
+        .unwrap_or(ContentProtectionReason::ForegroundIdentityUnavailable);
+    report_pause_reason(drm_content_paused(), reason);
 }
 
 /// Apps that trigger macOS content protection while ScreenCaptureKit is active
@@ -179,10 +294,6 @@ pub fn check_and_update_drm_state(
 
     let app = app_name.unwrap_or("");
     if is_drm_content(app, browser_url) {
-        debug!(
-            "DRM content in foreground: app={:?}, url={:?}",
-            app_name, browser_url
-        );
         set_drm_paused(true);
         true
     } else if !app.is_empty() {
@@ -410,7 +521,7 @@ pub fn pre_capture_drm_check(pause_on_drm_content: bool, _trigger_app_name: Opti
     let block = windows_pre_capture_should_block(foreground);
 
     if block {
-        set_drm_paused(true);
+        set_pause_reason(true, foreground.notice_reason());
     }
     block
 }
@@ -643,6 +754,25 @@ enum WindowsForegroundAssessment {
     BrowserUrlUnknown,
     Other,
     Unknown,
+    Changed,
+    AccessDenied,
+    CheckFailed,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsForegroundAssessment {
+    fn notice_reason(self) -> crate::privacy_notices::ContentProtectionReason {
+        use crate::privacy_notices::ContentProtectionReason as R;
+        match self {
+            Self::Drm => R::ProtectedContentMatched,
+            Self::Unknown => R::ForegroundIdentityUnavailable,
+            Self::Changed => R::ForegroundIdentityChanged,
+            Self::BrowserUrlUnknown => R::BrowserUrlUnverified,
+            Self::Other => R::GateCleared,
+            Self::AccessDenied => R::AccessDenied,
+            Self::CheckFailed => R::CheckFailed,
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -671,7 +801,12 @@ fn is_windows_browser(process_name: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn windows_pre_capture_should_block(foreground: WindowsForegroundAssessment) -> bool {
     match foreground {
-        WindowsForegroundAssessment::Drm | WindowsForegroundAssessment::Unknown => true,
+        WindowsForegroundAssessment::Drm
+        | WindowsForegroundAssessment::Unknown
+        | WindowsForegroundAssessment::Changed => true,
+        WindowsForegroundAssessment::AccessDenied | WindowsForegroundAssessment::CheckFailed => {
+            true
+        }
         // Windows does not yet have a narrow pre-capture browser URL query.
         // Existing capture metadata can engage DRM pause after acquisition;
         // once paused, poll_drm_clear() conservatively retains that pause while
@@ -724,7 +859,13 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
 
     let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(process) => process,
-        Err(_) => return WindowsForegroundAssessment::Unknown,
+        Err(error) => {
+            return if error.code().0 as u32 == 0x80070005 {
+                WindowsForegroundAssessment::AccessDenied
+            } else {
+                WindowsForegroundAssessment::CheckFailed
+            }
+        }
     };
     let mut path = [0u16; 1024];
     let mut path_len = path.len() as u32;
@@ -739,7 +880,14 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
     unsafe {
         let _ = CloseHandle(process);
     }
-    if query_result.is_err() || path_len == 0 {
+    if let Err(error) = query_result {
+        return if error.code().0 as u32 == 0x80070005 {
+            WindowsForegroundAssessment::AccessDenied
+        } else {
+            WindowsForegroundAssessment::CheckFailed
+        };
+    }
+    if path_len == 0 {
         return WindowsForegroundAssessment::Unknown;
     }
 
@@ -771,7 +919,7 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
         current_hwnd.0 as usize,
         current_pid,
     ) {
-        return WindowsForegroundAssessment::Unknown;
+        return WindowsForegroundAssessment::Changed;
     }
 
     assessment
@@ -781,8 +929,9 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
 pub fn poll_drm_clear() -> bool {
     let foreground = windows_foreground_assessment();
     if windows_poll_should_stay_paused(foreground) {
+        report_pause_reason(true, foreground.notice_reason());
         debug!(
-            "Windows DRM poll kept capture paused; foreground assessment={:?}",
+            "Windows content protection gate retained capture suppression; assessment={:?}",
             foreground
         );
         true
@@ -795,11 +944,69 @@ pub fn poll_drm_clear() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn microphone_privacy_survives_each_windows_content_protection_reason() {
+        let _guard = DRM_FLAG_LOCK.lock().unwrap();
+        use crate::privacy_notices::ContentProtectionReason as R;
+        use screenpipe_config::{AudioCaptureKind as K, DeviceAudioPrivacy};
+        let context = DeviceAudioPrivacy::for_device(K::Microphone, u64::MAX - 200);
+        let before = context.current().unwrap();
+        for reason in [
+            R::ProtectedContentMatched,
+            R::ForegroundIdentityUnavailable,
+            R::ForegroundIdentityChanged,
+            R::BrowserUrlUnverified,
+            R::AccessDenied,
+            R::CheckFailed,
+        ] {
+            set_pause_reason(true, reason);
+            assert_eq!(context.current(), Some(before));
+            assert!(before.is_current());
+            assert!(!screenpipe_config::audio_capture_allowed_for(K::Output));
+            set_pause_reason(false, R::GateCleared);
+        }
+    }
     use std::sync::Mutex;
 
     /// Tests that touch the shared DRM pause state must hold this
     /// mutex to avoid racing with each other (cargo test runs in parallel).
     static DRM_FLAG_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn pause_reasons_deduplicate_and_retain_onset_until_gate_clears() {
+        use crate::privacy_notices::ContentProtectionReason as R;
+        let now = chrono::Utc::now();
+        let initial = next_pause_notice(None, R::GateCleared, now).unwrap();
+        assert!(initial.suppression_since.is_none());
+        let paused =
+            next_pause_notice(Some(initial), R::ForegroundIdentityUnavailable, now).unwrap();
+        assert!(next_pause_notice(Some(paused), R::ForegroundIdentityUnavailable, now).is_none());
+        let changed = next_pause_notice(
+            Some(paused),
+            R::BrowserUrlUnverified,
+            now + chrono::Duration::seconds(10),
+        )
+        .unwrap();
+        assert_eq!(changed.suppression_since, Some(now));
+        let cleared = next_pause_notice(
+            Some(changed),
+            R::GateCleared,
+            now + chrono::Duration::seconds(20),
+        )
+        .unwrap();
+        assert_eq!(cleared.suppression_since, Some(now));
+        let again = next_pause_notice(
+            Some(cleared),
+            R::ProtectedContentMatched,
+            now + chrono::Duration::seconds(30),
+        )
+        .unwrap();
+        assert_eq!(
+            again.suppression_since,
+            Some(now + chrono::Duration::seconds(30))
+        );
+    }
 
     #[test]
     fn test_is_drm_app_positive() {

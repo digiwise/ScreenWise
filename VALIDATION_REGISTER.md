@@ -10,6 +10,98 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Microphone admission and pause ordering, 2026-10-08
+
+Microphone acquisition, queued/background/live transcription, SQLite writes and
+delayed callbacks now carry modality/device permits independently of visual
+exclusions and Windows foreground/protection uncertainty. Output protection is
+retained. Default lock, schedule, audio/device disable and explicit manual
+all-recording pause still revoke affected work; resume cannot revive old permits.
+The authenticated session-only `GET/POST /recording/privacy` exposes the manual
+pause flag. Desktop stop sets it before awaiting shutdown, and startup completion
+respects newer requests. Version-1 historical protection notices retain their
+original microphone meaning; current notices describe screen/output suppression.
+
+Eight policy tests, 15 audio privacy tests, 15 synthetic recorder tests, 18 engine
+privacy tests, 21 protection tests and 43 event-driven tests passed. These are
+overlapping selections, not an aggregate count. They cover microphone continuity
+during visual protection, common-gate rejection, device-generation revocation,
+buffered tails, queued database/callback rejection, partial shutdown, queue
+pressure/loss, automatic device switch-back and deterministic newer-pause races.
+An initial combined engine run exposed three test-status isolation failures;
+isolating test writer status repaired them without clearing production degradation.
+
+Six interval-store tests also passed, including warning before rejection without
+polling, pressure deduplication, recovery, exact numeric loss and late-registration
+replay. A fixed numeric callback now logs diagnostic storage pressure and rejected
+deliveries directly, independently of SQLite and Timeline queries.
+
+Independent read-only review used **gpt-6-astra / high**. Its six findings were
+fixed: sticky automatic-recovery disablement, desktop start overwriting a newer
+pause, unscoped optional macOS tap chunks, device resume overwriting a newer
+pause, superseded preference diagnostics and missing direct pressure/loss logs.
+The reviewer confirmed resolution
+by source inspection; it did not execute tests or inspect captured contents.
+
+Final desktop checking and 11 focused `recording_` tests passed, including the
+blocked-start/newer-pause case. They reused all 1,084/921 external artifacts with
+none rebuilt. Canonical formatting and whitespace checks passed; both lockfiles
+are unchanged.
+
+The final engine `release-local` build passed with all 785 external artifacts
+reused and none rebuilt (nine workspace artifacts reused, eight rebuilt).
+Inert CLI version/help checks passed. This is not a production-release result.
+
+The final desktop `release-local` build also passed (5m49s), reusing all 1,080
+external artifacts with none rebuilt; ten workspace artifacts reused and eight
+rebuilt. The desktop application was not launched.
+
+Frontend type checking/export passed with the existing `unpdf` warning. No capture
+session, captured-content read, model/dependency acquisition, firewall change or
+deployment was performed. Hardware callback/race behavior and macOS/Linux builds
+remain unvalidated. Paused OS streams may remain allocated, and the shared model
+can reset when switching devices. See [policy/coverage limits](docs/CAPTURE_DIAGNOSTICS.md).
+
+## Capture interval diagnostics, 2026-10-08
+
+Subsequent unaffected-monitor implementation: a consistent verified foreground
+on another monitor bypasses its global UIA tree and trigger labels, allowing
+admitted local bitmap/OCR work. Pixel admission remains based on every local
+overlapping window: excluded foreground, background and spanning windows retain
+redaction/isolation behavior. Missing enumeration, unknown native association,
+changed HWND/PID within evaluation and monitor changes across policy phases
+remain fail closed. Protected-content/lock/schedule policy and audio retention
+were not changed; no proposed monitor grouping UI was built.
+Passed 69 synthetic screen-policy and 43 event-driven engine tests, with all
+433/685 external artifacts reused and zero dependency rebuilds; canonical
+formatting passed. The updated engine `release-local` build passed (785 external
+artifacts reused, zero rebuilt; 13 workspace artifacts reused, four rebuilt),
+followed by inert version/help checks. These tests do not establish live WGC/UIA race behavior,
+occlusion correctness or complete privacy coverage. Existing inactive-monitor
+preferences still determine whether a worker captures. See
+[per-monitor behavior and limits](docs/CAPTURE_PRIVACY.md).
+
+Content-free interval observations now persist independently of capture admission
+for screen acquisition/storage/OCR, accessibility, input, microphone/output and
+transcription producers. Fixed reasons distinguish protection matches, uncertain
+checks, exclusion rules, partial redaction, fallback, silent samples, missing
+callbacks and processing deferral. Each source/channel/numeric scope retains
+onset and links changed segments; unchanged state is deduplicated. Authenticated
+Timeline responses retain currently open explanations across date boundaries and
+expose diagnostic capacity/loss status. Existing admission policies are unchanged.
+
+Passed synthetic checks: four config interval-store tests, ten notice persistence
+tests, 20 content-protection tests, 41 event-driven capture tests, one engine rule
+provenance test, 66 screen-policy tests, 11 keyboard privacy tests and 16 Timeline
+tests. The live keyboard test remained ignored. Canonical formatting and whitespace
+checks passed. The engine `release-local` build passed with all 785 external
+artifacts reused and zero dependency rebuilds (nine workspace artifacts reused,
+eight rebuilt). Inert `--version`, `--help` and `record --help` checks passed.
+No captured contents were read and no capture session, firewall
+change or deployment was performed. See [coverage and remaining
+limits](docs/CAPTURE_DIAGNOSTICS.md), including crash tails, provider paths and
+configuration-index stability; this is not complete producer or runtime validation.
+
 ## Audio segment search and Pi evidence guards, 2026-10-08
 
 Audio search now returns individual background transcription rows rather than

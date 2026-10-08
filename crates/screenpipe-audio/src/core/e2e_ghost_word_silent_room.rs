@@ -87,7 +87,7 @@ async fn silent_room_no_ghost_words() {
     let sample_rate: u32 = 16_000;
     let segment_secs = 5_u64;
 
-    let (audio_stream, tx) = AudioStream::from_sender_for_test(fake_device, sample_rate, 1);
+    let (audio_stream, tx) = AudioStream::from_sender_for_test(fake_device.clone(), sample_rate, 1);
     let audio_stream = Arc::new(audio_stream);
 
     let (whisper_tx, whisper_rx) = crossbeam::channel::bounded::<AudioInput>(32);
@@ -119,7 +119,13 @@ async fn silent_room_no_ghost_words() {
         }
 
         let chunk = vec![0.0_f32; chunk_samples];
-        if tx.send(chunk.into()).is_err() {
+        if tx
+            .send(crate::core::stream::CapturedAudio::for_device(
+                chunk,
+                &fake_device,
+            ))
+            .is_err()
+        {
             break;
         }
 
@@ -127,7 +133,11 @@ async fn silent_room_no_ghost_words() {
     }
 
     is_running.store(false, Ordering::Relaxed);
-    tx.send(vec![0.0_f32; chunk_samples].into()).ok();
+    tx.send(crate::core::stream::CapturedAudio::for_device(
+        vec![0.0_f32; chunk_samples],
+        &fake_device,
+    ))
+    .ok();
 
     let _ = tokio::time::timeout(Duration::from_secs(15), pipeline_handle).await;
 

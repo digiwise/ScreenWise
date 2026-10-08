@@ -22,6 +22,9 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 use whisper_rs::WhisperContext;
 
+use screenpipe_config::capture_diagnostics::{
+    CaptureCondition as CC, CaptureReason as CR, DiagnosticSource as DS,
+};
 use screenpipe_db::DatabaseManager;
 
 use super::{start_device_monitor, stop_device_monitor, AudioManagerOptions, TranscriptionMode};
@@ -933,6 +936,7 @@ impl AudioManager {
             Ok(device) => device,
             Err(_) => return Err(anyhow!("Device {} not found", device_name)),
         };
+        device.privacy_context().set_stopped(true);
 
         self.options
             .write()
@@ -940,6 +944,7 @@ impl AudioManager {
             .enabled_devices
             .remove(device_name);
 
+        device.report_diagnostic(DS::AudioDevice, CC::Stopped, CR::DeviceRecovery);
         self.stop_device_recording(&device).await
     }
 
@@ -947,7 +952,17 @@ impl AudioManager {
     /// Idempotent — safe to call on already-stopped devices.
     /// Used by device monitor for force-cycling devices after sleep/wake.
     pub async fn stop_device_recording(&self, device: &AudioDevice) -> Result<()> {
+        self.stop_device_recording_for_request(device, None).await
+    }
+    async fn stop_device_recording_for_request(
+        &self,
+        device: &AudioDevice,
+        request: Option<&screenpipe_config::audio_privacy::DeviceAudioPreferenceRequest>,
+    ) -> Result<()> {
         let _lifecycle = self.lifecycle_lock.lock().await;
+        if request.is_some_and(|request| !request.is_current()) {
+            return Ok(());
+        }
         screenpipe_events::begin_audio_shutdown_attempt();
         let result = self
             .stop_recording_devices(std::slice::from_ref(device), PRODUCER_STOP_TIMEOUT)
@@ -955,6 +970,19 @@ impl AudioManager {
         if result.is_err() {
             self.shutdown_incomplete.store(true, Ordering::Release);
         }
+        device.report_diagnostic(
+            DS::AudioDevice,
+            if result.is_err() {
+                CC::Failed
+            } else {
+                CC::Stopped
+            },
+            if result.is_err() {
+                CR::DeviceStreamFailed
+            } else {
+                CR::DeviceRecovery
+            },
+        );
         result
     }
 
@@ -965,15 +993,28 @@ impl AudioManager {
     /// Temporarily pause a device without changing the configured device list.
     /// Idempotent — safe to call if already paused. Never errors.
     pub async fn pause_device(&self, device_name: &str) -> Result<()> {
+        let privacy_request = parse_audio_device(device_name)
+            .ok()
+            .map(|device| device.privacy_context().set_disabled(true));
         // Mark as disabled FIRST so no monitor path can race and restart it
-        self.user_disabled_devices
-            .write()
-            .await
-            .insert(device_name.to_string());
+        let mut disabled = self.user_disabled_devices.write().await;
+        if privacy_request
+            .as_ref()
+            .is_some_and(|request| !request.is_current())
+        {
+            return Ok(());
+        }
+        disabled.insert(device_name.to_string());
+        if let Ok(device) = parse_audio_device(device_name) {
+            device.report_diagnostic(DS::UserPreference, CC::Suppressed, CR::UserPaused);
+        }
+        drop(disabled);
 
         // Best-effort stop — ignore all errors (already stopped, not found, etc.)
         if let Ok(device) = parse_audio_device(device_name) {
-            let _ = self.stop_device_recording(&device).await;
+            let _ = self
+                .stop_device_recording_for_request(&device, privacy_request.as_ref())
+                .await;
         }
         info!("user paused audio device: {}", device_name);
         Ok(())
@@ -981,13 +1022,21 @@ impl AudioManager {
 
     /// Resume a previously paused device. Idempotent — safe to call if already running.
     pub async fn resume_device(&self, device_name: &str) -> Result<()> {
-        // Remove from disabled FIRST so start_device gate allows it
-        self.user_disabled_devices.write().await.remove(device_name);
-
         let device = match parse_audio_device(device_name) {
             Ok(device) => device,
             Err(_) => return Err(anyhow!("Device {} not found", device_name)),
         };
+        let privacy_resume = device.privacy_context().begin_resume();
+        if !apply_device_resume(
+            &self.user_disabled_devices,
+            device_name,
+            &device,
+            privacy_resume,
+        )
+        .await
+        {
+            return Ok(());
+        }
         self.start_device(&device).await?;
         info!("user resumed audio device: {}", device_name);
         Ok(())
@@ -995,17 +1044,40 @@ impl AudioManager {
 
     /// Mark a device as user-disabled. The device monitor will not auto-start it.
     pub async fn user_disable_device(&self, device_name: &str) {
-        self.user_disabled_devices
-            .write()
-            .await
-            .insert(device_name.to_string());
+        let privacy_request = parse_audio_device(device_name)
+            .ok()
+            .map(|device| device.privacy_context().set_disabled(true));
+        let mut disabled = self.user_disabled_devices.write().await;
+        if privacy_request
+            .as_ref()
+            .is_some_and(|request| !request.is_current())
+        {
+            return;
+        }
+        disabled.insert(device_name.to_string());
+        if let Ok(device) = parse_audio_device(device_name) {
+            device.report_diagnostic(DS::UserPreference, CC::Suppressed, CR::Disabled);
+        }
+        drop(disabled);
         info!("user disabled audio device: {}", device_name);
     }
 
     /// Remove a device from the user-disabled set, allowing auto-start again.
     pub async fn user_enable_device(&self, device_name: &str) {
-        self.user_disabled_devices.write().await.remove(device_name);
-        info!("user re-enabled audio device: {}", device_name);
+        if let Ok(device) = parse_audio_device(device_name) {
+            let privacy_resume = device.privacy_context().begin_resume();
+            if !apply_device_resume(
+                &self.user_disabled_devices,
+                device_name,
+                &device,
+                privacy_resume,
+            )
+            .await
+            {
+                return;
+            }
+            info!("user re-enabled audio device: {}", device_name);
+        }
     }
 
     /// Returns the set of devices the user has explicitly disabled.
@@ -1014,6 +1086,7 @@ impl AudioManager {
     }
 
     pub async fn start_device(&self, device: &AudioDevice) -> Result<()> {
+        let privacy_restart = device.privacy_context().begin_restart();
         let _lifecycle = self.lifecycle_lock.lock().await;
         if self.shutdown_incomplete.load(Ordering::Acquire) {
             return Err(anyhow!(
@@ -1043,12 +1116,19 @@ impl AudioManager {
             return Ok(());
         }
 
+        if !privacy_restart.complete() {
+            return Err(anyhow!(
+                "audio device restart superseded by a newer privacy request"
+            ));
+        }
         if let Err(e) = self.device_manager.start_device(device).await {
             let err_str = e.to_string();
 
             if err_str.contains("Failed to build input stream") {
+                device.report_diagnostic(DS::AudioDevice, CC::Failed, CR::DeviceUnavailable);
                 return Err(anyhow!("Device {device} not found"));
             } else if !err_str.contains("already running") {
+                device.report_diagnostic(DS::AudioDevice, CC::Failed, CR::DeviceStartFailed);
                 return Err(e);
             }
         }
@@ -1057,7 +1137,14 @@ impl AudioManager {
             if let Some(is_running) = self.device_manager.is_running_mut(device) {
                 is_running.store(true, Ordering::Relaxed);
             }
-            let handle = self.record_device(device).await?;
+            let handle = match self.record_device(device).await {
+                Ok(handle) => handle,
+                Err(error) => {
+                    device.report_diagnostic(DS::AudioDevice, CC::Failed, CR::DeviceStartFailed);
+                    return Err(error);
+                }
+            };
+            device.report_diagnostic(DS::AudioDevice, CC::Admitted, CR::GateOpen);
             self.recording_handles
                 .insert(device.clone(), Arc::new(Mutex::new(handle)));
         }
@@ -1111,6 +1198,7 @@ impl AudioManager {
 
             // Check for inner Result errors (record_and_transcribe returned Err)
             if let Err(ref e) = record_result {
+                device_clone.report_diagnostic(DS::AudioDevice, CC::Failed, CR::DeviceStreamFailed);
                 warn!(
                     "recording for device {} exited with error: {}",
                     device_clone, e
@@ -1119,6 +1207,7 @@ impl AudioManager {
             }
 
             if !is_running.load(Ordering::Acquire) {
+                device_clone.report_diagnostic(DS::AudioDevice, CC::Stopped, CR::DeviceRecovery);
                 return Ok(());
             }
 
@@ -1206,6 +1295,9 @@ impl AudioManager {
                     );
                 }
                 let Some(privacy) = audio.privacy.filter(|p| p.is_current()) else {
+                    audio
+                        .device
+                        .report_transcription(CC::Suppressed, CR::PrivacyGenerationInvalidated);
                     info!("queued audio chunk discarded by privacy policy");
                     continue;
                 };
@@ -1385,6 +1477,9 @@ impl AudioManager {
                 // chunk was already written above; background transcription
                 // resumes when the live session ends.
                 if meeting_audio_tap.background_suppressed() {
+                    audio
+                        .device
+                        .report_transcription(CC::Deferred, CR::TranscriptionDeferred);
                     had_deferred_segments = true;
                     metrics.record_segment_deferred();
                     debug!(
@@ -1424,6 +1519,9 @@ impl AudioManager {
                             // shutdown impossible. Wake the independently owned
                             // reconciliation worker instead. Every deferred chunk,
                             // including this one, was durably inserted above.
+                            audio
+                                .device
+                                .report_transcription(CC::Admitted, CR::GateOpen);
                             had_deferred_segments = false;
                             deferral_started = None;
                             info!(
@@ -2085,10 +2183,108 @@ impl Drop for AudioManager {
     }
 }
 
+async fn apply_device_resume(
+    preferences: &RwLock<HashSet<String>>,
+    device_name: &str,
+    device: &AudioDevice,
+    request: screenpipe_config::audio_privacy::DeviceAudioPreferenceRequest,
+) -> bool {
+    let mut disabled = preferences.write().await;
+    if !request.complete_resume() {
+        return false;
+    }
+    disabled.remove(device_name);
+    device.report_diagnostic(DS::UserPreference, CC::Admitted, CR::GateOpen);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::device::{AudioDevice, DeviceType};
+
+    #[tokio::test]
+    async fn privacy_older_resume_waiting_on_preferences_cannot_override_newer_pause() {
+        let device = AudioDevice::new("synthetic-paused-resume".into(), DeviceType::Input);
+        let context = device.privacy_context();
+        context.set_disabled(true);
+        let preferences = Arc::new(RwLock::new(HashSet::from([device.to_string()])));
+        let held = preferences.write().await;
+        let pending = context.begin_resume();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let preferences = preferences.clone();
+            let name = device.to_string();
+            let device = device.clone();
+            async move {
+                started.send(()).unwrap();
+                apply_device_resume(&preferences, &name, &device, pending).await
+            }
+        });
+        waiting.await.unwrap();
+        // Even repeated disablement supersedes an already blocked resume.
+        let newer_pause = context.set_disabled(true);
+        device.report_diagnostic(DS::UserPreference, CC::Suppressed, CR::UserPaused);
+        drop(held);
+        assert!(!task.await.unwrap());
+        assert!(newer_pause.is_current());
+        assert!(preferences.read().await.contains(&device.to_string()));
+        assert!(context.current().is_none());
+        let latest = || {
+            screenpipe_config::capture_diagnostics::current()
+                .into_iter()
+                .find(|notice| {
+                    notice.source == DS::UserPreference
+                        && notice.scope
+                            == screenpipe_config::capture_diagnostics::CaptureScope::Device(
+                                device.diagnostic_id(),
+                            )
+                })
+                .unwrap()
+        };
+        assert_eq!(latest().condition, CC::Suppressed);
+        assert_eq!(latest().reasons, vec![CR::UserPaused]);
+        assert!(
+            apply_device_resume(
+                &preferences,
+                &device.to_string(),
+                &device,
+                context.begin_resume()
+            )
+            .await
+        );
+        assert!(!preferences.read().await.contains(&device.to_string()));
+        assert!(context.current().unwrap().is_current());
+        assert_eq!(latest().condition, CC::Admitted);
+        assert_eq!(latest().reasons, vec![CR::GateOpen]);
+    }
+
+    #[test]
+    fn privacy_device_lifecycle_switch_back_and_fallback_reengagement() {
+        let a = AudioDevice::new("synthetic-default-a".into(), DeviceType::Input);
+        let b = AudioDevice::new("synthetic-default-b".into(), DeviceType::Input);
+        let a_privacy = a.privacy_context();
+        let old = a_privacy.current().unwrap();
+        a_privacy.set_stopped(true);
+        assert!(b.privacy_context().begin_restart().complete());
+        b.privacy_context().set_stopped(true);
+        assert!(a_privacy.begin_restart().complete());
+        assert!(a_privacy.current().unwrap().is_current());
+        assert!(!old.is_current());
+        // Repeated automatic cleanup must also supersede an older startup.
+        a_privacy.set_stopped(true);
+        let pending = a_privacy.begin_restart();
+        a_privacy.set_stopped(true);
+        assert!(!pending.complete());
+        assert!(a_privacy.begin_restart().complete());
+        a_privacy.set_disabled(true);
+        a_privacy.set_stopped(true);
+        assert!(a_privacy.begin_restart().complete());
+        assert!(a_privacy.current().is_none());
+        a_privacy.set_disabled(false);
+        assert!(a_privacy.current().unwrap().is_current());
+        assert!(!old.is_current());
+    }
 
     #[tokio::test]
     async fn privacy_compensation_removes_raw_chunk_row_and_file() {

@@ -68,6 +68,7 @@ struct ActiveMeetingStream {
     notified_audio_stall: bool,
     notified_transcript_stall: bool,
     device_senders: HashMap<String, mpsc::Sender<MeetingAudioFrame>>,
+    device_privacy: HashMap<String, screenpipe_config::AudioPrivacyPermit>,
     device_retry_after: HashMap<String, Instant>,
 }
 
@@ -227,7 +228,6 @@ pub fn start_meeting_streaming_loop(
             }
         }
 
-        let mut observed_privacy = screenpipe_config::AudioPrivacyPermit::current();
         loop {
             reap_ready_stream_workers(&mut stream_workers, &mut stream_workers_clean);
             reap_ready_persistence_workers(
@@ -244,19 +244,8 @@ pub fn start_meeting_streaming_loop(
                 audio_rx.len(),
                 super::MEETING_AUDIO_FRAME_BUFFER,
             );
-            let privacy = screenpipe_config::AudioPrivacyPermit::current();
-            if privacy != observed_privacy {
-                if let Some(session) = active.as_mut() {
-                    session.device_senders.clear();
-                    session.device_retry_after.clear();
-                    session.last_audio_activity_at = Instant::now();
-                    session.started_at = Instant::now();
-                    session.live_transcript_seen = false;
-                    session.last_live_transcript_at = None;
-                }
-                audio_tap.set_background_suppressed(false);
-                observed_privacy = privacy;
-                info!("meeting audio privacy transition cleared buffered live state");
+            if let Some(session) = active.as_mut() {
+                prune_privacy_invalidated_streams(session);
             }
             tokio::select! {
                 _ = &mut stop_rx => {
@@ -396,7 +385,8 @@ pub fn start_meeting_streaming_loop(
                     }
                 }
                 _ = inactivity_tick.tick() => {
-                    if !screenpipe_config::audio_capture_allowed() {
+                    if !screenpipe_config::audio_capture_allowed_for(screenpipe_config::AudioCaptureKind::Microphone)
+                        && !screenpipe_config::audio_capture_allowed_for(screenpipe_config::AudioCaptureKind::Output) {
                         if let Some(session) = active.as_mut() {
                             session.device_senders.clear();
                             session.last_audio_activity_at = Instant::now();
@@ -527,6 +517,7 @@ async fn start_streaming_session(
         notified_audio_stall: false,
         notified_transcript_stall: false,
         device_senders: HashMap::new(),
+        device_privacy: HashMap::new(),
         device_retry_after: HashMap::new(),
     });
 
@@ -623,6 +614,18 @@ fn sample_final_receiver(receiver: &mpsc::Receiver<MeetingTranscriptFinal>) {
         receiver.len(),
         receiver.max_capacity(),
     );
+}
+
+fn prune_privacy_invalidated_streams(session: &mut ActiveMeetingStream) {
+    session
+        .device_privacy
+        .retain(|_, permit| permit.is_current());
+    session
+        .device_senders
+        .retain(|key, _| session.device_privacy.contains_key(key));
+    session
+        .device_retry_after
+        .retain(|key, _| session.device_privacy.contains_key(key));
 }
 
 fn sample_provider_queues(session: &ActiveMeetingStream) {
@@ -951,6 +954,9 @@ fn route_frame_to_provider(
         session.device_retry_after.remove(&key);
     }
 
+    if let Some(privacy) = frame.privacy {
+        session.device_privacy.insert(key.clone(), privacy);
+    }
     if !session.device_senders.contains_key(&key) {
         let (tx, rx) = mpsc::channel(PROVIDER_FRAME_BUFFER);
         match config.provider {
@@ -1243,6 +1249,7 @@ mod tests {
             notified_audio_stall: false,
             notified_transcript_stall: false,
             device_senders: HashMap::new(),
+            device_privacy: HashMap::new(),
             device_retry_after: HashMap::new(),
         }
     }
@@ -1306,6 +1313,31 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn privacy_pruning_keeps_microphone_stream_when_output_is_revoked() {
+        use screenpipe_config::{AudioCaptureKind as K, DeviceAudioPrivacy};
+        let mic = DeviceAudioPrivacy::for_device(K::Microphone, u64::MAX - 100);
+        let output = DeviceAudioPrivacy::for_device(K::Output, u64::MAX - 101);
+        let mut session = test_session(Instant::now(), true);
+        for (key, permit) in [
+            ("mic", mic.current().unwrap()),
+            ("output", output.current().unwrap()),
+        ] {
+            let (tx, _rx) = mpsc::channel(2);
+            session.device_senders.insert(key.into(), tx);
+            session.device_privacy.insert(key.into(), permit);
+        }
+        screenpipe_config::audio_privacy::set_drm_paused(true);
+        prune_privacy_invalidated_streams(&mut session);
+        screenpipe_config::audio_privacy::set_drm_paused(false);
+        assert!(session.device_senders.contains_key("mic"));
+        assert!(!session.device_senders.contains_key("output"));
+        mic.set_disabled(true);
+        prune_privacy_invalidated_streams(&mut session);
+        assert!(session.device_senders.is_empty());
+        mic.set_disabled(false);
     }
 
     #[tokio::test]

@@ -227,15 +227,128 @@ pub struct WindowFilters {
     ignore_patterns: Vec<WindowPattern>,
     include_patterns: Vec<WindowPattern>,
     ignored_urls: Vec<String>,
+    diagnostic_ignore_rules: Vec<(u32, WindowPattern)>,
+    diagnostic_include_rules: Vec<(u32, WindowPattern)>,
 }
 
 impl WindowFilters {
     pub fn new(ignore_list: &[String], include_list: &[String], ignored_urls: &[String]) -> Self {
         Self {
             ignore_patterns: WindowPattern::parse_list(ignore_list),
+            diagnostic_ignore_rules: ignore_list
+                .iter()
+                .enumerate()
+                .filter_map(|(index, raw)| {
+                    WindowPattern::parse(raw).map(|rule| (index as u32, rule))
+                })
+                .collect(),
+            diagnostic_include_rules: include_list
+                .iter()
+                .enumerate()
+                .filter_map(|(index, raw)| {
+                    WindowPattern::parse(raw).map(|rule| (index as u32, rule))
+                })
+                .collect(),
             include_patterns: WindowPattern::parse_list(include_list),
             ignored_urls: ignored_urls.iter().map(|s| s.to_lowercase()).collect(),
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn diagnostic_rule_matches(
+        &self,
+        app_name_lower: &str,
+        window_name: &str,
+        browser_url: Option<&str>,
+        diagnostic_app: Option<String>,
+        is_focused: bool,
+    ) -> Vec<WindowsCaptureRule> {
+        let filter_reason = self.exclusion_reason(app_name_lower, window_name);
+        let mut matches = Vec::new();
+        if filter_reason == Some("builtin_exclusion") {
+            if let Some(index) = WindowFilters::BUILTIN_IGNORED
+                .iter()
+                .position(|app| *app == app_name_lower)
+            {
+                matches.push(WindowsCaptureRule {
+                    origin: "builtin",
+                    index: index as u32,
+                    kind: "builtin_app",
+                    app: diagnostic_app.clone(),
+                    foreground: is_focused,
+                });
+            }
+        }
+        if filter_reason == Some("outside_include_filter") {
+            let scoped = self.diagnostic_include_rules.iter().any(|(_, rule)| {
+                rule.app
+                    .as_ref()
+                    .is_some_and(|app| app_name_lower.contains(app))
+            });
+            for (index, rule) in &self.diagnostic_include_rules {
+                let applies = if scoped {
+                    rule.app
+                        .as_ref()
+                        .is_some_and(|app| app_name_lower.contains(app))
+                } else {
+                    rule.app.is_none()
+                };
+                if applies && matches.len() < 4096 {
+                    matches.push(WindowsCaptureRule {
+                        origin: "included_windows",
+                        index: *index,
+                        kind: "include_admission",
+                        app: diagnostic_app.clone(),
+                        foreground: is_focused,
+                    });
+                }
+            }
+        }
+        for (index, rule) in &self.diagnostic_ignore_rules {
+            if rule.matches(&app_name_lower, &window_name.to_lowercase()) && matches.len() < 4096 {
+                matches.push(WindowsCaptureRule {
+                    origin: "ignored_windows",
+                    index: *index,
+                    kind: if rule.app.is_some() {
+                        if rule.title.is_empty() {
+                            "app_substring"
+                        } else {
+                            "app_and_title_substring"
+                        }
+                    } else {
+                        "app_or_title_substring"
+                    },
+                    app: diagnostic_app.clone(),
+                    foreground: is_focused,
+                });
+            }
+        }
+        for (index, rule) in self.ignored_urls.iter().enumerate() {
+            let singleton = WindowFilters::new(&[], &[], std::slice::from_ref(rule));
+            if (browser_url
+                .as_deref()
+                .is_some_and(|url| singleton.is_url_blocked(url))
+                || singleton.is_title_suggesting_blocked_url(&window_name))
+                && matches.len() < 4096
+            {
+                matches.push(WindowsCaptureRule {
+                    origin: "ignored_urls",
+                    index: index as u32,
+                    kind: if browser_url
+                        .as_deref()
+                        .is_some_and(|url| singleton.is_url_blocked(url))
+                    {
+                        "url_domain"
+                    } else {
+                        "url_title_heuristic"
+                    },
+                    app: diagnostic_app.clone(),
+                    foreground: is_focused,
+                });
+            }
+        }
+
+        matches
     }
 
     /// Apps that are always excluded — system lock screen processes.
@@ -978,10 +1091,21 @@ pub struct WindowsCapturePrivacy {
     pub outcome: &'static str,
     pub reason: Option<&'static str>,
     pub blockers: Vec<WindowsCaptureBlocker>,
+    pub rule_matches: Vec<WindowsCaptureRule>,
     pub blockers_truncated: bool,
     pub foreground_monitor: Option<String>,
     pub is_active_monitor: Option<bool>,
     pub foreground_monitor_changed: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WindowsCaptureRule {
+    pub origin: &'static str,
+    pub index: u32,
+    pub kind: &'static str,
+    pub app: Option<String>,
+    pub foreground: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1000,6 +1124,7 @@ impl Default for WindowsCapturePrivacy {
             outcome: "full_monitor",
             reason: None,
             blockers: Vec::new(),
+            rule_matches: Vec::new(),
             blockers_truncated: false,
             foreground_monitor: None,
             is_active_monitor: None,
@@ -1108,6 +1233,11 @@ impl WindowsCapturePrivacy {
             self.is_active_monitor = None;
         }
         self.blockers_truncated |= other.blockers_truncated;
+        for rule in other.rule_matches {
+            if !self.rule_matches.contains(&rule) && self.rule_matches.len() < 32 {
+                self.rule_matches.push(rule);
+            }
+        }
         for b in other.blockers {
             self.add_blocker(b.app, b.reasons, b.foreground);
         }
@@ -1284,6 +1414,23 @@ fn choose_windows_capture(
         Some(window) if window.can_capture => WindowsCaptureChoice::ActiveWindow(window.id),
         _ => WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn choose_windows_capture_scoped(
+    windows: &[WindowsPrivacySnapshot],
+    monitor_bounds: &Rect,
+    before: Option<WindowsForegroundSample>,
+    after: Option<WindowsForegroundSample>,
+    foreground_seen: bool,
+) -> WindowsCaptureChoice {
+    // A verified other-monitor foreground is context, not a local exclusion.
+    // Geometry still accounts for every excluded window overlapping this monitor.
+    // Missing/changed native association cannot establish an unaffected scope.
+    if before != after || !foreground_seen || before.is_none_or(|sample| sample.monitor.is_none()) {
+        return WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus);
+    }
+    choose_windows_capture(windows, monitor_bounds)
 }
 
 #[cfg(target_os = "windows")]
@@ -1648,11 +1795,26 @@ pub fn evaluate_windows_monitor_capture(
         }
         record_windows_window_blockers(
             &mut privacy,
-            diagnostic_app,
+            diagnostic_app.clone(),
             reasons,
             is_focused,
             overlaps_monitor,
         );
+
+        if overlaps_monitor || is_focused {
+            let matches = window_filters.diagnostic_rule_matches(
+                &app_name_lower,
+                &window_name,
+                browser_url.as_deref(),
+                diagnostic_app.clone(),
+                is_focused,
+            );
+            privacy.blockers_truncated |= privacy.rule_matches.len() + matches.len() > 32;
+            let available = 32usize.saturating_sub(privacy.rule_matches.len());
+            privacy
+                .rule_matches
+                .extend(matches.into_iter().take(available));
+        }
 
         if !overlaps_monitor {
             continue;
@@ -1691,16 +1853,23 @@ pub fn evaluate_windows_monitor_capture(
         );
     }
     let final_foreground = sample_windows_foreground();
-    let choice = if foreground != final_foreground {
+    if foreground.is_none_or(|sample| sample.monitor.is_none()) {
+        privacy.foreground_blocked("monitor_unverified");
+    }
+    if foreground != final_foreground {
         privacy.merge(WindowsCapturePrivacy::default().with_foreground_monitor(
             final_foreground.and_then(|sample| sample.monitor),
             monitor.id(),
         ));
         privacy.foreground_blocked("foreground_changed_during_evaluation");
-        WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus)
-    } else {
-        choose_windows_capture(&snapshots, &monitor_bounds)
-    };
+    }
+    let choice = choose_windows_capture_scoped(
+        &snapshots,
+        &monitor_bounds,
+        foreground,
+        final_foreground,
+        foreground_seen,
+    );
     if matches!(
         choice,
         WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
@@ -1816,6 +1985,16 @@ async fn capture_windows_monitor_privacy_safe_once(
         }
     };
     privacy.merge(post.privacy);
+    if privacy.foreground_monitor_changed {
+        return placeholder_capture(
+            monitor,
+            WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::InconsistentFocus,
+            ),
+            started_at,
+            privacy,
+        );
+    }
     match post.plan {
         WindowsMonitorCapturePlan::FullMonitor if !initial_was_active_only => {
             WindowsPrivacyCapture {
@@ -2223,6 +2402,148 @@ pub async fn capture_all_visible_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_scoped_excluded_foreground_only_blocks_affected_monitors() {
+        let a = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let b = Rect {
+            x: 100,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let c = Rect {
+            x: 200,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let focus = Some(WindowsForegroundSample {
+            window: 1,
+            process: 11,
+            monitor: Some(1),
+        });
+        let windows = [
+            privacy_snapshot(1, a, true, true, false),
+            privacy_snapshot(2, b, false, false, true),
+        ];
+        assert_eq!(
+            choose_windows_capture_scoped(&windows, &a, focus, focus, true),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::ActiveWindowExcluded)
+        );
+        for monitor in [b, c] {
+            assert_eq!(
+                choose_windows_capture_scoped(&windows, &monitor, focus, focus, true),
+                WindowsCaptureChoice::FullMonitor
+            );
+        }
+        // Excluded background overlap remains a restriction even if another
+        // ordinary window appears to cover it; no occlusion assumption.
+        let mut local = windows.to_vec();
+        local.push(privacy_snapshot(3, b, false, true, false));
+        assert_eq!(
+            choose_windows_capture_scoped(&local, &b, focus, focus, true),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_scoped_spanning_exclusion_blocks_every_overlap() {
+        let monitors = [
+            Rect {
+                x: -100,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        ];
+        let windows = [privacy_snapshot(
+            1,
+            Rect {
+                x: -20,
+                y: 10,
+                width: 40,
+                height: 50,
+            },
+            true,
+            true,
+            false,
+        )];
+        let focus = Some(WindowsForegroundSample {
+            window: 1,
+            process: 11,
+            monitor: Some(1),
+        });
+        for monitor in monitors {
+            assert_eq!(
+                choose_windows_capture_scoped(&windows, &monitor, focus, focus, true),
+                WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::ActiveWindowExcluded)
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_scoped_uncertain_foreground_never_admits_unaffected_pixels() {
+        let monitor = Rect {
+            x: 100,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let before = Some(WindowsForegroundSample {
+            window: 1,
+            process: 11,
+            monitor: Some(1),
+        });
+        for after in [
+            None,
+            Some(WindowsForegroundSample {
+                window: 2,
+                process: 11,
+                monitor: Some(1),
+            }),
+            Some(WindowsForegroundSample {
+                window: 1,
+                process: 12,
+                monitor: Some(1),
+            }),
+            Some(WindowsForegroundSample {
+                window: 1,
+                process: 11,
+                monitor: Some(2),
+            }),
+        ] {
+            assert_eq!(
+                choose_windows_capture_scoped(&[], &monitor, before, after, true),
+                WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus)
+            );
+        }
+        let unknown = Some(WindowsForegroundSample {
+            window: 1,
+            process: 11,
+            monitor: None,
+        });
+        for (sample, seen) in [(None, true), (unknown, true), (before, false)] {
+            assert_eq!(
+                choose_windows_capture_scoped(&[], &monitor, sample, sample, seen),
+                WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus)
+            );
+        }
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -3605,4 +3926,37 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_rules_preserve_source_indices_without_matching_text() {
+    let filters = WindowFilters::new(
+        &["".into(), "PrivateApp::SecretDocument".into()],
+        &[],
+        &["excluded.example".into()],
+    );
+    let rules = filters.diagnostic_rule_matches(
+        "privateapp",
+        "SecretDocument",
+        Some("https://excluded.example/private"),
+        None,
+        true,
+    );
+    assert_eq!(rules[0].index, 1);
+    assert_eq!(rules[0].kind, "app_and_title_substring");
+    assert!(rules
+        .iter()
+        .any(|rule| rule.origin == "ignored_urls" && rule.index == 0 && rule.kind == "url_domain"));
+    let encoded = serde_json::to_string(&rules).unwrap();
+    assert!(!encoded.to_lowercase().contains("secretdocument"));
+    assert!(!encoded.contains("excluded.example"));
+    assert!(rules.iter().all(|rule| rule.app.is_none()));
+    let includes = WindowFilters::new(&[], &["".into(), "PrivateApp::Allowed".into()], &[]);
+    let rules = includes.diagnostic_rule_matches("privateapp", "Other", None, None, true);
+    assert_eq!(rules[0].origin, "included_windows");
+    assert_eq!(rules[0].index, 1);
+    let builtin = WindowFilters::new(&[], &[], &[])
+        .diagnostic_rule_matches("logonui", "Lock", None, None, true);
+    assert_eq!(builtin[0].origin, "builtin");
 }

@@ -20,6 +20,7 @@
 //! or a TOML config file. Both paths produce the same type that the
 //! engine consumes.
 
+pub mod capture_diagnostics;
 mod defaults;
 mod persistence;
 mod recording;
@@ -29,7 +30,10 @@ pub use defaults::*;
 pub use persistence::*;
 pub use recording::*;
 pub mod audio_privacy;
-pub use audio_privacy::{audio_capture_allowed, AudioPrivacyPermit};
+pub use audio_privacy::{
+    audio_capture_allowed, audio_capture_allowed_for, AudioCaptureKind, AudioPrivacyPermit,
+    DeviceAudioPrivacy,
+};
 pub use screen_lock::{
     record_while_locked, screen_is_locked, set_record_while_locked, set_screen_locked,
     should_pause_audio_for_lock,

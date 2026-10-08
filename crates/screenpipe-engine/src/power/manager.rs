@@ -216,6 +216,25 @@ pub fn start_power_manager_with_pref(initial_pref: PowerMode) -> Arc<PowerManage
             // audio_disabled sets ratio=1.0 so no segment passes VAD — effectively
             // pauses Whisper without needing a separate code path.
             screenpipe_audio::vad::set_min_speech_ratio(new_profile.vad_min_speech_ratio);
+            {
+                use screenpipe_config::capture_diagnostics::*;
+                observe(
+                    CaptureChannel::Transcription,
+                    DiagnosticSource::Power,
+                    CaptureScope::Global,
+                    if new_profile.audio_disabled {
+                        CaptureCondition::Deferred
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    vec![if new_profile.audio_disabled {
+                        CaptureReason::PowerTranscriptionDeferred
+                    } else {
+                        CaptureReason::GateOpen
+                    }],
+                    Vec::new(),
+                );
+            }
 
             if new_profile.capture_paused && current_name != ProfileName::FullPause {
                 info!(

@@ -4,6 +4,91 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Microphone admission and lifecycle ordering (2026-10-08)
+
+The settled policy separates microphone permits from visual exclusions and
+foreground protection/uncertainty. Output retains its protection gate; lock,
+schedule, audio disable, device disable and explicit all-recording pause still
+apply. Desktop manual stop revokes before awaited shutdown. Explicit resume
+checks request revisions so older startup/resume completions cannot overwrite
+newer pauses. Automatic device recovery uses a separate lifecycle gate.
+See [policy and limits](docs/CAPTURE_DIAGNOSTICS.md).
+
+Use the canonical launcher with `RootTest -Lib` and `-TestArguments
+@('--test-threads=1')`: `screenpipe-config` / `audio_privacy::tests`,
+`screenpipe-audio` / `privacy_` and `core::run_record_and_transcribe::tests`,
+`screenpipe-engine` / `privacy_`, `drm_detector::tests` and
+`event_driven_capture`. These passed eight, 15, 15, 18, 21 and 43 tests
+respectively (the selections overlap). Sources and stores are synthetic; no
+hardware capture or local model is opened. The combined engine run initially
+failed three writer assertions because another test had latched process-wide
+degradation. Test writers now own isolated status; production degradation
+remains latched. The corrected selection passed.
+
+Six interval-store tests also passed. A final audit found pressure/loss could
+cross thresholds between API polls without a local warning. A dependency-free
+fixed numeric callback now reports pressure, recovery and rejected deliveries
+at mutation, outside the store mutex and independently of SQLite. The tests
+verify warning before rejection without polling, deduplication, exact loss counts,
+recovery, late-registration replay and the callback lock boundary.
+
+The first standalone audio library target lacked a launcher baseline and linked
+test executable. After reviewing its plan and native setup, `-AllowColdCache`
+adopted 13 external variants. Old dependency timestamps and a previously unset
+`VCINSTALLDIR` accounted for the stale artifacts. The necessary diagnostic
+rerun reused all 552 external artifacts with none rebuilt; subsequent engine
+selections reused all 685. No dependency or lockfile changed. The audio-only
+test feature selection retains an existing unused `sample_rate` warning.
+
+The frontend export used `NEXT_TELEMETRY_DISABLED=1` and
+`node node_modules/next/dist/bin/next build`, without invoking acquisition or
+sidecar-staging prebuild scripts. Type checking/export passed with the existing
+`unpdf` warning. Runtime milestones use `RootBuild -Package screenpipe-engine
+-Bin screenpipe` and `DesktopBuild`, both defaulting to `release-local`.
+
+Final `DesktopCheck` passed with all 1,084 external artifacts reused and none
+rebuilt. `DesktopTest -Bin screenpipe-app -TestFilter recording_ -TestArguments
+@('--test-threads=1')` passed 11 tests, including the deterministic newer-pause
+startup regression, with all 921 external artifacts reused and none rebuilt.
+Canonical `RootFmt`/`DesktopFmt` and whitespace checks passed.
+
+The final engine `RootBuild -Package screenpipe-engine -Bin screenpipe` passed
+in 3m19s under `release-local`: 785 external artifacts reused, none rebuilt;
+nine workspace artifacts reused and eight rebuilt. Inert `--version`, `--help`
+and `record --help` checks passed against that rebuilt executable.
+
+The final `DesktopBuild` passed under `release-local` in 5m49s: all 1,080
+external artifacts reused, none rebuilt; ten workspace artifacts reused and
+eight rebuilt. No desktop application or recording session was launched.
+
+## Capture interval diagnostics (2026-10-08)
+
+The subsequent unaffected-monitor change uses `RootTest -Package
+screenpipe-screen -Lib -TestFilter capture_` and `RootTest -Package
+screenpipe-engine -Lib -TestFilter event_driven_capture`. These exercise native
+association sampling decisions, excluded foreground/background/spanning geometry
+and omission of foreign UIA/trigger labels with fabricated snapshots. The existing
+`release-local` engine build is the compilation milestone; no live capture or
+UI implementation is authorized by these checks.
+
+Use the canonical locked/offline launcher with `RootTest -Lib` for
+`screenpipe-config` / `capture_diagnostics`, `screenpipe-engine` /
+`privacy_notices::tests`, `drm_detector::tests`, `event_driven_capture::tests`
+and `capture_diagnostic`, `screenpipe-screen` / `capture_`, and
+`screenpipe-a11y` / `keyboard_privacy` (package / test filter respectively).
+The standalone config test selection required initial cache adoption after
+reviewing `-PlanOnly`: 20 new external variants, no unexpected rebuilds.
+The engine check-only variant had no matching successful baseline; it was
+left unwarmed in favor of the established engine library-test target.
+Rust formatting edits used `cargo fmt --all`; canonical `RootFmt` verified them.
+The Timeline test is `node node_modules/vitest/vitest.mjs run --config
+vitest.config.mts components/rewind/__tests__/privacy-notice-track.test.tsx`
+from the desktop frontend directory. Build the settled engine using
+`RootBuild -Package screenpipe-engine -Bin screenpipe` (`release-local`).
+These checks use synthetic fixtures and inert CLI help/version invocations;
+they do not authorize capture, content inspection or deployment.
+See [coverage and limits](docs/CAPTURE_DIAGNOSTICS.md).
+
 ## Audio segment retrieval and Pi grounding (2026-10-08)
 
 Use the canonical locked/offline launcher and established caches. Focused

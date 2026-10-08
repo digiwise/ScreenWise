@@ -313,6 +313,30 @@ impl KeyboardPrivacy {
                 decision_stale = reason_deltas[KeyboardPrivacyDenial::DecisionStale.index()],
                 "keyboard/clipboard content events were suppressed by the password-field privacy gate"
             );
+            {
+                use screenpipe_config::capture_diagnostics::*;
+                let reasons = [
+                    CaptureReason::InputCheckUnavailable,
+                    CaptureReason::InputWorkerContended,
+                    CaptureReason::InputGenerationChanged,
+                    CaptureReason::InputFocusChanged,
+                    CaptureReason::InputCheckStale,
+                ]
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, reason)| (reason_deltas[index] > 0).then_some(reason))
+                .collect::<Vec<_>>();
+                for channel in [CaptureChannel::Keyboard, CaptureChannel::Clipboard] {
+                    observe(
+                        channel,
+                        DiagnosticSource::InputPrivacy,
+                        CaptureScope::Global,
+                        CaptureCondition::Suppressed,
+                        reasons.clone(),
+                        Vec::new(),
+                    );
+                }
+            }
             *last = Some(now);
         }
     }
@@ -330,6 +354,29 @@ impl KeyboardPrivacy {
             _ => KEYBOARD_PRIVACY_UNAVAILABLE,
         };
         let previous = self.logged_state.swap(state, Ordering::SeqCst);
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            let (condition, reason) = match state {
+                KEYBOARD_PRIVACY_ALLOWED => (CaptureCondition::Admitted, CaptureReason::GateOpen),
+                KEYBOARD_PRIVACY_PASSWORD => {
+                    (CaptureCondition::Suppressed, CaptureReason::PasswordField)
+                }
+                _ => (
+                    CaptureCondition::Suppressed,
+                    CaptureReason::InputCheckUnavailable,
+                ),
+            };
+            for channel in [CaptureChannel::Keyboard, CaptureChannel::Clipboard] {
+                observe(
+                    channel,
+                    DiagnosticSource::InputPrivacy,
+                    CaptureScope::Global,
+                    condition,
+                    vec![reason],
+                    Vec::new(),
+                );
+            }
+        }
         if previous != state {
             match state {
                 KEYBOARD_PRIVACY_ALLOWED => debug!(
@@ -846,11 +893,34 @@ impl UiaContext {
         let mut value = self.get_cached_string(element, UIA_ValueValuePropertyId);
         let automation_id = self.get_cached_string(element, UIA_AutomationIdPropertyId);
         let bounds = self.get_cached_bounds(element);
-        match redact_click_element_text(
+        let click_privacy = redact_click_element_text(
             self.get_cached_bool_opt(element, UIA_IsPasswordPropertyId),
             &mut name,
             &mut value,
-        ) {
+        );
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            let (condition, reason) = match click_privacy {
+                ClickElementPrivacy::Clear => (CaptureCondition::Admitted, CaptureReason::GateOpen),
+                ClickElementPrivacy::Password => (
+                    CaptureCondition::PartiallyRedacted,
+                    CaptureReason::PasswordField,
+                ),
+                ClickElementPrivacy::Unavailable => (
+                    CaptureCondition::PartiallyRedacted,
+                    CaptureReason::InputCheckUnavailable,
+                ),
+            };
+            observe(
+                CaptureChannel::Pointer,
+                DiagnosticSource::Redaction,
+                CaptureScope::Global,
+                condition,
+                vec![reason],
+                Vec::new(),
+            );
+        }
+        match click_privacy {
             ClickElementPrivacy::Clear => {}
             ClickElementPrivacy::Password => {
                 debug!("click element text redacted because the target is a password field")
@@ -1256,6 +1326,29 @@ pub fn run_uia_thread(
         // threads. We keep `pending_focus` and don't bump `last_capture_time` so the
         // capture is retried on the next loop once input pauses.
         let skip_capture = input_too_recent(&config, start_time, &last_input_at_ms);
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            observe(
+                CaptureChannel::Accessibility,
+                DiagnosticSource::UserPreference,
+                CaptureScope::Global,
+                if !config.capture_tree {
+                    CaptureCondition::Suppressed
+                } else if skip_capture {
+                    CaptureCondition::Deferred
+                } else {
+                    CaptureCondition::Admitted
+                },
+                vec![if !config.capture_tree {
+                    CaptureReason::Disabled
+                } else if skip_capture {
+                    CaptureReason::ActiveInputDeferral
+                } else {
+                    CaptureReason::GateOpen
+                }],
+                Vec::new(),
+            );
+        }
 
         // Check for pending focus change (debounced)
         if config.capture_tree && !skip_capture {
