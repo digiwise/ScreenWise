@@ -239,6 +239,30 @@ recoverable deletion jobs with visible failure status, and a complete access bou
 The preferred separate review store must be evaluated against those findings; it
 does not by itself solve accepted-data deletion or previously exposed consumer copies.
 
+## Completed design contract and builder work
+
+The [retention and access contract](DATA_CONTROL_CONTRACT.md) is committed as
+`7549a2203`. Sol 6.1 High design work and independent Astra High review resolved
+six substantive findings. It proposes separate review storage plus a common
+access boundary and complete sealed capture bundles as the first enforceable
+selection scope. Fine conversation/monitor/data-type selections are refused until
+byte isolation and lineage can enforce them. These are reviewable proposals, not
+owner approval of reduced initial scope or application implementation.
+
+Owner decisions remain on initial scope/fallback UX, review permissions and SQL/
+asset mediation, backup/legacy migration, expiry/recovery semantics, content-free
+audit/tombstone retention, consumer-copy completion, restore freshness and reliable
+conversation boundaries. Review the contract's explicit decision list before
+authorizing its proposed synthetic ledger/media-isolation prototype.
+
+The separate builder work is committed as `16aee39a9` on
+`codex/windows-build-concurrency` in an isolated worktree. Its opt-in `-Concurrent`
+supports root/desktop overlap while preserving same-cache and desktop-staging
+exclusion and default serialization. Synthetic checks passed: 12 lock, 97 launcher,
+18 cache and 84 trial-profile assertions. It has not been integrated into this
+checkout or used for the production builds above. Real-build speedup and PowerShell
+5.1 execution remain unvalidated. Integration review is separate from deployment.
+
 ## Suggested next steps
 
 1. Capture-policy implementation is committed as `3ea64c8c7`, including diagnostics,
@@ -251,10 +275,10 @@ does not by itself solve accepted-data deletion or previously exposed consumer c
    capture-policy source. Resolve its shared-media, derivative, cleanup and monitor
    attribution gaps in the design; assess separate review storage and granular
    deletion feasibility before planning the retention backend.
-3. Specify pending-review states and access contracts: live pending-review reasons,
-   mixed accepted/pending results, safe metadata, dedicated authorized local review,
-   Keep/Discard transitions, consumer caching and interrupted transfer recovery.
-   Select separate review storage or justify the centrally enforced fallback.
+3. Review the completed retention/access contract and its unresolved owner
+   decisions. It specifies pending-review reasons, mixed results, local review,
+   Keep/Discard transitions, copy handling and recovery. Agree the initial scope
+   and storage/access architecture before authorizing a synthetic prototype.
 4. Work through a conversation example to settle default groupings, fine-grained
    overrides and boundaries. Apply the accepted unlimited Snooze options and
    permanent Discard confirmation; settle expiry/startup behaviour, reminder
