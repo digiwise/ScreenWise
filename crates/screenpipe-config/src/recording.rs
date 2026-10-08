@@ -320,6 +320,11 @@ pub struct RecordingSettings {
     #[serde(rename = "disableKeyboardCapture", default = "default_true")]
     pub disable_keyboard_capture: bool,
 
+    /// Stop persisting pointer rows; operation hooks still wake visual capture.
+    /// False preserves the existing pointer-recording behavior for old settings.
+    #[serde(rename = "disablePointerCapture", default)]
+    pub disable_pointer_capture: bool,
+
     /// Continue recording audio when the screen is locked.
     /// Default: false (audio pauses when screen is locked to save resources).
     #[serde(rename = "recordWhileLocked", default)]
@@ -503,6 +508,7 @@ impl Default for RecordingSettings {
             pause_on_drm_content: false,
             disable_clipboard_capture: true,
             disable_keyboard_capture: true,
+            disable_pointer_capture: false,
             record_while_locked: false,
             languages: vec![],
             use_pii_removal: false,

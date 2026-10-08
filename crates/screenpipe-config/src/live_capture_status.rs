@@ -26,6 +26,7 @@ struct Store {
     started: Instant,
     evidence: HashMap<(CaptureChannel, CaptureScope), Evidence>,
     checks: HashMap<(CaptureChannel, DiagnosticSource, CaptureScope), Observation>,
+    device_names: HashMap<(CaptureChannel, u64), String>,
     truncated: bool,
 }
 impl Default for Store {
@@ -35,6 +36,7 @@ impl Default for Store {
             started: Instant::now(),
             evidence: HashMap::new(),
             checks: HashMap::new(),
+            device_names: HashMap::new(),
             truncated: false,
         }
     }
@@ -65,6 +67,9 @@ pub struct IntervalCheck {
 }
 #[derive(Serialize)]
 pub struct LiveStatus {
+    /// Ephemeral hardware metadata for the authenticated current-session UI.
+    /// Never included in diagnostic notices or persisted history.
+    pub device_names: Vec<DeviceName>,
     pub audio_activity: crate::audio_activity::AudioActivity,
     pub schema_version: u8,
     pub snapshot_at_ms: u64,
@@ -73,6 +78,37 @@ pub struct LiveStatus {
     pub evidence: Vec<LiveEvidence>,
     pub evidence_available: bool,
     pub interval_checks: Vec<IntervalCheck>,
+}
+#[derive(Serialize)]
+pub struct DeviceName {
+    pub channel: CaptureChannel,
+    pub device: u64,
+    pub name: String,
+}
+pub fn register_device_name(channel: CaptureChannel, device: u64, name: &str) {
+    if device == 0
+        || !matches!(
+            channel,
+            CaptureChannel::Microphone | CaptureChannel::OutputAudio
+        )
+    {
+        return;
+    }
+    let name: String = name
+        .chars()
+        .filter(|ch| {
+            !ch.is_control() && !matches!(*ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .take(160)
+        .collect();
+    if name.trim().is_empty() {
+        return;
+    }
+    if let Ok(mut state) = store().lock() {
+        if state.device_names.len() < 1024 || state.device_names.contains_key(&(channel, device)) {
+            state.device_names.insert((channel, device), name);
+        }
+    }
 }
 /// Called once before recording producers start. Never reads historical database rows.
 pub fn start_session() {
@@ -125,6 +161,7 @@ pub fn stored(channel: CaptureChannel, scope: CaptureScope) {
 }
 pub fn snapshot() -> LiveStatus {
     let mut output = LiveStatus {
+        device_names: Vec::new(),
         audio_activity: crate::audio_activity::snapshot(),
         schema_version: 1,
         snapshot_at_ms: now_ms(),
@@ -142,6 +179,16 @@ pub fn snapshot() -> LiveStatus {
     output.evidence_available = !state.truncated;
     output.session_started_at_ms = state.started_at_ms;
     output.session_uptime_ms = now.saturating_duration_since(state.started).as_millis() as u64;
+    output.device_names = state
+        .device_names
+        .iter()
+        .map(|(&(channel, device), name)| DeviceName {
+            channel,
+            device,
+            name: name.clone(),
+        })
+        .collect();
+    output.device_names.sort_by_key(|row| row.device);
     output.interval_checks = state
         .checks
         .iter()

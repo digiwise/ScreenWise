@@ -218,3 +218,64 @@ export, formatting, desktop check and both production release builds. Exact cach
 counts and artifact identities are in the [validation register](../VALIDATION_REGISTER.md#compact-recording-status-release-validation-2026-10-09).
 Installed GUI appearance and native notification delivery have not been exercised;
 no deployment or new capture session was performed.
+
+## Named sources and floating dashboard
+
+The owner selected Listening for operational quiet audio and Watching for visual
+or event capture awaiting new input. Green Recording (or Capturing when recent
+storage is unconfirmed), blue Listening/Watching, amber Paused, red Error and grey
+Unconfirmed have distinct icons. Stopped is not a separate dashboard state:
+explicit user/setting/schedule pauses identify their cause; missing callbacks and
+producer failures are errors; outdated evidence remains unconfirmed. A failed
+status request cannot establish that the backend process is absent.
+
+Positive user-preference observations are setting transitions, not recurring
+producer checks. Fresh aggregate privacy admission verifies their operating gates.
+It also covers the positive output-audio content-protection observation because
+the aggregate admission reads that gate. Power observations require current
+operational evidence. Explicit current-session user-preference pauses remain
+Paused until changed; stale operational failures or unverifiable protection checks
+never silently become active. Details identify the observer, scope, reason/rule,
+last report and last operational check; policy snapshots are labelled separately.
+
+Quiet audio uses a complete 60-second observation window with at least 59 seconds
+of silent samples and at most one second of non-silent samples, plus a fresh
+same-device silent observation and capture evidence. This accommodates small
+noise without claiming speech, microphone audibility or transcript accuracy.
+Watching without a recent new image requires fresh operational capture checks;
+fresh privacy permission alone is insufficient. Unchanged screens do not imply
+an audio-style continuous-sample failure. Processing/storage remain separate.
+
+Actual audio-device labels are bounded, escaped current-session metadata from the
+authenticated status response, matched by channel and session-local device ID.
+Invalid or ambiguous name metadata falls back to unknown without breaking numeric
+capture evidence. Device names do not need blanket redaction in the local UI.
+This increment exposes them as explicit source metadata rather than generic
+diagnostic text. Historical naming needs a persisted session/source mapping first:
+old IDs must not be matched to a new session's device. Names therefore are not yet
+copied into persisted notices, diagnostic logs or historical rows; this is an
+implementation boundary, not a decision to permanently hide names from history.
+
+The separate Recording dashboard opens from the adjacent toolbar button. It is
+always on top, initially in the primary monitor's lower-right work area, movable,
+resizable and hideable. Reopening an existing window preserves its position.
+Six primary data types are visible; derived types expand by group, whose icon
+still reflects hidden problems. Status opens the existing detailed panel locally.
+The floating window polls independently while mounted without becoming a duplicate
+notification leader or mounting onboarding/deeplink lifecycle handlers.
+
+Quick controls offer explicit Start all/Pause all, current-session per-device
+audio start/pause, and saved screen, keyboard, clipboard and pointer recording
+preferences. Audio control resolves the current authenticated device list by exact
+ID and type; displayed labels are never reconstructed into control identities.
+Preference changes are saved before applying and may briefly restart other active
+capture. Applying preferences does not start an absent/manually paused session or
+clear an existing privacy/device pause. Requests are acknowledged separately from
+observed recording; failures do not create optimistic green status.
+
+Keyboard, clipboard and pointer switches control event persistence. Their hooks
+can still trigger permitted visual capture. Pointer off filters click/move/scroll
+rows independently, with old settings preserving the previous enabled default.
+Screenshot storage, OCR and paired accessibility follow visual capture;
+transcription follows its audio sources. No independent derived-data or activity
+metadata control is invented. Keep/Discard and review-before-keeping remain separate.

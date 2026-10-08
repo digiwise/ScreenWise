@@ -77,7 +77,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
-  const isOverlay = pathname === "/shortcut-reminder";
+  const isOverlay = pathname === "/shortcut-reminder" || pathname === "/recording-dashboard";
   const isSearch = pathname === "/search";
 
   useEffect(() => {

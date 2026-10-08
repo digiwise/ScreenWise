@@ -152,6 +152,8 @@ pub struct UiRecorderConfig {
     pub tree_walk_interval_ms: u64,
     /// Record input events to DB (false = still capture for wake signal but don't write)
     pub record_input_events: bool,
+    /// Persist click/move/scroll rows. Hooks can still trigger visual capture.
+    pub record_pointer_events: bool,
     /// Persist keyboard-derived rows (`text` / `key`) to DB. When false,
     /// keyboard events can still wake event-driven capture, but private input
     /// payloads are not written.
@@ -199,6 +201,7 @@ impl Default for UiRecorderConfig {
             enable_tree_walker: true,
             tree_walk_interval_ms: 3000,
             record_input_events: true,
+            record_pointer_events: true,
             record_keyboard_events: true,
             record_clipboard_events: true,
             apply_pii_removal: true,
@@ -591,6 +594,7 @@ pub async fn start_ui_recording(
     let batch_size = config.batch_size;
     let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
     let record_input_events = config.record_input_events;
+    let record_pointer_events = config.record_pointer_events;
     let record_keyboard_events = config.record_keyboard_events;
     let record_clipboard_events = config.record_clipboard_events;
     let trigger_gates = TriggerGates;
@@ -640,7 +644,10 @@ pub async fn start_ui_recording(
         for (channel, enabled) in [
             (CaptureChannel::Keyboard, record_keyboard_events),
             (CaptureChannel::Clipboard, config.capture_clipboard_content),
-            (CaptureChannel::Pointer, record_input_events),
+            (
+                CaptureChannel::Pointer,
+                record_input_events && record_pointer_events,
+            ),
         ] {
             observe(
                 channel,
@@ -798,6 +805,7 @@ pub async fn start_ui_recording(
                         }
                     }
                     let should_record_event = record_input_events
+                        && pointer_recording_allowed(&routing_event, record_pointer_events)
                         && !is_ignored
                         && should_record_input_event(
                             &routing_event,
@@ -1004,6 +1012,15 @@ pub async fn start_ui_recording(
 // Dead code below removed: TreeWalkerMetrics, run_tree_walker, constants.
 // Tree walker is disabled — paired_capture.rs handles accessibility capture.
 // Keeping this comment as a tombstone for git blame.
+
+fn pointer_recording_allowed(event: &InsertUiEvent, enabled: bool) -> bool {
+    use screenpipe_db::UiEventType;
+    enabled
+        || !matches!(
+            event.event_type,
+            UiEventType::Click | UiEventType::Move | UiEventType::Scroll
+        )
+}
 
 fn should_record_input_event(
     db_event: &InsertUiEvent,
@@ -1488,6 +1505,29 @@ mod capture_trigger_kind_tests {
 
     fn gates(_keystroke: bool, _clipboard: bool) -> TriggerGates {
         TriggerGates
+    }
+
+    #[test]
+    fn pointer_preference_filters_only_pointer_rows_without_disabling_capture_triggers() {
+        for kind in [UiEventType::Click, UiEventType::Move, UiEventType::Scroll] {
+            let event = evt(kind);
+            assert!(!pointer_recording_allowed(&event, false));
+            assert!(pointer_recording_allowed(&event, true));
+        }
+        for kind in [
+            UiEventType::Key,
+            UiEventType::Text,
+            UiEventType::Clipboard,
+            UiEventType::AppSwitch,
+            UiEventType::WindowFocus,
+            UiEventType::PrivacyNotice,
+        ] {
+            assert!(pointer_recording_allowed(&evt(kind), false));
+        }
+        assert!(capture_trigger_kind(&evt(UiEventType::Click), &[], gates(true, true)).is_some());
+        let legacy: screenpipe_config::RecordingSettings =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!legacy.disable_pointer_capture);
     }
 
     #[test]

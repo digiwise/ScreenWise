@@ -7,8 +7,28 @@ vi.mock("@/lib/api", () => ({ localFetch: fetchMock }));
 import { startRecordingStatusMonitoring, useRecordingStatus, recordingStatusUnavailable } from "../use-recording-status";
 const body = () => ({ persistence_degraded: false, active_intervals: [{ channel: "microphone", source: "audio_processing", scope: { device: 1 }, condition: "silent", reasons: ["silent_input"], rules: [], since_ms: 1, observed_at_ms: 2 }], live_status: { schema_version: 1, snapshot_at_ms: Date.now(), session_started_at_ms: 1, session_uptime_ms: 1000, evidence_available: true, evidence: [], interval_checks: [{ channel: "microphone", source: "audio_processing", scope: { device: 1 }, checked_at_ms: Date.now(), checked_age_ms: 1000 }] } });
 describe("shared background recording status", () => {
+  it("classifies request failures safely and clears them after recovery and visibility changes", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("secret token and private path"))
+      .mockResolvedValueOnce({ ok: true, json: async () => body() });
+    stops.push(startRecordingStatusMonitoring()); await vi.advanceTimersByTimeAsync(0);
+    expect(useRecordingStatus.getState().requestFailure?.kind).toBe("request_failed");
+    expect(useRecordingStatus.getState().error).not.toContain("secret");
+    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().requestFailure).toBeNull();
+    useRecordingStatus.setState({ requestFailure: { kind: "request_failed" } });
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(useRecordingStatus.getState().requestFailure).toBeNull();
+  });
+  it("reports HTTP authorization and malformed responses without raw exceptions", async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ invalid: true }) });
+    stops.push(startRecordingStatusMonitoring()); await vi.advanceTimersByTimeAsync(0);
+    expect(useRecordingStatus.getState().requestFailure).toEqual({ kind: "http_error", httpStatus: 401 });
+    expect(useRecordingStatus.getState().error).toContain("authorization failed (HTTP 401)");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(useRecordingStatus.getState().requestFailure?.kind).toBe("invalid_response");
+  });
   let stops: (() => void)[];
-  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); stops = []; fetchMock.mockReset(); useRecordingStatus.setState({ rows: [], evidence: [], audio: null, alerts: [], degraded: false, session: null, checked: null, receivedMonotonic: null, error: null, tick: Date.now(), generation: 0 }); });
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); stops = []; fetchMock.mockReset(); useRecordingStatus.setState({ rows: [], evidence: [], deviceNames: [], audio: null, alerts: [], degraded: false, session: null, checked: null, receivedMonotonic: null, error: null, requestFailure: null, tick: Date.now(), generation: 0 }); });
   afterEach(() => { stops.forEach((stop) => stop()); vi.useRealTimers(); });
   it("keeps one poll loop for several consumers and survives closing one", async () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => body() });
@@ -22,7 +42,7 @@ describe("shared background recording status", () => {
     fetchMock.mockImplementation((_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Aborted")))));
     stops.push(startRecordingStatusMonitoring());
     await vi.advanceTimersByTimeAsync(7999); expect(fetchMock).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1); expect(useRecordingStatus.getState().error).toContain("unavailable");
+    await vi.advanceTimersByTimeAsync(1); expect(useRecordingStatus.getState().error).toContain("timed out after 8 seconds");
     await vi.advanceTimersByTimeAsync(4999); expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1); expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -57,5 +77,15 @@ describe("shared background recording status", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     resolve({ ok: true, json: async () => body() }); await vi.advanceTimersByTimeAsync(0);
     expect(useRecordingStatus.getState().checked).toBeNull(); expect(useRecordingStatus.getState().rows).toEqual([]);
+  });
+  it("replaces device names each snapshot and clears them on session changes and failures", async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ...body(), live_status: { ...body().live_status, device_names: [{ channel: "microphone", device: 1, name: "USB mic" }] } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...body(), live_status: { ...body().live_status, session_started_at_ms: 2, device_names: [] } }) })
+      .mockRejectedValue(new Error("Offline"));
+    stops.push(startRecordingStatusMonitoring()); await vi.advanceTimersByTimeAsync(0);
+    expect(useRecordingStatus.getState().deviceNames).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().deviceNames).toEqual([]);
+    useRecordingStatus.setState({ deviceNames: [{ channel: "microphone", device: 1, name: "temporary" }] });
+    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().deviceNames).toEqual([]);
   });
 });

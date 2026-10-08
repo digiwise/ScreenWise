@@ -57,4 +57,14 @@ describe("consolidated recording alerts", () => {
     expect(recordingProblems([row({ checkedAge: 60000 })], [], [], false, 0)).toEqual(["status_unavailable"]);
     expect(recordingProblems([row({ checkedAge: null })], [], [], false, 0)).toEqual(["status_unavailable"]);
   });
+  it("does not infer a visual recording error from unchanged images or an old positive setting", () => {
+    const current = row({ channel: "screen", source: "capture operation", scope: "Monitor 1", condition: "admitted", reasons: ["gate open"] });
+    expect(recordingProblems([current, row({ channel: "screen", source: "user preference", scope: statusScope("global"), condition: "admitted", reasons: ["gate open"], checkedAge: 60000 })], [evidence({ channel: "screen", scope: "Monitor 1" })], [], false, 0)).toEqual([]);
+    expect(recordingProblems([{ ...current, condition: "failed", reasons: ["capture failure"] }], [], [], false, 0)).toEqual(["recording_error"]);
+  });
+  it("honours explicit user policy until changed, without hiding unknown stopped causes", () => {
+    const policy = row({ source: "user preference", scope: statusScope("global"), condition: "stopped", reasons: ["disabled"], checkedAge: 60000 });
+    expect(recordingProblems([row(), policy], [evidence()], [], false, 0)).toEqual([]);
+    expect(recordingProblems([row({ checkedAge: 60000 }), { ...policy, checkedAge: null }], [], [], false, 0)).toEqual(["status_unavailable"]);
+  });
 });

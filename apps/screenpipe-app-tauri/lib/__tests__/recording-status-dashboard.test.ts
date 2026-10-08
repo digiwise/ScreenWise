@@ -8,13 +8,21 @@ const row: StatusObservation = { key: "microphone:privacy", channel: "microphone
 const success: CaptureEvidence = { key: "microphone:device2", channel: "microphone", scope: "Device 2", global: false, captureSupported: true, storageSupported: true, captured: 1000, stored: 1000, captureAge: 0, storageAge: 0 };
 const input = (values: Partial<DashboardInput> = {}): DashboardInput => ({ rows: [row], evidence: [success], audio: null, elapsed: 0, now: 100000, unavailable: false, ...values });
 describe("truthful compact recording classification", () => {
+  it("distinguishes actual status request errors from startup and stale uncertainty", () => {
+    expect(classifyRecordingType("microphone", input({ unavailable: true }))[0].mode).toBe("unknown");
+    const failed = classifyRecordingType("microphone", input({ unavailable: true, requestFailed: true }))[0];
+    expect(failed.mode).toBe("error"); expect(failed.label).toBe("Status request failed — recording unconfirmed");
+    expect(classifyRecordingType("microphone", input({ requestFailed: true }))[0].mode).toBe("recording");
+    const stale = classifyRecordingType("microphone", input({ rows: [{ ...row, checkedAge: 22000 }] }))[0];
+    expect(stale.detail).toContain("privacy admission"); expect(stale.detail).toContain("22 seconds ago");
+  });
   it("requires fresh checks and independently fresh capture/storage for recording observed", () => {
-    expect(classifyRecordingType("microphone", input())[0].label).toBe("Recording observed");
+    expect(classifyRecordingType("microphone", input())[0].label).toBe("Recording audio samples");
     expect(classifyRecordingType("microphone", input({ rows: [{ ...row, checkedAge: 15001 }] }))[0].mode).toBe("unknown");
     expect(classifyRecordingType("microphone", input({ unavailable: true }))[0].mode).toBe("unknown");
   });
   it("does not turn capture-only or delayed storage into a recording claim", () => {
-    expect(classifyRecordingType("microphone", input({ evidence: [{ ...success, storageAge: null, stored: null }] }))[0].label).toBe("Capture observed — storage unconfirmed");
+    expect(classifyRecordingType("microphone", input({ evidence: [{ ...success, storageAge: null, stored: null }] }))[0].label).toBe("Receiving audio samples");
     const stored = classifyRecordingType("microphone", input({ evidence: [{ ...success, captureAge: 60000 }] }))[0];
     expect(stored.label).toBe("Storage observed — capture unconfirmed"); expect(stored.mode).toBe("unknown");
   });
@@ -31,23 +39,55 @@ describe("truthful compact recording classification", () => {
     const status = classifyRecordingType("microphone", input({ rows: [row, { ...row, source: "permission", checkedAge: 60000 }] }))[0];
     expect(status.mode).toBe("unknown"); expect(status.label).toContain("permission checks are stale");
   });
+  it("uses live aggregate admission rather than the age of a positive policy snapshot", () => {
+    const preference = { ...row, source: "user preference", checkedAge: 60000 };
+    expect(classifyRecordingType("microphone", input({ rows: [row, preference] }))[0].label).toBe("Recording audio samples");
+    expect(classifyRecordingType("microphone", input({ rows: [preference] }))[0].mode).toBe("unknown");
+    expect(classifyRecordingType("microphone", input({ rows: [row, { ...preference, condition: "stopped", status: "Capture ended", reasons: ["disabled"] }] }))[0].mode).toBe("paused");
+  });
+  it("covers output's positive DRM transition only through its current aggregate gate", () => {
+    const values = input({ rows: [{ ...row, channel: "output_audio" }, { ...row, channel: "output_audio", source: "content protection", checkedAge: 38000 }], evidence: [{ ...success, channel: "output_audio" }] });
+    expect(classifyRecordingType("output_audio", values)[0].mode).toBe("recording");
+    expect(classifyRecordingType("output_audio", { ...values, rows: values.rows.slice(1) })[0].mode).toBe("unknown");
+    expect(classifyRecordingType("output_audio", { ...values, rows: [values.rows[0], { ...values.rows[1], condition: "suppressed" }] })[0].mode).toBe("unknown");
+    const screen = { ...values, rows: values.rows.map((item) => ({ ...item, channel: "screen" })), evidence: values.evidence.map((item) => ({ ...item, channel: "screen" })) };
+    expect(classifyRecordingType("screen", screen)[0].mode).toBe("unknown");
+  });
+  it("requires actual operational proof before accepting an old positive power observation", () => {
+    const preference = { ...row, source: "power", checkedAge: 60000 };
+    expect(classifyRecordingType("microphone", input({ rows: [row, preference] }))[0].mode).toBe("unknown");
+    expect(classifyRecordingType("microphone", input({ rows: [row, preference, { ...row, source: "audio processing" }] }))[0].mode).toBe("recording");
+  });
+  it("keeps explicit user policy until changed without treating operational failures as policy", () => {
+    const policy = { ...row, source: "user preference", condition: "stopped", reasons: ["disabled"], checkedAge: 60000 };
+    expect(classifyRecordingType("microphone", input({ rows: [policy] }))[0].mode).toBe("paused");
+    expect(classifyRecordingType("microphone", input({ rows: [{ ...policy, source: "audio device", condition: "failed", reasons: ["device stream failed"] }] }))[0].mode).toBe("unknown");
+    expect(classifyRecordingType("microphone", input({ rows: [{ ...policy, checkedAge: null }] }))[0].mode).toBe("unknown");
+  });
+  it("watches unchanged visual data only with a current operational check and prior success", () => {
+    const screen = input({ rows: [{ ...row, channel: "screen" }, { ...row, channel: "screen", source: "monitor capture", scope: "Monitor 1" }], evidence: [{ ...success, channel: "screen", scope: "Monitor 1", captureAge: 60000, storageAge: 60000 }] });
+    expect(classifyRecordingType("screen", screen)[0].label).toBe("Watching — no recent new capture");
+    expect(classifyRecordingType("screen", { ...screen, rows: screen.rows.slice(0, 1) })[0].mode).toBe("unknown");
+    expect(classifyRecordingType("screen", { ...screen, evidence: [] })[0].mode).toBe("unknown");
+  });
   it("shows an explicit fresh pause and error independently of recent success", () => {
     expect(classifyRecordingType("microphone", input({ rows: [row, { ...row, condition: "suppressed", status: "Suppressed" }] }))[0].mode).toBe("paused");
     expect(classifyRecordingType("microphone", input({ rows: [row, { ...row, condition: "no_callbacks", status: "No audio callbacks" }] }))[0].mode).toBe("error");
   });
   it("treats sparse idle input as ready only with operational checks and past success", () => {
     const values = input({ rows: [{ ...row, channel: "keyboard" }], evidence: [{ ...success, channel: "keyboard", scope: row.scope, global: true, captureAge: 60000, storageAge: 60000 }] });
-    expect(classifyRecordingType("keyboard", values)[0].label).toBe("Ready — no recent input");
+    expect(classifyRecordingType("keyboard", values)[0].label).toBe("Watching — awaiting input");
     expect(classifyRecordingType("keyboard", { ...values, rows: [] })[0].mode).toBe("unknown");
     expect(classifyRecordingType("keyboard", { ...values, evidence: [] })[0].mode).toBe("unknown");
   });
   it("requires sustained quiet with current callbacks, allowing rolling callback boundary rounding", () => {
     const audio = { available: true, window: 60000, observedWindow: 60000, devices: [{ key: "mic2", channel: "microphone" as const, device: 2, samples: 59900, silent: 59900, nonSilent: 0, processed: null, speech: null, uncertain: null, vadAvailable: false, pendingSpeech: null, pendingTasks: null, pendingAge: null, words: null, results: null, deferred: null }] };
     const values = input({ audio, rows: [row, { ...row, scope: "Device 2", source: "audio device", condition: "silent", status: "Silent samples received" }] });
-    expect(classifyRecordingType("microphone", values)[0].label).toBe("Listening — silent samples");
+    expect(classifyRecordingType("microphone", values)[0].label).toBe("Listening — mostly quiet samples");
+    expect(classifyRecordingType("microphone", { ...values, audio: { ...audio, devices: [{ ...audio.devices[0], silent: 59300, nonSilent: 500 }] } })[0].mode).toBe("quiet");
     expect(classifyRecordingType("microphone", { ...values, audio: { ...audio, devices: [{ ...audio.devices[0], silent: 5000 }] } })[0].mode).not.toBe("quiet");
     expect(classifyRecordingType("microphone", { ...values, rows: values.rows.slice(1) })[0].mode).toBe("unknown");
-    expect(classifyRecordingType("microphone", { ...values, rows: [row, { ...values.rows[1], since: values.now - 5000 }] })[0].mode).not.toBe("quiet");
+    expect(classifyRecordingType("microphone", { ...values, audio: { ...audio, observedWindow: 5000 } })[0].mode).not.toBe("quiet");
   });
   it("always marks uninstrumented activity metadata unknown", () => expect(classifyRecordingType("activity", input())[0].label).toContain("not instrumented"));
 });

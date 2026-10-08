@@ -6,6 +6,18 @@
 
 export const commands = {
 /**
+ * Apply saved source preferences without resuming an intentionally paused session.
+ * This may briefly interrupt other producers; it never clears privacy gates.
+ */
+async applyRecordingPreferences() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_recording_preferences") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Request Calendar permission (shows one-time macOS popup).
  * Returns "granted", "denied", or an error message.
  */
@@ -1342,6 +1354,17 @@ async showPermissionRecoveryWindow() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Explicitly opened status companion. Opening it never starts capture.
+ */
+async showRecordingDashboard() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("show_recording_dashboard") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async showShortcutReminder(shortcut: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("show_shortcut_reminder", { shortcut }) };
@@ -1977,6 +2000,11 @@ disableClipboardCapture?: boolean;
  * Opt in to keyboard DB rows via the "Capture keyboard" toggle.
  */
 disableKeyboardCapture?: boolean;
+/**
+ * Stop persisting pointer rows; operation hooks still wake visual capture.
+ * False preserves the existing pointer-recording behavior for old settings.
+ */
+disablePointerCapture?: boolean;
 /**
  * Continue recording audio when the screen is locked.
  * Default: false (audio pauses when screen is locked to save resources).

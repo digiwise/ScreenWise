@@ -10,7 +10,51 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest artifacts and validation: [compact recording status](#compact-recording-status-release-validation-2026-10-09). Earlier hashes below belong to their historical candidates.
+Latest artifacts and validation: [named sources and floating status](#named-sources-and-floating-status-validation-2026-10-09). Earlier hashes below belong to their historical candidates.
+
+## Named sources and floating status validation (2026-10-09)
+
+Implemented the separate always-on-top corner dashboard with six primary data
+types, expandable derived types, current-session audio names, detailed Status
+access and explicit recording controls. Listening/Watching are distinct from
+Recording/Capturing, policy pauses, errors and unconfirmed evidence. Status request
+failures show fixed timeout/HTTP/invalid-response reasons without inferring that
+the backend process has exited. Policy state is not treated as a periodic callback;
+stale operational blockers remain explicit.
+
+119 unique frontend checks, 15 unique engine checks and two native binding checks
+passed, together with TypeScript, final Next export, formatting and desktop check.
+See [build notes](BUILD_NOTES.md#named-sources-and-floating-status-validation-2026-10-09)
+for commands, the repaired assertion/formatting failures and cache counts.
+No dependency, profile or lockfile changes were made.
+
+The recorder production release passed in 8m31s (785 external artifacts reused,
+zero rebuilt; 11 workspace artifacts reused, eight rebuilt). Inert CLI checks
+passed. Recorder SHA256:
+`FAA9977DB78FCDD95B9CBFAA06CBF1AD06D6E28407CF96C1A80AE52DF42D59EC`.
+
+The desktop production release passed in 14m18s (1,080 external artifacts reused,
+zero rebuilt; ten workspace artifacts reused, eight rebuilt). Desktop SHA256:
+`FC79BDA7F0FB3C04CC89C8B7FCF711DCC9C3A70A47E1972EF65E8BC55A4E9F27`.
+Both builds reported zero new external variants and zero unexpected rebuilds.
+
+Applying saved screen/keyboard/clipboard/pointer preferences can briefly restart
+other active producers. The new native command does not resume an absent/manual
+pause or clear existing device/privacy pauses. Audio controls resolve exact
+current authenticated device identity. Controls are requests, not evidence of
+active recording; unavailable settings, rejected operations and uncertain state
+remain visible. Pointer off stops event storage while hooks can still trigger
+permitted visual capture. Derived types remain linked to their source; independent
+derived-data and activity-metadata controls are not implemented.
+
+Device names need no blanket local UI redaction. They are separate bounded
+authenticated metadata, not persisted generic notice text. Historical names need
+reliable session/source identity before a name can be attached to an older ID;
+that mapping remains unimplemented. Keep/Discard and pending review remain separate.
+
+No installed GUI/device-control/notification trial or continuous-capture claim is
+made. No new capture, private-content inspection, deployment or firewall change
+occurred. The built desktop executable is not launched by these checks.
 
 ## Compact recording status release validation (2026-10-09)
 

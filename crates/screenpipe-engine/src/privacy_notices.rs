@@ -828,7 +828,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audio_signal_and_transcription_intervals_do_not_expose_device_labels() {
+    async fn audio_signal_and_transcription_intervals_keep_device_labels_out_of_persisted_notices()
+    {
         let _writer_guard = WRITER_TEST_LOCK.lock().await;
         use screenpipe_audio::core::device::{AudioDevice, DeviceType};
         use screenpipe_config::capture_diagnostics::*;
@@ -846,6 +847,30 @@ mod tests {
         let id = device.diagnostic_id();
         assert!(id > 0);
         assert_eq!(id, device.clone().diagnostic_id());
+        // Device labels are explicit current-session metadata, not persisted notices.
+        let metadata = screenpipe_config::live_capture_status::snapshot();
+        assert!(metadata
+            .device_names
+            .iter()
+            .any(|row| row.channel == CaptureChannel::Microphone
+                && row.device == id
+                && row.name == "synthetic-private-hardware-label"));
+        screenpipe_config::live_capture_status::register_device_name(
+            CaptureChannel::Microphone,
+            id,
+            &format!("\n{}\t", "x".repeat(200)),
+        );
+        let bounded = screenpipe_config::live_capture_status::snapshot();
+        assert_eq!(
+            bounded
+                .device_names
+                .iter()
+                .find(|row| row.device == id)
+                .unwrap()
+                .name,
+            "x".repeat(160)
+        );
+        device.diagnostic_id(); // Restore the actual runtime name, never a guessed list index.
         device.report_diagnostic(
             DiagnosticSource::AudioProcessing,
             CaptureCondition::Silent,
@@ -891,7 +916,7 @@ mod tests {
             .iter()
             .any(|event| event.channel == CaptureChannel::Transcription
                 && event.condition == CaptureCondition::Deferred));
-        assert!(!serde_json::to_string(&result)
+        assert!(!serde_json::to_string(&result.data)
             .unwrap()
             .contains("synthetic-private-hardware-label"));
     }

@@ -1,10 +1,59 @@
 # ScreenWise Windows build notes
 
-The latest source/artifact milestone is [compact recording status](#compact-recording-status-release-validation-2026-10-09). Earlier release entries describe their historical candidates.
+The latest source/artifact milestone is [named sources and floating status](#named-sources-and-floating-status-validation-2026-10-09). Earlier release entries describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
+
+## Named sources and floating status validation (2026-10-09)
+
+The settled candidate adds the always-on-top corner dashboard, named audio
+devices, Listening/Watching terminology, specific request/policy/failure reasons
+and source controls. Pointer event persistence now has an independent preference;
+old settings retain the prior enabled default. See the
+[status specification](docs/RECORDING_STATUS_UI.md#named-sources-and-floating-dashboard).
+Source edits were frozen before compilation; native runs used canonical caches,
+locked/offline dependencies and two jobs. No acquisition, profile, dependency or
+lockfile changes were made.
+
+- 118 focused frontend checks passed together; one additional floating-window
+  request-failure regression passed in its six-test component file (119 unique
+  checks). TypeScript and the final 16-page Next production export passed. The
+  pre-existing `unpdf` import-meta warning remains; the new dashboard route is
+  included in the export. Acquisition prebuild scripts were not invoked.
+- 15 unique engine checks passed: 13 privacy-notice checks plus pointer-event
+  selection/legacy default and source-preference propagation regressions. The
+  first notice run had 12 passes and one assertion failure: the assertion checked
+  the whole API response, which now intentionally includes live device metadata.
+  The assertion was scoped to persisted notice rows and rerun successfully.
+  Initial compilation reused 685 external artifacts, rebuilt none and rebuilt
+  seven workspace artifacts. The two additional focused checks reused the
+  existing linked engine test binary without rebuilding.
+- `RootFmt`, `DesktopFmt` and `DesktopCheck` passed. Formatting initially caught
+  the newly renamed long test declaration; it was formatted before desktop check.
+  Desktop check reused 1,084 external artifacts, rebuilt none, reused ten workspace
+  artifacts and rebuilt nine.
+- Native `DesktopTest -Bin screenpipe-app -TestFilter export_typescript_bindings`
+  with `UPDATE_TAURI_BINDINGS=1` generated the new commands/preference bindings.
+  It passed in 5m41s (921 external reused/zero rebuilt; ten workspace reused/eight
+  rebuilt). `tauri_bindings_are_current` passed on the same selector/cache with
+  all 921 external and 18 workspace artifacts reused. No GUI was launched.
+
+- `RootBuild -BuildProfile release -Jobs 2` passed in 8m31s, reusing 785 external
+  artifacts with zero rebuilt; 11 workspace artifacts reused, eight rebuilt.
+  Inert version/help/record-help checks passed without starting capture.
+- `DesktopBuild -BuildProfile release -Jobs 2` passed in 14m18s, reusing all
+  1,080 external artifacts with zero rebuilt; ten workspace artifacts reused,
+  eight rebuilt. No new external variants or unexpected rebuilds occurred.
+  The executable was hashed without launching it.
+
+Production artifact results are recorded in the
+[validation register](VALIDATION_REGISTER.md#named-sources-and-floating-status-validation-2026-10-09).
+This is compilation and controlled-fixture evidence; installed corner placement,
+real device control, native notification delivery and live recording behavior
+remain untested. No deployment, captured-content inspection, capture session or
+firewall change was performed.
 
 ## Compact recording status release validation (2026-10-09)
 

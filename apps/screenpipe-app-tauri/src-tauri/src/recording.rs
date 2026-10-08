@@ -486,6 +486,44 @@ pub async fn start_capture(
 // Full lifecycle commands (backward compat)
 // ---------------------------------------------------------------------------
 
+/// Apply saved source preferences without resuming an intentionally paused session.
+/// This may briefly interrupt other producers; it never clears privacy gates.
+#[tauri::command]
+#[specta::specta]
+pub async fn apply_recording_preferences(
+    state: State<'_, RecordingState>,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    let mut capture_guard = state.capture.lock().await;
+    if capture_guard.is_none() || screenpipe_config::audio_privacy::all_recording_paused() {
+        return Ok(false);
+    }
+    // Validate settings/server before tearing down a working session.
+    let config = build_config(&app)?;
+    let server_guard = state.server.lock().await;
+    let server = server_guard
+        .as_ref()
+        .ok_or("Recorder backend is not running")?;
+    if let Some(session) = capture_guard.take() {
+        session.stop().await;
+    }
+    // stop_capture revokes the gate before waiting for this lock; a newer pause wins.
+    if screenpipe_config::audio_privacy::all_recording_paused() {
+        return Ok(false);
+    }
+    match CaptureSession::start(server, &config, false).await {
+        Ok(session) => {
+            *capture_guard = Some(session);
+            Ok(true)
+        }
+        Err(error) => {
+            screenpipe_config::audio_privacy::set_all_recording_paused(true);
+            crate::health::set_recording_status(crate::health::RecordingStatus::Error);
+            Err(error)
+        }
+    }
+}
+
 /// Stop capture AND server so the next spawn_screenpipe does a full restart.
 /// Called by "Apply & Restart" and audio shortcuts.
 /// The tray toggle uses stop_capture / start_capture to keep the server alive.

@@ -449,3 +449,31 @@ checks and both production release builds. See the [validation record](../VALIDA
 Next is a separately authorized deployment and installed status/notification
 trial, then the pending-review and Keep/Discard milestone. The status work itself
 does not accept, discard or change the recording policy of captured data.
+
+### Named sources, Listening/Watching and corner dashboard
+
+The owner authorized a separate always-on-top corner dashboard, names for audio
+devices, precise reasons, access to the detailed Status panel and quick recording
+controls. Listening describes operational quiet audio; Watching describes visual
+or event capture awaiting new input. Recording, Paused, Error and Unconfirmed
+remain distinct. Stopped is not a separate user-facing state: show the actual
+policy, device/producer failure or unavailable evidence.
+
+Policy state and operational freshness are separate. A setting-change observation
+must not expire as though it were a periodic producer check; unknown operational
+or safety evidence must still remain explicit. Hardware names are current-session
+authenticated metadata, not persisted diagnostic text or historical identity.
+
+The compact window offers primary sources and expandable derived types. Saved
+source preferences briefly restart an active capture session; application preserves
+manual and device pauses. Per-device audio controls apply to the current session.
+Pointer recording now has an independent persistence preference, while operation
+hooks can still trigger permitted visual capture, as with keyboard and clipboard.
+Derived types remain linked to their capture sources. These controls affect future
+recording and do not implement deletion, retention or pending review.
+
+Device names need no blanket redaction in the local dashboard or source details.
+Current names are explicit authenticated metadata. Historical names should remain
+an option once session/source identity is persisted correctly; temporary numeric
+device IDs must not be guessed across restarts. The present absence of names in
+persisted generic notices is not a permanent policy to hide them from local history.

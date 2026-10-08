@@ -87,6 +87,7 @@ pub struct RecordingConfig {
     /// wake event-driven capture, and the a11y tree + OCR still capture on-screen text. See
     /// `RecordingSettings.disable_keyboard_capture`.
     pub disable_keyboard_capture: bool,
+    pub disable_pointer_capture: bool,
     pub languages: Vec<Language>,
 
     // Speaker identification
@@ -243,6 +244,7 @@ impl RecordingConfig {
             pause_on_drm_content: settings.pause_on_drm_content,
             disable_clipboard_capture: settings.disable_clipboard_capture,
             disable_keyboard_capture: settings.disable_keyboard_capture,
+            disable_pointer_capture: settings.disable_pointer_capture,
             languages: settings
                 .languages
                 .iter()
@@ -321,6 +323,7 @@ impl RecordingConfig {
             capture_text: !self.disable_keyboard_capture,
             capture_keystrokes: true,
             record_keyboard_events: !self.disable_keyboard_capture,
+            record_pointer_events: !self.disable_pointer_capture,
             record_clipboard_events: !self.disable_clipboard_capture,
             apply_pii_removal: self.use_pii_removal,
             // Event-driven capture relies on same-app title changes reaching
@@ -459,6 +462,7 @@ mod tests {
         let settings = screenpipe_config::RecordingSettings {
             disable_clipboard_capture: true,
             disable_keyboard_capture: true,
+            disable_pointer_capture: true,
             ignored_windows: vec!["Secret Notes".to_string(), "Password Manager".to_string()],
             included_windows: vec!["Work Browser".to_string()],
             capture_on_keystroke: Some(true),
@@ -480,6 +484,7 @@ mod tests {
         assert!(!ui.capture_text);
         assert!(ui.capture_keystrokes);
         assert!(!ui.record_keyboard_events);
+        assert!(!ui.record_pointer_events);
         assert!(!ui.record_clipboard_events);
         assert!(ui.apply_pii_removal);
         assert!(ui.capture_window_focus);

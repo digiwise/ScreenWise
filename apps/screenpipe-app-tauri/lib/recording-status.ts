@@ -11,7 +11,7 @@ export const DATA_TYPES = {
 const CONDITIONS: Record<string, string> = {
   admitted: "Capture permitted", suppressed: "Suppressed", failed: "Failed",
   redacted: "Redacted", partially_redacted: "Partially redacted", active_window_only: "Active window only",
-  deferred: "Processing deferred", silent: "Silent samples received", no_callbacks: "No audio callbacks", stopped: "Stopped",
+  deferred: "Processing deferred", silent: "Silent samples received", no_callbacks: "No audio callbacks", stopped: "Capture ended — cause unavailable",
 };
 const SOURCES = new Set(["privacy_admission", "content_protection", "monitor_capture", "capture_operation", "window_policy", "input_privacy", "audio_device", "audio_processing", "power", "user_preference", "permission", "persistence", "redaction", "session"]);
 const ORIGINS = new Set(["ignored_windows", "included_windows", "ignored_urls", "builtin"]);
@@ -22,6 +22,45 @@ const words = (value: string) => value.replaceAll("_", " ");
 const integer = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 export type StatusObservation = { key: string; channel: string; source: string; scope: string; condition: string; status: string; reasons: string[]; rules: string[]; since: number; observed: number; checkedAge: number | null };
 export type CaptureEvidence = { key: string; channel: string; scope: string; global: boolean; captureSupported: boolean; storageSupported: boolean; captured: number | null; stored: number | null; captureAge: number | null; storageAge: number | null };
+export type RecordingDeviceName = { channel: "microphone" | "output_audio"; device: number; name: string };
+const REASON_DESCRIPTIONS: Record<string, string> = {
+  "user stopped": "Disabled by user", "user paused": "Paused by user", "disabled": "Disabled in recording settings", "session stopped": "Recorder session ended",
+  "screen locked": "Computer is locked", "schedule paused": "Recording schedule is paused", "silent input": "Samples contain silence",
+  "no audio callbacks": "Audio device is not delivering samples", "device unavailable": "Device unavailable", "device start failed": "Device could not start",
+  "device stream failed": "Device stream failed", "device recovery": "Device is recovering", "foreground unavailable": "Foreground app could not be identified",
+  "foreground changed": "Foreground app changed during privacy check", "browser url unverified": "Browser URL could not be verified",
+  "excluded foreground": "Excluded foreground window", "excluded background": "Excluded visible window", "outside include filter": "Window is outside the include policy",
+  "protected content matched": "Protected-content policy matched", "content protection gate": "Protected-content gate is closed",
+  "no safe window": "No permitted window could be captured", "monitor inactive": "Monitor is inactive", "capture check failed": "Capture safety check failed",
+  "input check unavailable": "Input safety check is unavailable", "input check stale": "Input safety check is stale", "input focus changed": "Input focus changed during safety check",
+  "input generation changed": "Input privacy policy changed during the safety check", "input worker contended": "Input safety worker was busy",
+  "window metadata unavailable": "Window metadata could not be read", "monitor unverified": "Monitor could not be verified",
+  "monitor acquisition failed": "Monitor capture could not start", "active window acquisition failed": "Active-window capture could not start",
+  "post capture check failed": "Post-capture privacy check failed", "capture failure": "Capture operation failed", "access denied": "Capture access was denied",
+  "active input deferral": "Capture delayed while input is active", "privacy generation invalidated": "Privacy state changed while processing",
+  "permission needed": "Recording permission is needed", "permission lost": "Recording permission was lost",
+  "power transcription deferred": "Transcription deferred by power policy", "power screenshots disabled": "Screenshots disabled by power policy",
+  "power capture paused": "Capture paused by power policy", "transcription deferred": "Transcription processing deferred", "private browsing": "Private-browsing policy matched",
+};
+export function recordingReason(reason: string): string {
+  return REASON_DESCRIPTIONS[reason] ?? (REASONS.has(reason.replaceAll(" ", "_")) ? reason : "Reason unavailable");
+}
+export function recordingObservationLabel(row: StatusObservation): string {
+  if (row.condition === "admitted" && row.source === "user preference") return "Enabled in recording settings";
+  if (row.condition === "admitted" && row.source === "power") return "Allowed by power policy";
+  const cause = row.reasons.find((reason) => reason !== "gate open");
+  if (row.condition === "stopped") return cause ? recordingReason(cause) : "Capture ended — cause unavailable";
+  if (["suppressed", "deferred", "redacted", "partially_redacted", "failed", "no_callbacks"].includes(row.condition))
+    return cause ? `${row.condition === "suppressed" ? "Paused" : row.status} — ${recordingReason(cause)}` : `${row.status} — reason unavailable`;
+  return row.status;
+}
+export function recordingDeviceScope(scope: string, channel: string, names: RecordingDeviceName[] = []): string {
+  const match = /^Device ([1-9][0-9]*)$/.exec(scope);
+  if (!match) return scope;
+  const device = Number(match[1]);
+  const metadata = names.find((item) => item.channel === channel && item.device === device);
+  return metadata ? `${metadata.name} (device ${device})` : `Unknown device (ID ${device})`;
+}
 export const STATUS_MAX_AGE_MS = 15000;
 export function statusScope(raw: unknown): string {
   if (raw === "global") return "All sources (global scope; individual monitor attribution unavailable)";
@@ -37,7 +76,7 @@ export function evidenceAge(age: number | null, elapsed = 0): string {
   const seconds = Math.floor((age + Math.max(0, elapsed)) / 1000);
   return seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ${seconds % 60}s ago`;
 }
-export function parseLiveStatus(body: unknown): { evidence: CaptureEvidence[]; snapshot: number; session: number } {
+export function parseLiveStatus(body: unknown): { evidence: CaptureEvidence[]; snapshot: number; session: number; deviceNames: RecordingDeviceName[] } {
   if (!body || typeof body !== "object") throw new Error("Live status unavailable");
   const live = (body as Record<string, unknown>).live_status as Record<string, unknown>;
   if (!live || live.schema_version !== 1 || typeof live.evidence_available !== "boolean" || !integer(live.session_uptime_ms) || !integer(live.snapshot_at_ms) || !integer(live.session_started_at_ms)
@@ -59,7 +98,25 @@ export function parseLiveStatus(body: unknown): { evidence: CaptureEvidence[]; s
       captured: row.last_capture_at_ms as number | null, stored: row.last_storage_at_ms as number | null,
       captureAge: row.capture_age_ms as number | null, storageAge: row.storage_age_ms as number | null };
   });
-  return { evidence: live.evidence_available ? evidence : [], snapshot: live.snapshot_at_ms, session: live.session_started_at_ms };
+  const deviceNames: RecordingDeviceName[] = [];
+  if (Array.isArray(live.device_names) && live.device_names.length <= 1024) {
+    const seenNames = new Set<string>();
+    const ambiguousNames = new Set<string>();
+    for (const raw of live.device_names) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      if ((item.channel !== "microphone" && item.channel !== "output_audio") || !integer(item.device) || item.device === 0
+        || typeof item.name !== "string" || item.name.length === 0 || item.name.length > 320 || [...item.name].length > 160
+        || !item.name.trim() || /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(item.name)) continue;
+      const key = `${item.channel}:${item.device}`;
+      if (seenNames.has(key)) { ambiguousNames.add(key); continue; }
+      seenNames.add(key); deviceNames.push({ channel: item.channel, device: item.device, name: item.name });
+    }
+    for (let index = deviceNames.length - 1; index >= 0; index--) {
+      if (ambiguousNames.has(`${deviceNames[index].channel}:${deviceNames[index].device}`)) deviceNames.splice(index, 1);
+    }
+  }
+  return { evidence: live.evidence_available ? evidence : [], snapshot: live.snapshot_at_ms, session: live.session_started_at_ms, deviceNames };
 }
 
 // Validate every displayed field; never render arbitrary server messages, app identities or matching text.

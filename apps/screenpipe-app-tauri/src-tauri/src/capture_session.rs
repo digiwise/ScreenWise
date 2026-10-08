@@ -62,6 +62,35 @@ impl CaptureSession {
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         reconfigure_audio_manager(server, config).await?;
 
+        // Explicit source preference, distinct from operational producer checks.
+        // Off persists until changed; an admitted preference does not prove capture.
+        {
+            use screenpipe_config::capture_diagnostics::*;
+            for channel in [
+                CaptureChannel::Screen,
+                CaptureChannel::ScreenStorage,
+                CaptureChannel::Ocr,
+                CaptureChannel::Accessibility,
+            ] {
+                observe(
+                    channel,
+                    DiagnosticSource::UserPreference,
+                    CaptureScope::Global,
+                    if config.disable_vision {
+                        CaptureCondition::Suppressed
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    vec![if config.disable_vision {
+                        CaptureReason::Disabled
+                    } else {
+                        CaptureReason::GateOpen
+                    }],
+                    Vec::new(),
+                );
+            }
+        }
+
         // --- Capture trigger sender (set by VisionManager, consumed by UI recorder) ---
         let mut capture_trigger_tx: Option<screenpipe_engine::event_driven_capture::TriggerSender> =
             None;

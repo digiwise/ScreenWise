@@ -33,7 +33,7 @@ export const Providers = forwardRef<
   const [mounted, setMounted] = useState(false);
   // Keep navigation and integration deep links mounted in every main window.
   const pathname = usePathname();
-  const isOverlay = pathname === "/shortcut-reminder";
+  const isOverlay = pathname === "/shortcut-reminder" || pathname === "/recording-dashboard";
   useEffect(() => {
     setMounted(true);
   }, []);

@@ -95,6 +95,7 @@ impl AudioDevice {
             return 0;
         };
         if let Some(id) = ids.get(self) {
+            self.register_status_name(*id);
             return *id;
         }
         if ids.len() >= 1024 {
@@ -102,7 +103,20 @@ impl AudioDevice {
         }
         let id = ids.len() as u64 + 1;
         ids.insert(self.clone(), id);
+        self.register_status_name(id);
         id
+    }
+
+    fn register_status_name(&self, id: u64) {
+        use screenpipe_config::capture_diagnostics::CaptureChannel;
+        screenpipe_config::live_capture_status::register_device_name(
+            match self.device_type {
+                DeviceType::Input => CaptureChannel::Microphone,
+                DeviceType::Output => CaptureChannel::OutputAudio,
+            },
+            id,
+            &self.name,
+        );
     }
 
     pub fn report_diagnostic(
