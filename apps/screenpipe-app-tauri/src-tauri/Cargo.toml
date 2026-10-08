@@ -14,7 +14,7 @@ rust-version = "1.92"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-tauri-build = { version = "=2.6.2", features = [] }
+tauri-build = { version = "=2.6.2", features = ["codegen"] }
 tauri-helper = { git = "https://github.com/divanshu-go/tauri-helper", rev = "e25ff1d2c5026189305a0251a1e06788efe1d2b3" }
 # Used by build.rs on Windows MSVC targets (incl. cross-compiles from
 # Linux/macOS CI runners) to compile c/bswap_shim.c — provides

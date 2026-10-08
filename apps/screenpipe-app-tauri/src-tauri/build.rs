@@ -517,7 +517,13 @@ fn main() {
             .compile("bswap_shim");
     }
 
-    tauri_build::build()
+    // Generate embedded assets before rustc starts. Generating them in the
+    // context proc macro makes new assets newer than Cargo's dep-info reference,
+    // unnecessarily invalidating the next otherwise unchanged application build.
+    tauri_build::try_build(
+        tauri_build::Attributes::new().codegen(tauri_build::CodegenContext::new()),
+    )
+    .expect("failed to build Tauri context");
 }
 
 /// Compile shortcut_reminder.swift into a static library.

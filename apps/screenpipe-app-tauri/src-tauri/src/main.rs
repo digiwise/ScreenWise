@@ -1369,7 +1369,7 @@ async fn main() {
 
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(tauri::tauri_build_context!())
         .expect("error while building tauri application");
 
     // Setup dock right-click menu (fallback for when tray is behind the notch)

@@ -121,6 +121,10 @@ or refresh runtime manifests; use the existing trial preparation for those actio
 
 ## Distinguish missing variants from invalidation
 
+The desktop prepares embedded Tauri context in its build script to avoid a
+follow-up relink after first generating frontend assets during rustc. See the
+[cause, scoped repair and validation limits](../../../docs/DESKTOP_CONTEXT_BUILD.md).
+
 Check-mode metadata, linked tests, build-time dependencies and optimized application
 builds can require different artifacts even in the same cache. Completing one mode
 does not warm every other mode. Each initially missing variant may compile once.
