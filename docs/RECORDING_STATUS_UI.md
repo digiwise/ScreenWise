@@ -279,3 +279,109 @@ rows independently, with old settings preserving the previous enabled default.
 Screenshot storage, OCR and paired accessibility follow visual capture;
 transcription follows its audio sources. No independent derived-data or activity
 metadata control is invented. Keep/Discard and review-before-keeping remain separate.
+
+## Prepared follow-up after deployment (2026-10-09)
+
+The owner requested preparation and investigation only. Do not implement these
+changes until the current `release-local` candidate has been deployed. They are
+not part of that candidate; the build/source remain fixed.
+
+### Preserve last status when stale
+
+Keep the last reported status, icon and specific reason visible, with an adjacent
+warning such as **stale 15s**. Label it as last reported so old Recording does not
+claim current recording. Staleness supplements rather than replaces the status.
+Never-seen status still needs an explicit unknown state. Request failures remain
+visible separately, alongside the older status if available.
+
+Keep the last successful snapshot separately from transport freshness: the current
+poller clears observations on failure, visibility change and suspension, while the
+classifier replaces old blockers with an unknown summary. Preserve per-source
+observations through those cases, without applying old device IDs to a new session.
+Calculate age from the producer check/response time, not when the condition began.
+Distinguish durable settings state from periodic operational checks, and account
+for the producer's expected reporting cadence. Show source-specific staleness;
+one stale observer should not silently relabel every fresh source. Stale display
+must not change capture/privacy admission or make an old sample a fresh success.
+
+### Foreground identification investigation
+
+The monitor-specific `foreground_unavailable` reason comes from
+`evaluate_windows_monitor_capture` in
+`crates/screenpipe-screen/src/capture_screenshot_by_window.rs`: it samples the
+native foreground HWND/PID and searches the capture-window enumeration for it.
+If it was not seen, it emits `foreground_window_unavailable`, which the engine
+maps to `ForegroundUnavailable`. This does not necessarily mean the application
+identity is unknown: the code can attach a verified executable to that blocker.
+
+The existing pinned xcap 0.9.4 source's Windows `is_valid_window` deliberately
+omits all windows belonging to the current process. In the desktop's embedded
+recorder, ScreenWise's own GUI can therefore be absent from `Window::all()` while
+foreground. Invisible/cloaked windows, some shell/tool windows and focus transitions
+can also produce a missing match. This is a confirmed mechanism and a likely
+recurring cause while looking at ScreenWise; the existing reason cannot establish
+the cause of every occurrence. No external implementation was copied or changed.
+
+A bounded diagnostic-log sample on 9 October, approximately 09:05–10:41 Sydney,
+contained 192 `foreground_unavailable` mentions. These are not 192 distinct
+episodes: monitor/channel notices and transitions can repeat. Only fixed reason
+counts/timestamps were extracted, without printing captured content or log text.
+A subsequent authenticated status-only query showed the reported monitor's
+current window policy was fresh and redacted for excluded background/no safe
+window, rather than foreground identification. That later sample does not explain
+the earlier screenshot's exact cause.
+
+Prepare separate reasons for missing native foreground, changed foreground,
+known window absent from the capture list and recognised recorder/shell windows.
+Recognise known identities independently of capture eligibility; retaining a
+redaction may still be correct. Preserve before/after focus checks, exclusions and
+monitor uncertainty. Any adjustment to capture admission needs separate review;
+renaming an unknown state is not permission to capture it.
+
+### Monitor names and input safety detail
+
+Monitor metadata already includes `id`, `stable_id`, `name`, resolution and primary
+status, and Recording Settings displays names. Reuse verified current monitor
+names in status, with position/resolution for duplicate names and numeric IDs in
+technical details. Optional user aliases can be considered later. Hardware/topology
+changes require identity handling before naming historical observations.
+
+The input safety check is the UI Automation password-field probe in
+`crates/screenpipe-a11y/src/platform/windows_uia.rs`. It checks native focus,
+the focused UIA element, keyboard-focus ownership and PID, the explicitly supported
+`IsPassword` property, and unchanged focus/element at the end. Failed calls,
+unsupported properties, missing decisions and mismatches currently collapse into
+unavailable paths; `.ok()?` discards the underlying error/stage. The hook also
+uses DecisionUnavailable when the visual privacy gate is closed. The current
+generic label therefore cannot identify which step failed in the screenshot.
+
+Prepare bounded stage/reason diagnostics and practical error codes for native
+focus, worker readiness, UIA retrieval, ownership validation, password-property
+support/read and final focus comparison. Existing stale-decision, worker-lock,
+generation and focus-mismatch reasons should remain distinct. Explain whether
+keyboard content, clipboard content or click-element text was suppressed, instead
+of implying that every input event or producer stopped. Do not record element
+names, values, window titles or arbitrary exception payloads in generic notices.
+Keep password checks fail closed.
+
+### Normal gaps in computer audio output
+
+The backend already treats Windows/macOS output receive timeouts as non-fatal:
+`run_record_and_transcribe.rs` explicitly notes that nothing playing can mean no
+callbacks, reports AudioProcessing/NoCallbacks and continues. The dashboard and
+alert classifier currently treat every NoCallbacks observation as a failure.
+That is a UI/alert interpretation mismatch, rather than a fatal backend timeout.
+
+Show ordinary output gaps as **Listening — waiting for computer audio output**,
+including time since the last sample and a separate check-age warning when needed.
+No samples is different from received silent samples: invent no silent duration,
+speech classification or inferred playback. Do not generate repeated fault alerts
+merely for quiet output. Keep microphone timeouts, explicit device removal/stream
+failure, backend failure, user/policy pauses and genuinely missing producer
+verification distinct. Do not suppress a real error because a device is output.
+
+After deployment, implement these together with regressions for preserved stale
+statuses, session/device identity, ordinary output gaps versus explicit failure,
+named monitors and specific input/foreground failure stages. Validate against the
+actual local-profile candidate; no new capture or interactive trial is authorised
+by this preparation document.
