@@ -446,11 +446,103 @@ async fn persist_capture_diagnostics(db: &DatabaseManager, degraded: &AtomicBool
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct NoticeRange {
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
     limit: Option<usize>,
+    before_time: Option<DateTime<Utc>>,
+    before_id: Option<i64>,
+    group: Option<NoticeGroup>,
+    channel: Option<screenpipe_config::capture_diagnostics::CaptureChannel>,
+    condition: Option<screenpipe_config::capture_diagnostics::CaptureCondition>,
+    scope: Option<HistoryScope>,
+    scope_id: Option<u64>,
+}
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoticeGroup {
+    Visual,
+    Audio,
+    Input,
+    System,
+}
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HistoryScope {
+    Global,
+    Monitor,
+    Device,
+}
+impl NoticeRange {
+    fn matches(&self, event: &SafeNoticeEvent) -> bool {
+        use screenpipe_config::capture_diagnostics::{CaptureChannel as C, CaptureScope as S};
+        let channels: &[C] = match event {
+            SafeNoticeEvent::Capture(d) => std::slice::from_ref(&d.channel),
+            SafeNoticeEvent::ContentProtection(d) if d.schema_version == 1 => {
+                &[C::Screen, C::Microphone, C::OutputAudio]
+            }
+            SafeNoticeEvent::ContentProtection(_) => &[C::Screen, C::OutputAudio],
+            SafeNoticeEvent::AudioShutdown(_) | SafeNoticeEvent::AudioDelivery(_) => {
+                &[C::Microphone, C::OutputAudio, C::Transcription]
+            }
+            _ => &[],
+        };
+        if self
+            .channel
+            .is_some_and(|channel| !channels.contains(&channel))
+        {
+            return false;
+        }
+        if self.group.is_some_and(|group| !match group {
+            NoticeGroup::Visual => channels
+                .iter()
+                .any(|c| matches!(c, C::Screen | C::ScreenStorage | C::Ocr | C::Accessibility)),
+            NoticeGroup::Audio => channels
+                .iter()
+                .any(|c| matches!(c, C::Microphone | C::OutputAudio | C::Transcription)),
+            NoticeGroup::Input => channels
+                .iter()
+                .any(|c| matches!(c, C::Keyboard | C::Clipboard | C::Pointer)),
+            NoticeGroup::System => channels.is_empty(),
+        }) {
+            return false;
+        }
+        let diagnostic = match event {
+            SafeNoticeEvent::Capture(d) => Some(d),
+            _ => None,
+        };
+        if self
+            .condition
+            .is_some_and(|condition| diagnostic.is_none_or(|d| d.condition != condition))
+        {
+            return false;
+        }
+        if let Some(scope) = self.scope {
+            let Some(d) = diagnostic else {
+                return false;
+            };
+            let matched = match (scope, d.scope) {
+                (HistoryScope::Global, S::Global) => self.scope_id.is_none(),
+                (HistoryScope::Monitor, S::Monitor(id)) => {
+                    self.scope_id.is_none_or(|wanted| wanted == id as u64)
+                }
+                (HistoryScope::Device, S::Device(id)) => {
+                    self.scope_id.is_none_or(|wanted| wanted == id)
+                }
+                _ => false,
+            };
+            if !matched {
+                return false;
+            }
+        }
+        true
+    }
+}
+#[derive(Debug, Serialize)]
+struct NoticeCursor {
+    before_time: DateTime<Utc>,
+    before_id: i64,
 }
 #[derive(Debug, Serialize)]
 pub struct TimelineNotice {
@@ -469,6 +561,7 @@ pub struct NoticeResponse {
     live_status: screenpipe_config::live_capture_status::LiveStatus,
     data: Vec<TimelineNotice>,
     has_more: bool,
+    next_cursor: Option<NoticeCursor>,
     persistence_degraded: bool,
     active_intervals: Vec<screenpipe_config::capture_diagnostics::CaptureDiagnostic>,
     active_notices: Vec<TimelineNotice>,
@@ -482,10 +575,22 @@ pub struct NoticeResponse {
 async fn query_notices(db: &DatabaseManager, range: &NoticeRange) -> Result<NoticeResponse, ()> {
     let limit = range.limit.unwrap_or(1000).clamp(1, 1000);
     let rows: Vec<(i64, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-        "SELECT id,timestamp,text_content FROM ui_events WHERE event_type='privacy_notice' AND timestamp>=? AND timestamp<? ORDER BY timestamp DESC,id DESC LIMIT ?",
+        "SELECT id,timestamp,text_content FROM ui_events WHERE event_type='privacy_notice' AND timestamp>=? AND timestamp<? AND (? IS NULL OR timestamp<? OR (timestamp=? AND id<?)) ORDER BY timestamp DESC,id DESC LIMIT ?",
     ).bind(range.start_time.to_rfc3339()).bind(range.end_time.to_rfc3339())
+        .bind(range.before_time.map(|t| t.to_rfc3339())).bind(range.before_time.map(|t| t.to_rfc3339()))
+        .bind(range.before_time.map(|t| t.to_rfc3339())).bind(range.before_id)
         .bind((limit+1) as i64).fetch_all(&db.pool).await.map_err(|_| ())?;
     let has_more = rows.len() > limit;
+    // Cursor advances by scanned rows even when filters or malformed payloads
+    // omit every displayed row. Equal timestamps use id as the stable tie-break.
+    let next_cursor = has_more
+        .then(|| {
+            rows.get(limit - 1).map(|(id, timestamp, _)| NoticeCursor {
+                before_time: *timestamp,
+                before_id: *id,
+            })
+        })
+        .flatten();
     let mut data = Vec::new();
     let mut invalid_rows = false;
     for (id, timestamp, payload) in rows.into_iter().take(limit) {
@@ -507,6 +612,9 @@ async fn query_notices(db: &DatabaseManager, range: &NoticeRange) -> Result<Noti
         if matches!(&event, SafeNoticeEvent::ContentProtection(event) if !matches!(event.schema_version, 1 | 2))
         {
             invalid_rows = true;
+            continue;
+        }
+        if !range.matches(&event) {
             continue;
         }
         data.push(TimelineNotice {
@@ -539,6 +647,7 @@ async fn query_notices(db: &DatabaseManager, range: &NoticeRange) -> Result<Noti
         live_status: screenpipe_config::live_capture_status::snapshot(),
         data,
         has_more,
+        next_cursor,
         persistence_degraded: invalid_rows
             || PERSISTENCE_DEGRADED.load(Ordering::Relaxed)
             || screenpipe_config::capture_diagnostics::degraded(),
@@ -583,6 +692,10 @@ pub async fn capture_events(
 ) -> Result<Json<NoticeResponse>, (StatusCode, Json<serde_json::Value>)> {
     if range.end_time <= range.start_time
         || range.end_time - range.start_time > chrono::Duration::days(32)
+        || range.before_time.is_some() != range.before_id.is_some()
+        || range.before_id.is_some_and(|id| id <= 0)
+        || range.scope_id.is_some() && range.scope.is_none()
+        || matches!(range.scope, Some(HistoryScope::Global)) && range.scope_id.is_some()
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -623,6 +736,91 @@ mod tests {
     use crate::sleep_monitor::WindowsLockNoticeReason;
     use screenpipe_events::SessionRecoveryIssue;
     static WRITER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    #[test]
+    fn status_log_query_parameters_accept_typed_filters_and_reject_unknown_values() {
+        let uri = "/capture-events?start_time=2026-10-08T00%3A00%3A00Z&end_time=2026-10-09T00%3A00%3A00Z&group=audio&channel=microphone&condition=failed&scope=device&scope_id=12&before_id=3&before_time=2026-10-08T12%3A00%3A00Z".parse().unwrap();
+        let Query(range) = Query::<NoticeRange>::try_from_uri(&uri).unwrap();
+        assert_eq!(range.scope_id, Some(12));
+        assert_eq!(range.before_id, Some(3));
+        let invalid = "/capture-events?start_time=2026-10-08T00%3A00%3A00Z&end_time=2026-10-09T00%3A00%3A00Z&channel=private_data".parse().unwrap();
+        assert!(Query::<NoticeRange>::try_from_uri(&invalid).is_err());
+    }
+    #[tokio::test]
+    async fn status_log_cursor_crosses_filtered_empty_pages_and_equal_timestamps() {
+        use screenpipe_config::capture_diagnostics::{
+            CaptureChannel as C, CaptureCondition as K, CaptureDiagnostic, CaptureReason as R,
+            CaptureScope as S, DiagnosticSource as D,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let db = DatabaseManager::new(
+            temp.path().join("db.sqlite").to_str().unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        let diagnostic = |channel, scope| CaptureDiagnostic {
+            channel,
+            scope,
+            source: D::CaptureOperation,
+            condition: K::Failed,
+            reasons: vec![R::CaptureFailure],
+            rules: vec![],
+            excluded_apps: vec![],
+            observed_at_ms: now.timestamp_millis() as u64,
+            since_ms: now.timestamp_millis() as u64,
+            previous_since_ms: None,
+        };
+        for (channel, scope) in [
+            (C::Microphone, S::Device(12)),
+            (C::Screen, S::Monitor(1)),
+            (C::Screen, S::Monitor(2)),
+        ] {
+            db.insert_ui_event(&notice_row(
+                SafeNoticeEvent::Capture(diagnostic(channel, scope)),
+                now,
+            ))
+            .await
+            .unwrap();
+        }
+        let mut range = NoticeRange {
+            start_time: now - chrono::Duration::seconds(1),
+            end_time: now + chrono::Duration::seconds(1),
+            limit: Some(1),
+            group: Some(NoticeGroup::Audio),
+            channel: Some(C::Microphone),
+            condition: Some(K::Failed),
+            scope: Some(HistoryScope::Device),
+            scope_id: Some(12),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let page = query_notices(&db, &range).await.unwrap();
+            assert!(page.data.is_empty());
+            assert!(page.has_more);
+            let cursor = page.next_cursor.unwrap();
+            range.before_time = Some(cursor.before_time);
+            range.before_id = Some(cursor.before_id);
+        }
+        let final_page = query_notices(&db, &range).await.unwrap();
+        assert_eq!(final_page.data.len(), 1);
+        assert!(!final_page.has_more);
+        assert!(final_page.next_cursor.is_none());
+        assert_eq!(
+            final_page.data[0].diagnostic.as_ref().unwrap().scope,
+            S::Device(12)
+        );
+        range.scope_id = Some(99);
+        assert!(query_notices(&db, &range).await.unwrap().data.is_empty());
+        range.before_time = None;
+        range.before_id = None;
+        range.scope = None;
+        range.scope_id = None;
+        range.group = Some(NoticeGroup::Visual);
+        range.channel = Some(C::Screen);
+        range.limit = Some(10);
+        assert_eq!(query_notices(&db, &range).await.unwrap().data.len(), 2);
+    }
     fn test_writer(db: Arc<DatabaseManager>) -> PrivacyNoticeRecorder {
         // Production degradation is deliberately process-wide and latched.
         // Other synthetic tests can trigger it; this writer owns its test status.
@@ -674,6 +872,7 @@ mod tests {
                 start_time: Utc::now() - chrono::Duration::minutes(1),
                 end_time: Utc::now() + chrono::Duration::seconds(1),
                 limit: Some(1000),
+                ..Default::default()
             },
         )
         .await
@@ -729,6 +928,7 @@ mod tests {
                 start_time: Utc::now() - chrono::Duration::minutes(1),
                 end_time: Utc::now() + chrono::Duration::seconds(1),
                 limit: Some(1000),
+                ..Default::default()
             },
         )
         .await
@@ -796,6 +996,7 @@ mod tests {
                 start_time: now - chrono::Duration::seconds(1),
                 end_time: now + chrono::Duration::seconds(1),
                 limit: Some(100),
+                ..Default::default()
             },
         )
         .await
@@ -866,6 +1067,7 @@ mod tests {
                 start_time: now - chrono::Duration::seconds(1),
                 end_time: Utc::now() + chrono::Duration::seconds(1),
                 limit: Some(10),
+                ..Default::default()
             },
         )
         .await
@@ -916,6 +1118,7 @@ mod tests {
                 start_time: now - chrono::Duration::seconds(1),
                 end_time: now + chrono::Duration::seconds(1),
                 limit: Some(10),
+                ..Default::default()
             },
         )
         .await
@@ -953,6 +1156,7 @@ mod tests {
                 start_time: now - chrono::Duration::seconds(1),
                 end_time: Utc::now() + chrono::Duration::seconds(1),
                 limit: Some(10),
+                ..Default::default()
             },
         )
         .await
@@ -1014,6 +1218,7 @@ mod tests {
                 start_time: now - chrono::Duration::seconds(1),
                 end_time: now + chrono::Duration::seconds(1),
                 limit: Some(10),
+                ..Default::default()
             },
         )
         .await
@@ -1061,6 +1266,7 @@ mod tests {
                 start_time: now - chrono::Duration::seconds(1),
                 end_time: now + chrono::Duration::seconds(1),
                 limit: Some(10),
+                ..Default::default()
             },
         )
         .await

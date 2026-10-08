@@ -1,10 +1,52 @@
 # ScreenWise Windows build notes
 
-The latest source/artifact milestone is [audio activity](#audio-activity-release-validation-2026-10-09). Earlier release entries describe their historical candidates.
+The latest source/artifact milestone is [compact recording status](#compact-recording-status-release-validation-2026-10-09). Earlier release entries describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
+
+## Compact recording status release validation (2026-10-09)
+
+The settled candidate adds grouped state icons, source drill-down, background
+warnings and a filterable persisted status-log list. Its specification and limits
+are in [RECORDING_STATUS_UI.md](docs/RECORDING_STATUS_UI.md#compact-dashboard-background-alerts-and-status-log).
+All frontend and native edits were frozen before compilation. Canonical native
+runs used the established caches, locked/offline dependencies and two jobs;
+no dependency, profile or lockfile changes were made.
+
+- 89 focused frontend checks passed across status parsing, audio activity,
+  dashboard states, alerts, shared polling, dialog, history and monitor ownership.
+  TypeScript `--noEmit` and the final Next production export passed. The existing
+  `unpdf` import-meta warning remains; no acquisition prebuild scripts were run.
+- 13 focused engine privacy-notice tests passed, including typed URL filters and
+  exact timestamp/ID pagination through filtered-empty pages. External artifacts:
+  685 reused, zero rebuilt; workspace artifacts: nine reused, seven rebuilt.
+- Canonical `RootFmt`, `DesktopFmt` and `DesktopCheck` passed. Desktop check reused
+  1,084 external artifacts with zero rebuilt; ten workspace artifacts reused,
+  nine rebuilt.
+- `DesktopTest -Bin screenpipe-app -TestFilter
+  status_monitor_notification_ownership -Jobs 2 -AllowColdCache` passed one test
+  in 6m35s. Its new selector required initial baseline adoption in the existing
+  desktop test cache. The first missing external fingerprint was `tauri-build`
+  with `codegen`; prior variants lacked that feature. The run reused 906 external
+  artifacts, built 15 new variants and reported zero unexpected rebuilds. Nine
+  workspace artifacts were reused and nine rebuilt. No cache was cleared or
+  configuration changed to bypass the gate. This verifies heartbeat expiry and
+  legacy alert eligibility after a suppressed threshold; it does not launch Tauri.
+- `RootBuild -BuildProfile release -Jobs 2` passed in 6m05s, reusing 785 external
+  artifacts with zero rebuilt; 17 workspace artifacts reused, two rebuilt.
+  The recorder passed inert version/help/record-help checks.
+- `DesktopBuild -BuildProfile release -Jobs 2` passed in 10m23s, reusing 1,080
+  external artifacts with zero rebuilt; 16 workspace artifacts reused, two rebuilt.
+  No new external variants or unexpected rebuilds occurred. The desktop executable
+  was hashed without launching it.
+
+Both production release artifacts are recorded in the corresponding
+[validation register entry](VALIDATION_REGISTER.md#compact-recording-status-release-validation-2026-10-09).
+These checks cover compilation and controlled fixtures. No capture session,
+installed desktop launch, native notification delivery trial, deployment or
+firewall change is included.
 
 ## Production release validation (2026-10-08)
 

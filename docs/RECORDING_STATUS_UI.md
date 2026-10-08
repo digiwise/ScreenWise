@@ -2,7 +2,9 @@
 
 The home toolbar **Status** button and existing status deep link open a dialog
 using the authenticated `/capture-events` current `active_intervals` snapshot.
-It polls every five seconds only while open, with an eight-second request timeout.
+The persistent home webview now polls every five seconds in the background, with
+an eight-second request timeout. Other webviews poll only while Status is open.
+One shared loop per webview serves the toolbar, dashboard and alerts.
 Fetch or schema failures clear previous observations and report unavailable status.
 
 ## Trustworthy live status increment
@@ -66,8 +68,9 @@ audio queue capacity and confirmed versus possible delivery losses, and fixed
 audio shutdown failure reasons. Latched counts/issues include earlier session
 incidents and are not presented as proof loss is continuing at the current time.
 
-This milestone adds no approval, pending-review storage, Keep/Discard policy,
-notifications or always-on-top window. Those can build on the observer model.
+The initial milestone added no notifications. The dashboard/alerts increment
+below adds notifications without implementing approval, pending-review storage,
+Keep/Discard policy or an always-on-top window.
 
 Existing timeline and recent-data deletion callers also recognise
 `file_cleanup_incomplete`: they show validated committed deletion counts and
@@ -154,3 +157,64 @@ Focused parser/UI checks cover separate devices/input/output, missing/partial
 coverage, stage distinction, delayed durations, bounded safe numeric fields,
 private field rejection, informational hint thresholds and stale metric hiding.
 Final validation results for this increment are recorded with its release milestone.
+
+## Compact dashboard, background alerts and status log
+
+The toolbar shows coloured Visual, Audio and Input/activity group icons with
+state shapes, accessible labels and counts. Opening Status shows compact group
+cards; expand a group, then a data type, to inspect monitor/device evidence,
+specific reasons/rule references and audio stage measurements. Individual scopes
+remain independent. A group summary is not a claim every source shares its state.
+
+Green indicates recent verified success; capture-only evidence explicitly says
+storage is unconfirmed. Delayed storage alone does not indicate recording.
+Blue listening/quiet indicates fresh operational observations with no recent
+input, not a verified working microphone. Amber pause, red error and grey unknown
+have distinct shapes as well as colours. Stale permission/blocker checks cannot
+be overridden by another observer's success. App/window activity metadata is
+listed explicitly as uninstrumented, rather than invented as healthy.
+
+The home webview is the background notification leader; other windows cannot
+produce duplicate native reminders. Unexpected operational failure, persistent
+verification uncertainty or unavailable status triggers one subdued in-app warning
+after 60 seconds. One combined continuing incident repeats at most every 15
+minutes, rather than notifying separately for cascading sources or changing
+reasons. Recovery, recorder session changes, clock discontinuities and suspension
+reset the observation period. Existing cumulative loss counts are historical,
+not automatically repeated ongoing-error notifications. Known manual/schedule/
+lock/disabled/exclusion pauses, silence and ordinary sparse input are not repeated
+fault warnings. Stale expected-pause observations cannot hide a fresh failure.
+
+Native reminders use the existing Capture stalls preference and granted OS
+notification permission; the new monitor never requests permission. The local
+warning remains available when permission is denied or native delivery fails.
+Notifications contain fixed status descriptions, not captured content or source
+identities. A local home heartbeat every ten seconds suppresses the older restart
+popup path; its 30-second monotonic expiry restores legacy fallback. This affects
+notification ownership only, not capture gates, health checks or recovery.
+Background warnings depend on the desktop/home webview remaining alive and its
+timers running. They are not an independent OS service or an always-visible tray
+monitor; suspension cannot guarantee delivery at the one-minute deadline.
+
+**Status log** is an expandable list, not a chart. Filter by inclusive local dates
+(up to 32 days), logical group, data type, condition and monitor/device/global
+scope, optionally with a numeric source ID. Source/condition filters apply to
+typed observations; older system notices may lack this attribution. Fixed state,
+allowlisted reason/rule references and onset/report times are shown; stored free
+text, app names, titles and paths are never rendered. This is persisted transition
+history, not continuous capture proof or historical audio metric graphs.
+
+The authenticated API scans bounded pages with an exact timestamp/ID cursor.
+Filtered-empty pages still advance, including equal timestamps and sub-millisecond
+precision. Load older notices to continue; more history is explicitly indicated.
+At most 5,000 loaded matches remain displayed; newer displayed rows are removed
+with an explicit notice as older pages load. Refresh returns to newest history.
+Missing/invalid diagnostic persistence is marked incomplete. Filters abort old
+requests so stale responses cannot restore previous selections.
+
+This increment passed 89 focused frontend checks, 13 engine notice checks and one
+native notification-ownership regression, plus TypeScript, production frontend
+export, formatting, desktop check and both production release builds. Exact cache
+counts and artifact identities are in the [validation register](../VALIDATION_REGISTER.md#compact-recording-status-release-validation-2026-10-09).
+Installed GUI appearance and native notification delivery have not been exercised;
+no deployment or new capture session was performed.

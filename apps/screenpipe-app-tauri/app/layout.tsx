@@ -11,6 +11,7 @@ import { Suspense, useEffect } from "react";
 import { BrowserPairingDialog } from "@/components/browser-pairing-dialog";
 import { RecentChatSwitcherController } from "@/components/chat/recent-chat-switcher-controller";
 import { RecordingStatusDialog } from "@/components/status/recording-status-dialog";
+import { RecordingStatusMonitor } from "@/components/status/recording-status-monitor";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 // TODO: vault lock UI disabled for now — vault is CLI-only until app UX is polished
 // import { VaultLockDialog } from "@/components/vault-lock-dialog";
@@ -380,6 +381,7 @@ export default function RootLayout({
           {!isOverlay && <Toaster />}
           {!isOverlay && <FeedbackDialog />}
           {!isOverlay && <RecordingStatusDialog />}
+          {!isOverlay && <RecordingStatusMonitor />}
         </Providers>
       </body>
     </html>

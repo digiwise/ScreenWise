@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::sync::{atomic::Ordering, RwLock};
 use std::time::Instant;
-use tauri::{path::BaseDirectory, Emitter, Manager};
+use tauri::{path::BaseDirectory, Emitter, Listener, Manager};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
@@ -534,9 +534,34 @@ const CAPTURE_STALL_THRESHOLD: u32 = 90;
 /// Suppress re-notification for this long after showing one.
 const NOTIFICATION_COOLDOWN: Duration = Duration::from_secs(300); // 5 minutes
 
+// Notification ownership only: this never changes capture gates or health checks.
+// A bounded local heartbeat prevents old restart popups from duplicating the
+// dashboard's combined reminders. Legacy notification fallback returns on expiry.
+static STATUS_MONITOR_HEARTBEAT: Lazy<RwLock<Option<Instant>>> = Lazy::new(|| RwLock::new(None));
+fn status_monitor_recent(last: Option<Instant>, now: Instant) -> bool {
+    last.and_then(|last| now.checked_duration_since(last))
+        .is_some_and(|age| age < Duration::from_secs(30))
+}
+fn dashboard_owns_capture_notifications() -> bool {
+    STATUS_MONITOR_HEARTBEAT
+        .read()
+        .map(|last| status_monitor_recent(*last, Instant::now()))
+        .unwrap_or(false)
+}
+fn capture_stall_threshold_met(checks: u32) -> bool {
+    checks >= CAPTURE_STALL_THRESHOLD
+}
+
 /// Starts a background task that periodically checks the health of the sidecar
 /// and updates the tray icon accordingly.
 pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
+    app.listen("recording-status-monitor-alive", |event| {
+        if event.payload() == "\"home\"" {
+            if let Ok(mut last) = STATUS_MONITOR_HEARTBEAT.write() {
+                *last = Some(Instant::now());
+            }
+        }
+    });
     let mut interval = interval(Duration::from_secs(1));
     let client = reqwest::Client::new();
     let mut last_status = String::new();
@@ -916,10 +941,12 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
                         .ok()
                         .flatten()
                         .map(|s| s.show_restart_notifications)
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                        && !dashboard_owns_capture_notifications();
                     let now_instant = Instant::now();
 
-                    if consecutive_audio_stall == CAPTURE_STALL_THRESHOLD && notifications_enabled {
+                    if capture_stall_threshold_met(consecutive_audio_stall) && notifications_enabled
+                    {
                         let cooldown_ok = last_audio_notification
                             .map(|t| now_instant.duration_since(t) >= NOTIFICATION_COOLDOWN)
                             .unwrap_or(true);
@@ -934,7 +961,8 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
                         }
                     }
 
-                    if consecutive_vision_stall == CAPTURE_STALL_THRESHOLD && notifications_enabled
+                    if capture_stall_threshold_met(consecutive_vision_stall)
+                        && notifications_enabled
                     {
                         let cooldown_ok = last_vision_notification
                             .map(|t| now_instant.duration_since(t) >= NOTIFICATION_COOLDOWN)
@@ -1036,6 +1064,31 @@ async fn check_health(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_monitor_notification_ownership_expires_without_changing_health() {
+        let now = Instant::now();
+        assert!(!status_monitor_recent(None, now));
+        assert!(status_monitor_recent(
+            Some(now),
+            now + Duration::from_secs(29)
+        ));
+        assert!(!status_monitor_recent(
+            Some(now),
+            now + Duration::from_secs(30)
+        ));
+        assert!(!status_monitor_recent(
+            Some(now + Duration::from_secs(1)),
+            now
+        ));
+        assert!(!capture_stall_threshold_met(CAPTURE_STALL_THRESHOLD - 1));
+        // If ownership covered the exact threshold tick, legacy fallback must
+        // still be eligible after expiry, rather than waiting for a new incident.
+        assert!(
+            capture_stall_threshold_met(CAPTURE_STALL_THRESHOLD + 31)
+                && !status_monitor_recent(Some(now), now + Duration::from_secs(31))
+        );
+    }
 
     fn make_healthy_response() -> Result<HealthCheckResponse> {
         Ok(HealthCheckResponse {

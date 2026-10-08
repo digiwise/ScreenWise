@@ -415,3 +415,37 @@ This improves diagnosis before the separate retention/pending-review milestone.
 Capture admission and installed recording remain unchanged. Deployment and a
 freshly authorized live GUI/audio trial remain the next validation steps after
 the release milestone; full retention remains separate.
+
+### Compact status dashboard and log
+
+The owner authorized the previously discussed dashboard, drill-down, error
+warnings and background reminders, with a filterable status-log list instead of
+charts. Visual, Audio and Input/activity groups use coloured state icons and
+counts; groups and individual data types expand into source details. Policy pause,
+recent recording/capture success, operational quiet, error and unknown remain
+distinct. Activity metadata without instrumentation is shown as unavailable.
+
+The chosen defaults are one minute of sustained unexpected problems before a
+subdued warning and one combined continuing-incident reminder every 15 minutes.
+Known exclusions, lock/manual/schedule/disabled pauses and ordinary silence/idle
+input do not create repeated fault warnings. Persistent verification uncertainty
+does warrant attention. Quiet icons use sustained fresh operational evidence,
+not just an old last-success time or an open gate.
+
+The background notification leader is the persistent home webview; other windows
+monitor while Status is open. Native delivery uses the existing Capture stalls
+setting and granted permission; no new permission prompt. An expiring heartbeat
+avoids duplicate legacy capture-stall popups while the new leader is alive.
+Timers suspended by the OS cannot guarantee the notification deadline.
+
+Status history uses persisted, allowlisted transitions with date/group/data-type/
+condition/source filters and explicit paging. It is not continuous recording
+proof or a history of rolling audio measurements. These status improvements do
+not implement or resolve remaining Keep/Discard and pending-review choices.
+Deployment and fresh authorized GUI/audio validation remain separate from builds.
+
+This milestone is implemented and passed the focused frontend/backend/native
+checks and both production release builds. See the [validation record](../VALIDATION_REGISTER.md#compact-recording-status-release-validation-2026-10-09).
+Next is a separately authorized deployment and installed status/notification
+trial, then the pending-review and Keep/Discard milestone. The status work itself
+does not accept, discard or change the recording policy of captured data.

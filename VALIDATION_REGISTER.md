@@ -10,7 +10,44 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest artifacts and validation: [audio activity](#audio-activity-release-validation-2026-10-09). Earlier hashes below belong to their historical candidates.
+Latest artifacts and validation: [compact recording status](#compact-recording-status-release-validation-2026-10-09). Earlier hashes below belong to their historical candidates.
+
+## Compact recording status release validation (2026-10-09)
+
+Implemented grouped Visual, Audio and Input/activity icons with distinct
+recording, quiet, policy-pause, error and unknown states; expandable source details;
+background combined warnings; and a date/group/data-type/condition/scope-filtered
+status-log list with bounded cursor pagination. Reasons and rule references use
+closed diagnostic fields; arbitrary stored text is not rendered. Pending-review
+and Keep/Discard implementation remain separate.
+
+89 focused frontend checks, 13 engine notice tests and one native notification
+ownership regression passed. TypeScript, final Next production export, formatting
+and desktop check passed. The native test warmed 15 missing external codegen
+variants in the established cache, with zero unexpected rebuilds. See
+[build notes](BUILD_NOTES.md#compact-recording-status-release-validation-2026-10-09)
+for commands and cache counts. No lockfile or dependency changes were made.
+
+The recorder production release passed in 6m05s and passed inert CLI checks.
+Recorder SHA256:
+`1DF7B90A7EA5BE6BF1D775FC00E8BF09F4781A0FD29A2BE1623B9D86DE00E98D`.
+
+The desktop production release passed in 10m23s, reusing all 1,080 external
+artifacts and rebuilding only two workspace artifacts. Desktop SHA256:
+`0B72B5C8D086B46943A176DEDBAE4F0DBD1E0BB6A7B800DBC38375AF836390C3`.
+
+The primary reminder cadence is a 60-second sustained unexpected problem and
+15-minute continuing-incident debounce. Expected policy pauses and ordinary
+silence/sparse input do not generate repeated fault warnings. Native delivery
+requires the existing preference and granted permission. The home webview must
+remain alive; its 30-second heartbeat expiry restores legacy notification fallback
+without changing capture gates or recovery. Legacy fallback retains its older
+cadence. No independent system service, guaranteed suspension-time delivery,
+complete activity-metadata instrumentation or continuous-history proof is claimed.
+
+Compilation and controlled fixtures do not verify installed GUI appearance,
+real microphone behavior or OS notification delivery. No live capture, captured
+content inspection, deployment, desktop launch or firewall change occurred.
 
 ## Production release build milestone, 2026-10-08
 
