@@ -359,3 +359,14 @@ e25968736; recording-status GUI 92f81aa65. Builder merge remains 6938fd9af.
 The implementation and final build records are committed locally; no push or
 deployment is implied. Further source work on full retention remains dependent
 on the explicit contract choices, not on the status GUI.
+
+### Isolated worktree commits
+
+The completed isolated source worktrees are now committed as desktop context
+`b7cf62ee7`, recording status `013398719` and deletion repairs `5d57695ce`.
+Every affected tracked file matches the already integrated and validated main
+branch exactly after Git normalization. Their validation notes include the final
+canonical results. All worktrees are clean; private generated evidence is
+preserved. These are archival branch commits, requiring no duplicate merge or
+rebuild. Deployment/live checks and the remaining retention decisions are still
+pending as described above.
