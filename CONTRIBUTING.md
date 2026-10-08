@@ -60,8 +60,13 @@ git diff -- Cargo.lock apps/screenpipe-app-tauri/src-tauri/Cargo.lock
 
 Check the separate desktop workspace and frontend when a change affects them.
 Use the [canonical launcher](scripts/windows/build/README.md) for supported Windows
-Cargo tasks. Choose `-BuildProfile release` for production/performance evidence and
-the release milestones in AGENTS.md; it is not the routine iteration profile.
+Cargo tasks. Use `release-local` by default for local development, validation and
+deployment. Run `-BuildProfile release` only when explicitly requested by the owner
+or when investigating inadequate `release-local` performance. Before pushing, a
+full release build may be recommended with a concrete reason; the owner chooses.
+Adequate local-profile performance is sufficient to proceed, assuming release
+will perform at least as well. Label measurements with the profile actually tested.
+Required tests, formatting, frontend export and affected native checks/builds remain.
 Do not substitute a unit test for a live capture, audio or OS-firewall claim.
 Record exact tested scope and outstanding checks in
 [VALIDATION_REGISTER.md](VALIDATION_REGISTER.md). Build/signing/publishing actions

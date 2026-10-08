@@ -113,9 +113,14 @@ paths do not cover these paths. Complete the owner-run firewall preparation befo
 any trial; no launcher invocation changes firewall rules or starts recording.
 Do not switch back to an old executable just because its rules already exist.
 
-Use `-BuildProfile release` for production-representative timing, throughput,
-overload and resource measurements and at the production-release milestones in
-[AGENTS.md](../../../AGENTS.md). This is expensive and has its own cached artifacts.
+Use `release-local` by default for local development, validation and deployment.
+Use `-BuildProfile release` only on explicit owner request or to investigate
+inadequate `release-local` performance, as specified in [AGENTS.md](../../../AGENTS.md).
+Before pushing, recommend a full release build when there is a concrete reason;
+the owner chooses. Adequate local-profile performance is sufficient to proceed,
+assuming release will perform at least as well. Attribute measurements to the
+profile actually tested. Required tests, formatting, frontend export and affected
+native checks/builds remain. Full release is expensive and has its own cached artifacts.
 This launcher does not stage sidecars, package, start capture, change firewall rules
 or refresh runtime manifests; use the existing trial preparation for those actions.
 

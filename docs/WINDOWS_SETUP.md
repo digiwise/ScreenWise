@@ -127,15 +127,22 @@ The root development profile optimizes dependencies at level 2 without their
 debug symbols. This improves runtime and limits artifact size, but makes an
 uncached test dependency graph more expensive to compile. The full `release`
 profile uses full LTO and one code-generation unit and is intentionally slow.
-Use it for production-representative performance evidence and release milestones.
-For intermediate functional checks, both workspaces use `release-local`:
+Run it only when explicitly requested by the owner or when investigating inadequate
+`release-local` performance. Before pushing, recommend it when there is a concrete
+reason, such as packaging/native linkage changes; the owner chooses.
+For local development, validation and deployment, both workspaces default to `release-local`:
 incremental compilation, 16 code-generation units, optimization level 1 and no LTO.
 The former `release-dev` profile has been removed. Runtime throughput/resource
-results from `release-local` are not production performance results.
+results must identify the profile actually tested. Adequate `release-local`
+performance is sufficient to proceed locally, with the working assumption that
+release will perform at least as well. This does not constitute a release measurement.
+Required tests, formatting, frontend export and affected native checks/builds remain.
+Deployment/startup tooling must select matching executable, DLL, sidecar and
+artifact-validation paths; profile permission does not itself migrate those scripts.
 
 ```powershell
 .\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild
-# Explicit production/performance build, when required:
+# Full release only on owner request or to investigate inadequate local performance:
 .\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -BuildProfile release
 ```
 

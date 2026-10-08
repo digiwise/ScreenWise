@@ -88,16 +88,18 @@ classification requires inspection and monitoring, not owner approval.
   application after every hypothesis. For Windows UIA, keyboard hooks and
   privacy admission, first use `screenpipe-a11y` unit tests and use or add a
   narrowly scoped Windows-only live integration test. Use the incremental
-  `release-local` profile for intermediate functional builds and ordinary
-  interactive/manual trial iterations: run
+  `release-local` profile by default for rapid local development, validation,
+  interactive/manual trial iterations and local deployment: run
   `scripts/windows/build/Invoke-ScreenWiseBuild.ps1 -Task RootBuild` or
   `-Task DesktopBuild` for the affected workspace. These presets default to
   `release-local` and include `--locked --offline`. A `release-local` run may support
   a clearly labelled, scoped
   full-application behavior claim, but it does not validate the production
-  release artifact or release-profile performance. Use explicit `-BuildProfile release`
-  for timing, throughput, overload or sustained-resource measurements intended to
-  represent production. The former `release-dev` profile is retired; do not recreate
+  release artifact or measured release-profile performance. Adequate `release-local`
+  performance is sufficient to proceed locally, with the working assumption that
+  release will perform at least as well; this is not a measured performance claim.
+  Attribute timing, throughput, overload and resource results to the profile actually
+  tested. The former `release-dev` profile is retired; do not recreate
   it or reuse its executable as current validation. Ensure executable paths,
   runtime manifests, hashes, sidecars and firewall rules match the exact profile.
   Any focused live test that takes focus or generates input still requires the
@@ -152,15 +154,18 @@ classification requires inspection and monitoring, not owner approval.
 - Run a full release build through the canonical launcher with
   `-Task RootBuild -BuildProfile release` or
   `-Task DesktopBuild -BuildProfile release`, for the affected workspace,
-  only for a settled candidate when preparing
-  a public push, package, distribution, tag or release; validating behavior
-  specifically attributed to the production release artifact; changing Cargo
-  profiles, release-only configuration, build scripts, native linkage, packaging,
-  sidecar layout, signing or installer behavior; or when the owner explicitly
-  requests it. Meaningful runtime changes may be committed after appropriate
-  targeted tests and a successful `release-local` build. Batch related commits and
-  perform one full release build at the final applicable milestone; do not repeat
-  it unless relevant source or production-build inputs changed.
+  only when the owner explicitly requests it or when investigating inadequate
+  `release-local` performance. A public push, package, tag, build-system change or
+  production milestone does not automatically require full LTO. Before pushing,
+  recommend a full release build when there is a concrete reason, such as native
+  linkage, packaging or release-specific configuration, and explain the reason;
+  the owner chooses whether to run it. Meaningful runtime changes may be committed
+  after appropriate targeted tests and a successful affected `release-local` build.
+  Keep required formatting, tests, frontend export and native checks/builds.
+  Do not repeat a successful full release build unless relevant inputs changed and
+  one of the two triggers still applies. Local deployment may use `release-local`
+  after the existing artifact, runtime and readiness checks; this policy is not
+  authorization to deploy, start capture or change firewall rules.
 - Direct Cargo invocation is appropriate for explicitly scoped operations the
   launcher does not support (for example custom features/platform targets/profiles,
   additional inspection options, applying formatting edits, benchmarks or docs);
@@ -168,7 +173,7 @@ classification requires inspection and monitoring, not owner approval.
   by an existing packaging driver. State the reason for bypassing the launcher,
   retain the established cache/toolchain/native configuration where applicable,
   and record the exact command. This is not permission to bypass a rejected
-  override without diagnosis, relax release milestones, run `cargo update`,
+  override without diagnosis, bypass the full-release triggers, run `cargo update`,
   acquire dependencies implicitly or clear/move active caches. Explicit dependency
   provisioning or narrowly scoped native-cache repair remains subject to the
   existing acquisition and cleanup rules in docs/WINDOWS_SETUP.md.
@@ -271,9 +276,9 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
    smoke test and the canonical launcher's `-Task RootBuild` or
    `-Task DesktopBuild` for the affected workspace (default `release-local`).
    The launcher initializes the configured Developer PowerShell environment.
-   Apply the full-release milestone rules above to build-system
-   changes and production-artifact claims; ordinary commits and clearly labelled
-   `release-local` functional validation do not require full LTO.
+   Apply the explicit-request/performance triggers above to full release builds;
+   ordinary commits, local deployments and build-system changes do not by themselves
+   require full LTO. Claims must identify the actual profile/artifact tested.
 3. Inspect the full diff and `git diff --check`; check both Rust lockfiles.
 4. Update concise setup/validation documentation, including failures and limits.
 5. Inspect the exact staged paths; never include private notes, captures, logs,

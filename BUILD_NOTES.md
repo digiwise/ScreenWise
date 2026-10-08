@@ -6,6 +6,23 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Local iteration and deployment policy (2026-10-09)
+
+Owner-approved policy now defaults to `release-local` for rapid local development,
+validation and deployment. Full release builds run only on explicit owner request
+or when investigating inadequate `release-local` performance. A concrete case for
+a pre-push release build may be recommended, with the owner deciding. Adequate
+local-profile performance is sufficient to proceed, assuming release performs at
+least as well; measured claims still identify the tested profile. Required checks
+remain unchanged. Historical release records below describe their actual builds.
+
+The named-source dashboard release was completed before this policy change.
+Deployment/startup scripts remain unchanged until the owner deploys that release;
+their later migration must consistently select executable, DLL/sidecar and
+artifact-validation paths. This documentation change starts no capture and deploys
+nothing. Documentation consistency and `git diff --check` were checked; no rebuild
+was needed for the policy text.
+
 ## Named sources and floating status validation (2026-10-09)
 
 The settled candidate adds the always-on-top corner dashboard, named audio
