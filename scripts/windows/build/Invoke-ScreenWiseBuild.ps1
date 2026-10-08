@@ -23,6 +23,7 @@ param(
     [ValidateRange(1, 64)] [int]$Jobs = 4,
     [switch]$Diagnostics,
     [switch]$AllowColdCache,
+    [switch]$Concurrent,
     [switch]$PlanOnly
 )
 
@@ -66,8 +67,8 @@ if (($Lib -or $Bin) -and -not $needsNative) { throw 'Lib and Bin require a compi
 if ($WarningsAsErrors -and $Mode -ne 'Clippy') { throw 'WarningsAsErrors requires Clippy mode.' }
 if ($Mode -eq 'Fmt' -and $Package) { throw 'Fmt checks the entire selected workspace; omit Package.' }
 if ($Mode -eq 'Metadata' -and $Package) { throw 'Metadata describes the selected workspace; omit Package.' }
-if (-not $needsNative -and ($Diagnostics -or $AllowColdCache -or $PSBoundParameters.ContainsKey('Jobs'))) {
-    throw 'Diagnostics, AllowColdCache and Jobs require a compiling mode.'
+if (-not $needsNative -and ($Diagnostics -or $AllowColdCache -or $Concurrent -or $PSBoundParameters.ContainsKey('Jobs'))) {
+    throw 'Diagnostics, AllowColdCache, Concurrent and Jobs require a compiling mode.'
 }
 foreach ($value in @($Package, $TestFilter, $TestTarget, $Bin)) {
     if ($value -and $value.StartsWith('-')) { throw 'Package, TestFilter, TestTarget and Bin must not be Cargo options.' }
@@ -114,6 +115,8 @@ if ($TestArguments.Count) { $cargoArgs += '--'; $cargoArgs += $TestArguments }
 if ($WarningsAsErrors) { $cargoArgs += @('--', '-D', 'warnings') }
 if ($Mode -eq 'Fmt') { $cargoArgs += @('--all', '--', '--check') }
 if ($Mode -eq 'Metadata') { $cargoArgs += @('--format-version', '1', '--no-deps') }
+Import-Module (Join-Path $PSScriptRoot 'BuildLocks.psm1') -Force
+$lockPlan = if ($needsNative) { @(Get-ScreenWiseBuildLockPlan $repoRoot $targetDir $Workspace ([bool]$Concurrent)) } else { @() }
 $plan = [pscustomobject][ordered]@{
     workspace = $Workspace; mode = $Mode; profile = $profile
     working_directory = $repoRoot; target_directory = $targetDir
@@ -122,6 +125,8 @@ $plan = [pscustomobject][ordered]@{
     cmake_generator = if ($needsNative) { 'Ninja Multi-Config' } else { $null }
     cmake_configuration_types = if ($needsNative) { 'Debug;Release;RelWithDebInfo;MinSizeRel' } else { $null }
     diagnostics = [bool]$Diagnostics
+    concurrent = [bool]$Concurrent
+    build_locks = $lockPlan
     requires_native_environment = $needsNative
     cache_policy = if (-not $needsNative) { 'not applicable' } elseif ($AllowColdCache) { 'cold cache explicitly permitted' } else { 'matching successful baseline and artifacts required' }
     configuration = if (-not $needsNative) { 'not required' } elseif ($buildConfig) { $ConfigPath } else { 'existing Developer PowerShell environment' }
@@ -156,15 +161,16 @@ $runName = '{0}-{1}-{2}-{3}' -f ([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff
 $runDir = Join-Path $logRoot $runName
 [IO.Directory]::CreateDirectory($runDir) | Out-Null
 $runLog = Join-Path $runDir 'cargo.log'
-$lockStream = $null
+$lockStreams = @()
 $savedEnvironment = @{}
 foreach ($entry in Get-ChildItem Env:) { $savedEnvironment[$entry.Name] = $entry.Value }
 Push-Location -LiteralPath $repoRoot
 try {
-    # Serialize only invocations of this launcher. Direct Cargo commands retain
-    # their own normal locking; this never terminates another build or cleans it.
+    # Locks do not depend on evidence location, profile or compilation identity.
+    # Direct Cargo/frontend/packaging commands remain outside this protocol.
     if ($needsNative) {
-        $lockStream = [IO.File]::Open((Join-Path $logRoot 'launcher.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+        $lockPlan | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runDir 'build-locks.json') -Encoding UTF8
+        $lockStreams = Enter-ScreenWiseBuildLocks $lockPlan
         if ($buildConfig) {
             if (-not (Test-Path -LiteralPath $buildConfig.developer_shell -PathType Leaf)) {
                 throw "Configured Developer PowerShell launcher is missing: $($buildConfig.developer_shell)"
@@ -308,6 +314,6 @@ try {
         if (-not $savedEnvironment.ContainsKey($entry.Name)) { [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process') }
     }
     foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
-    if ($lockStream) { $lockStream.Dispose() }
+    foreach ($lockStream in $lockStreams) { $lockStream.Dispose() }
     Pop-Location
 }

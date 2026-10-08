@@ -199,15 +199,68 @@ Use the evidence to identify the first dirty dependency, fix avoidable configura
 drift, add a regression check and record the remedy. Confirm reuse during the next
 necessary equivalent run, rather than launching an extra build for diagnosis.
 
-The launcher serializes its own invocations; direct Cargo commands still use normal
-Cargo locks. Adoption is required: existing terminal commands and agents do not
-automatically use this script. Do not launch it alongside an ongoing main-thread
-build just to warm or verify a cache.
+## Opt-in overlap of root and desktop compilation
+
+Compiling invocations remain serial by default. Add `-Concurrent` to **both**
+invocations to allow one root and one desktop operation to overlap using their
+existing distinct caches. Inspect both plans first. Start only builds already
+needed for settled source; overlap does not justify warming a second variant.
+
+```powershell
+# Inspect first, then omit -PlanOnly in two separate PowerShell processes.
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootBuild -BuildProfile release -Concurrent -Jobs 2 -PlanOnly
+.\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task DesktopBuild -BuildProfile release -Concurrent -Jobs 2 -PlanOnly
+```
+
+Use overlap when available memory, disk and CPU make it worthwhile, such as a
+long root optimisation/link stage leaving CPU capacity for desktop compilation.
+Keep the **sum** of job limits within the reviewed machine budget (the example
+retains the usual total of four). Cargo jobs bound Cargo scheduling, not linker
+threads, native subprocesses or memory. Reduce the second build's `-Jobs` further
+when appropriate; do not start overlap under memory/disk pressure. There is no
+automatic resource detector or late linker-stage scheduler. This flag changes
+neither features/profile nor cache signature; native-environment checks,
+cold-cache gates, artifact reporting and output locations still apply.
+
+The plan exposes `build_locks`; compiling attempts save `build-locks.json` in
+their unique evidence directory. The protocol uses held OS file handles:
+
+- The canonical `target\build-diagnostics\launcher.lock` is exclusive for serial
+  runs and shared for opted-in runs. Serial runs refuse overlap, including with
+  the older launcher using that canonical lock. Conflicts fail promptly; they
+  do not queue or terminate processes.
+- Each selected target has an exclusive `.screenwise-launcher.lock`, across
+  modes, profiles and evidence locations. Same-cache attempts are refused even
+  when evidence roots differ. Paths containing junctions/symlinks are refused.
+- Every desktop compiling operation also holds the checkout's exclusive
+  `.local\build\locks\desktop-staging.lock`. Different desktop caches cannot
+  overlap: `src-tauri/build.rs` writes `windows-runtime`, command generation and
+  Tauri generated files outside the selected Cargo target.
+
+Handles are released on failure and success; leftover lock files are normal
+and must not be removed to bypass exclusion. Root Windows staging occurs in
+`crates/screenpipe-audio/build.rs`: the verified ORT DLL goes into the selected
+target/profile derived from `OUT_DIR`. Engine `build.rs` does not copy recorder
+sidecars into desktop source. Provisioned ORT/OpenBLAS inputs are read-only
+consumers here. Native dependency build outputs remain under Cargo targets;
+Cargo's own locks protect tool/registry caches. Do not provision or mutate shared
+native/tool/dependency stores during overlap.
+
+The launcher calls Cargo directly. It does not invoke Tauri CLI
+`beforeBuildCommand` or frontend `prebuild`, which can write shared frontend,
+sidecar and asset outputs and perform acquisition. Frontend export, binding
+generation, sidecar preparation, packaging, provisioning and direct Cargo commands
+do **not** participate in these locks; finish their inputs before building and
+do not run them during overlap. The older launcher's custom evidence-root lock
+is also outside this protocol. Adopt the updated launcher for all participants.
+Do not change source/scripts during a build or run against a production cache
+solely to validate overlap.
 
 ## Launcher regression checks
 
 ```powershell
 .\scripts\windows\build\Test-ScreenWiseBuildLauncher.ps1
+.\scripts\windows\build\Test-BuildLocks.ps1
 .\scripts\windows\build\Test-CargoCache.ps1
 .\scripts\windows\build\Test-TrialBuildProfiles.ps1
 ```
@@ -218,7 +271,12 @@ gates in isolation, before any process, recording, network or firewall action.
 They verify cache selection, focused target arguments, Clippy warning flags,
 lightweight operation without native setup, JSON output, rejected overrides,
 exit propagation, and environment/location restoration without running a compiler
-or changing genuine Cargo artifacts. The launcher suite uses its own stub cache
-and `-EvidenceDirectory` so it does not compete for the real launcher's lock.
+or changing genuine Cargo artifacts. The launcher suite uses stub caches and
+separate evidence in its checkout, exercising its canonical scheduling lock.
+Run it in an isolated worktree while real builds are active elsewhere. The lock
+suite uses a synthetic repository/cache layout and a hidden PowerShell process.
+The suites cover overlapping launcher processes, same-cache rejection across
+evidence roots, desktop staging exclusion, serial exclusion, reparse-path refusal
+and lock release after partial acquisition or Cargo failure.
 Small generated fixtures and diagnostic logs
 remain under ignored `target`. They do not replace a real build of the application.

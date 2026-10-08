@@ -36,6 +36,20 @@ artifacts. Installed-package preflight, hardware microphone signal and live
 transition behaviour remain separate validation steps; compilation does not
 resolve the previously observed silent microphone input.
 
+## Launcher concurrency, 2026-10-08
+
+Opt-in root/desktop overlap retains same-cache, desktop shared-staging and default
+serial exclusion. Synthetic isolated-worktree validation passed 12 OS-lock,
+97 launcher, 18 cache and 84 trial-profile assertions. The two-launcher test held
+root stub Cargo while desktop stub Cargo completed, with independent evidence.
+Same-cache/evidence-override, desktop staging and junction refusals plus failure
+release passed. See [exact commands and limits](BUILD_NOTES.md#launcher-concurrency-protocol-2026-10-08).
+Integration repeated all 211 assertions successfully. Real concurrent release
+operations used the existing caches with two jobs each: root passed in 33.83s
+with 785 external and 19 workspace artifacts reused, none rebuilt. Desktop
+remains in progress after a generated Tauri asset timestamp forced relinking.
+Speedup measurements and Windows PowerShell 5.1 execution remain unvalidated.
+
 ## Microphone admission and pause ordering, 2026-10-08
 
 Microphone acquisition, queued/background/live transcription, SQLite writes and

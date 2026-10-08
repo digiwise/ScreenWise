@@ -24,10 +24,46 @@ no relevant source changed. These are compilation, synthetic deployment-script
 and inert CLI results, not live hardware or installed-package validation. No
 desktop app/capture session was launched and the running deployment was unchanged.
 
-The existing launcher has a global compilation lock and refuses concurrent
-invocations. An isolated-worktree concurrency improvement is being developed
-separately; it was not used for these builds. Review shared staging and cache
+The launcher used for those sequential builds had a global compilation lock and refused concurrent
+invocations. The isolated-worktree concurrency improvement was developed
+separately; it was not used for those builds. Review shared staging and cache
 boundaries before overlapping independent root/desktop builds.
+
+## Launcher concurrency protocol (2026-10-08)
+
+The launcher now accepts explicit `-Concurrent` on both root and desktop runs.
+Default serial scheduling, same-cache exclusion and all cache/native gates remain.
+Desktop compiling runs additionally exclude other desktop caches because Tauri
+writes shared staging/generated files. Evidence roots no longer select locks.
+See the [launcher guide](scripts/windows/build/README.md) for the source-staging
+audit, resource budget and operations outside the protocol.
+
+Validation used an isolated worktree and only synthetic tools/state:
+
+```powershell
+.\scripts\windows\build\Test-BuildLocks.ps1
+.\scripts\windows\build\Test-ScreenWiseBuildLauncher.ps1
+.\scripts\windows\build\Test-CargoCache.ps1
+.\scripts\windows\build\Test-TrialBuildProfiles.ps1
+git diff --check
+git diff -- Cargo.lock apps/screenpipe-app-tauri/src-tauri/Cargo.lock
+```
+
+PowerShell 7 passed 12 lock, 97 launcher, 18 cache and 84 trial-profile assertions.
+Two separate stubbed launcher processes exercised overlap, completion/evidence
+isolation, same-cache refusal and serial exclusion. OS-handle tests additionally
+refused concurrent desktop staging across different caches and junction aliases.
+Failure-path tests verified partial-lock and Cargo-failure release. No real Rust
+or native build, download, application launch, recording or firewall operation ran.
+Production builds were active in a different checkout and were untouched.
+
+Remaining validation: after those builds finish and integration is reviewed,
+observe the next already necessary settled-candidate root/desktop production
+builds with `-Concurrent`, a reviewed combined job budget and unchanged warm
+caches. Compare reuse counts, native staging, outputs and total elapsed/resource
+use against their sequential observations. No real speedup, production artifact
+equivalence or Windows PowerShell 5.1 execution is claimed by these synthetic
+checks. Do not add full builds solely to warm or benchmark a new worktree cache.
 
 ## Microphone admission and lifecycle ordering (2026-10-08)
 
@@ -1468,3 +1504,16 @@ fixed IPv4 TCP probe was blocked, and the unscoped control succeeded. It reporte
 audio-disabled follow-up. A fresh owner readiness gate is required before the
 prepared banner/native-copy GUI check starts. No package download, firewall
 change, new capture session, commit or push occurred during these repairs.
+
+## Builder integration verification (2026-10-08)
+
+Merged the scoped concurrency builder into the main checkout, preserving both
+documentation histories. All 211 synthetic assertions passed again here.
+Reviewed root/desktop release plans and started both with -Concurrent -Jobs 2
+using the established warm caches. Root passed in 33.83s with all 785 external
+and 19 workspace artifacts reused, none rebuilt. Desktop is still running:
+Cargo identified a generated Tauri HTML asset timestamp newer than the prior
+binary fingerprint, causing a workspace-only relink. No external rebuild has
+appeared. This is not yet a speedup or completed desktop validation claim.
+The unnecessary generated-asset invalidation requires a scoped follow-up; do
+not reset caches or add repeated production builds solely for measurement.

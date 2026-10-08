@@ -301,3 +301,13 @@ instructions to the other chat.
 - [Retention settings](../apps/screenpipe-app-tauri/components/settings/retention-settings.tsx)
 - [Privacy settings](../apps/screenpipe-app-tauri/components/settings/privacy-section.tsx)
 - [Input event model](../crates/screenpipe-a11y/src/events.rs)
+
+## Newly authorized parallel work (2026-10-08)
+
+The owner requested a recording-status GUI ahead of optional review/retention
+controls, concrete repairs to major existing deletion gaps, and a concurrent
+investigation/fix of unnecessary desktop rebuilds. Status must expose precise
+safe reasons and avoid claiming unimplemented retention enforcement. Deletion
+repairs preserve existing selection scope; material storage/access architecture
+changes remain decisions in the contract. Desktop build inputs must remain
+unchanged until the running build finishes.
