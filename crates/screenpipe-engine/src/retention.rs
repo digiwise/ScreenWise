@@ -391,15 +391,18 @@ async fn do_local_cleanup(
 
                     total += batch_total;
 
-                    for path in result
+                    let selected: Vec<String> = result
                         .video_files
                         .iter()
-                        .chain(result.audio_files.iter())
-                        .chain(result.snapshot_files.iter())
-                    {
-                        if let Err(e) = tokio::fs::remove_file(path).await {
-                            warn!("retention: failed to delete file {}: {}", path, e);
-                        }
+                        .chain(&result.audio_files)
+                        .chain(&result.snapshot_files)
+                        .cloned()
+                        .collect();
+                    let cleanup = db.retry_selected_media_deletions(&selected, 100).await?;
+                    if cleanup.pending > 0 {
+                        anyhow::bail!(
+                            "file_cleanup_incomplete: media cleanup remains queued for retry"
+                        );
                     }
                 }
                 Err(e) => {
@@ -458,9 +461,6 @@ async fn do_local_cleanup(
     }
 
     if any_deleted && matches!(mode, RetentionMode::All) {
-        if let Err(e) = db.cleanup_orphaned_chunks().await {
-            warn!("retention: orphan chunk cleanup failed: {}", e);
-        }
         info!("retention: running incremental vacuum to reclaim disk space");
         if let Err(e) = db.execute_raw_sql("PRAGMA incremental_vacuum(1000)").await {
             warn!("retention: incremental vacuum failed: {}", e);
@@ -468,4 +468,53 @@ async fn do_local_cleanup(
     }
 
     Ok(total)
+}
+
+/// Finishes previously requested deletion; never selects new content by age or
+/// storage pressure. Runs independently of the optional retention policy.
+pub(crate) struct MediaDeletionRetryTask(tokio::task::JoinHandle<()>);
+impl Drop for MediaDeletionRetryTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub(crate) fn spawn_media_deletion_retry(db: Arc<DatabaseManager>) -> MediaDeletionRetryTask {
+    MediaDeletionRetryTask(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut last_status = None;
+        loop {
+            interval.tick().await;
+            match db.retry_media_deletions(100).await {
+                Ok(result) => {
+                    let status = Some(Ok(result.pending));
+                    if status != last_status {
+                        if result.pending > 0 {
+                            warn!(
+                                reason = "file_cleanup_incomplete",
+                                pending = result.pending,
+                                "media deletion remains queued"
+                            );
+                        } else if last_status.is_some() {
+                            info!(
+                                reason = "media_cleanup_complete",
+                                "queued media cleanup completed"
+                            );
+                        }
+                        last_status = status;
+                    }
+                }
+                Err(_) => {
+                    let status = Some(Err(()));
+                    if status != last_status {
+                        warn!(
+                            reason = "media_cleanup_retry_failed",
+                            "media cleanup retry failed"
+                        );
+                        last_status = status;
+                    }
+                }
+            }
+        }
+    }))
 }

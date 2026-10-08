@@ -69,6 +69,71 @@ fn normalize_timestamp_for_range_query(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.to_string())
 }
 
+// Preserve unrelated orphan rows: a range action owns only chunks referenced by
+// records selected before deletion. In particular raw, untranscribed audio must
+// not lose its only file pointer during an unrelated range deletion.
+async fn range_chunk_ids(
+    tx: &mut ImmediateTx,
+    start: &str,
+    end: &str,
+) -> Result<(Vec<i64>, Vec<i64>), sqlx::Error> {
+    let videos = sqlx::query_scalar("SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL")
+        .bind(start).bind(end).fetch_all(&mut **tx.conn()).await?;
+    let audio = sqlx::query_scalar("SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL")
+        .bind(start).bind(end).fetch_all(&mut **tx.conn()).await?;
+    Ok((videos, audio))
+}
+
+async fn delete_selected_orphan_chunks(
+    tx: &mut ImmediateTx,
+    ids: &[i64],
+    video: bool,
+) -> Result<u64, sqlx::Error> {
+    let mut deleted = 0;
+    for batch in ids.chunks(500) {
+        let prefix = if video {
+            "DELETE FROM video_chunks WHERE NOT EXISTS (SELECT 1 FROM frames f WHERE f.video_chunk_id = video_chunks.id) AND id IN ("
+        } else {
+            "DELETE FROM audio_chunks WHERE NOT EXISTS (SELECT 1 FROM audio_transcriptions t WHERE t.audio_chunk_id = audio_chunks.id) AND id IN ("
+        };
+        let mut query = sqlx::QueryBuilder::<Sqlite>::new(prefix);
+        let mut values = query.separated(", ");
+        for id in batch {
+            values.push_bind(*id);
+        }
+        values.push_unseparated(")");
+        deleted += query
+            .build()
+            .execute(&mut **tx.conn())
+            .await?
+            .rows_affected();
+    }
+    Ok(deleted)
+}
+
+async fn enqueue_media_deletions(
+    tx: &mut ImmediateTx,
+    videos: &[String],
+    audio: &[String],
+    snapshots: &[String],
+) -> Result<(), sqlx::Error> {
+    for (kind, paths) in [("video", videos), ("audio", audio), ("snapshot", snapshots)] {
+        for path in paths {
+            sqlx::query("INSERT INTO media_deletion_jobs (file_path, media_kind) VALUES (?1, ?2) ON CONFLICT(file_path) DO NOTHING")
+                .bind(path).bind(kind).execute(&mut **tx.conn()).await?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+pub struct MediaDeletionCleanup {
+    pub video_files_deleted: u64,
+    pub audio_files_deleted: u64,
+    pub snapshot_files_deleted: u64,
+    pub pending: u64,
+    pub failed: u64,
+}
 pub struct DeleteTimeRangeResult {
     pub frames_deleted: u64,
     pub ocr_deleted: u64,
@@ -6311,6 +6376,101 @@ impl DatabaseManager {
         Ok(())
     }
 
+    /// Retry only previously authorized eligible files. Each short transaction
+    /// retains failed ownership and excludes DB writers while checking/unlinking.
+    /// In-flight filesystem-only writers are not coordinated by this protocol.
+    pub async fn retry_media_deletions(
+        &self,
+        limit: u32,
+    ) -> Result<MediaDeletionCleanup, sqlx::Error> {
+        let paths: Vec<String> = sqlx::query_scalar("SELECT file_path FROM media_deletion_jobs ORDER BY COALESCE(last_attempt_at, created_at), file_path LIMIT ?1")
+            .bind(limit.min(100)).fetch_all(&self.pool).await?;
+        self.process_media_deletion_paths(paths).await
+    }
+
+    /// Immediate request cleanup reports only that action's eligible paths.
+    pub async fn retry_selected_media_deletions(
+        &self,
+        paths: &[String],
+        limit: u32,
+    ) -> Result<MediaDeletionCleanup, sqlx::Error> {
+        let selected: std::collections::BTreeSet<&String> = paths.iter().collect();
+        let attempted = selected
+            .iter()
+            .take(limit.min(100) as usize)
+            .map(|p| (*p).clone())
+            .collect();
+        let mut result = self.process_media_deletion_paths(attempted).await?;
+        result.pending = 0;
+        result.failed = 0;
+        let selected: Vec<&String> = selected.into_iter().collect();
+        for batch in selected.chunks(500) {
+            let mut query = sqlx::QueryBuilder::<Sqlite>::new("SELECT COUNT(*), COALESCE(SUM(last_reason = 'file_cleanup_incomplete'), 0) FROM media_deletion_jobs WHERE file_path IN (");
+            let mut values = query.separated(", ");
+            for path in batch {
+                values.push_bind(*path);
+            }
+            values.push_unseparated(")");
+            let row = query.build().fetch_one(&self.pool).await?;
+            result.pending += row.get::<i64, _>(0) as u64;
+            result.failed += row.get::<i64, _>(1) as u64;
+        }
+        Ok(result)
+    }
+
+    async fn process_media_deletion_paths(
+        &self,
+        paths: Vec<String>,
+    ) -> Result<MediaDeletionCleanup, sqlx::Error> {
+        let mut result = MediaDeletionCleanup::default();
+        for path in paths {
+            let mut tx = self.begin_immediate_with_retry().await?;
+            let kind: Option<String> = sqlx::query_scalar(
+                "SELECT media_kind FROM media_deletion_jobs WHERE file_path = ?1",
+            )
+            .bind(&path)
+            .fetch_optional(&mut **tx.conn())
+            .await?;
+            let Some(kind) = kind else {
+                tx.commit().await?;
+                continue;
+            };
+            let referenced: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM video_chunks WHERE file_path = ?1) OR EXISTS(SELECT 1 FROM audio_chunks WHERE file_path = ?1) OR EXISTS(SELECT 1 FROM frames WHERE snapshot_path = ?1)")
+                .bind(&path).fetch_one(&mut **tx.conn()).await?;
+            let reason = if referenced != 0 {
+                Some("media_still_referenced")
+            } else if !std::path::Path::new(&path).is_absolute() {
+                Some("media_path_unverified")
+            } else {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        match kind.as_str() {
+                            "video" => result.video_files_deleted += 1,
+                            "audio" => result.audio_files_deleted += 1,
+                            _ => result.snapshot_files_deleted += 1,
+                        };
+                        None
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => Some("file_cleanup_incomplete"),
+                }
+            };
+            if let Some(reason) = reason {
+                sqlx::query("UPDATE media_deletion_jobs SET last_reason = ?1, last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE file_path = ?2").bind(reason).bind(&path).execute(&mut **tx.conn()).await?;
+            } else {
+                sqlx::query("DELETE FROM media_deletion_jobs WHERE file_path = ?1")
+                    .bind(&path)
+                    .execute(&mut **tx.conn())
+                    .await?;
+            }
+            tx.commit().await?;
+        }
+        result.pending = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_deletion_jobs")
+            .fetch_one(&self.pool)
+            .await? as u64;
+        result.failed = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_deletion_jobs WHERE last_reason = 'file_cleanup_incomplete'").fetch_one(&self.pool).await? as u64;
+        Ok(result)
+    }
     pub async fn delete_time_range(
         &self,
         start: DateTime<Utc>,
@@ -6320,6 +6480,8 @@ impl DatabaseManager {
 
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
+        let (selected_video_ids, selected_audio_ids) =
+            range_chunk_ids(&mut tx, &start_str, &end_str).await?;
 
         // 1. Collect local video file paths for chunks that become fully orphaned.
         // Correlated NOT EXISTS below remains safe when frame references are NULL.
@@ -6361,6 +6523,8 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+
+        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
 
         // 3. Delete ocr_text (ocr_text_fts was dropped by migration)
         let ocr_result = sqlx::query(
@@ -6444,12 +6608,8 @@ impl DatabaseManager {
         let frames_deleted = frames_result.rows_affected();
 
         // 6. Delete orphaned video_chunks (no frames reference them anymore)
-        let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE NOT EXISTS (SELECT 1 FROM frames f WHERE f.video_chunk_id = video_chunks.id)",
-        )
-        .execute(&mut **tx.conn())
-        .await?;
-        let video_chunks_deleted = video_chunks_result.rows_affected();
+        let video_chunks_deleted =
+            delete_selected_orphan_chunks(&mut tx, &selected_video_ids, true).await?;
 
         // 7. Delete audio_transcriptions — triggers audio_transcriptions_fts delete
         let audio_transcriptions_result =
@@ -6461,12 +6621,8 @@ impl DatabaseManager {
         let audio_transcriptions_deleted = audio_transcriptions_result.rows_affected();
 
         // 8. Delete orphaned audio_chunks — audio_tags CASCADE'd automatically
-        let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE NOT EXISTS (SELECT 1 FROM audio_transcriptions at WHERE at.audio_chunk_id = audio_chunks.id)",
-        )
-        .execute(&mut **tx.conn())
-        .await?;
-        let audio_chunks_deleted = audio_chunks_result.rows_affected();
+        let audio_chunks_deleted =
+            delete_selected_orphan_chunks(&mut tx, &selected_audio_ids, false).await?;
 
         // 9. accessibility table was dropped by migration 20260312000000
         let accessibility_deleted: u64 = 0;
@@ -6523,7 +6679,7 @@ impl DatabaseManager {
     }
 
     /// Delete data in a time range and return ALL local file paths for deletion.
-    /// Unlike `delete_time_range` (which only returns cloud-uploaded files),
+    /// Both variants return local files; the former cloud distinction is obsolete.
     /// this variant returns every video/audio/snapshot file — used by local
     /// retention to free disk space without requiring cloud archive.
     pub async fn delete_time_range_local(
@@ -6535,6 +6691,8 @@ impl DatabaseManager {
 
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
+        let (selected_video_ids, selected_audio_ids) =
+            range_chunk_ids(&mut tx, &start_str, &end_str).await?;
 
         // 1. Collect ALL video file paths for chunks that become fully orphaned.
         // Correlated NOT EXISTS below remains safe when frame references are NULL.
@@ -6577,6 +6735,8 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+
+        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
 
         // 4. Delete ocr_text
         let ocr_result = sqlx::query(
@@ -6654,12 +6814,8 @@ impl DatabaseManager {
         let frames_deleted = frames_result.rows_affected();
 
         // 8. Delete orphaned video_chunks
-        let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE NOT EXISTS (SELECT 1 FROM frames f WHERE f.video_chunk_id = video_chunks.id)",
-        )
-        .execute(&mut **tx.conn())
-        .await?;
-        let video_chunks_deleted = video_chunks_result.rows_affected();
+        let video_chunks_deleted =
+            delete_selected_orphan_chunks(&mut tx, &selected_video_ids, true).await?;
 
         // 9. Delete audio_transcriptions
         let audio_transcriptions_result =
@@ -6671,12 +6827,8 @@ impl DatabaseManager {
         let audio_transcriptions_deleted = audio_transcriptions_result.rows_affected();
 
         // 10. Delete orphaned audio_chunks
-        let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE NOT EXISTS (SELECT 1 FROM audio_transcriptions at WHERE at.audio_chunk_id = audio_chunks.id)",
-        )
-        .execute(&mut **tx.conn())
-        .await?;
-        let audio_chunks_deleted = audio_chunks_result.rows_affected();
+        let audio_chunks_deleted =
+            delete_selected_orphan_chunks(&mut tx, &selected_audio_ids, false).await?;
 
         // 11. accessibility table was dropped by migration 20260312000000
         let accessibility_deleted: u64 = 0;
@@ -6930,12 +7082,11 @@ impl DatabaseManager {
     }
 
     /// Fast batch delete: only deletes time-range-bounded rows (ocr_text,
-    /// elements, frames, audio_transcriptions, ui_events). Skips the expensive
-    /// orphan cleanup (video_chunks, audio_chunks) which requires full-table
-    /// reference scans. Call `cleanup_orphaned_chunks` once after all batches.
+    /// elements, frames, audio_transcriptions, ui_events). Orphan reference checks
+    /// are limited to chunks selected in this batch, avoiding a global sweep.
     ///
     /// Returns file paths and row counts. video_chunks_deleted and
-    /// audio_chunks_deleted will always be 0 — orphans are cleaned separately.
+    /// audio_chunks_deleted count only selected chunks that became orphaned.
     pub async fn delete_time_range_batch(
         &self,
         start: DateTime<Utc>,
@@ -6945,6 +7096,8 @@ impl DatabaseManager {
 
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
+        let (selected_video_ids, selected_audio_ids) =
+            range_chunk_ids(&mut tx, &start_str, &end_str).await?;
 
         // Collect snapshot files
         let snapshot_files: Vec<String> = sqlx::query_scalar(
@@ -6981,6 +7134,8 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+
+        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
 
         // Delete ocr_text
         let ocr_result = sqlx::query(
@@ -7057,7 +7212,8 @@ impl DatabaseManager {
             .await?;
         let frames_deleted = frames_result.rows_affected();
 
-        // NO orphan video_chunks cleanup here — done separately
+        let video_chunks_deleted =
+            delete_selected_orphan_chunks(&mut tx, &selected_video_ids, true).await?;
 
         // Delete audio_transcriptions
         let audio_transcriptions_result =
@@ -7068,7 +7224,8 @@ impl DatabaseManager {
                 .await?;
         let audio_transcriptions_deleted = audio_transcriptions_result.rows_affected();
 
-        // NO orphan audio_chunks cleanup here — done separately
+        let audio_chunks_deleted =
+            delete_selected_orphan_chunks(&mut tx, &selected_audio_ids, false).await?;
 
         // accessibility table was dropped by migration 20260312000000
         let accessibility_deleted: u64 = 0;
@@ -7114,8 +7271,8 @@ impl DatabaseManager {
             frames_deleted,
             ocr_deleted,
             audio_transcriptions_deleted,
-            audio_chunks_deleted: 0,
-            video_chunks_deleted: 0,
+            audio_chunks_deleted,
+            video_chunks_deleted,
             accessibility_deleted,
             ui_events_deleted,
             meeting_transcript_segments_deleted: meeting_segments_result.rows_affected(),
@@ -10710,6 +10867,259 @@ mod tests {
         assert!(db.audio_chunk_exists(chunk_id).await.unwrap());
     }
 
+    #[tokio::test]
+    async fn range_deletion_preserves_unrelated_orphans_shared_bytes_and_selected_ownership() {
+        for mode in 0..3 {
+            let db = test_database().await;
+            let dir = std::env::temp_dir().join(format!(
+                "screenwise-range-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let paths: Vec<String> = (0..6)
+                .map(|i| {
+                    dir.join(format!("synthetic-{i}.media"))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            for path in &paths {
+                std::fs::write(path, b"synthetic selected or retained bytes").unwrap();
+            }
+            for id in 1..=3_i64 {
+                sqlx::query("INSERT INTO video_chunks (id, file_path) VALUES (?1, ?2)")
+                    .bind(id)
+                    .bind(&paths[(id - 1) as usize])
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO audio_chunks (id, file_path) VALUES (?1, ?2)")
+                    .bind(id)
+                    .bind(&paths[(id + 2) as usize])
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+            }
+            for (id, chunk, timestamp, text) in [
+                (1_i64, 1_i64, "2026-01-02T00:00:00+00:00", "selected text"),
+                (2, 2, "2026-01-02T00:00:00+00:00", "selected shared text"),
+                (3, 2, "2026-01-04T00:00:00+00:00", "kept text"),
+            ] {
+                sqlx::query("INSERT INTO frames (id, video_chunk_id, offset_index, timestamp, device_name, full_text) VALUES (?1, ?2, 0, ?3, 'synthetic-monitor', ?4)").bind(id).bind(chunk).bind(timestamp).bind(text).execute(&db.pool).await.unwrap();
+                sqlx::query("INSERT INTO ocr_text (frame_id, text) VALUES (?1, ?2)")
+                    .bind(id)
+                    .bind(text)
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO audio_transcriptions (audio_chunk_id, offset_index, timestamp, transcription) VALUES (?1, 0, ?2, ?3)").bind(chunk).bind(timestamp).bind(text).execute(&db.pool).await.unwrap();
+            }
+            let start = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let end = DateTime::parse_from_rfc3339("2026-01-03T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let result = match mode {
+                0 => db.delete_time_range(start, end).await,
+                1 => db.delete_time_range_local(start, end).await,
+                _ => db.delete_time_range_batch(start, end).await,
+            }
+            .unwrap();
+            assert_eq!(result.video_files, vec![paths[0].clone()]);
+            assert_eq!(result.audio_files, vec![paths[3].clone()]);
+            let cleanup = db.retry_media_deletions(100).await.unwrap();
+            assert_eq!(cleanup.pending, 0);
+            assert_eq!(cleanup.video_files_deleted, 1);
+            assert_eq!(cleanup.audio_files_deleted, 1);
+            assert!(!std::path::Path::new(&paths[0]).exists());
+            assert!(!std::path::Path::new(&paths[3]).exists());
+            for index in [1, 2, 4, 5] {
+                assert_eq!(
+                    std::fs::read(&paths[index]).unwrap(),
+                    b"synthetic selected or retained bytes"
+                );
+            }
+            let videos: Vec<i64> = sqlx::query_scalar("SELECT id FROM video_chunks ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+            let audio: Vec<i64> = sqlx::query_scalar("SELECT id FROM audio_chunks ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(videos, vec![2, 3]);
+            assert_eq!(audio, vec![2, 3]);
+            let text: Vec<String> = sqlx::query_scalar("SELECT text FROM ocr_text")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(text, vec!["kept text"]);
+            let text: Vec<String> =
+                sqlx::query_scalar("SELECT transcription FROM audio_transcriptions")
+                    .fetch_all(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(text, vec!["kept text"]);
+            let indexed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM frames_fts WHERE frames_fts MATCH 'selected'",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(indexed, 0);
+            assert_eq!(result.video_chunks_deleted, 1);
+            assert_eq!(result.audio_chunks_deleted, 1);
+            for index in [1, 2, 4, 5] {
+                std::fs::remove_file(&paths[index]).unwrap();
+            }
+            std::fs::remove_dir(&dir).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn media_cleanup_job_survives_reopen_and_blocks_new_live_references() {
+        let dir = std::env::temp_dir().join(format!(
+            "screenwise-cleanup-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let database = dir.join("synthetic.sqlite");
+        let media = dir.join("synthetic.media");
+        // A directory is a portable deterministic unlink failure.
+        std::fs::create_dir(&media).unwrap();
+        let db = DatabaseManager::new(&database.to_string_lossy(), Default::default())
+            .await
+            .unwrap();
+        let mut tx = db.begin_immediate_with_retry().await.unwrap();
+        enqueue_media_deletions(&mut tx, &[media.to_string_lossy().into_owned()], &[], &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 1);
+        db.pool.close().await;
+        db.write_pool.close().await;
+        drop(db);
+        let db = DatabaseManager::new(&database.to_string_lossy(), Default::default())
+            .await
+            .unwrap();
+        let reason: String = sqlx::query_scalar("SELECT last_reason FROM media_deletion_jobs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(reason, "file_cleanup_incomplete");
+        std::fs::remove_dir(&media).unwrap();
+        std::fs::write(&media, b"synthetic bytes awaiting retry").unwrap();
+        sqlx::query("INSERT INTO audio_chunks (file_path) VALUES (?1)")
+            .bind(media.to_string_lossy().as_ref())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 1);
+        assert_eq!(
+            std::fs::read(&media).unwrap(),
+            b"synthetic bytes awaiting retry"
+        );
+        let reason: String = sqlx::query_scalar("SELECT last_reason FROM media_deletion_jobs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(reason, "media_still_referenced");
+        assert_eq!(
+            db.retry_selected_media_deletions(&[], 100)
+                .await
+                .unwrap()
+                .pending,
+            0
+        );
+        assert_eq!(
+            db.retry_selected_media_deletions(&[media.to_string_lossy().into_owned()], 100)
+                .await
+                .unwrap()
+                .pending,
+            1
+        );
+        sqlx::query("DELETE FROM audio_chunks WHERE file_path = ?1")
+            .bind(media.to_string_lossy().as_ref())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let cleanup = db.retry_media_deletions(100).await.unwrap();
+        assert_eq!(cleanup.video_files_deleted, 1);
+        assert_eq!(cleanup.pending, 0);
+        assert!(!media.exists());
+        // Committed jobs persist even if the process ends before its first pass.
+        let missing = dir.join("already-missing.media");
+        let mut tx = db.begin_immediate_with_retry().await.unwrap();
+        enqueue_media_deletions(&mut tx, &[], &[], &[missing.to_string_lossy().into_owned()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 0);
+        let many: Vec<String> = (0..101)
+            .map(|i| {
+                dir.join(format!("absent-{i}.media"))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let mut tx = db.begin_immediate_with_retry().await.unwrap();
+        enqueue_media_deletions(&mut tx, &many, &[], &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            db.retry_selected_media_deletions(&many, 100)
+                .await
+                .unwrap()
+                .pending,
+            1
+        );
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 0);
+        db.pool.close().await;
+        db.write_pool.close().await;
+        drop(db);
+        for path in [
+            database.clone(),
+            database.with_extension("sqlite-wal"),
+            database.with_extension("sqlite-shm"),
+        ] {
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        std::fs::remove_dir(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn media_cleanup_retry_rotates_blocked_jobs_before_newer_eligible_bytes() {
+        let db = test_database().await;
+        let dir = std::env::temp_dir().join(format!(
+            "screenwise-fair-cleanup-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        for i in 0..100 {
+            let path = dir.join(format!("blocked-{i}"));
+            std::fs::create_dir(&path).unwrap();
+            sqlx::query("INSERT INTO media_deletion_jobs (file_path, media_kind, created_at) VALUES (?1, 'snapshot', '2024-01-01T00:00:00Z')").bind(path.to_string_lossy().as_ref()).execute(&db.pool).await.unwrap();
+        }
+        let eligible = dir.join("eligible.media");
+        std::fs::write(&eligible, b"synthetic later eligible bytes").unwrap();
+        sqlx::query("INSERT INTO media_deletion_jobs (file_path, media_kind, created_at) VALUES (?1, 'snapshot', '2025-01-01T00:00:00Z')").bind(eligible.to_string_lossy().as_ref()).execute(&db.pool).await.unwrap();
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 101);
+        assert!(eligible.exists());
+        let second = db.retry_media_deletions(100).await.unwrap();
+        assert_eq!(second.snapshot_files_deleted, 1);
+        assert_eq!(second.pending, 100);
+        assert!(!eligible.exists());
+        for i in 0..100 {
+            std::fs::remove_dir(dir.join(format!("blocked-{i}"))).unwrap();
+        }
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 0);
+        std::fs::remove_dir(dir).unwrap();
+    }
     async fn test_database() -> DatabaseManager {
         DatabaseManager::new("sqlite::memory:", Default::default())
             .await

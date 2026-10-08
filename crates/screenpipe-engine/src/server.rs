@@ -299,6 +299,7 @@ impl SCServer {
     /// Start the server with a pre-bound TcpListener.
     /// Use this when the caller needs to confirm the port is bound before proceeding.
     pub async fn start_with_listener(self, listener: TcpListener) -> Result<(), std::io::Error> {
+        let _media_cleanup_retry = crate::retention::spawn_media_deletion_retry(self.db.clone());
         let app = self.create_router().await;
         info!("Server listening on {}", self.addr);
 

@@ -22,9 +22,7 @@ pub struct DeleteTimeRangeRequest {
     pub start: DateTime<Utc>,
     #[serde(deserialize_with = "super::time::deserialize_flexible_datetime")]
     pub end: DateTime<Utc>,
-    /// When true, also delete local-only mp4/wav files that haven't been
-    /// uploaded to cloud yet. The default (`false`) preserves the original
-    /// cloud-archive-aware behavior used by sync flows.
+    /// Compatibility selector; both variants currently delete selected local media.
     #[serde(default)]
     pub local_only: bool,
 }
@@ -40,6 +38,17 @@ pub struct DeleteTimeRangeResponse {
     pub ui_events_deleted: u64,
     pub video_files_deleted: u64,
     pub audio_files_deleted: u64,
+    pub snapshot_files_deleted: u64,
+    /// Number of jobs with a recorded unlink failure.
+    pub files_failed: u64,
+    /// Includes blocked, failed and deferred files from this action.
+    pub files_pending_cleanup: u64,
+    pub cleanup_retry_scheduled: bool,
+    pub cleanup_status_unknown: bool,
+    /// Filesystem cleanup completed for the returned eligible files only.
+    pub file_cleanup_complete: bool,
+    /// Range deletion cannot verify removal of shared media or all derivatives.
+    pub permanent_discard_verified: bool,
 }
 
 #[oasgen]
@@ -69,30 +78,6 @@ pub(crate) async fn delete_time_range_handler(
         )
     })?;
 
-    // Delete files from disk AFTER successful DB commit
-    let mut video_files_deleted: u64 = 0;
-    for path in &result.video_files {
-        match std::fs::remove_file(path) {
-            Ok(_) => video_files_deleted += 1,
-            Err(e) => warn!("failed to delete video file {}: {}", path, e),
-        }
-    }
-
-    let mut audio_files_deleted: u64 = 0;
-    for path in &result.audio_files {
-        match std::fs::remove_file(path) {
-            Ok(_) => audio_files_deleted += 1,
-            Err(e) => warn!("failed to delete audio file {}: {}", path, e),
-        }
-    }
-
-    // Delete uploaded snapshot files from disk
-    for path in &result.snapshot_files {
-        if let Err(e) = std::fs::remove_file(path) {
-            warn!("failed to delete snapshot file {}: {}", path, e);
-        }
-    }
-
     // Evict the range from the in-memory hot frame cache. Without this the
     // /stream/frames WS keeps re-emitting cached entries that point at
     // mp4/jpeg files we just unlinked — which made the timeline "jump
@@ -102,7 +87,32 @@ pub(crate) async fn delete_time_range_handler(
         .evict_range(payload.start, payload.end)
         .await;
 
-    Ok(JsonResponse(DeleteTimeRangeResponse {
+    state.search_cache.invalidate_all();
+    if let Some(cache) = &state.frame_image_cache {
+        cache.lock().await.clear();
+    }
+
+    // Jobs survive the committed record removal and retry on startup/requests.
+    let selected_paths: Vec<String> = result
+        .video_files
+        .iter()
+        .chain(&result.audio_files)
+        .chain(&result.snapshot_files)
+        .cloned()
+        .collect();
+    let cleanup = state
+        .db
+        .retry_selected_media_deletions(&selected_paths, 100)
+        .await;
+    let cleanup_status_unknown = cleanup.is_err();
+    let cleanup = cleanup.unwrap_or_default();
+    let video_files_deleted = cleanup.video_files_deleted;
+    let audio_files_deleted = cleanup.audio_files_deleted;
+    let snapshot_files_deleted = cleanup.snapshot_files_deleted;
+    let files_failed = cleanup.failed;
+    let files_pending_cleanup = cleanup.pending;
+
+    let response = DeleteTimeRangeResponse {
         frames_deleted: result.frames_deleted,
         ocr_deleted: result.ocr_deleted,
         audio_transcriptions_deleted: result.audio_transcriptions_deleted,
@@ -112,7 +122,25 @@ pub(crate) async fn delete_time_range_handler(
         ui_events_deleted: result.ui_events_deleted,
         video_files_deleted,
         audio_files_deleted,
-    }))
+        snapshot_files_deleted,
+        files_failed,
+        files_pending_cleanup,
+        cleanup_retry_scheduled: cleanup_status_unknown || files_pending_cleanup > 0,
+        cleanup_status_unknown,
+        file_cleanup_complete: !cleanup_status_unknown && files_pending_cleanup == 0,
+        permanent_discard_verified: false,
+    };
+    if cleanup_status_unknown || files_pending_cleanup > 0 {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(json!({
+                "error": "Selected records were removed, but media cleanup is incomplete and will be retried.",
+                "reason": "file_cleanup_incomplete",
+                "deletion": response,
+            })),
+        ));
+    }
+    Ok(JsonResponse(response))
 }
 
 #[derive(Deserialize, OaSchema)]
