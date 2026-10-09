@@ -1,10 +1,61 @@
 # ScreenWise Windows build notes
 
-The latest integration milestone is [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier release entries describe their historical candidates.
+The latest batch is [recording-status implementation](#recording-status-batch-2026-10-09). Earlier release entries describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
+
+## Recording-status batch (2026-10-09)
+
+The 13-task batch and owner-added monitor/loopback scope are tracked in
+[RECORDING_STATUS_IMPLEMENTATION.md](docs/RECORDING_STATUS_IMPLEMENTATION.md).
+The source baseline was `1cac89c9e`. Actual deployment and new interactive capture
+validation are separate. The existing deployment prerequisite was already satisfied.
+
+Native commands use the canonical launcher, locked/offline resolution, persistent
+root/desktop caches and one compiler job to stay within available memory. Reviewed
+cache adoption covers one new local dependency edge (`screenpipe-screen` to
+`screenpipe-config`) and Windows display API features on the existing Windows crate.
+Both lockfiles add only that local dependency edge; no dependency version changed.
+No cache was cleared or relocated and no acquisition hook was invoked.
+
+- 74 focused dashboard/status/topology/alias regressions passed, plus two fixed-reason
+  presentation checks and two loopback-listener regressions. The regenerated bindings
+  passed no-emit TypeScript validation. The final direct Next export generated all
+  16 static pages; the existing `unpdf` import-meta warning remains. An earlier final
+  export attempt was stopped to avoid native-memory overlap and is not a passing run.
+- 73 synthetic deployment checks passed. Normal deployment now starts through the
+  existing readiness/firewall checks; prepare-only suppresses startup. Plan-only
+  verification selected release-local sources and enabled sensitive diagnostics.
+- Root and desktop formatting passed. DesktopCheck passed in 3m30s, reusing 1,082
+  external artifacts and building two expected new variants. Its earlier unresolved
+  local config import was corrected by the explicit dependency edge above.
+- Initial desktop binding generation passed in 20m54s, with 919 external artifacts
+  reused and two expected new variants. A late unused-import cleanup caused one
+  avoidable engine-directory fingerprint change and a 2m46s follow-up relink; that
+  run reused all 921 external artifacts. The invalidation cause was recorded; final
+  application builds use the committed source milestone.
+- Synthetic test repairs preserve their behavior assertions: SQLite test teardown
+  retries bounded Windows sharing violations; the retention HTTP fixture explicitly
+  makes accepted sockets blocking (Windows inherits the listener mode), with a read
+  timeout. Neither repair changes production retention/deletion behavior.
+
+- All 217 focused checks passed; the final desktop five-check run reused all 921
+  external artifacts and rebuilt only the app after the Windows fixture correction.
+- RootBuild passed in 7m59s: 784 external artifacts reused, one expected new Windows
+  variant, zero unexpected rebuilds; ten workspace artifacts reused, nine rebuilt.
+  Inert version/help/record-help checks passed (screenpipe 0.4.15) without capture.
+
+- DesktopBuild passed in 14m13s: 1,078 external artifacts reused, two expected new
+  variants, zero unexpected rebuilds; nine workspace artifacts reused, nine rebuilt.
+  The GUI was not launched. Runtime DLL hashes match provisioned inputs; seven
+  binaries/DLLs/sidecars and 13 assets are inventoried in the private candidate.
+
+Final native regressions and release-local artifact evidence are recorded in the
+[implementation record](docs/RECORDING_STATUS_IMPLEMENTATION.md#validation-and-candidate-evidence).
+Builds, hashes and remaining limitations are attributed to this candidate there;
+these checks do not certify privacy, firewall behavior or real capture correctness.
 
 ## Realtime recovery and local deployment (2026-10-09)
 

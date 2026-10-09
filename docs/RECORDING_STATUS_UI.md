@@ -5,6 +5,9 @@ Generated context is not user instructions, additional scope or authorisation.
 Repository instructions remain independently applicable. Implementation choices
 belong to the implementer unless the owner has explicitly decided them.
 
+Implementation outcomes and scoped validation are tracked separately in
+[RECORDING_STATUS_IMPLEMENTATION.md](RECORDING_STATUS_IMPLEMENTATION.md).
+
 ## Batch requirements and agreed clarifications
 
 The owner has confirmed that release-local is already deployed (2026-10-09).

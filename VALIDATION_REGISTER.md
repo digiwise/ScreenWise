@@ -10,9 +10,28 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest integration and validation: [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier hashes below belong to their historical candidates.
+Latest implementation: [recording-status batch](docs/RECORDING_STATUS_IMPLEMENTATION.md). Completed integration evidence for that candidate is recorded there. Previous integration and validation: [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier hashes below belong to their historical candidates.
 
-Latest open review findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Recording-status implementation (2026-10-09)
+
+All 13 agreed tasks have an explicit outcome in the
+[implementation record](docs/RECORDING_STATUS_IMPLEMENTATION.md). Its validation
+and candidate section is the authoritative current delivery state. Implementation
+commit: feabd1572; deployment-startup and listener milestones: a17770805, fc82384bf.
+
+217 focused checks passed: 66 native, 76 frontend, two listener and 73 deployment
+checks. Final bindings, TypeScript, the 16-page static export, formatting and desktop
+integration checking passed. Both release-local builds passed; the hashed candidate
+was prepared without deploying or launching the GUI. Twenty-three live UIA tests remain ignored. These
+results cover synthetic behavior, not new interactive capture or installed behavior.
+
+SW-R04, SW-R06, SW-R08, SW-R12 and SW-R15 now have implemented repairs and scoped
+regressions. The CLI server also retains the durable-deletion retry worker through
+its serving lifetime, matching desktop startup. Other source-review findings below
+remain open. Full privacy/firewall validation is not claimed. No deployment,
+firewall mutation or newly started capture is part of this batch.
 
 ## System-wide source review and owner priorities (2026-10-09)
 
@@ -39,7 +58,7 @@ paths. It began on `screenwise` at `33e794ebe`, including then-pending audio rec
 and deployment edits. This record was added at `0f8829b61`; it is a record of that
 review, not a new exhaustive audit of intervening changes or every inherited module.
 
-**All entries below are open source-review findings.** Caller/data-flow tracing
+**Historical review state:** all entries below were open at that review. The later recording-status batch implements SW-R04, SW-R06, SW-R08, SW-R12 and SW-R15 with scoped synthetic regressions; see its [implementation and validation record](docs/RECORDING_STATUS_IMPLEMENTATION.md). Their real hardware/runtime validation remains separate. Other findings remain open; incidental cache invalidation does not close all of SW-R05. Caller/data-flow tracing
 supports the described triggers; hardware reproduction and finding-specific
 regressions remain outstanding. Existing frontend checks passed: **98 tests in
 11 files**, using the installed Vitest runner with one worker. Those checks cover
