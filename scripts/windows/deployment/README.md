@@ -5,14 +5,15 @@
 From the repository root, quit any deployed ScreenWise instance, then run:
 
 ```powershell
-# Ordinary PowerShell: reuse built release-local binaries and the shared Pi.
+# Reuse built release-local binaries and start when all checks pass.
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1
-# Elevated PowerShell: install/verify the nine exact executable block rules.
-& .\scripts\windows\deployment\Set-ScreenWiseDeploymentFirewall.ps1
-# After confirming the rule output, ordinary PowerShell:
-& .\scripts\windows\deployment\Start-ScreenWise.ps1 -PreflightOnly
-& .\scripts\windows\deployment\Start-ScreenWise.ps1
 ```
+
+For first-time firewall preparation, or to stage without capture, use
+`Deploy-ScreenWise.ps1 -PrepareOnly`. If startup reports missing rules, run
+`Set-ScreenWiseDeploymentFirewall.ps1` explicitly in elevated PowerShell, then
+run `Start-ScreenWise.ps1 -PreflightOnly` and `Start-ScreenWise.ps1` from ordinary
+PowerShell after confirming the rule output.
 
 Leave Ollama running on loopback with `ministral-3` already installed. Pi is
 included with read-only recording retrieval; no shell/file-writing tools are
@@ -52,7 +53,8 @@ From the repository root in ordinary PowerShell:
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1
 ```
 
-By default this reuses already-built `release-local` artifacts. It copies the GUI,
+By default this reuses already-built `release-local` artifacts and automatically
+starts the installed version only after the startup launcher accepts all checks. It copies the GUI,
 recorder, Bun, FFmpeg/FFprobe, native DLLs and GUI assets to
 `.local/deployment/release`. It reuses the private WebView2 directory from the
 existing `.local/gui-trial-runtime/runtime.json`, without copying it. Required
@@ -81,7 +83,12 @@ explicit time bounds; raw media, arbitrary URLs, API mutations and built-in
 bash/read/write/edit tools are unavailable. Captured content remains untrusted
 evidence. [Tool scope and limits](pi/README.md) apply; retrieval may be partial.
 
-Deployment only prepares files. It does not start capture or alter firewall rules.
+Deployment starts the installed version automatically through `Start-ScreenWise.ps1`
+after all existing firewall and startup checks pass. `-PrepareOnly` stages files
+without checking startup prerequisites or starting capture. No deployment mode
+creates or changes firewall rules. If startup fails, the newly prepared installation
+remains available; the command reports the prerequisite failure. Resolve it and
+run `Start-ScreenWise.ps1` rather than rebuilding or redeploying.
 The first deployment creates a unique group for nine exact executable paths:
 six ScreenWise/runtime executables and the installed Ollama app, server and model
 runner. Existing Ollama rules remain; new deployment rules do not replace them.
@@ -149,8 +156,8 @@ To reuse the
 installation at Windows login, explicitly pass `-RegisterStartup`; it registers
 the same fail-closed launcher under your HKCU Run key, using the console
 PowerShell executable that ran deployment. It refuses a restricted/AllSigned
-policy rather than changing policy or silently bypassing it. `-Launch` explicitly starts
-after deployment and still requires the rules to be installed first. Startup
+policy rather than changing policy or silently bypassing it. `-Launch` remains a compatibility alias for the default automatic startup; it cannot
+be combined with `-PrepareOnly`. Startup
 requires this checkout and its reused WebView2 directory to remain in place.
 
 To remove **only this deployment's rules**, use elevated PowerShell:
@@ -170,6 +177,19 @@ registration, model downloads or GUI launch):
 ```powershell
 & .\scripts\windows\deployment\Test-ScreenWiseDeployment.ps1
 ```
+
+## Sensitive diagnostics option
+
+This local deployment batch defaults `-SensitiveDebugLogging $true` for the owner's
+requested diagnostic period. It records the boolean in the deployment manifest;
+startup enables `SCREENWISE_SENSITIVE_DEBUG=1` only for the GUI child process.
+Use `-SensitiveDebugLogging $false` when preparing a deployment to turn it off.
+Older manifests without the option remain off, and startup removes any inherited
+opt-in before applying the manifest. This does not edit settings in a running app.
+Sensitive diagnostics are separate from ordinary safe notices and logs; they may
+contain private decision context and must not be published. See
+[the diagnostics guide](../../../docs/CAPTURE_DIAGNOSTICS.md) for storage and limits.
+Preparation here does not start a diagnostic capture or inspect existing captures.
 
 ## Prompt Parakeet transcription
 

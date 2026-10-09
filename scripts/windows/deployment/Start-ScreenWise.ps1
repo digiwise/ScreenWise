@@ -105,6 +105,12 @@ $psi.WorkingDirectory = $m.binary_directory
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $psi.EnvironmentVariables['SCREENPIPE_DATA_DIR'] = $m.data_directory
+# Only the reviewed deployment option enables this separate, sensitive sink.
+# Explicitly remove an inherited opt-in for old or opted-out manifests.
+$psi.EnvironmentVariables.Remove('SCREENWISE_SENSITIVE_DEBUG')
+if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_logging -eq $true) {
+    $psi.EnvironmentVariables['SCREENWISE_SENSITIVE_DEBUG'] = '1'
+}
 $psi.EnvironmentVariables['SCREENPIPE_PORT'] = "$($m.port)"
 $psi.EnvironmentVariables['WEBVIEW2_BROWSER_EXECUTABLE_FOLDER'] = $m.webview2_directory
 $psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $webviewProfile

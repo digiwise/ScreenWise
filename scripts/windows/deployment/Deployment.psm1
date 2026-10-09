@@ -144,6 +144,9 @@ function Read-DeploymentManifest {
     $m = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
     if ($m.schema -notin @('screenwise.local-deployment.v1','screenwise.local-deployment.v2') -or
         $m.profile -cnotin @('release-local','release')) { throw 'Unsupported deployment manifest.' }
+    if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_logging -isnot [bool]) {
+        throw 'Sensitive debug logging must be a boolean.'
+    }
     $binaryRoot = Assert-DeploymentPath $m.binary_directory $PrivateRoot
     $dataRoot = Assert-DeploymentPath $m.data_directory $PrivateRoot
     if ($binaryRoot -ieq $dataRoot -or $dataRoot.StartsWith($binaryRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
@@ -219,6 +222,16 @@ function Publish-DeploymentFiles {
     }
 }
 
+function Invoke-DeploymentStartup {
+    param([Parameter(Mandatory)][string]$StartupScript, [Parameter(Mandatory)][string]$ManifestPath)
+    # The startup launcher owns every preflight and only launches after all pass.
+    # Do not change firewall rules or bypass its checks when updating an installation.
+    try { & $StartupScript -ManifestPath $ManifestPath }
+    catch {
+        throw "Deployment files are prepared, but startup checks/launch failed. No firewall rules were changed. Resolve the reported prerequisite and rerun Start-ScreenWise.ps1. $($_.Exception.Message)"
+    }
+}
+
 Export-ModuleMember -Function Assert-DeploymentPath, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
-    Read-DeploymentManifest, Publish-DeploymentFiles
+    Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup

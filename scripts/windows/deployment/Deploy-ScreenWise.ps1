@@ -15,10 +15,13 @@ param(
     [ValidateSet('release-local', 'release')][string]$BuildProfile = 'release-local',
     [switch]$Build,
     [switch]$RegisterStartup,
-    [switch]$Launch,
+    [switch]$Launch, # Compatibility: startup is now the default.
+    [switch]$PrepareOnly,
+    [bool]$SensitiveDebugLogging = $true,
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
+if ($Launch -and $PrepareOnly) { throw 'Choose automatic startup or -PrepareOnly, not both.' }
 Import-Module (Join-Path $PSScriptRoot 'Deployment.psm1') -Force
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $private = Join-Path $repo '.local'
@@ -43,7 +46,7 @@ if ($PlanOnly) {
     [pscustomobject]@{ build_requested = [bool]$Build; profile = $BuildProfile; deployment = $binary;
         gui_source = $guiBuild; recorder_source = $cliBuild;
         data = $DataDirectory; port = $Port; register_startup = [bool]$RegisterStartup;
-        launch = [bool]$Launch; webview_manifest = $RuntimeManifestPath; pi_included = $true;
+        launch = !$PrepareOnly; prepare_only = [bool]$PrepareOnly; sensitive_debug_logging = $SensitiveDebugLogging; webview_manifest = $RuntimeManifestPath; pi_included = $true;
         pi_runtime = $PiRuntimePath; pi_tool_mode = 'recording-api-only'; provision_pi = [bool]$ProvisionPi } | ConvertTo-Json
     return
 }
@@ -163,7 +166,7 @@ foreach ($file in @($piItems | Where-Object { !$_.PSIsContainer }) + @(Get-Item 
     $files += [ordered]@{ path=$file.FullName; length=$file.Length; modified_utc=$file.LastWriteTimeUtc.ToString('o') }
 }
 $manifest = [ordered]@{
-    schema='screenwise.local-deployment.v2'; profile=$BuildProfile; deployed_utc=[DateTime]::UtcNow.ToString('o');
+    schema='screenwise.local-deployment.v2'; profile=$BuildProfile; sensitive_debug_logging=$SensitiveDebugLogging; deployed_utc=[DateTime]::UtcNow.ToString('o');
     binary_directory=$binary; data_directory=$DataDirectory; port=$Port; firewall_group=$group;
     gui_executable=(Join-Path $binary 'screenpipe-app.exe'); cli_executable=(Join-Path $binary 'screenpipe.exe');
     bun_executable=(Join-Path $binary 'bun.exe'); ffmpeg_executable=(Join-Path $binary 'ffmpeg.exe');
@@ -193,8 +196,13 @@ if ($RegisterStartup) {
 Write-Host "Deployed $BuildProfile binaries: $binary"
 Write-Host "Persistent recording data: $DataDirectory"
 Write-Host "Shared Pi 0.75.4 (reused, not copied): $PiRuntimePath"
-Write-Host "Install firewall rules in elevated PowerShell:"
+Write-Host "If startup reports missing firewall rules, explicitly install them in elevated PowerShell:"
 Write-Host ("& '{0}' -ManifestPath '{1}'" -f (Join-Path $PSScriptRoot 'Set-ScreenWiseDeploymentFirewall.ps1').Replace("'", "''"), $manifestPath.Replace("'", "''"))
-Write-Host "Then launch from ordinary PowerShell:"
+Write-Host "To retry startup after resolving a prerequisite, use ordinary PowerShell:"
 Write-Host ("& '{0}' -ManifestPath '{1}'" -f $launchScript.Replace("'", "''"), $manifestPath.Replace("'", "''"))
-if ($Launch) { & $launchScript -ManifestPath $manifestPath }
+if ($PrepareOnly) {
+    Write-Host 'Prepared only; startup checks and capture were not started.'
+} else {
+    Write-Host 'Checking existing firewall rules and startup prerequisites before automatic launch.'
+    Invoke-DeploymentStartup -StartupScript $launchScript -ManifestPath $manifestPath
+}

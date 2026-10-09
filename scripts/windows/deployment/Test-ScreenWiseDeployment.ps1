@@ -108,11 +108,29 @@ foreach ($selectedProfile in @('release-local', 'release')) {
     $planArgs = @{PlanOnly=$true}
     if ($selectedProfile -eq 'release') { $planArgs.BuildProfile = $selectedProfile }
     $plan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') @planArgs | Out-String | ConvertFrom-Json)
+    Check ($plan.launch -eq $true -and !$plan.prepare_only) "automatic $selectedProfile startup selected"
+    Check ($plan.sensitive_debug_logging -eq $true) "local sensitive diagnostics selected"
     Check ($plan.profile -ceq $selectedProfile) "deployment selects $selectedProfile"
     Check ($plan.gui_source -eq (Join-Path $repo "apps\screenpipe-app-tauri\src-tauri\target\$selectedProfile") -and
         $plan.recorder_source -eq (Join-Path $repo "target\$selectedProfile")) "matched $selectedProfile source paths"
     Check ($plan.deployment -eq (Join-Path $private 'deployment\release')) "stable $selectedProfile deployed directory"
 }
+$preparePlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -PrepareOnly -SensitiveDebugLogging $false | Out-String | ConvertFrom-Json)
+Check (!$preparePlan.launch -and $preparePlan.prepare_only) 'prepare-only suppresses automatic startup'
+Check (!$preparePlan.sensitive_debug_logging) 'sensitive diagnostics explicit opt-out'
+Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -PrepareOnly -Launch } 'conflicting startup switches rejected'
+# Execute the dispatch with a synthetic launcher only. No actual GUI or firewall access.
+$stubStartup = Join-Path $root 'synthetic-start.ps1'
+$startupMarker = Join-Path $root 'startup-marker'
+[IO.File]::WriteAllText($stubStartup, 'param([string]$ManifestPath) [IO.File]::WriteAllText($ManifestPath, "checked-and-started")')
+Invoke-DeploymentStartup -StartupScript $stubStartup -ManifestPath $startupMarker
+Check ((Get-Content -LiteralPath $startupMarker -Raw) -ceq 'checked-and-started') 'automatic launch delegates to checked startup script'
+[IO.File]::WriteAllText($stubStartup, 'param([string]$ManifestPath) throw "synthetic missing firewall rule"')
+Reject { Invoke-DeploymentStartup -StartupScript $stubStartup -ManifestPath $startupMarker } 'failed prerequisite propagates without alternate launch'
+$manifest.sensitive_debug_logging = 'true'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+Reject { Read-DeploymentManifest $manifestPath $private } 'string diagnostic opt-in refused'
+$manifest.sensitive_debug_logging = $true
 $manifest.data_directory=Join-Path $binary 'recordings'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 Reject { Read-DeploymentManifest $manifestPath $private } 'manifest data under binaries rejected'
