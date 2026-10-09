@@ -49,6 +49,11 @@ edits that appeared during this task are preserved separately. The owner selecte
 separate builds; this candidate uses the successful frontend export completed
 before those edits, whose 502 files are inventoried privately.
 
+Implementation milestone: `1fe902f46`. Prepared private inventory:
+`.local/build/deployment-candidates/20261009-release-local-1fe902f46.json`.
+It records committed source identity, artifact/asset hashes, native input checks,
+frontend inventory and validation evidence. The candidate is prepared, not installed.
+
 - 112 synthetic deployment checks passed, including support/integrity refusals,
   PID replacement, unavailable helper identity, cleanup failure, dispatch failure,
   deadlines, surviving helpers, staged publication and side-effect-free plans.

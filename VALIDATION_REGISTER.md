@@ -10,9 +10,30 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest implementation: [recording-status batch](docs/RECORDING_STATUS_IMPLEMENTATION.md). Completed integration evidence for that candidate is recorded there. Previous integration and validation: [realtime recovery and local deployment](#realtime-recovery-and-local-deployment-2026-10-09). Earlier hashes below belong to their historical candidates.
+Latest implementation: [graceful deployment shutdown](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md). Previous candidate: [recording-status batch](docs/RECORDING_STATUS_IMPLEMENTATION.md). Earlier hashes below belong to their historical candidates.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Graceful deployment shutdown (2026-10-09)
+
+112 synthetic deployment checks and twelve focused native checks passed: ten new
+quit checks (including hidden native IPC transport) and two existing degraded/early
+shutdown-marker checks. Formatting, desktop integration checking, frontend export
+and Pi direct API/SDK checks passed. The parked external-client MCP bridge was
+excluded. [Artifact evidence and command details](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md)
+identify the selected release-local candidate and preserved unrelated edits.
+
+Source milestone `1fe902f46`; the desktop release-local build reused all 1,080
+external artifacts and rebuilt only the app. The unchanged recorder was reused.
+The two actual quit-only release smoke cases returned exit 2 without session/data
+initialization. The private hashed candidate is prepared and remains uninstalled.
+
+Support detection on the installed legacy executable was read-only: it lacks both
+the marker and protocol metadata. A manual tray Quit is needed once for bootstrap.
+No quit command was sent to it. Installed shutdown during recording, real cleanup
+failure handling and automatic capture restart remain untested. No deployment,
+firewall mutation, captured-content inspection or interactive capture validation
+was performed. These changes do not close the existing privacy/firewall findings.
 
 ## Recording-status implementation (2026-10-09)
 

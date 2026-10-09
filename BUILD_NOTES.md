@@ -1,6 +1,6 @@
 # ScreenWise Windows build notes
 
-The latest batch is [recording-status implementation](#recording-status-batch-2026-10-09). Earlier release entries describe their historical candidates.
+The latest batch is [graceful deployment shutdown](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md). Earlier release entries describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
@@ -15,6 +15,36 @@ release workflow without installing dependencies or starting the bridge. Pi's
 `screenwise_recordings` extension uses the authenticated recorder HTTP API directly
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
+## Graceful deployment shutdown (2026-10-09)
+
+Normal deployment prepares the complete candidate before requesting quit through
+the existing Windows single-instance IPC. The early quit-only client cannot
+initialize an app/session when its target is absent. Tray and external requests
+share cleanup; deployment checks capability/integrity, exact process ownership,
+successful exit and installed-process quiescence before replacing files.
+Plan-only remains inert; prepare-only requires manual quit and suppresses startup.
+The legacy installed version requires one final manual tray Quit before bootstrap.
+
+112 deployment regressions, ten new native quit regressions and two existing
+shutdown-marker regressions passed. RootFmt, DesktopFmt and DesktopCheck passed;
+the latter reused all 1,084 external artifacts. The focused linked tests reused all
+921 external artifacts. Pi's 25 direct API tests and pinned SDK loader check passed;
+the external-client MCP package stayed excluded. The direct Next export/type
+check passed for all 16 static pages with the existing `unpdf` warning.
+The owner chose separate builds for unrelated concurrent recording-status edits;
+the completed pre-edit frontend export is retained for this candidate.
+
+DesktopBuild passed in 8m38s with all 1,080 external artifacts reused, zero new
+variants/unexpected rebuilds and only the app rebuilt. The unchanged recorder was
+reused after inert CLI checks. Both release-GUI quit-only smoke cases returned exit
+2 without creating data/session directories. Native DLLs match configured inputs;
+the candidate inventory pins seven binaries/DLLs/sidecars and 13 assets to source
+milestone `1fe902f46`. No acquisition, cache clearing or full-release build occurred.
+
+See the [implementation record](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md) for artifact
+evidence and limits. Actual deployment, shutdown of the running installed app,
+firewall changes and interactive capture validation remain separate actions.
 
 ## Recording-status batch (2026-10-09)
 
