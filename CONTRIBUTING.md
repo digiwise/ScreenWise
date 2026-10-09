@@ -73,6 +73,12 @@ Record exact tested scope and outstanding checks in
 are separate from routine source validation; inherited upstream automation must
 not publish under Screenpipe's identities or services.
 
+The external-client MCP package (`packages/screenpipe-mcp`) is parked and excluded
+from builds, tests, packaging and deployment candidates. Its retained instructions
+are reference material. Pi's direct recorder API extension remains in scope; see
+[the owner policy](AGENTS.md#external-client-mcp-server--parked-2026-10-09) before
+proposing any MCP work.
+
 ## Safe tests
 
 Prefer deterministic synthetic tests and fresh test stores. Interactive capture,

@@ -1,5 +1,14 @@
 # Screenpipe MCP Server
 
+> **Parked in ScreenWise (owner policy, 2026-10-09).** This external-client MCP
+> bridge is excluded from builds, testing, packaging and deployment candidates.
+> Preserve the source; do not execute the retained setup/build/test instructions
+> below or install its dependencies as part of ordinary repository work.
+> Codex and Claude Code must explain a concrete reason and prompt the owner before
+> revisiting this policy. See the authoritative [repository instructions](../../AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+> Pi's `screenwise_recordings` extension and direct recorder HTTP API remain active
+> and do not require this MCP server. The remainder is retained reference material.
+
 <a href="https://www.pulsemcp.com/servers/screenpipe-screenpipe"><img src="https://www.pulsemcp.com/badge/top-pick/screenpipe-screenpipe" width="400" alt="PulseMCP Badge"></a>
 
 <br/>

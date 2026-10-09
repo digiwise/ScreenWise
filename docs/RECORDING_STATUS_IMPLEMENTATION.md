@@ -114,7 +114,12 @@ Previously completed milestone: 73 synthetic deployment checks passed, including
 automatic startup selection, prepare-only, failure propagation, diagnostic opt-out
 and manifest type validation. The development-listener regression has two passing
 checks without opening listeners; the separate MCP fixture changes were inspected
-without installing its absent dependencies.
+but their tests were not run. At that milestone, dependencies did not resolve from
+the MCP package; Vitest and TypeScript were available in the desktop frontend's
+separate dependency tree. The owner subsequently parked the external-client MCP
+server (2026-10-09): its builds and tests are now excluded, not outstanding candidate
+requirements. Pi's direct recorder API extension remains in scope. See the
+[canonical policy](../AGENTS.md#external-client-mcp-server--parked-2026-10-09).
 
 Source milestone: `feabd15721d2e2b8462d5f64f41710bb18e15240`. Deployment startup
 and listener-policy milestones are `a17770805` and `fc82384bf` respectively.

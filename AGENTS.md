@@ -195,6 +195,24 @@ classification requires inspection and monitoring, not owner approval.
   MLX crate remains a workspace member but is not a default Windows build target.
 - No silent dependency/model/tool acquisition to make a runtime test pass.
 
+## External-client MCP server — parked (2026-10-09)
+
+The external-client MCP server in `packages/screenpipe-mcp` is parked by owner
+policy. Preserve its source, but exclude it from builds, tests, packaging and
+release/deployment candidates. Do not install or repair its dependencies, run its
+server or reactivate its inherited release workflow as part of ordinary work.
+Missing MCP validation is outside the active scope, not a release blocker.
+
+This policy applies to the external-client MCP bridge only. Pi's owned
+`screenwise_recordings` extension and direct authenticated recorder HTTP APIs
+remain in scope, including their appropriate builds and regression checks.
+
+Codex and Claude Code must prompt the owner if a concrete need suggests revisiting
+this policy: explain the use case and trade-off, and obtain an explicit policy
+change before resuming MCP work. Do not silently reactivate it or repeatedly ask
+merely because retained MCP instructions or unrun tests exist. The retained package
+README and historical records do not override this policy.
+
 ## Authentication, privacy and safe status
 
 Keep bearer authentication enabled, including for localhost. `/health` and a small

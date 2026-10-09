@@ -6,6 +6,16 @@ The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
 [AGENTS.md](AGENTS.md); no parent workspace document is required.
 
+## Current scope: external-client MCP parked (2026-10-09)
+
+The owner has parked `packages/screenpipe-mcp`. Exclude this external-client
+bridge from builds, tests, packaging and deployment candidates; its unrun checks
+are no longer outstanding candidate requirements. Preserve the source and disabled
+release workflow without installing dependencies or starting the bridge. Pi's
+`screenwise_recordings` extension uses the authenticated recorder HTTP API directly
+and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
+owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
 ## Recording-status batch (2026-10-09)
 
 The 13-task batch and owner-added monitor/loopback scope are tracked in
