@@ -1,6 +1,8 @@
 # ScreenWise Windows build notes
 
-The latest batch is [graceful deployment shutdown](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md). Earlier release entries describe their historical candidates.
+The latest candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md), based on
+the existing graceful deployment implementation. Earlier release entries
+describe their historical candidates.
 
 The portable build and test instructions are in
 [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). Repository policy is in
@@ -15,6 +17,65 @@ release workflow without installing dependencies or starting the bridge. Pi's
 `screenwise_recordings` extension uses the authenticated recorder HTTP API directly
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
+## Capture fixes candidate (2026-10-09)
+
+Candidate `20261009-capture-fixes-66814bfb3-dirty` uses release-local and includes
+the final status UI export, diagnostic transition repair, accessibility preference
+repair and exact maximised-window screenshot/UIA scoping. Baseline commit
+`66814bfb3` does not contain the working-tree changes used for this build. Versions remain recorder
+0.4.15 and desktop 2.5.28; use the exact hashes in the
+[hand-off](docs/CAPTURE_FIX_HANDOFF.md) to identify this candidate.
+
+- Canonical RootBuild: 4m33s; 785 external reused, zero rebuilt; 11 workspace
+  reused, eight rebuilt. Evidence: `20261009T045315851Z-Root-Build-f4a63fb2`.
+- Canonical DesktopBuild: 7m53s; 1,080 external reused, zero rebuilt; ten workspace
+  reused, eight rebuilt. Evidence: `20261009T045829245Z-Desktop-Build-f1c40fd7`.
+- Settled native tests: config 59, screen 131, accessibility 191 (23 live ignored),
+  engine capture 45, notice/API persistence 13; audio 16 serial. All reused
+  external artifacts. RootFmt passed after the engine error-lifetime repair.
+- Frontend: 106 unique checks, TypeScript and 16-page export passed, with the
+  existing unpdf warning. The final 502-file export and seven candidate binaries/
+  sidecars, thirteen assets and native inputs are privately inventoried.
+- Both Rust lockfiles are unchanged. No dependency acquisition/cache move/clean,
+  full LTO build or external-client MCP build was performed.
+- The GUI's graceful-quit marker passed a metadata-only scan. No candidate GUI
+  launch, production deployment/restart, firewall change or live soak occurred.
+
+The ignored synthetic overlay integration target compiled through canonical
+RootTest and passed two offline evaluator tests. Its new target required reviewed
+one-time cache adoption; all 433 external artifacts were reused, zero rebuilt.
+Interactive fixture failures and fresh-consent retry status are recorded in the
+[checklist](docs/CAPTURE_FIX_MASTER_CHECKLIST.md) and fixture README; compilation
+alone is not empirical overlay-isolation evidence.
+
+The final Astra minimal POC rebuilt only the integration test in 7.33s, reusing
+all 433 external artifacts (five workspace reused/two rebuilt); RootFmt passed.
+The fresh-consented test then passed in 3.53s with zero overlay pixels in the
+target and successful colour controls/owned-process cleanup. It uses the
+production WGC window primitive, without a global-focus prerequisite; this is
+scoped opaque-overlay evidence, not complete engine/UIA or in-flight race proof.
+
+The stored-target extension compiled in 57.84s through canonical RootTest,
+again reusing all 433 external artifacts (five workspace reused/two rebuilt).
+Two offline evaluator tests passed, with two live tests ignored by default;
+RootFmt passed. Fresh-consented execution on the owner desktop passed all three
+cases in 9.10s: an ordinary foreground cover left raw WGC returning green target
+pixels without magenta; minimise/close returned capture errors. The real
+production validator rejected each stored target; no replacement or monitor
+acquisition or persistence was exercised. The first extension launch failed at
+baseline under the sandbox account; unchanged retry followed metadata-only
+preflight and new consent in the verified context. Production source and final
+release-local binaries were unchanged. Evidence:
+`20261009T054842942Z-Root-Test-fd74e67f` and
+`20261009T054831578Z-Root-Fmt-822ba7c3`; scoped results are in the hand-off.
+
+The owner subsequently confirmed deployment. Running desktop hash matched the
+candidate; verified process start was 2026-10-09T06:09:27.871258Z. This task did
+not deploy/restart or perform a live soak. The final authorised diagnostic-only
+cleanup ended conservatively at that process start, preserving all later events.
+Claude Code/the separate client only verifies production behaviour through the
+API; source, builds and maintenance remain this task's responsibility.
 
 ## Graceful deployment shutdown (2026-10-09)
 

@@ -212,6 +212,10 @@ hidden. Unexpected state requires safe stop and a new gate.
 
 ## Reliable Windows GUI fixtures
 
+Use the [fixture readiness guide](../../../docs/WINDOWS_FIXTURE_READINESS.md)
+for launch/preflight parity, safe failure categories and offline controller
+regressions. An inconclusive launch must be diagnosed before another fresh gate.
+
 A fixture used as live privacy evidence must run on the owner's active
 interactive desktop. `IsWindowVisible` can be true for a window created in a
 background or otherwise inaccessible desktop, so it is only a diagnostic. After

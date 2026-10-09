@@ -27,8 +27,35 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
 };
+
+fn selected_tree_identity_matches(
+    target: super::WindowsTreeTarget,
+    hwnd: isize,
+    process_id: u32,
+    exists: bool,
+) -> bool {
+    exists
+        && target.hwnd != 0
+        && target.process_id != 0
+        && target.hwnd == hwnd
+        && target.process_id == process_id
+}
+
+fn selected_tree_identity_is_current(target: super::WindowsTreeTarget) -> bool {
+    let hwnd = HWND(target.hwnd as *mut std::ffi::c_void);
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    }
+    selected_tree_identity_matches(
+        target,
+        hwnd.0 as isize,
+        process_id,
+        unsafe { IsWindow(hwnd) }.as_bool(),
+    )
+}
 
 /// Excluded apps — password managers and security tools (matches macOS list).
 const EXCLUDED_APPS: &[&str] = &[
@@ -187,8 +214,19 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
 
-        // Get the focused window
-        let hwnd = unsafe { GetForegroundWindow() };
+        // Paired maximised-window capture supplies the exact bitmap owner.
+        // An invalid explicit target fails closed; it never follows new focus.
+        if self
+            .config
+            .windows_target
+            .is_some_and(|target| !selected_tree_identity_is_current(target))
+        {
+            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+        }
+        let hwnd = match self.config.windows_target {
+            Some(target) => HWND(target.hwnd as *mut std::ffi::c_void),
+            None => unsafe { GetForegroundWindow() },
+        };
         if hwnd == HWND::default() {
             if self.config.monitor_width != 0.0 || self.config.monitor_height != 0.0 {
                 return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
@@ -219,6 +257,11 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         // Get process info
         let mut pid: u32 = 0;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if self.config.windows_target.is_some_and(|target| {
+            !selected_tree_identity_matches(target, hwnd.0 as isize, pid, true)
+        }) {
+            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+        }
         // Resolve logical app name — handles WebView2 and shell-hosted Edge.
         let app_name = crate::platform::windows::get_effective_app_name(hwnd, pid);
 
@@ -338,7 +381,11 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let node_count = root.node_count();
         // Focus or monitor ownership can change while a provider is being read.
         // Discard the acquired tree instead of attaching stale text to a frame.
-        if unsafe { GetForegroundWindow() } != hwnd || get_monitor_rect(hwnd) != monitor_rect {
+        let identity_changed = match self.config.windows_target {
+            Some(target) => !selected_tree_identity_is_current(target),
+            None => (unsafe { GetForegroundWindow() }) != hwnd,
+        };
+        if identity_changed || get_monitor_rect(hwnd) != monitor_rect {
             return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
         }
         let content_hash = TreeSnapshot::compute_hash(&text_buffer);
@@ -847,6 +894,25 @@ fn append_text(buffer: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_tree_target_keeps_bitmap_owner_and_rejects_changed_or_unknown_identity() {
+        let target = super::super::WindowsTreeTarget {
+            hwnd: 42,
+            process_id: 7,
+        };
+        // A different global foreground is irrelevant: explicit identity only.
+        assert!(selected_tree_identity_matches(target, 42, 7, true));
+        assert!(!selected_tree_identity_matches(target, 43, 7, true));
+        assert!(!selected_tree_identity_matches(target, 42, 8, true));
+        assert!(!selected_tree_identity_matches(target, 42, 7, false));
+        assert!(!selected_tree_identity_matches(target, 0, 0, false));
+        let config = TreeWalkerConfig {
+            windows_target: Some(target),
+            ..Default::default()
+        };
+        assert_eq!(config.clone().windows_target, Some(target));
+    }
 
     fn monitor_scope(x: f64, y: f64) -> TreeWalkerConfig {
         TreeWalkerConfig {

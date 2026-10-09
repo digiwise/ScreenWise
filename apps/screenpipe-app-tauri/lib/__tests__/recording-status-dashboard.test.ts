@@ -8,6 +8,13 @@ const row: StatusObservation = { key: "microphone:privacy", channel: "microphone
 const success: CaptureEvidence = { key: "microphone:device2", channel: "microphone", scope: "Device 2", global: false, captureSupported: true, storageSupported: true, captured: 1000, stored: 1000, captureAge: 0, storageAge: 0 };
 const input = (values: Partial<DashboardInput> = {}): DashboardInput => ({ rows: [row], evidence: [success], audio: null, elapsed: 0, now: 100000, unavailable: false, ...values });
 describe("truthful compact recording classification", () => {
+  it("keeps maximised-window permission distinct from successful capture", () => {
+    const selected = { ...row, channel: "screen", source: "window policy", condition: "active_window_only", reasons: ["maximised window only"] };
+    const pending = classifyRecordingType("screen", input({ rows: [selected], evidence: [] }))[0];
+    expect(pending.label).toBe("Maximised window only"); expect(pending.mode).toBe("unknown");
+    expect(pending.detail).toContain("Selected-window capture is permitted");
+    expect(classifyRecordingType("screen", input({ rows: [selected], evidence: [{ ...success, channel: "screen" }] }))[0].mode).toBe("recording");
+  });
   it("distinguishes actual status request errors from startup and stale uncertainty", () => {
     expect(classifyRecordingType("microphone", input({ unavailable: true }))[0].mode).toBe("unknown");
     const failed = classifyRecordingType("microphone", input({ unavailable: true, requestFailed: true }))[0];
@@ -45,13 +52,15 @@ describe("truthful compact recording classification", () => {
     expect(classifyRecordingType("microphone", input({ rows: [preference] }))[0].mode).toBe("unknown");
     expect(classifyRecordingType("microphone", input({ rows: [row, { ...preference, condition: "stopped", status: "Capture ended", reasons: ["disabled"] }] }))[0].mode).toBe("paused");
   });
-  it("covers output's positive DRM transition only through its current aggregate gate", () => {
+  it("covers positive DRM transitions through their current aggregate gate, retaining stale negative gates", () => {
     const values = input({ rows: [{ ...row, channel: "output_audio" }, { ...row, channel: "output_audio", source: "content protection", checkedAge: 38000 }], evidence: [{ ...success, channel: "output_audio" }] });
     expect(classifyRecordingType("output_audio", values)[0].mode).toBe("recording");
     expect(classifyRecordingType("output_audio", { ...values, rows: values.rows.slice(1) })[0].mode).toBe("unknown");
     expect(classifyRecordingType("output_audio", { ...values, rows: [values.rows[0], { ...values.rows[1], condition: "suppressed" }] })[0].mode).toBe("paused");
     const screen = { ...values, rows: values.rows.map((item) => ({ ...item, channel: "screen" })), evidence: values.evidence.map((item) => ({ ...item, channel: "screen" })) };
-    expect(classifyRecordingType("screen", screen)[0].mode).toBe("unknown");
+    expect(classifyRecordingType("screen", screen)[0].mode).toBe("recording");
+    expect(classifyRecordingType("screen", { ...screen, rows: screen.rows.slice(1) })[0].mode).toBe("unknown");
+    expect(classifyRecordingType("screen", { ...screen, rows: [screen.rows[0], { ...screen.rows[1], condition: "suppressed" }] })[0].staleAge).toBe(38000);
   });
   it("requires actual operational proof before accepting an old positive power observation", () => {
     const preference = { ...row, source: "power", checkedAge: 60000 };
@@ -115,4 +124,34 @@ it("withholds numeric stale ages after a clock discontinuity", () => {
   const previous = classifyRecordingType("microphone", input());
   const expired = classifyRecordingType("microphone", input({ unavailable: true, elapsed: 0, ageUncertain: true, lastStatuses: { microphone: previous } }))[0];
   expect(expired.staleAge).toBeNull(); expect(expired.label).toBe(previous[0].label);
+});
+
+it("never attaches another observer's stale age to a retained redaction", () => {
+  const window = { ...row, key: "screen:window:Monitor 1", channel: "screen", scope: "Monitor 1", source: "window policy", condition: "redacted", status: "Redacted", reasons: ["excluded background"] };
+  const previous = classifyRecordingType("screen", input({ rows: [window], evidence: [] }));
+  const permission = { ...window, key: "screen:permission:Monitor 1", source: "permission", condition: "admitted", status: "Capture permitted", reasons: ["gate open"], checkedAge: 471000 };
+  const current = classifyRecordingType("screen", input({ rows: [{ ...window, condition: "admitted", status: "Capture permitted", reasons: ["gate open"] }, permission], evidence: [], lastStatuses: { screen: previous } }))[0];
+  expect(current.label).toBe("Capture permitted"); expect(current.mode).toBe("unknown");
+  expect(current.staleAge).toBe(471000); expect(current.detail).toContain("permission:");
+  expect(current.detail).toContain("not the duration of a confirmed ongoing problem");
+});
+
+it("preserves a stale blocker from the same observer with its actual check explanation", () => {
+  const window = { ...row, key: "screen:window:Monitor 1", channel: "screen", scope: "Monitor 1", source: "window policy", condition: "redacted", status: "Redacted", reasons: ["excluded background"] };
+  const previous = classifyRecordingType("screen", input({ rows: [window], evidence: [] }));
+  const current = classifyRecordingType("screen", input({ rows: [{ ...window, checkedAge: 471000 }], evidence: [], lastStatuses: { screen: previous } }))[0];
+  expect(current.label).toBe(previous[0].label); expect(current.staleAge).toBe(471000);
+  expect(current.detail).toContain("window policy:"); expect(current.detail).toContain("471 seconds ago");
+});
+
+it("reports current active-window fallback and its missing-metadata policy despite an old DRM transition", () => {
+  const window = { ...row, key: "screen:window:Monitor 1", channel: "screen", scope: "Monitor 1", source: "window policy", condition: "active_window_only", status: "Active window only", reasons: ["excluded background", "window metadata unavailable"] };
+  const current = classifyRecordingType("screen", input({ rows: [{ ...row, channel: "screen" }, window, { ...row, channel: "screen", source: "content protection", checkedAge: 471000 }], evidence: [] }))[0];
+  expect(current.label).toBe("Active window only — Window metadata could not be read");
+  expect(current.mode).toBe("unknown");
+  expect(current.staleAge).toBeUndefined(); expect(current.detail).toContain("No matching configured rule was identified");
+  expect(current.detail).toContain("covered by a maximized window");
+  const captured = classifyRecordingType("screen", input({ rows: [{ ...row, channel: "screen" }, window], evidence: [{ ...success, channel: "screen", scope: "Monitor 1" }] }))[0];
+  expect(captured.mode).toBe("recording"); expect(captured.label).toBe(current.label);
+  expect(captured.detail).toContain("background pixels withheld");
 });

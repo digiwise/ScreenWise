@@ -17,7 +17,7 @@ export function RecordingStateIcon({ status, compact = false, condensed = false 
   const Icon = STATE_ICONS[status.mode];
   return <span className={`inline-flex min-w-0 items-center gap-1.5 ${COLORS[status.mode]}`} title={status.detail ? `${status.label}: ${status.detail}` : status.label}>
     <Icon className="size-4 shrink-0" aria-hidden="true" /><span className={compact ? "sr-only" : condensed ? "truncate text-[11px]" : "text-xs"}>{status.label}</span>
-    {status.staleAge !== undefined && <span className="shrink-0 text-[10px] text-amber-600" title="Previous observation; current recording has not been confirmed">⚠ {status.staleAge === null ? "stale; age unknown" : `stale ${Math.floor(status.staleAge / 1000)}s`}</span>}
+    {status.staleAge !== undefined && <span className="shrink-0 text-[10px] text-amber-600" title="Time since the last check; this does not establish how long the reported condition continued. Current recording has not been confirmed.">⚠ {status.staleAge === null ? "stale; age unknown" : `stale ${Math.floor(status.staleAge / 1000)}s`}</span>}
   </span>;
 }
 export function recordingGroupStatus(group: typeof RECORDING_GROUPS[number], input: DashboardInput) {

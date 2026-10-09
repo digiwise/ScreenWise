@@ -482,7 +482,7 @@ fn get_frontmost_pid() -> Option<i32> {
 }
 
 /// Rectangle bounds for overlap calculations
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -1120,6 +1120,10 @@ pub struct WindowsCapturePrivacy {
     pub foreground_monitor: Option<String>,
     pub is_active_monitor: Option<bool>,
     pub foreground_monitor_changed: bool,
+    /// Native identity used only to pair a window-specific bitmap with UIA.
+    /// HWND/PID and geometry are not added to persisted diagnostics.
+    #[serde(skip)]
+    pub selected_window: Option<WindowsCaptureTarget>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1153,6 +1157,7 @@ impl Default for WindowsCapturePrivacy {
             foreground_monitor: None,
             is_active_monitor: None,
             foreground_monitor_changed: false,
+            selected_window: None,
         }
     }
 }
@@ -1175,9 +1180,14 @@ impl WindowsCapturePrivacy {
     pub fn with_outcome(mut self, outcome: WindowsCaptureOutcome) -> Self {
         (self.outcome, self.reason) = match outcome {
             WindowsCaptureOutcome::FullMonitor => ("full_monitor", None),
-            WindowsCaptureOutcome::BackgroundRedacted => {
-                ("active_window_only", Some("excluded_background"))
-            }
+            WindowsCaptureOutcome::BackgroundRedacted => (
+                "active_window_only",
+                Some(if self.selected_window.is_some() {
+                    "maximised_window_only"
+                } else {
+                    "excluded_background"
+                }),
+            ),
             WindowsCaptureOutcome::CaptureRedacted(reason) => (
                 "redacted",
                 Some(match reason {
@@ -1468,6 +1478,7 @@ pub struct WindowsActiveWindow {
     window_y: i32,
     window_width: u32,
     window_height: u32,
+    is_focused: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1641,7 +1652,7 @@ impl WindowsActiveWindow {
             app_name: self.app_name,
             window_name: self.window_name,
             process_id: self.process_id,
-            is_focused: true,
+            is_focused: self.is_focused,
             browser_url: self.browser_url,
             window_x: self.window_x,
             window_y: self.window_y,
@@ -1664,6 +1675,232 @@ pub enum WindowsMonitorCapturePlan {
 pub struct WindowsMonitorCaptureEvaluation {
     pub plan: WindowsMonitorCapturePlan,
     pub privacy: WindowsCapturePrivacy,
+}
+
+/// Exact native target. Selection is sampled, not an atomic visibility proof.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsCaptureTarget {
+    pub hwnd: isize,
+    pub process_id: u32,
+    pub monitor_id: u32,
+    bounds: Rect,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy)]
+struct WindowsSelectionSample {
+    target: WindowsCaptureTarget,
+    maximised: bool,
+    topmost: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn covers_monitor(window: Rect, monitor: Rect) -> bool {
+    window.width > 0
+        && window.height > 0
+        && i64::from(window.x) <= i64::from(monitor.x)
+        && i64::from(window.y) <= i64::from(monitor.y)
+        && i64::from(window.x) + i64::from(window.width)
+            >= i64::from(monitor.x) + i64::from(monitor.width)
+        && i64::from(window.y) + i64::from(window.height)
+            >= i64::from(monitor.y) + i64::from(monitor.height)
+}
+
+#[cfg(target_os = "windows")]
+fn choose_maximised_target(
+    samples: impl IntoIterator<Item = WindowsSelectionSample>,
+    monitor: Rect,
+    monitor_id: u32,
+) -> Option<WindowsCaptureTarget> {
+    // Small always-on-top windows are deliberately ignored by owner policy.
+    // Full-screen always-on-top windows count even when IsZoomed is false.
+    // The first remaining window decides eligibility; never search below it.
+    let first = samples
+        .into_iter()
+        .find(|sample| !sample.topmost || covers_monitor(sample.target.bounds, monitor))?;
+    (first.maximised && first.target.monitor_id == monitor_id).then_some(first.target)
+}
+
+#[cfg(target_os = "windows")]
+fn selected_capture_matches(
+    before: Option<WindowsCaptureTarget>,
+    after: Option<WindowsCaptureTarget>,
+) -> bool {
+    before.is_some() && before == after
+}
+
+#[cfg(target_os = "windows")]
+fn choose_selected_window_capture(
+    windows: &[WindowsPrivacySnapshot],
+    target: WindowsCaptureTarget,
+) -> WindowsCaptureChoice {
+    match windows
+        .iter()
+        .find(|window| window.id == target.hwnd as u32)
+    {
+        Some(window) if window.is_excluded => {
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::ActiveWindowExcluded)
+        }
+        Some(window) if window.can_capture => WindowsCaptureChoice::ActiveWindow(window.id),
+        _ => WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn sample_maximised_target(
+    monitor: &SafeMonitor,
+) -> Result<Option<WindowsCaptureTarget>, Box<dyn Error>> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct NativeRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetTopWindow(hwnd: isize) -> isize;
+        fn GetWindow(hwnd: isize, command: u32) -> isize;
+        fn IsWindow(hwnd: isize) -> i32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn IsIconic(hwnd: isize) -> i32;
+        fn IsZoomed(hwnd: isize) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, process: *mut u32) -> u32;
+        fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: isize,
+            attribute: u32,
+            value: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetLastError(error: u32);
+        fn GetLastError() -> u32;
+    }
+    let bounds = Rect {
+        x: monitor.x(),
+        y: monitor.y(),
+        width: monitor.width(),
+        height: monitor.height(),
+    };
+    let unavailable = || std::io::Error::other("maximised-window selection could not be verified");
+    let mut seen = HashSet::new();
+    let mut hwnd = unsafe { GetTopWindow(0) };
+    if hwnd == 0 {
+        return Err(unavailable().into());
+    }
+    while hwnd != 0 {
+        if seen.len() >= 4096 || !seen.insert(hwnd) || unsafe { IsWindow(hwnd) } == 0 {
+            return Err(unavailable().into());
+        }
+        if unsafe { IsWindowVisible(hwnd) } != 0 && unsafe { IsIconic(hwnd) } == 0 {
+            let mut cloaked = 0u32;
+            if unsafe { DwmGetWindowAttribute(hwnd, 14, (&mut cloaked as *mut u32).cast(), 4) } < 0
+            {
+                return Err(unavailable().into());
+            }
+            if cloaked == 0 {
+                let mut rect = NativeRect::default();
+                if unsafe {
+                    DwmGetWindowAttribute(
+                        hwnd,
+                        9,
+                        (&mut rect as *mut NativeRect).cast(),
+                        std::mem::size_of::<NativeRect>() as u32,
+                    )
+                } < 0
+                {
+                    return Err(unavailable().into());
+                }
+                let width = i64::from(rect.right) - i64::from(rect.left);
+                let height = i64::from(rect.bottom) - i64::from(rect.top);
+                if width < 0
+                    || height < 0
+                    || width > i64::from(i32::MAX)
+                    || height > i64::from(i32::MAX)
+                {
+                    return Err(unavailable().into());
+                }
+                let window_bounds = Rect {
+                    x: rect.left,
+                    y: rect.top,
+                    width: width as u32,
+                    height: height as u32,
+                };
+                let overlaps = i64::from(rect.left) < i64::from(bounds.x) + i64::from(bounds.width)
+                    && i64::from(rect.right) > i64::from(bounds.x)
+                    && i64::from(rect.top) < i64::from(bounds.y) + i64::from(bounds.height)
+                    && i64::from(rect.bottom) > i64::from(bounds.y);
+                if window_bounds.width > 0 && window_bounds.height > 0 && overlaps {
+                    unsafe {
+                        SetLastError(0);
+                    }
+                    let style = unsafe { GetWindowLongPtrW(hwnd, -20) };
+                    if style == 0 && unsafe { GetLastError() } != 0 {
+                        return Err(unavailable().into());
+                    }
+                    let topmost = style & 0x8 != 0;
+                    if !topmost || covers_monitor(window_bounds, bounds) {
+                        let mut process_id = 0;
+                        if unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) } == 0
+                            || process_id == 0
+                        {
+                            return Err(unavailable().into());
+                        }
+                        let native_monitor = unsafe { MonitorFromWindow(hwnd, 0) };
+                        if native_monitor == 0 {
+                            return Err(unavailable().into());
+                        }
+                        // xcap exposes HWND as u32. Reject a native handle that
+                        // cannot be represented by that existing capture API.
+                        if hwnd != hwnd as u32 as isize && hwnd != hwnd as u32 as i32 as isize {
+                            return Err(unavailable().into());
+                        }
+                        let sample = WindowsSelectionSample {
+                            target: WindowsCaptureTarget {
+                                hwnd,
+                                process_id,
+                                monitor_id: native_monitor as u32,
+                                bounds: window_bounds,
+                            },
+                            maximised: unsafe { IsZoomed(hwnd) } != 0,
+                            topmost,
+                        };
+                        if unsafe { IsWindow(hwnd) } == 0 {
+                            return Err(unavailable().into());
+                        }
+                        return Ok(choose_maximised_target([sample], bounds, monitor.id()));
+                    }
+                }
+            }
+        }
+        hwnd = unsafe { GetWindow(hwnd, 2) }; // GW_HWNDNEXT; bounded and cycle checked.
+    }
+    Ok(None)
+}
+
+/// Recheck target selection and the selected window's current privacy rules.
+#[cfg(target_os = "windows")]
+pub fn verify_windows_capture_target(
+    monitor: &SafeMonitor,
+    filters: &WindowFilters,
+    target: WindowsCaptureTarget,
+) -> Result<WindowsCapturePrivacy, Box<dyn Error>> {
+    let evaluated = evaluate_windows_monitor_capture(monitor, filters)?;
+    if !selected_capture_matches(Some(target), evaluated.privacy.selected_window)
+        || !matches!(evaluated.plan, WindowsMonitorCapturePlan::ActiveWindow(_))
+    {
+        return Err(std::io::Error::other("selected window or its admission changed").into());
+    }
+    Ok(evaluated.privacy)
 }
 
 #[cfg(target_os = "windows")]
@@ -1703,25 +1940,34 @@ pub fn evaluate_windows_monitor_capture(
         height: monitor.height(),
     };
     let mut runtime_windows = Vec::new();
+    let selected_window = sample_maximised_target(monitor)?;
     let foreground = sample_windows_foreground();
     let mut privacy = WindowsCapturePrivacy::default()
         .with_foreground_monitor(foreground.and_then(|sample| sample.monitor), monitor.id());
+    privacy.selected_window = selected_window;
     let mut foreground_unsuitable = None;
     let mut foreground_seen = false;
+    let mut selected_url_checked = false;
 
     for source in Window::all().inspect_err(|error| {
         sensitive_capture_error("window_enumeration", "Window::all", None, error)
     })? {
+        let id = source
+            .id()
+            .inspect_err(|error| sensitive_capture_error("window_metadata", "id", None, error))?;
+        // Do not query non-selected app/title/URL metadata in window-only mode.
+        // xcap's own metadata-only validity enumeration remains unchanged.
+        if selected_window.is_some_and(|selected| selected.hwnd as u32 != id) {
+            continue;
+        }
         if source.is_minimized().inspect_err(|error| {
             sensitive_capture_error("window_metadata", "is_minimized", None, error)
         })? {
             continue;
         }
 
-        let id = source
-            .id()
-            .inspect_err(|error| sensitive_capture_error("window_metadata", "id", None, error))?;
-        let is_focused = foreground.is_some_and(|sample| sample.window == id);
+        let actually_focused = foreground.is_some_and(|sample| sample.window == id);
+        let is_focused = selected_window.is_some() || actually_focused;
         let window_x = source
             .x()
             .inspect_err(|error| sensitive_capture_error("window_metadata", "x", None, error))?;
@@ -1750,7 +1996,10 @@ pub fn evaluate_windows_monitor_capture(
             .pid()
             .inspect_err(|error| sensitive_capture_error("window_metadata", "pid", None, error))?
             as i32;
-        if is_focused && foreground.is_some_and(|sample| sample.process != process_id as u32) {
+        if selected_window.is_some_and(|selected| selected.process_id != process_id as u32)
+            || (actually_focused
+                && foreground.is_some_and(|sample| sample.process != process_id as u32))
+        {
             return Err(
                 std::io::Error::other("foreground process changed during evaluation").into(),
             );
@@ -1787,7 +2036,8 @@ pub fn evaluate_windows_monitor_capture(
 
         let mut browser_url = None;
         let mut url_uncertain = false;
-        if is_browser && is_focused {
+        if is_browser && actually_focused {
+            selected_url_checked |= selected_window.is_some();
             match create_url_detector().get_active_url(&app_name, process_id, &window_name) {
                 Ok(url) => browser_url = url,
                 Err(error) => {
@@ -1906,7 +2156,7 @@ pub fn evaluate_windows_monitor_capture(
         .iter()
         .map(|window| window.snapshot.clone())
         .collect();
-    if !foreground_seen {
+    if selected_window.is_none() && !foreground_seen {
         let app = foreground.and_then(|sample| get_process_exe_name(sample.process));
         privacy.add_blocker(
             diagnostic_executable_name(app.as_deref()),
@@ -1915,23 +2165,39 @@ pub fn evaluate_windows_monitor_capture(
         );
     }
     let final_foreground = sample_windows_foreground();
-    if foreground.is_none_or(|sample| sample.monitor.is_none()) {
+    if selected_window.is_none() && foreground.is_none_or(|sample| sample.monitor.is_none()) {
         privacy.foreground_blocked("monitor_unverified");
     }
-    if foreground != final_foreground {
+    if selected_window.is_none() && foreground != final_foreground {
         privacy.merge(WindowsCapturePrivacy::default().with_foreground_monitor(
             final_foreground.and_then(|sample| sample.monitor),
             monitor.id(),
         ));
         privacy.foreground_blocked("foreground_changed_during_evaluation");
     }
-    let choice = choose_windows_capture_scoped(
-        &snapshots,
-        &monitor_bounds,
-        foreground,
-        final_foreground,
-        foreground_seen,
-    );
+    let choice = if let Some(selected) = selected_window {
+        if !selected_capture_matches(Some(selected), sample_maximised_target(monitor)?)
+            || (selected_url_checked && foreground != final_foreground)
+        {
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus)
+        } else {
+            choose_selected_window_capture(&snapshots, selected)
+        }
+    } else {
+        // Eligibility must remain absent throughout a legacy full-display plan.
+        // A newly maximised window requires a fresh window-specific acquisition.
+        if sample_maximised_target(monitor)?.is_some() {
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus)
+        } else {
+            choose_windows_capture_scoped(
+                &snapshots,
+                &monitor_bounds,
+                foreground,
+                final_foreground,
+                foreground_seen,
+            )
+        }
+    };
     if matches!(
         choice,
         WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
@@ -1979,6 +2245,9 @@ pub fn evaluate_windows_monitor_capture(
                 window_y: window.window_y,
                 window_width: window.window_width,
                 window_height: window.window_height,
+                is_focused: foreground.is_some_and(|sample| {
+                    sample.window == id && sample.process == window.process_id as u32
+                }),
             })
         }
     };
@@ -2012,6 +2281,7 @@ async fn capture_windows_monitor_privacy_safe_once(
     };
 
     let mut privacy = initial.privacy;
+    let selected_window = privacy.selected_window;
     let (mut image, mut active_window, initial_was_active_only) = match initial.plan {
         WindowsMonitorCapturePlan::FullMonitor => {
             match crate::utils::capture_monitor_image(monitor, &[]).await {
@@ -2084,7 +2354,35 @@ async fn capture_windows_monitor_privacy_safe_once(
             );
         }
     };
+    let post_target = post.privacy.selected_window;
     privacy.merge(post.privacy);
+    if selected_window.is_some() || post_target.is_some() {
+        let outcome = match post.plan {
+            WindowsMonitorCapturePlan::ActiveWindow(_)
+                if selected_capture_matches(selected_window, post_target) =>
+            {
+                WindowsCaptureOutcome::BackgroundRedacted
+            }
+            WindowsMonitorCapturePlan::Redacted(reason) => {
+                WindowsCaptureOutcome::CaptureRedacted(reason)
+            }
+            _ => WindowsCaptureOutcome::CaptureRedacted(
+                WindowsCaptureRedactionReason::InconsistentFocus,
+            ),
+        };
+        if outcome.is_placeholder() {
+            return placeholder_capture(monitor, outcome, started_at, privacy);
+        }
+        // Keep the original selected-window bitmap. Never switch target and
+        // recapture after the post check without another verified acquisition.
+        return WindowsPrivacyCapture {
+            image,
+            active_window,
+            outcome,
+            duration: started_at.elapsed(),
+            privacy: privacy.with_outcome(outcome),
+        };
+    }
     if privacy.foreground_monitor_changed {
         return placeholder_capture(
             monitor,
@@ -2502,6 +2800,211 @@ pub async fn capture_all_visible_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    fn maximised_selection_fixture(
+        hwnd: isize,
+        topmost: bool,
+        maximised: bool,
+        bounds: Rect,
+    ) -> WindowsSelectionSample {
+        WindowsSelectionSample {
+            target: WindowsCaptureTarget {
+                hwnd,
+                process_id: 77,
+                monitor_id: 1,
+                bounds,
+            },
+            topmost,
+            maximised,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_capture_ignores_small_topmost_but_counts_full_screen_topmost() {
+        let monitor = Rect {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let target = maximised_selection_fixture(2, false, true, monitor);
+        let small = maximised_selection_fixture(
+            1,
+            true,
+            false,
+            Rect {
+                x: -1900,
+                y: 20,
+                width: 300,
+                height: 200,
+            },
+        );
+        assert_eq!(
+            choose_maximised_target([small, target], monitor, 1),
+            Some(target.target)
+        );
+        let full = maximised_selection_fixture(1, true, false, monitor);
+        // Full-screen need not have WS_MAXIMIZE / IsZoomed. Its executable
+        // identity does not participate in the selection decision.
+        assert_eq!(choose_maximised_target([full, target], monitor, 1), None);
+        let full_maximised = WindowsSelectionSample {
+            maximised: true,
+            ..full
+        };
+        assert_eq!(
+            choose_maximised_target([full_maximised, target], monitor, 1),
+            Some(full_maximised.target)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_capture_never_searches_below_a_regular_window_or_foreign_monitor() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let max = maximised_selection_fixture(2, false, true, monitor);
+        let regular = maximised_selection_fixture(1, false, false, monitor);
+        assert_eq!(choose_maximised_target([regular, max], monitor, 1), None);
+        let foreign = WindowsSelectionSample {
+            target: WindowsCaptureTarget {
+                monitor_id: 2,
+                ..max.target
+            },
+            ..max
+        };
+        assert_eq!(choose_maximised_target([foreign, max], monitor, 1), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_capture_requires_identical_verified_target_across_samples() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let max = maximised_selection_fixture(2, false, true, monitor);
+        let before = choose_maximised_target([max], monitor, 1);
+        assert!(selected_capture_matches(
+            before,
+            choose_maximised_target([max], monitor, 1)
+        ));
+        for changed in [
+            WindowsSelectionSample {
+                target: WindowsCaptureTarget {
+                    hwnd: 3,
+                    ..max.target
+                },
+                ..max
+            },
+            WindowsSelectionSample {
+                target: WindowsCaptureTarget {
+                    process_id: 78,
+                    ..max.target
+                },
+                ..max
+            },
+            WindowsSelectionSample {
+                maximised: false,
+                ..max
+            },
+            WindowsSelectionSample {
+                target: WindowsCaptureTarget {
+                    bounds: Rect { x: 1, ..monitor },
+                    ..max.target
+                },
+                ..max
+            },
+        ] {
+            assert!(!selected_capture_matches(
+                before,
+                choose_maximised_target([changed], monitor, 1)
+            ));
+        }
+        let above = maximised_selection_fixture(3, false, true, monitor);
+        assert!(!selected_capture_matches(
+            before,
+            choose_maximised_target([above, max], monitor, 1)
+        ));
+        // Failed/unknown samples cannot establish or preserve permission.
+        assert!(!selected_capture_matches(before, None));
+        assert!(!selected_capture_matches(None, None));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_capture_rules_apply_only_to_the_selected_window() {
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let target = maximised_selection_fixture(1, false, true, bounds).target;
+        let allowed = WindowsPrivacySnapshot {
+            id: 1,
+            bounds,
+            is_focused: false,
+            is_excluded: false,
+            can_capture: true,
+        };
+        let hidden_excluded = WindowsPrivacySnapshot {
+            id: 2,
+            bounds,
+            is_focused: false,
+            is_excluded: true,
+            can_capture: false,
+        };
+        assert_eq!(
+            choose_selected_window_capture(&[allowed.clone(), hidden_excluded], target),
+            WindowsCaptureChoice::ActiveWindow(1)
+        );
+        let excluded = WindowsPrivacySnapshot {
+            is_excluded: true,
+            ..allowed
+        };
+        assert_eq!(
+            choose_selected_window_capture(&[excluded], target),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::ActiveWindowExcluded)
+        );
+        assert_eq!(
+            choose_selected_window_capture(&[], target),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_capture_disclosure_contains_fixed_reason_without_native_target() {
+        let mut privacy = WindowsCapturePrivacy::default();
+        privacy.selected_window = Some(
+            maximised_selection_fixture(
+                123,
+                false,
+                true,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            )
+            .target,
+        );
+        let privacy = privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted);
+        assert_eq!(privacy.reason, Some("maximised_window_only"));
+        assert!(privacy.blockers.is_empty());
+        let json = serde_json::to_value(privacy).unwrap();
+        assert!(json.get("selected_window").is_none());
+        assert!(json.get("hwnd").is_none());
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

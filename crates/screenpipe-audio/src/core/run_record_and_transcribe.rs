@@ -86,7 +86,9 @@ const RECORDING_STOP_POLL: Duration = Duration::from_millis(25);
 
 #[inline]
 fn is_silent_buffer(chunk: &[f32]) -> bool {
-    !chunk.is_empty() && chunk.iter().all(|s| s.abs() < SILENT_BUFFER_PEAK_THRESHOLD)
+    // Empty delivery is not evidence of real audio and must not reopen the
+    // diagnostic interval or refresh the usable-sample recovery watchdog.
+    chunk.iter().all(|s| s.abs() < SILENT_BUFFER_PEAK_THRESHOLD)
 }
 
 async fn wait_for_recording_stop(is_running: &AtomicBool) {
@@ -700,6 +702,13 @@ async fn flush_audio(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_buffer_classification_never_treats_empty_delivery_as_real_audio() {
+        for samples in [vec![], vec![0.0; 128], vec![0.0000001; 128]] {
+            assert!(super::is_silent_buffer(&samples));
+        }
+        assert!(!super::is_silent_buffer(&[0.0, 0.01, 0.0]));
+    }
     use super::*;
 
     struct ResetPrivacy;

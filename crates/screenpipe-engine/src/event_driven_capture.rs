@@ -23,8 +23,8 @@ use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
 #[cfg(target_os = "windows")]
 use screenpipe_screen::capture_screenshot_by_window::{
     capture_windows_monitor_privacy_safe, evaluate_windows_monitor_capture,
-    render_windows_capture_notice, WindowsCaptureFailureStage, WindowsCaptureOutcome,
-    WindowsCapturePrivacy, WindowsMonitorCapturePlan,
+    render_windows_capture_notice, verify_windows_capture_target, WindowsCaptureFailureStage,
+    WindowsCaptureOutcome, WindowsCapturePrivacy, WindowsMonitorCapturePlan,
 };
 use screenpipe_screen::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use screenpipe_screen::monitor::{list_monitors, SafeMonitor};
@@ -1996,6 +1996,59 @@ fn resolve_capture_metadata(
     (app_name, window_name, browser_url, document_path)
 }
 
+#[cfg(target_os = "windows")]
+fn windows_tree_config_for_bitmap(
+    mut config: TreeWalkerConfig,
+    bitmap_owner: Option<(isize, u32)>,
+) -> TreeWalkerConfig {
+    // The caller supplies the identity carried by the verified window-specific
+    // bitmap. Do not reuse a previous target or consult foreground focus here.
+    // Keep an invalid explicit identity explicit: the walker rejects it rather
+    // than falling back to another window.
+    config.windows_target = bitmap_owner
+        .map(|(hwnd, process_id)| screenpipe_a11y::tree::WindowsTreeTarget { hwnd, process_id });
+    config
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_capture_metadata(
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    trigger: &CaptureTrigger,
+    lightweight_app_name: Option<&str>,
+    foreground_on_monitor: bool,
+    selected: Option<&screenpipe_screen::capture_screenshot_by_window::CapturedWindow>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    // The tree is rooted at the pinned HWND/PID. Global app/focus trigger
+    // payloads must not override either the bitmap owner or its fallback.
+    let Some(selected) = selected else {
+        return resolve_capture_metadata(
+            tree,
+            trigger,
+            lightweight_app_name,
+            foreground_on_monitor,
+        );
+    };
+    match tree {
+        Some(tree) => (
+            Some(tree.app_name.clone()),
+            Some(tree.window_name.clone()),
+            tree.browser_url.clone(),
+            tree.document_path.clone(),
+        ),
+        None => (
+            Some(selected.app_name.clone()),
+            Some(selected.window_name.clone()),
+            selected.browser_url.clone(),
+            None,
+        ),
+    }
+}
+
 fn matching_elements_reference(
     current_hash: Option<i64>,
     previous_hash: Option<i64>,
@@ -2136,6 +2189,10 @@ async fn do_capture(
     let windows_capture =
         capture_windows_monitor_privacy_safe(params.monitor, &window_filters).await;
     #[cfg(target_os = "windows")]
+    let selected_window = windows_capture.privacy.selected_window;
+    #[cfg(target_os = "windows")]
+    let selected_metadata = selected_window.and(windows_capture.active_window);
+    #[cfg(target_os = "windows")]
     let (image, windows_outcome, capture_dur, mut windows_privacy) = (
         windows_capture.image,
         windows_capture.outcome,
@@ -2207,32 +2264,46 @@ async fn do_capture(
     // more immediately before UIA so a newly focused excluded window never has
     // its accessibility tree paired with the previously safe bitmap.
     #[cfg(target_os = "windows")]
-    let pre_walk_outcome = match evaluate_windows_monitor_capture(params.monitor, &window_filters) {
-        Ok(evaluation) => {
-            windows_privacy.merge(evaluation.privacy);
-            report_windows_privacy(params.monitor_id, &windows_privacy);
-            // New background exclusions invalidate an acquired full-monitor
-            // bitmap. Only a fresh safe acquisition can admit it again.
-            let latest = match evaluation.plan {
-                WindowsMonitorCapturePlan::FullMonitor => WindowsCaptureOutcome::FullMonitor,
-                WindowsMonitorCapturePlan::ActiveWindow(_) => {
-                    WindowsCaptureOutcome::BackgroundRedacted
-                }
-                WindowsMonitorCapturePlan::Redacted(reason) => {
-                    WindowsCaptureOutcome::CaptureRedacted(reason)
-                }
-            };
-            if windows_privacy.foreground_monitor_changed {
-                Some(WindowsCaptureOutcome::CaptureRedacted(
+    let pre_walk_outcome = if let Some(target) = selected_window {
+        match verify_windows_capture_target(params.monitor, &window_filters, target).map_err(|_| ())
+        {
+            Ok(privacy) => {
+                windows_privacy.merge(privacy);
+                None
+            }
+            Err(_) => Some(WindowsCaptureOutcome::CaptureFailed(
+                WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+            )),
+        }
+    } else {
+        match evaluate_windows_monitor_capture(params.monitor, &window_filters) {
+            Ok(evaluation) => {
+                let scope_changed = evaluation.privacy.selected_window.is_some();
+                windows_privacy.merge(evaluation.privacy);
+                report_windows_privacy(params.monitor_id, &windows_privacy);
+                // New background exclusions invalidate an acquired full-monitor
+                // bitmap. Only a fresh safe acquisition can admit it again.
+                let latest = match evaluation.plan {
+                    WindowsMonitorCapturePlan::FullMonitor => WindowsCaptureOutcome::FullMonitor,
+                    WindowsMonitorCapturePlan::ActiveWindow(_) => {
+                        WindowsCaptureOutcome::BackgroundRedacted
+                    }
+                    WindowsMonitorCapturePlan::Redacted(reason) => {
+                        WindowsCaptureOutcome::CaptureRedacted(reason)
+                    }
+                };
+                if scope_changed || windows_privacy.foreground_monitor_changed {
+                    Some(WindowsCaptureOutcome::CaptureRedacted(
                     screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::InconsistentFocus,
                 ))
-            } else {
-                pre_walk_privacy_outcome(windows_outcome, latest)
+                } else {
+                    pre_walk_privacy_outcome(windows_outcome, latest)
+                }
             }
+            Err(_) => Some(WindowsCaptureOutcome::CaptureFailed(
+                WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+            )),
         }
-        Err(_) => Some(WindowsCaptureOutcome::CaptureFailed(
-            WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
-        )),
     };
     #[cfg(target_os = "windows")]
     if let Some(outcome) = pre_walk_outcome {
@@ -2250,7 +2321,13 @@ async fn do_capture(
     // Walk accessibility tree on blocking thread (AX APIs are synchronous).
     // Apply adaptive budget overrides: expensive apps (Electron/Discord) get
     // reduced max_nodes and timeout to avoid blocking their UI thread.
+    #[cfg(not(target_os = "windows"))]
     let mut config = params.tree_walker_config.clone();
+    #[cfg(target_os = "windows")]
+    let mut config = windows_tree_config_for_bitmap(
+        params.tree_walker_config.clone(),
+        selected_window.map(|target| (target.hwnd, target.process_id)),
+    );
 
     // Get the focused app name for budget decisions. AppSwitch triggers carry
     // the name directly; for all other triggers (visual change, idle, manual)
@@ -2268,6 +2345,11 @@ async fn do_capture(
                 None
             }
         }
+    };
+    #[cfg(target_os = "windows")]
+    let trigger_app = match selected_metadata.as_ref() {
+        Some(selected) => Some(selected.app_name.clone()),
+        None => trigger_app,
     };
 
     // Terminal OCR rate-limit: wezterm/alacritty/kitty/hyper/warp all bypass AX
@@ -2330,7 +2412,9 @@ async fn do_capture(
     }
 
     #[cfg(target_os = "windows")]
-    let tree_walk_result = if windows_other_monitor_tree_is_unnecessary(&windows_privacy) {
+    let tree_walk_result = if selected_window.is_none()
+        && windows_other_monitor_tree_is_unnecessary(&windows_privacy)
+    {
         // The bitmap policy already assessed local windows. Global focus must
         // neither supply foreign text/labels nor veto an unaffected monitor.
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor)
@@ -2349,7 +2433,27 @@ async fn do_capture(
     #[cfg(target_os = "windows")]
     windows_privacy.refresh_foreground_monitor(params.monitor_id);
     #[cfg(target_os = "windows")]
-    if windows_privacy.foreground_monitor_changed {
+    if let Some(target) = selected_window {
+        match verify_windows_capture_target(params.monitor, &window_filters, target).map_err(|_| ())
+        {
+            Ok(privacy) => windows_privacy.merge(privacy),
+            Err(_) => {
+                return persist_windows_placeholder(
+                    params,
+                    trigger,
+                    captured_at,
+                    WindowsCaptureOutcome::CaptureFailed(
+                        WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                    ),
+                    screenshot_disabled,
+                    &windows_privacy,
+                )
+                .await
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if selected_window.is_none() && windows_privacy.foreground_monitor_changed {
         return persist_windows_placeholder(
             params, trigger, captured_at,
             WindowsCaptureOutcome::CaptureRedacted(
@@ -2547,12 +2651,22 @@ async fn do_capture(
 
     // Use tree metadata by default, but for focus-change triggers prefer the
     // event payload when the tree lags or reports the wrong frontmost target.
+    #[cfg(not(target_os = "windows"))]
     let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
         resolve_capture_metadata(
             tree_snapshot.as_ref(),
             trigger,
             trigger_app.as_deref(),
             foreground_on_monitor,
+        );
+    #[cfg(target_os = "windows")]
+    let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
+        resolve_windows_capture_metadata(
+            tree_snapshot.as_ref(),
+            trigger,
+            trigger_app.as_deref(),
+            foreground_on_monitor,
+            selected_metadata.as_ref(),
         );
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
@@ -2679,6 +2793,27 @@ async fn do_capture(
         });
     }
 
+    #[cfg(target_os = "windows")]
+    if let Some(target) = selected_window {
+        match verify_windows_capture_target(params.monitor, &window_filters, target).map_err(|_| ())
+        {
+            Ok(privacy) => windows_privacy.merge(privacy),
+            Err(_) => {
+                return persist_windows_placeholder(
+                    params,
+                    trigger,
+                    captured_at,
+                    WindowsCaptureOutcome::CaptureFailed(
+                        WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                    ),
+                    screenshot_disabled,
+                    &windows_privacy,
+                )
+                .await
+            }
+        }
+    }
+
     // The caller's candidate was derived from the previous capture. Recheck
     // against this acquired tree, especially after focus moves to another monitor.
     let elements_ref_frame_id = matching_elements_reference(
@@ -2703,6 +2838,12 @@ async fn do_capture(
         window_name: window_name_owned.as_deref(),
         browser_url: browser_url_owned.as_deref(),
         document_path: document_path_owned.as_deref(),
+        #[cfg(target_os = "windows")]
+        focused: selected_metadata
+            .as_ref()
+            .map(|selected| selected.is_focused)
+            .unwrap_or(foreground_on_monitor),
+        #[cfg(not(target_os = "windows"))]
         focused: foreground_on_monitor,
         capture_trigger: trigger.as_str(),
         use_pii_removal: params.use_pii_removal,
@@ -2870,6 +3011,105 @@ fn is_frame_mostly_black(image: &image::DynamicImage) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn paired_windows_tree_uses_exact_screenshot_owner_without_foreground_fallback() {
+        use screenpipe_a11y::tree::WindowsTreeTarget;
+        let bitmap_owner = (42, 7);
+        let foreign_focus = WindowsTreeTarget {
+            hwnd: 99,
+            process_id: 11,
+        };
+        let config = TreeWalkerConfig {
+            windows_target: Some(foreign_focus),
+            ignored_windows: vec!["synthetic ignored app".into()],
+            max_nodes_override: Some(123),
+            ..Default::default()
+        };
+        let paired = windows_tree_config_for_bitmap(config.clone(), Some(bitmap_owner));
+        assert_eq!(
+            paired.windows_target,
+            Some(WindowsTreeTarget {
+                hwnd: bitmap_owner.0,
+                process_id: bitmap_owner.1,
+            })
+        );
+        assert_ne!(paired.windows_target, Some(foreign_focus));
+        assert_eq!(paired.ignored_windows, config.ignored_windows);
+        assert_eq!(paired.max_nodes_override, Some(123));
+
+        // The next bitmap pins its own identity, rather than the earlier frame
+        // or a global focus target. Missing/invalid acquisition never retains
+        // a stale explicit target or silently substitutes foreign focus.
+        let next = windows_tree_config_for_bitmap(paired, Some((43, 8)));
+        assert_eq!(
+            next.windows_target,
+            Some(WindowsTreeTarget {
+                hwnd: 43,
+                process_id: 8
+            })
+        );
+        let invalid = windows_tree_config_for_bitmap(next, Some((0, 0)));
+        assert_eq!(
+            invalid.windows_target,
+            Some(WindowsTreeTarget {
+                hwnd: 0,
+                process_id: 0
+            })
+        );
+        assert_eq!(
+            windows_tree_config_for_bitmap(invalid, None).windows_target,
+            None
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_window_metadata_uses_selected_owner_even_on_foreign_focus_triggers() {
+        use screenpipe_screen::capture_screenshot_by_window::CapturedWindow;
+        let selected = CapturedWindow {
+            image: image::DynamicImage::new_rgba8(1, 1),
+            app_name: "selected.exe".into(),
+            window_name: "selected synthetic window".into(),
+            process_id: 7,
+            is_focused: false,
+            browser_url: None,
+            window_x: 0,
+            window_y: 0,
+            window_width: 100,
+            window_height: 100,
+        };
+        for trigger in [
+            CaptureTrigger::AppSwitch {
+                app_name: "foreign.exe".into(),
+                target: None,
+            },
+            CaptureTrigger::WindowFocus {
+                window_name: "foreign synthetic window".into(),
+                target: None,
+            },
+        ] {
+            assert_eq!(
+                resolve_windows_capture_metadata(
+                    None,
+                    &trigger,
+                    Some("foreign.exe"),
+                    false,
+                    Some(&selected)
+                ),
+                (
+                    Some("selected.exe".into()),
+                    Some("selected synthetic window".into()),
+                    None,
+                    None
+                )
+            );
+            assert_eq!(
+                resolve_windows_capture_metadata(None, &trigger, Some("foreign.exe"), false, None),
+                (None, None, None, None)
+            );
+        }
+    }
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_late_exclusion_withholds_previously_acquired_monitor_pixels() {
@@ -3649,6 +3889,7 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
             "initial_privacy_evaluation" => CaptureReason::CaptureCheckFailed,
             "inconsistent_focus" => CaptureReason::InconsistentFocus,
             "excluded_background" => CaptureReason::ExcludedBackground,
+            "maximised_window_only" => CaptureReason::MaximisedWindowOnly,
             _ => CaptureReason::NoSafeWindow,
         });
     }

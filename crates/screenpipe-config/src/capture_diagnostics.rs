@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +99,7 @@ pub enum CaptureReason {
     AccessDenied,
     ExcludedForeground,
     ExcludedBackground,
+    MaximisedWindowOnly,
     OutsideIncludeFilter,
     NoSafeWindow,
     InconsistentFocus,
@@ -164,6 +165,7 @@ impl CaptureReason {
             Self::AccessDenied => "capture_access_denied",
             Self::ExcludedForeground => "capture_excluded_foreground",
             Self::ExcludedBackground => "capture_excluded_background",
+            Self::MaximisedWindowOnly => "capture_maximised_window_only",
             Self::OutsideIncludeFilter => "capture_outside_include_filter",
             Self::NoSafeWindow => "capture_no_safe_window",
             Self::InconsistentFocus => "capture_inconsistent_focus",
@@ -312,9 +314,113 @@ impl CaptureDiagnostic {
     }
 }
 type Key = (CaptureChannel, DiagnosticSource, CaptureScope);
+// Diagnostic history only: capture permits, live observations, samples and
+// watchdogs remain immediate. One second spans many audio buffers/UIA polls.
+const NOISY_DIAGNOSTIC_DWELL_MS: u64 = 1_000;
+
+#[derive(Default)]
+struct DiagnosticTransition {
+    published: Option<CaptureDiagnostic>,
+    candidate: Option<(CaptureDiagnostic, u64)>,
+}
+
+fn same_state(a: &CaptureDiagnostic, b: &CaptureDiagnostic) -> bool {
+    a.condition == b.condition
+        && a.reasons == b.reasons
+        && a.rules == b.rules
+        && a.excluded_apps == b.excluded_apps
+}
+
+fn noisy_key(event: &CaptureDiagnostic) -> bool {
+    matches!(
+        (event.channel, event.source),
+        (
+            CaptureChannel::Microphone | CaptureChannel::OutputAudio,
+            DiagnosticSource::AudioProcessing
+        ) | (
+            CaptureChannel::Keyboard | CaptureChannel::Clipboard,
+            DiagnosticSource::InputPrivacy
+        )
+    )
+}
+
+fn transient_input_reason(reason: CaptureReason) -> bool {
+    matches!(
+        reason,
+        CaptureReason::InputCheckUnavailable
+            | CaptureReason::InputCheckStale
+            | CaptureReason::InputGenerationChanged
+            | CaptureReason::InputFocusChanged
+            | CaptureReason::InputWorkerContended
+    )
+}
+
+impl DiagnosticTransition {
+    fn observe(&mut self, mut event: CaptureDiagnostic, tick_ms: u64) -> Option<CaptureDiagnostic> {
+        if self
+            .published
+            .as_ref()
+            .is_some_and(|previous| same_state(previous, &event))
+        {
+            self.candidate = None;
+            return None;
+        }
+        let dwell = self.published.as_ref().is_some_and(|previous| {
+            match (event.source, event.condition) {
+                (DiagnosticSource::AudioProcessing, CaptureCondition::Silent) => {
+                    event.reasons == [CaptureReason::SilentInput]
+                }
+                (DiagnosticSource::AudioProcessing, CaptureCondition::Admitted) => {
+                    event.reasons == [CaptureReason::GateOpen]
+                        && previous.condition == CaptureCondition::Silent
+                }
+                (DiagnosticSource::InputPrivacy, CaptureCondition::Admitted) => {
+                    event.reasons == [CaptureReason::GateOpen]
+                        && previous.condition == CaptureCondition::Suppressed
+                }
+                // First rejection is immediate; sustained changes of transient
+                // cause are reported, but per-poll reason oscillation is not.
+                (DiagnosticSource::InputPrivacy, CaptureCondition::Suppressed) => {
+                    previous.condition == CaptureCondition::Suppressed
+                        && !event.reasons.is_empty()
+                        && event.reasons.iter().copied().all(transient_input_reason)
+                        && previous.reasons.iter().copied().all(transient_input_reason)
+                }
+                _ => false,
+            }
+        });
+        if dwell {
+            match &self.candidate {
+                Some((candidate, started))
+                    if same_state(candidate, &event) && tick_ms >= *started =>
+                {
+                    if tick_ms - started < NOISY_DIAGNOSTIC_DWELL_MS {
+                        return None;
+                    }
+                    event.since_ms = candidate.since_ms;
+                }
+                _ => {
+                    self.candidate = Some((event, tick_ms));
+                    return None;
+                }
+            }
+        }
+        event.previous_since_ms = self.published.as_ref().map(|previous| previous.since_ms);
+        self.candidate = None;
+        self.published = Some(event.clone());
+        Some(event)
+    }
+}
+
+fn diagnostic_tick_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
 #[derive(Default)]
 struct Diagnostics {
     current: HashMap<Key, CaptureDiagnostic>,
+    transitions: HashMap<Key, DiagnosticTransition>,
     pending: VecDeque<CaptureDiagnostic>,
     dropped_observations: u64,
     reported_pressure: bool,
@@ -423,7 +529,15 @@ impl Diagnostics {
             dropped_observations: self.dropped_observations,
         }
     }
-    fn observe(&mut self, mut event: CaptureDiagnostic) -> Vec<DiagnosticDeliveryNotice> {
+    fn observe(&mut self, event: CaptureDiagnostic) -> Vec<DiagnosticDeliveryNotice> {
+        self.observe_at(event, diagnostic_tick_ms())
+    }
+    // Explicit monotonic time makes buffer/probe regressions deterministic.
+    fn observe_at(
+        &mut self,
+        mut event: CaptureDiagnostic,
+        tick_ms: u64,
+    ) -> Vec<DiagnosticDeliveryNotice> {
         if event.reasons.len() > 32 || event.rules.len() > 32 {
             DEGRADED.store(true, Ordering::Relaxed);
             event.reasons.truncate(32);
@@ -433,15 +547,16 @@ impl Diagnostics {
         event.reasons.dedup();
         let key = (event.channel, event.source, event.scope);
         if let Some(previous) = self.current.get_mut(&key) {
-            if previous.condition == event.condition
-                && previous.reasons == event.reasons
-                && previous.rules == event.rules
-                && previous.excluded_apps == event.excluded_apps
-            {
-                previous.observed_at_ms = event.observed_at_ms;
-                return Vec::new();
+            if same_state(previous, &event) {
+                event.since_ms = previous.since_ms;
+                event.previous_since_ms = previous.previous_since_ms;
+                if !noisy_key(&event) {
+                    previous.observed_at_ms = event.observed_at_ms;
+                    return Vec::new();
+                }
+            } else {
+                event.previous_since_ms = Some(previous.since_ms);
             }
-            event.previous_since_ms = Some(previous.since_ms);
         }
         if self.current.len() >= 4096 && !self.current.contains_key(&key) {
             self.dropped_observations = self.dropped_observations.saturating_add(1);
@@ -449,6 +564,17 @@ impl Diagnostics {
             return self.delivery_notices();
         }
         self.current.insert(key, event.clone());
+        if noisy_key(&event) {
+            let Some(published) = self
+                .transitions
+                .entry(key)
+                .or_default()
+                .observe(event, tick_ms)
+            else {
+                return Vec::new();
+            };
+            event = published;
+        }
         if self.pending.len() >= 4096 {
             self.dropped_observations = self.dropped_observations.saturating_add(1);
             DEGRADED.store(true, Ordering::Relaxed);
@@ -589,6 +715,316 @@ pub fn close_source(scope: CaptureScope, source: DiagnosticSource, reason: Captu
 mod tests {
     use super::*;
     static DELIVERY_NOTICES: Mutex<Vec<DiagnosticDeliveryNotice>> = Mutex::new(Vec::new());
+
+    fn simulated_event(
+        channel: CaptureChannel,
+        source: DiagnosticSource,
+        scope: CaptureScope,
+        condition: CaptureCondition,
+        reason: CaptureReason,
+        at: u64,
+    ) -> CaptureDiagnostic {
+        CaptureDiagnostic {
+            channel,
+            source,
+            scope,
+            condition,
+            reasons: vec![reason],
+            rules: Vec::new(),
+            excluded_apps: Vec::new(),
+            observed_at_ms: at,
+            since_ms: at,
+            previous_since_ms: None,
+        }
+    }
+
+    #[test]
+    fn silent_buffers_with_brief_reopens_emit_only_sustained_transitions() {
+        for channel in [CaptureChannel::Microphone, CaptureChannel::OutputAudio] {
+            let mut diagnostics = Diagnostics::default();
+            let sample = |silent, at| {
+                simulated_event(
+                    channel,
+                    DiagnosticSource::AudioProcessing,
+                    CaptureScope::Device(1),
+                    if silent {
+                        CaptureCondition::Silent
+                    } else {
+                        CaptureCondition::Admitted
+                    },
+                    if silent {
+                        CaptureReason::SilentInput
+                    } else {
+                        CaptureReason::GateOpen
+                    },
+                    at,
+                )
+            };
+            diagnostics.observe_at(sample(true, 0), 0);
+            for at in (10..60_000).step_by(10) {
+                // A 100ms non-silent burst every two seconds must not clear silence.
+                diagnostics.observe_at(sample(at % 2_000 >= 100, at), at);
+            }
+            assert_eq!(diagnostics.pending.len(), 1);
+            for at in (60_000..=61_000).step_by(10) {
+                diagnostics.observe_at(sample(false, at), at);
+            }
+            assert_eq!(diagnostics.pending.len(), 2);
+            let recovery = diagnostics.pending.back().unwrap();
+            assert_eq!(recovery.condition, CaptureCondition::Admitted);
+            assert_eq!(recovery.since_ms, 60_000);
+            assert_eq!(recovery.observed_at_ms, 61_000);
+            assert_eq!(recovery.previous_since_ms, Some(0));
+            for at in (62_000..=63_000).step_by(10) {
+                diagnostics.observe_at(sample(true, at), at);
+            }
+            assert_eq!(diagnostics.pending.len(), 3);
+            assert_eq!(
+                diagnostics.pending.back().unwrap().condition,
+                CaptureCondition::Silent
+            );
+        }
+    }
+
+    #[test]
+    fn input_check_flaps_keep_one_suppression_until_stable_recovery() {
+        for channel in [CaptureChannel::Keyboard, CaptureChannel::Clipboard] {
+            let mut diagnostics = Diagnostics::default();
+            let input = |condition, reason, at| {
+                simulated_event(
+                    channel,
+                    DiagnosticSource::InputPrivacy,
+                    CaptureScope::Global,
+                    condition,
+                    reason,
+                    at,
+                )
+            };
+            diagnostics.observe_at(
+                input(CaptureCondition::Admitted, CaptureReason::GateOpen, 0),
+                0,
+            );
+            diagnostics.observe_at(
+                input(
+                    CaptureCondition::Suppressed,
+                    CaptureReason::InputCheckUnavailable,
+                    1,
+                ),
+                1,
+            );
+            for at in (10..30_000).step_by(10) {
+                let (condition, reason) = match at % 40 {
+                    0 => (CaptureCondition::Admitted, CaptureReason::GateOpen),
+                    10 => (
+                        CaptureCondition::Suppressed,
+                        CaptureReason::InputCheckUnavailable,
+                    ),
+                    20 => (CaptureCondition::Suppressed, CaptureReason::InputCheckStale),
+                    _ => (
+                        CaptureCondition::Suppressed,
+                        CaptureReason::InputGenerationChanged,
+                    ),
+                };
+                diagnostics.observe_at(input(condition, reason, at), at);
+            }
+            assert_eq!(diagnostics.pending.len(), 2);
+            // Live truth/heartbeats are immediate even while history holds recovery.
+            diagnostics.observe_at(
+                input(CaptureCondition::Admitted, CaptureReason::GateOpen, 30_000),
+                30_000,
+            );
+            assert_eq!(
+                diagnostics.current.values().next().unwrap().condition,
+                CaptureCondition::Admitted
+            );
+            diagnostics.observe_at(
+                input(CaptureCondition::Admitted, CaptureReason::GateOpen, 30_999),
+                30_999,
+            );
+            assert_eq!(diagnostics.pending.len(), 2);
+            diagnostics.observe_at(
+                input(CaptureCondition::Admitted, CaptureReason::GateOpen, 31_000),
+                31_000,
+            );
+            assert_eq!(diagnostics.pending.len(), 3);
+        }
+    }
+
+    #[test]
+    fn sustained_input_cause_change_is_reported_once_and_password_is_immediate() {
+        let mut diagnostics = Diagnostics::default();
+        let input = |reason, at| {
+            simulated_event(
+                CaptureChannel::Keyboard,
+                DiagnosticSource::InputPrivacy,
+                CaptureScope::Global,
+                CaptureCondition::Suppressed,
+                reason,
+                at,
+            )
+        };
+        diagnostics.observe_at(input(CaptureReason::InputCheckUnavailable, 0), 0);
+        for at in (10..=1_010).step_by(10) {
+            diagnostics.observe_at(input(CaptureReason::InputCheckStale, at), at);
+        }
+        assert_eq!(diagnostics.pending.len(), 2);
+        diagnostics.observe_at(input(CaptureReason::PasswordField, 1_011), 1_011);
+        assert_eq!(diagnostics.pending.len(), 3);
+        diagnostics.observe_at(
+            input(CaptureReason::InputPasswordPropertyFailed, 1_012),
+            1_012,
+        );
+        assert_eq!(diagnostics.pending.len(), 4);
+    }
+
+    #[test]
+    fn real_failures_stops_no_callbacks_and_other_gates_bypass_dwell() {
+        let mut diagnostics = Diagnostics::default();
+        let audio = |condition, reason, at| {
+            simulated_event(
+                CaptureChannel::OutputAudio,
+                DiagnosticSource::AudioProcessing,
+                CaptureScope::Device(2),
+                condition,
+                reason,
+                at,
+            )
+        };
+        diagnostics.observe_at(
+            audio(CaptureCondition::Silent, CaptureReason::SilentInput, 0),
+            0,
+        );
+        diagnostics.observe_at(
+            audio(CaptureCondition::Admitted, CaptureReason::GateOpen, 1),
+            1,
+        );
+        diagnostics.observe_at(
+            audio(
+                CaptureCondition::NoCallbacks,
+                CaptureReason::NoAudioCallbacks,
+                2,
+            ),
+            2,
+        );
+        diagnostics.observe_at(
+            audio(CaptureCondition::Stopped, CaptureReason::DeviceRecovery, 3),
+            3,
+        );
+        diagnostics.observe_at(
+            audio(CaptureCondition::Admitted, CaptureReason::GateOpen, 4),
+            4,
+        );
+        diagnostics.observe_at(
+            audio(CaptureCondition::Stopped, CaptureReason::SessionStopped, 5),
+            5,
+        );
+        assert_eq!(diagnostics.pending.len(), 5);
+        for condition in [
+            CaptureCondition::Admitted,
+            CaptureCondition::Failed,
+            CaptureCondition::Redacted,
+            CaptureCondition::Suppressed,
+            CaptureCondition::Admitted,
+        ] {
+            diagnostics.observe_at(
+                simulated_event(
+                    CaptureChannel::Screen,
+                    DiagnosticSource::MonitorCapture,
+                    CaptureScope::Monitor(65701),
+                    condition,
+                    CaptureReason::CaptureFailure,
+                    6,
+                ),
+                6,
+            );
+        }
+        assert_eq!(diagnostics.pending.len(), 10);
+        for condition in [CaptureCondition::Suppressed, CaptureCondition::Admitted] {
+            diagnostics.observe_at(
+                simulated_event(
+                    CaptureChannel::Keyboard,
+                    DiagnosticSource::PrivacyAdmission,
+                    CaptureScope::Global,
+                    condition,
+                    CaptureReason::ScreenLocked,
+                    7,
+                ),
+                7,
+            );
+        }
+        assert_eq!(diagnostics.pending.len(), 12);
+    }
+
+    #[test]
+    fn dwell_is_per_source_device_and_uses_monotonic_not_calendar_time() {
+        let mut diagnostics = Diagnostics::default();
+        let audio = |id, condition, reason, calendar| {
+            simulated_event(
+                CaptureChannel::Microphone,
+                DiagnosticSource::AudioProcessing,
+                CaptureScope::Device(id),
+                condition,
+                reason,
+                calendar,
+            )
+        };
+        diagnostics.observe_at(
+            audio(
+                1,
+                CaptureCondition::Silent,
+                CaptureReason::SilentInput,
+                10_000,
+            ),
+            0,
+        );
+        diagnostics.observe_at(
+            audio(
+                2,
+                CaptureCondition::Admitted,
+                CaptureReason::GateOpen,
+                10_000,
+            ),
+            0,
+        );
+        diagnostics.observe_at(
+            audio(
+                1,
+                CaptureCondition::Admitted,
+                CaptureReason::GateOpen,
+                9_000,
+            ),
+            10,
+        );
+        diagnostics.observe_at(
+            audio(
+                2,
+                CaptureCondition::Silent,
+                CaptureReason::SilentInput,
+                20_000,
+            ),
+            20,
+        );
+        diagnostics.observe_at(
+            audio(
+                1,
+                CaptureCondition::Admitted,
+                CaptureReason::GateOpen,
+                1_000_000,
+            ),
+            1_010,
+        );
+        assert_eq!(diagnostics.pending.len(), 3);
+        diagnostics.observe_at(
+            audio(
+                2,
+                CaptureCondition::Silent,
+                CaptureReason::SilentInput,
+                20_001,
+            ),
+            1_020,
+        );
+        assert_eq!(diagnostics.pending.len(), 4);
+    }
     #[test]
     fn repeated_check_refreshes_observation_without_new_transition() {
         let mut diagnostics = Diagnostics::default();

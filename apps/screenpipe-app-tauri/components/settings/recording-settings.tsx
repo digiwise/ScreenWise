@@ -2983,7 +2983,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
                   <h3 className="text-sm font-medium text-foreground">Screen recording</h3>
-                  <p className="text-xs text-muted-foreground">Capture screenshots from your monitors</p>
+                  <p className="text-xs text-muted-foreground">Capture screenshots and interface text using accessibility and OCR</p>
                 </div>
               </div>
               <Switch id="disableVision" checked={!settings.disableVision} onCheckedChange={(checked) => handleSettingsChange({ disableVision: !checked }, true)} />

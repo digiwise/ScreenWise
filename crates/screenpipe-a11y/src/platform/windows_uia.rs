@@ -208,6 +208,7 @@ pub struct KeyboardPrivacy {
     reported_content_suppressions: AtomicU64,
     content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
     reported_content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
+    diagnostic_content_suppressions_by_reason: [AtomicU64; KEYBOARD_PRIVACY_DENIAL_REASONS],
     last_content_suppression_notice: Mutex<Option<Instant>>,
     probes: AtomicU64,
     last_probe_duration_us: AtomicU64,
@@ -381,38 +382,30 @@ impl KeyboardPrivacy {
                 decision_stale = reason_deltas[KeyboardPrivacyDenial::DecisionStale.index()],
                 "keyboard/clipboard content events were suppressed by the password-field privacy gate"
             );
-            {
-                use screenpipe_config::capture_diagnostics::*;
-                let reasons = [
-                    self.failure_reason.lock().unwrap_or(
-                        if self.logged_state.load(Ordering::SeqCst) == KEYBOARD_PRIVACY_PASSWORD {
-                            CaptureReason::PasswordField
-                        } else {
-                            CaptureReason::InputCheckUnavailable
-                        },
-                    ),
-                    CaptureReason::InputWorkerContended,
-                    CaptureReason::InputGenerationChanged,
-                    CaptureReason::InputFocusChanged,
-                    CaptureReason::InputCheckStale,
-                ]
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, reason)| (reason_deltas[index] > 0).then_some(reason))
-                .collect::<Vec<_>>();
-                for channel in [CaptureChannel::Keyboard, CaptureChannel::Clipboard] {
-                    observe(
-                        channel,
-                        DiagnosticSource::InputPrivacy,
-                        CaptureScope::Global,
-                        CaptureCondition::Suppressed,
-                        reasons.clone(),
-                        Vec::new(),
-                    );
-                }
-            }
             *last = Some(now);
         }
+    }
+
+    // Consume hook rejection counts once per worker poll, independently of the
+    // slower log counters. An old rejection must never overwrite a new healthy
+    // probe when the periodic counter summary is flushed.
+    fn take_content_suppression_reasons(&self, unavailable: CaptureReason) -> Vec<CaptureReason> {
+        [
+            unavailable,
+            CaptureReason::InputWorkerContended,
+            CaptureReason::InputGenerationChanged,
+            CaptureReason::InputFocusChanged,
+            CaptureReason::InputCheckStale,
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, reason)| {
+            let total = self.content_suppressions_by_reason[index].load(Ordering::Relaxed);
+            let previous = self.diagnostic_content_suppressions_by_reason[index]
+                .swap(total, Ordering::Relaxed);
+            (total > previous).then_some(reason)
+        })
+        .collect()
     }
 
     #[cfg(test)]
@@ -448,7 +441,7 @@ impl KeyboardPrivacy {
         let previous = self.logged_state.swap(state, Ordering::SeqCst);
         {
             use screenpipe_config::capture_diagnostics::*;
-            let (condition, reason) = match state {
+            let (mut condition, reason) = match state {
                 KEYBOARD_PRIVACY_ALLOWED => (CaptureCondition::Admitted, CaptureReason::GateOpen),
                 KEYBOARD_PRIVACY_PASSWORD => {
                     (CaptureCondition::Suppressed, CaptureReason::PasswordField)
@@ -458,13 +451,28 @@ impl KeyboardPrivacy {
                     failure.unwrap_or(CaptureReason::InputCheckUnavailable),
                 ),
             };
+            let mut reasons =
+                self.take_content_suppression_reasons(if state == KEYBOARD_PRIVACY_ALLOWED {
+                    CaptureReason::InputCheckUnavailable
+                } else {
+                    reason
+                });
+            if condition == CaptureCondition::Suppressed {
+                reasons.push(reason);
+            } else if !reasons.is_empty() {
+                // Report that this poll interval actually rejected content,
+                // rather than alternating open + suppression on the same poll.
+                condition = CaptureCondition::Suppressed;
+            } else {
+                reasons.push(reason);
+            }
             for channel in [CaptureChannel::Keyboard, CaptureChannel::Clipboard] {
                 observe(
                     channel,
                     DiagnosticSource::InputPrivacy,
                     CaptureScope::Global,
                     condition,
-                    vec![reason],
+                    reasons.clone(),
                     Vec::new(),
                 );
             }
@@ -523,6 +531,26 @@ fn input_too_recent(
     }
     let now_ms = start_time.elapsed().as_millis() as u64;
     now_ms.saturating_sub(last_input) < config.pause_extraction_on_input_ms
+}
+
+// This optional background reader is disabled when paired visual capture owns
+// UIA. Its internal flag is not the user's accessibility recording preference.
+fn background_tree_observation(
+    enabled: bool,
+    deferred: bool,
+) -> Option<(
+    screenpipe_config::capture_diagnostics::CaptureCondition,
+    CaptureReason,
+)> {
+    use screenpipe_config::capture_diagnostics::CaptureCondition;
+    enabled.then_some(if deferred {
+        (
+            CaptureCondition::Deferred,
+            CaptureReason::ActiveInputDeferral,
+        )
+    } else {
+        (CaptureCondition::Admitted, CaptureReason::GateOpen)
+    })
 }
 
 /// Shared state for pending focus changes (set by COM handler, read by UIA thread)
@@ -1535,26 +1563,16 @@ pub fn run_uia_thread(
         // threads. We keep `pending_focus` and don't bump `last_capture_time` so the
         // capture is retried on the next loop once input pauses.
         let skip_capture = input_too_recent(&config, start_time, &last_input_at_ms);
+        if let Some((condition, reason)) =
+            background_tree_observation(config.capture_tree, skip_capture)
         {
             use screenpipe_config::capture_diagnostics::*;
             observe(
                 CaptureChannel::Accessibility,
-                DiagnosticSource::UserPreference,
+                DiagnosticSource::CaptureOperation,
                 CaptureScope::Global,
-                if !config.capture_tree {
-                    CaptureCondition::Suppressed
-                } else if skip_capture {
-                    CaptureCondition::Deferred
-                } else {
-                    CaptureCondition::Admitted
-                },
-                vec![if !config.capture_tree {
-                    CaptureReason::Disabled
-                } else if skip_capture {
-                    CaptureReason::ActiveInputDeferral
-                } else {
-                    CaptureReason::GateOpen
-                }],
+                condition,
+                vec![reason],
                 Vec::new(),
             );
         }
@@ -2015,6 +2033,53 @@ mod tests {
         assert_eq!(
             diagnostics.suppressions_by_reason[KeyboardPrivacyDenial::DecisionStale.index()],
             1
+        );
+    }
+
+    #[test]
+    fn keyboard_privacy_rejections_are_consumed_once_independent_of_log_flush() {
+        let privacy = KeyboardPrivacy::default();
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::DecisionStale);
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::GenerationChanged);
+        let reasons =
+            privacy.take_content_suppression_reasons(CaptureReason::InputCheckUnavailable);
+        assert_eq!(
+            reasons,
+            vec![
+                CaptureReason::InputGenerationChanged,
+                CaptureReason::InputCheckStale
+            ]
+        );
+        assert!(privacy
+            .take_content_suppression_reasons(CaptureReason::InputCheckUnavailable)
+            .is_empty());
+        // Flushing accumulated log counts cannot replay them into gate state.
+        privacy.report_content_suppressions(Instant::now(), true);
+        assert!(privacy
+            .take_content_suppression_reasons(CaptureReason::InputCheckUnavailable)
+            .is_empty());
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::DecisionUnavailable);
+        assert_eq!(
+            privacy.take_content_suppression_reasons(CaptureReason::InputCheckUnavailable),
+            vec![CaptureReason::InputCheckUnavailable]
+        );
+    }
+
+    #[test]
+    fn delegated_background_tree_reader_does_not_report_accessibility_disabled() {
+        use screenpipe_config::capture_diagnostics::CaptureCondition;
+        assert_eq!(background_tree_observation(false, false), None);
+        assert_eq!(background_tree_observation(false, true), None);
+        assert_eq!(
+            background_tree_observation(true, false),
+            Some((CaptureCondition::Admitted, CaptureReason::GateOpen))
+        );
+        assert_eq!(
+            background_tree_observation(true, true),
+            Some((
+                CaptureCondition::Deferred,
+                CaptureReason::ActiveInputDeferral
+            ))
         );
     }
 

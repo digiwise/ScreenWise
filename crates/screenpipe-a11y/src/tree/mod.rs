@@ -396,8 +396,19 @@ pub fn hamming_distance(a: u64, b: u64) -> u32 {
 }
 
 /// Configuration for the tree walker.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsTreeTarget {
+    pub hwnd: isize,
+    pub process_id: u32,
+}
+
+/// Configuration for the tree walker.
 #[derive(Debug, Clone)]
 pub struct TreeWalkerConfig {
+    /// When paired window capture selects a target, never follow global focus.
+    #[cfg(target_os = "windows")]
+    pub windows_target: Option<WindowsTreeTarget>,
     /// How often to walk the tree (default: 3s).
     pub walk_interval: Duration,
     /// Maximum recursion depth (default: 35).
@@ -455,6 +466,8 @@ pub struct TreeWalkerConfig {
 impl Default for TreeWalkerConfig {
     fn default() -> Self {
         Self {
+            #[cfg(target_os = "windows")]
+            windows_target: None,
             walk_interval: Duration::from_secs(3),
             max_depth: 35,
             max_nodes: 5000,

@@ -58,6 +58,11 @@ app.py
 !scripts/windows/day-to-day-trial/pi_rpc_smoke.py
 !scripts/windows/day-to-day-trial/pi_console_host.py
 !scripts/windows/day-to-day-trial/test_pi_rpc_smoke.py
+!scripts/windows/maintenance/prune_capture_event_flaps.py
+!scripts/windows/maintenance/test_prune_capture_event_flaps.py
+!scripts/windows/interactive-validation/window-overlay/overlay_control.py
+!scripts/windows/interactive-validation/window-overlay/test_overlay_control.py
+!scripts/windows/interactive-validation/window-overlay/simple_overlay.py
 *.pyw
 *.pyz
 *.py3

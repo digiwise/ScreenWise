@@ -32,6 +32,22 @@ function open() { useStatusDialog.getState().open(); render(<RecordingStatusDial
 function expand(group: string, type: string) { fireEvent.click(screen.getByRole("button", { name: `${group} details` })); fireEvent.click(screen.getByRole("button", { name: `${type} details` })); }
 
 describe("compact recording dashboard", () => {
+  it("shows deliberate maximised-window scoping without invented blockers", () => {
+    seed({ observations: [{ ...observation, channel: "screen", source: "window_policy", scope: { monitor: 1 }, condition: "active_window_only", reasons: ["maximised_window_only"] }], evidence: [] });
+    open(); expand("Visual", "Screen images and video");
+    expect(screen.getAllByText("Maximised window only").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/same selected maximised window/).every((element) => element.textContent?.includes("scoped"))).toBe(true);
+    expect(screen.queryByText(/Observed blocker applications|No matching configured rule/)).toBeNull();
+  });
+  it("explains the missing-metadata privacy policy in the full visual drill-down", () => {
+    seed({ observations: [{ ...observation, channel: "screen", source: "window_policy", scope: { monitor: 1 }, condition: "active_window_only", reasons: ["excluded_background", "window_metadata_unavailable"], excluded_apps: ["explorer.exe", "C:\\private\\secret.exe"] }], evidence: [] });
+    open(); expand("Visual", "Screen images and video");
+    expect(screen.getAllByText(/Active window only — Window metadata could not be read/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/No matching configured rule was identified/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/covered by a maximized window/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Observed blocker applications: explorer.exe/)).toBeVisible();
+    expect(screen.queryByText(/private|secret/)).toBeNull();
+  });
   beforeEach(() => { fetchMock.mockReset(); invokeMock.mockReset().mockResolvedValue(undefined); useStatusDialog.getState().close(); useRecordingStatus.setState({ rows: [], evidence: [], deviceNames: [], audio: null, alerts: [], degraded: false, session: null, checked: null, receivedMonotonic: null, error: null, requestFailure: null, tick: Date.now(), generation: 0 }); });
   it("consumes shared status without adding a dialog poller", () => { render(<RecordingStatusDialog />); expect(fetchMock).not.toHaveBeenCalled(); expect(screen.queryByRole("dialog")).toBeNull(); });
   it("shows three compact coloured group icons in the toolbar with accessible counts", () => { seed(); render(<RecordingStatusButton />); const button = screen.getByRole("button", { name: "Recording status" }); expect(within(button).getByText(/Visual:/)).toBeInTheDocument(); expect(within(button).getByText(/Audio:/)).toBeInTheDocument(); expect(within(button).getByText(/Input and activity:/)).toBeInTheDocument(); fireEvent.click(button); expect(useStatusDialog.getState().isOpen).toBe(true); });

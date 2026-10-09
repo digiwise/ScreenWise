@@ -12,7 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStatusDialog } from "@/lib/hooks/use-status-dialog";
 import { useRecordingStatus, recordingStatusUnavailable, type RecordingStatusState } from "@/lib/hooks/use-recording-status";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { evidenceAge, DATA_TYPES, recordingDeviceScope, recordingObservationLabel, recordingReason } from "@/lib/recording-status";
+import { evidenceAge, DATA_TYPES, recordingDeviceScope, recordingObservationLabel, recordingPolicyExplanation, recordingReason } from "@/lib/recording-status";
 import { audioDuration, audioLowOutput } from "@/lib/audio-activity";
 import { RECORDING_GROUPS, classifyRecordingType, worstRecordingStatus, recordingPolicyObservation, recordingCheckIsCurrent, type DashboardInput } from "@/lib/recording-status-dashboard";
 import { RecordingGroupIcon, RecordingGroupCounts, RecordingStateIcon } from "./recording-status-dashboard";
@@ -123,7 +123,8 @@ const observations = unavailable ? [] : rows.filter((row) => row.channel === cha
           {observations.map((row) => <div key={row.key} className="text-sm mt-2">
             <div className={row.condition === "admitted" ? "text-muted-foreground" : "text-amber-600"}>{recordingDeviceScope(row.scope, channel, names)} · {recordingCheckIsCurrent(row, observations, elapsed, channelEvidence) ? recordingObservationLabel(row) : `Status unavailable — last reported: ${recordingObservationLabel(row)}`}</div>
             <div>{row.reasons.map(recordingReason).join("; ")}</div>
-            {row.rules.map((rule) => <div key={rule} className="text-xs">{rule}</div>)}
+            {row.source === "window policy" && row.condition !== "admitted" && !row.reasons.includes("maximised window only") && <div className="text-xs">Observed blocker applications: {row.blockerApps?.length ? row.blockerApps.join(", ") : "unavailable"}. Identities are sampled; they are not a rule-to-application mapping.</div>}
+            {recordingPolicyExplanation(row) ? <div className="text-xs">{recordingPolicyExplanation(row)}</div> : row.rules.map((rule) => <div key={rule} className="text-xs">{rule}</div>)}
             <div className="text-xs text-muted-foreground">Observer: {row.source} · condition since {new Date(row.since).toLocaleString()} · {recordingPolicyObservation(row) ? "policy last reported" : "last report"} {new Date(row.observed).toLocaleString()}{!recordingPolicyObservation(row) && ` · last producer check: ${row.checkedAge === null ? "unavailable" : evidenceAge(row.checkedAge, elapsed)}`}</div>
           </div>)}
         </div>;

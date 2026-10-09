@@ -10,7 +10,7 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest implementation: [graceful deployment shutdown](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md). Previous candidate: [recording-status batch](docs/RECORDING_STATUS_IMPLEMENTATION.md). Earlier hashes below belong to their historical candidates.
+Latest candidate: [capture status, event-flap and maximised-window fixes](docs/CAPTURE_FIX_HANDOFF.md). Previous implementation: [graceful deployment shutdown](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md). Earlier hashes below belong to their historical candidates.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
 
@@ -1454,3 +1454,81 @@ trial or firewall change occurred. This is compilation and synthetic evidence,
 not live transcription-quality validation. Secondary audio paths and complete
 queue/segment tracing remain incompletely instrumented. Retention/pending-review
 implementation and freshly authorized live validation remain separate milestones.
+
+## Capture status, event-flap and maximised-window repair (2026-10-09)
+
+The authorised increment repairs stale observer attribution, missing rule/policy
+explanations, background UIA falsely reporting the feature disabled, and noisy
+sample/input diagnostics. Three new UI checks distinguish deliberate maximised
+window scoping from exclusions and from confirmed capture. Focused frontend
+coverage is 106 unique checks; affected parser/dashboard/dialog selection has
+73 checks. TypeScript and the final 16-page Next export passed with the existing
+unpdf warning. No dependency acquisition or lockfile change.
+
+Config 59, screen 131, accessibility 191 (23 live ignored), engine capture 45,
+notice/API persistence 13, audio 16 serial and maintenance five regressions
+passed. Audio's first parallel run exposed existing shared-global test
+interference; serial execution passed without source repair. Exact selected
+window propagation, background maximised-window metadata, invalid identity,
+small overlays and full-monitor topmost precedence have deterministic coverage.
+RootFmt passed. Final release-local RootBuild passed in 4m33s with all 785
+external artifacts reused; DesktopBuild passed in 7m53s with all 1,080 reused.
+No external dependencies were rebuilt. Versions and exact hashes are in the
+[hand-off](docs/CAPTURE_FIX_HANDOFF.md).
+
+The owner separately authorised bounded diagnostic-history pruning: 18,500 flood
+rows removed, 1,024 original target transitions and all 2,078 other notices
+preserved. Four authenticated API pages confirmed 3,102 survivors. No recorded
+content was queried, no fake replacement rows or vacuum were used. Private
+archive/receipt and transaction verification preserve the scoped evidence;
+this is not a lossless reconstruction or full database restoration archive.
+
+Later authorisation extended the same strict cleanup to three additional bounded
+ranges ending 2026-10-09T05:15:00Z. Removed another 14,549 rows; retained 1,506
+target transitions and 2,884 other notices unchanged. Total removal is 33,049.
+Older non-flood history, unknown shapes, uncertain privacy/focus pairs, the small
+output-audio dataset and later events remain untouched. See the hand-off table.
+
+Synthetic window-overlay integration compilation and two pixel evaluator checks
+passed, with its live test ignored by default. Fixture/controller checks and
+metadata desktop preflight passed outside the restricted executor. Four freshly
+consented attempts stopped before acquisition: first cause unrecorded; second
+lost foreground after accepted activation; third passed owner-click readiness
+but failed independent-overlay ownership because WinForms assigned an implicit
+owner; a fourth child exited without retained details. The owner-authorised
+gpt-6-astra agent replaced the fixture with two independent simple forms, no
+click/focus/owner manipulation/parent-handle coupling. Self-test/Python syntax,
+RootFmt, ten pins and two offline image evaluator tests passed; narrow rebuild
+7.33s/433 external reused/zero rebuilt. The fresh-consented replacement then
+passed in 3.53s (native test 0.88s): target/overlay/underlying colour controls 1.0,
+overlay colour in target 0.0, separate PID/native-max/bounds/Z checks passed.
+Both owned processes closed; images were discarded in memory. This is empirical
+proof for the synthetic opaque overlay on the production WGC primitive, not an
+in-flight state-mutation or UIA test. No production deployment,
+restart, recording session, firewall change or live soak is performed here.
+See [master checklist](docs/CAPTURE_FIX_MASTER_CHECKLIST.md),
+[event repair and historical limits](docs/CAPTURE_EVENT_FLAP_FIX.md) and
+[authorised window-scoping plan](docs/VISIBLE_WINDOW_CAPTURE_PLAN.md).
+
+The later stored-target extension passed three pre-acquisition mutations with
+fresh consent in 9.10s on the owner desktop. Every cyan baseline was 1.0.
+After an ordinary non-topmost foreground cover, raw WGC returned last-painted
+green target pixels (1.0), with replacement magenta 0.0. Minimised/closed targets
+returned capture errors. Real production `verify_windows_capture_target`
+rejected each changed target; no replacement/monitor acquisition, saved image
+or recorder persistence was exercised. This does not prove an in-flight race
+or continuous frame freshness. The preceding sandbox-account attempt failed
+all baseline captures with `0x80070424`; no mutations occurred. Metadata-only
+preflight and a fresh-consented unchanged retry passed in the verified owner
+context. Test-only compilation took 57.84s, all 433 external artifacts reused;
+two offline tests passed and two live tests were ignored by default. RootFmt
+passed. Production candidate binaries and source were unchanged.
+
+The owner then confirmed deployment. Metadata-only verification found the
+running desktop hash matched the candidate and process start was
+2026-10-09T06:09:27.871258Z. The final authorised one-off cleanup used that
+conservative cutoff, removing 3,268 further flood rows and preserving 426 target
+transitions plus all 651 other notices unchanged. Five bounded ranges total
+36,317 removed/8,569 retained. Private archive/receipt verification preceded
+exact-row deletion; no post-cutoff events were included. The separate client
+owns API behaviour verification; no production soak or agent restart was run.
