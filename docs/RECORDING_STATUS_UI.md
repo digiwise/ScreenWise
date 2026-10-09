@@ -399,9 +399,10 @@ The next implementation batch also includes these owner-requested dashboard task
 - Add monitor aliases, upgrading the earlier optional-alias proposal to included
   scope. Keep aliases separate from current runtime IDs and expose the underlying
   identity in details; do not attach an alias to an uncertain historical monitor.
-- Make the main-window status/control row wrap, with a logical two-line layout
-  when needed. Preserve readable status labels and access to every control at
-  narrow widths and increased display scaling.
+- Make specifically and only the main-window row containing the Status label
+  shown in the owner's screenshot wrap, with a logical two-line layout when needed.
+  Preserve readable labels and access to every control on that row at narrow widths
+  and increased display scaling. Other main-window rows are outside this task.
 - Add level 1 as a complete compact overview without scrolling at the intended
   default size. The existing view becomes level 2, with existing More details as
   level 3. Summaries must expose mixed states, errors, pauses and staleness rather
@@ -421,3 +422,38 @@ the full startup preflight pass, with an explicit prepare-only option. Finish wi
 focused regressions, required checks, one settled local-profile build/export,
 documentation and commits. Actual deployment/interactive validation remain separate
 actions. This section records scope only; none of these new changes is implemented.
+
+### Consolidated next implementation batch
+
+This list consolidates the scope above without dropping the owner's priorities:
+
+1. Truthful status presentation: preserve last reported state/reason with an
+   adjacent staleness age; keep ordinary computer-output audio gaps Listening and
+   suppress inappropriate fault alerts, while retaining real errors.
+2. Specific foreground and input-safety diagnostics: distinguish identification,
+   enumeration, focus-transition, password-property and worker/check failures,
+   preserving capture/privacy gates and practical bounded error details.
+3. Monitor identification: existing monitor names plus user aliases, duplicate-name
+   disambiguation, technical IDs in details and sound identity/session handling.
+4. Floating-dashboard lifecycle/access: restore prior visibility, position, size
+   and view level with on-screen/DPI checks, and add a system-tray launcher.
+5. Three-level dashboard: full compact overview without scrolling at level 1,
+   current view at level 2 and existing More details at level 3; move the permanent
+   footer into relevant control help/detail labels.
+6. Responsive layout only for the main-window row containing Status in the
+   screenshot; wrap that row's controls at logical breakpoints.
+7. Reliable deletion and retention lifecycle: SW-R04 durable failed-eviction retry
+   jobs and SW-R06 restored saved retention after every backend restart.
+8. Correct Windows fallback audio configuration/sample-rate propagation (SW-R08).
+9. Exact CORS origins and minimal unauthenticated versus detailed authenticated
+   health (SW-R12), preserving existing supported consumers.
+10. Convert only timestamp metadata, preserving captured text verbatim (SW-R15).
+11. Deployment verifies existing firewall rules and complete startup preflight,
+    then starts automatically only when both pass; explicit prepare-only option.
+    Missing/conflicting rules leave it stopped, with useful instructions and no
+    automatic firewall mutation.
+12. Focused regressions and required checks; one settled frontend export and
+    affected release-local builds, updated validation/docs, reviewable commits and
+    preparation of the next deployment candidate.
+
+Implementation remains deferred until the current candidate is deployed, as agreed.
