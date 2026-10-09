@@ -657,6 +657,10 @@ fn create_dynamic_menu(
             .build(app)?,
     );
 
+    menu_builder = menu_builder.item(
+        &MenuItemBuilder::with_id("show_recording_dashboard", "Recording dashboard").build(app)?,
+    );
+
     // --- Recording controls ---
     menu_builder = menu_builder.item(&PredefinedMenuItem::separator(app)?);
 
@@ -834,6 +838,14 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let _ = app_handle.run_on_main_thread(move || {
                 show_main_window(app.clone());
                 let _ = app.emit("tray-show-timeline", ());
+            });
+        }
+        "show_recording_dashboard" => {
+            let app = app_handle.clone();
+            let _ = app_handle.run_on_main_thread(move || {
+                if crate::recording_dashboard::show(&app, true).is_err() {
+                    tracing::warn!("dashboard could not be opened from tray");
+                }
             });
         }
         "show_search" => {

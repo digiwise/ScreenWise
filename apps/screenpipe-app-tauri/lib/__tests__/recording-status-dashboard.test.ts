@@ -33,11 +33,11 @@ describe("truthful compact recording classification", () => {
   });
   it("does not clear a stale blocker based on another observer", () => {
     const status = classifyRecordingType("microphone", input({ rows: [row, { ...row, source: "permission", condition: "suppressed", status: "Suppressed", checkedAge: 60000 }] }))[0];
-    expect(status.mode).toBe("unknown"); expect(status.label).toContain("blocker");
+    expect(status.mode).toBe("paused"); expect(status.label).toContain("Suppressed"); expect(status.staleAge).toBe(60000);
   });
   it("does not substitute fresh capture for a different stale permission gate", () => {
     const status = classifyRecordingType("microphone", input({ rows: [row, { ...row, source: "permission", checkedAge: 60000 }] }))[0];
-    expect(status.mode).toBe("unknown"); expect(status.label).toContain("permission checks are stale");
+    expect(status.mode).toBe("unknown"); expect(status.label).toBe("Capture permitted"); expect(status.staleAge).toBe(60000);
   });
   it("uses live aggregate admission rather than the age of a positive policy snapshot", () => {
     const preference = { ...row, source: "user preference", checkedAge: 60000 };
@@ -49,7 +49,7 @@ describe("truthful compact recording classification", () => {
     const values = input({ rows: [{ ...row, channel: "output_audio" }, { ...row, channel: "output_audio", source: "content protection", checkedAge: 38000 }], evidence: [{ ...success, channel: "output_audio" }] });
     expect(classifyRecordingType("output_audio", values)[0].mode).toBe("recording");
     expect(classifyRecordingType("output_audio", { ...values, rows: values.rows.slice(1) })[0].mode).toBe("unknown");
-    expect(classifyRecordingType("output_audio", { ...values, rows: [values.rows[0], { ...values.rows[1], condition: "suppressed" }] })[0].mode).toBe("unknown");
+    expect(classifyRecordingType("output_audio", { ...values, rows: [values.rows[0], { ...values.rows[1], condition: "suppressed" }] })[0].mode).toBe("paused");
     const screen = { ...values, rows: values.rows.map((item) => ({ ...item, channel: "screen" })), evidence: values.evidence.map((item) => ({ ...item, channel: "screen" })) };
     expect(classifyRecordingType("screen", screen)[0].mode).toBe("unknown");
   });
@@ -61,8 +61,8 @@ describe("truthful compact recording classification", () => {
   it("keeps explicit user policy until changed without treating operational failures as policy", () => {
     const policy = { ...row, source: "user preference", condition: "stopped", reasons: ["disabled"], checkedAge: 60000 };
     expect(classifyRecordingType("microphone", input({ rows: [policy] }))[0].mode).toBe("paused");
-    expect(classifyRecordingType("microphone", input({ rows: [{ ...policy, source: "audio device", condition: "failed", reasons: ["device stream failed"] }] }))[0].mode).toBe("unknown");
-    expect(classifyRecordingType("microphone", input({ rows: [{ ...policy, checkedAge: null }] }))[0].mode).toBe("unknown");
+    expect(classifyRecordingType("microphone", input({ rows: [{ ...policy, source: "audio device", condition: "failed", reasons: ["device stream failed"] }] }))[0].mode).toBe("error");
+    expect(classifyRecordingType("microphone", input({ rows: [{ ...policy, checkedAge: null }] }))[0].mode).toBe("paused");
   });
   it("watches unchanged visual data only with a current operational check and prior success", () => {
     const screen = input({ rows: [{ ...row, channel: "screen" }, { ...row, channel: "screen", source: "monitor capture", scope: "Monitor 1" }], evidence: [{ ...success, channel: "screen", scope: "Monitor 1", captureAge: 60000, storageAge: 60000 }] });
@@ -90,4 +90,29 @@ describe("truthful compact recording classification", () => {
     expect(classifyRecordingType("microphone", { ...values, audio: { ...audio, observedWindow: 5000 } })[0].mode).not.toBe("quiet");
   });
   it("always marks uninstrumented activity metadata unknown", () => expect(classifyRecordingType("activity", input())[0].label).toContain("not instrumented"));
+});
+
+it("preserves the last summary and reason beside an explicit stale age", () => {
+  const current = classifyRecordingType("microphone", input());
+  const expired = classifyRecordingType("microphone", input({ unavailable: true, requestFailed: true, elapsed: 23000, lastStatuses: { microphone: current } }));
+  expect(expired[0].label).toBe(current[0].label); expect(expired[0].mode).toBe(current[0].mode); expect(expired[0].staleAge).toBe(23000);
+});
+it("listens during normal output gaps but still reports microphone and stream faults", () => {
+  const gap = { ...row, channel: "output_audio", scope: "Device 2", source: "audio processing", condition: "no_callbacks", status: "No audio callbacks", reasons: ["no audio callbacks"] };
+  const values = input({ rows: [{ ...row, channel: "output_audio" }, gap], evidence: [{ ...success, channel: "output_audio" }] });
+  expect(classifyRecordingType("output_audio", values)[0].label).toBe("Listening — awaiting computer audio");
+  expect(classifyRecordingType("output_audio", { ...values, rows: [...values.rows, { ...gap, source: "audio device", condition: "failed", reasons: ["device stream failed"] }] })[0].mode).toBe("error");
+  expect(classifyRecordingType("microphone", input({ rows: [row, { ...gap, channel: "microphone" }] }))[0].mode).toBe("error");
+});
+
+it("retains producer age across an outage after a stale snapshot", () => {
+  const previous = { mode: "paused" as const, label: "Paused — excluded foreground", scope: "Monitor 1", staleAge: 80000 };
+  expect(classifyRecordingType("screen", input({ unavailable: true, elapsed: 5000, lastStatuses: { screen: [previous] } }))[0].staleAge).toBe(85000);
+  expect(classifyRecordingType("screen", input({ unavailable: true, elapsed: 5000, lastStatuses: { screen: [{ ...previous, staleAge: null }] } }))[0].staleAge).toBeNull();
+});
+
+it("withholds numeric stale ages after a clock discontinuity", () => {
+  const previous = classifyRecordingType("microphone", input());
+  const expired = classifyRecordingType("microphone", input({ unavailable: true, elapsed: 0, ageUncertain: true, lastStatuses: { microphone: previous } }))[0];
+  expect(expired.staleAge).toBeNull(); expect(expired.label).toBe(previous[0].label);
 });

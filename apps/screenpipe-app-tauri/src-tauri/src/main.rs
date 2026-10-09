@@ -63,6 +63,7 @@ mod pi_provisioning;
 mod pi_rpc_inventory;
 mod pi_runtime;
 mod recording;
+mod recording_dashboard;
 mod retention;
 mod secrets;
 mod server_core;
@@ -620,6 +621,11 @@ async fn main() {
                 });
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == "recording-dashboard" {
+                    api.prevent_close();
+                    crate::recording_dashboard::hide(window.app_handle());
+                    return;
+                }
                 let _ = window.set_always_on_top(false);
                 let _ = window.set_visible_on_all_workspaces(false);
 
@@ -1360,10 +1366,11 @@ async fn main() {
                 }
             });
 
-            // Auto-start local data retention if it was enabled
+            crate::recording_dashboard::restore(app.handle());
+
+            // Restore saved retention after readiness recovery and backend restarts
             let app_handle_clone = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
                 retention::auto_start(&app_handle_clone).await;
             });
 
@@ -1392,6 +1399,7 @@ async fn main() {
                     // Otherwise, prevent auto-exit so the app stays alive in the
                     // tray when all windows are closed / destroyed.
                     if tray::QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                        crate::recording_dashboard::flush(app_handle);
                         info!("ExitRequested event — quit was requested, allowing exit");
                     } else {
                         info!("ExitRequested event — preventing (app stays in tray)");

@@ -6522,6 +6522,7 @@ dependencies = [
  "rusty-tesseract",
  "sck-rs",
  "screenpipe-a11y",
+ "screenpipe-config",
  "screenpipe-core",
  "screenpipe-db",
  "serde",

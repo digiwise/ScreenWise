@@ -327,10 +327,9 @@ impl AudioStream {
             }
         }
 
-        let audio_config = AudioStreamConfig::from(&config);
         let channels = config.channels();
 
-        let thread = Self::spawn_audio_thread(
+        let (audio_config, thread) = Self::spawn_audio_thread(
             cpal_audio_device,
             config,
             tx,
@@ -361,14 +360,15 @@ impl AudioStream {
         stream_control_tx: mpsc::Sender<StreamControl>,
         windows_input_aec: bool,
         macos_input_vpio: bool,
-    ) -> Result<tokio::task::JoinHandle<()>> {
+    ) -> Result<(AudioStreamConfig, tokio::task::JoinHandle<()>)> {
+        let (opened_tx, opened_rx) = oneshot::channel();
         let device_name = device.name()?;
         #[cfg(target_os = "macos")]
         let use_vpio = macos_input_vpio;
         #[cfg(target_os = "windows")]
         let use_aec = windows_input_aec;
 
-        Ok(tokio::task::spawn_blocking(move || {
+        let thread = tokio::task::spawn_blocking(move || {
             // Primary attempt: the "best" config get_cpal_device_and_config
             // picked (highest sample rate × most channels from
             // supported_input_configs). On Windows 11 24H2 WASAPI sometimes
@@ -394,7 +394,7 @@ impl AudioStream {
                 windows_input_aec,
                 macos_input_vpio,
             ) {
-                Ok(s) => Some(s),
+                Ok(s) => Some((s, AudioStreamConfig::from(&config))),
                 Err(primary_err) if is_wasapi_unsupported_format(&primary_err) => {
                     warn!(
                         "primary input config rejected for {} ({}), retrying with default_input_config",
@@ -419,7 +419,7 @@ impl AudioStream {
                                 windows_input_aec,
                                 macos_input_vpio,
                             ) {
-                                Ok(s) => Some(s),
+                                Ok(s) => Some((s, AudioStreamConfig::from(&fallback))),
                                 Err(fallback_err) => {
                                     // Last resort: disable Windows AEC and try again.
                                     // Some USB mics (e.g. Logitech C922) reject AEC even
@@ -451,7 +451,7 @@ impl AudioStream {
                                                     "AEC disabled as last resort for {} — mic works but echo cancellation is off",
                                                     device_name
                                                 );
-                                                Some(s)
+                                                Some((s, AudioStreamConfig::from(&fallback)))
                                             }
                                             Err(no_aec_err) => {
                                                 error!(
@@ -514,7 +514,7 @@ impl AudioStream {
                         windows_input_aec,
                         false,
                     ) {
-                        Ok(s) => Some(s),
+                        Ok(s) => Some((s, AudioStreamConfig::from(&config))),
                         Err(fallback_err) => {
                             error!(
                                 "HAL fallback also failed for {} after VPIO error: {} (VPIO error: {})",
@@ -530,9 +530,15 @@ impl AudioStream {
                 }
             };
 
-            if let Some(stream) = stream {
+            if let Some((stream, opened_config)) = stream {
                 if let Err(e) = stream.play() {
                     error!("failed to play stream for {}: {}", device_name, e);
+                    return;
+                }
+
+                // Publish only after the selected stream has actually started.
+                // A timed-out caller must not leave an orphan stream running.
+                if opened_tx.send(opened_config).is_err() {
                     return;
                 }
 
@@ -564,7 +570,9 @@ impl AudioStream {
                     response.send(()).ok();
                 }
             }
-        }))
+        });
+        let opened_config = await_opened_config(opened_rx).await?;
+        Ok((opened_config, thread))
     }
 
     pub async fn subscribe(&self) -> broadcast::Receiver<CapturedAudio> {
@@ -1102,9 +1110,45 @@ mod from_wav_tests {
     }
 }
 
+#[cfg(not(all(target_os = "linux", feature = "pulseaudio")))]
+async fn await_opened_config(
+    receiver: oneshot::Receiver<AudioStreamConfig>,
+) -> Result<AudioStreamConfig> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
+        .await
+        .map_err(|_| anyhow!("audio stream initialization timed out"))?
+        .map_err(|_| anyhow!("audio stream initialization failed"))
+}
+
 #[cfg(all(test, not(all(target_os = "linux", feature = "pulseaudio"))))]
 mod wasapi_format_tests {
-    use super::is_wasapi_unsupported_format;
+    use super::{await_opened_config, is_wasapi_unsupported_format, AudioStreamConfig};
+
+    #[tokio::test]
+    async fn opened_configuration_handshake_uses_fallback_rate_and_channels() {
+        let rejected = AudioStreamConfig::new(96000, 2);
+        let fallback = cpal::SupportedStreamConfig::new(
+            1,
+            cpal::SampleRate(44100),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
+        );
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(AudioStreamConfig::from(&fallback)).unwrap();
+        let opened = await_opened_config(receiver).await.unwrap();
+        assert_eq!(opened.sample_rate().0, 44100);
+        assert_eq!(opened.channels(), 1);
+        assert_ne!(opened.sample_rate().0, rejected.sample_rate().0);
+        // One second of opened samples must be interpreted as one second.
+        assert_eq!(44100.0 / opened.sample_rate().0 as f64, 1.0);
+    }
+
+    #[tokio::test]
+    async fn opened_configuration_handshake_fails_when_stream_did_not_open() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        drop(sender);
+        assert!(await_opened_config(receiver).await.is_err());
+    }
 
     fn err(msg: &str) -> anyhow::Error {
         anyhow::anyhow!("{}", msg)

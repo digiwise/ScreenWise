@@ -27,6 +27,7 @@ pub mod live_capture_status;
 mod persistence;
 mod recording;
 pub mod screen_lock;
+pub mod sensitive_debug;
 
 pub use defaults::*;
 pub use persistence::*;

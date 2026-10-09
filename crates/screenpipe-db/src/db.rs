@@ -131,6 +131,7 @@ pub struct MediaDeletionCleanup {
     pub video_files_deleted: u64,
     pub audio_files_deleted: u64,
     pub snapshot_files_deleted: u64,
+    pub bytes_freed: u64,
     pub pending: u64,
     pub failed: u64,
 }
@@ -6442,8 +6443,10 @@ impl DatabaseManager {
             } else if !std::path::Path::new(&path).is_absolute() {
                 Some("media_path_unverified")
             } else {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 match std::fs::remove_file(&path) {
                     Ok(()) => {
+                        result.bytes_freed = result.bytes_freed.saturating_add(size);
                         match kind.as_str() {
                             "video" => result.video_files_deleted += 1,
                             "audio" => result.audio_files_deleted += 1,
@@ -6895,7 +6898,8 @@ impl DatabaseManager {
     ///
     /// Marks evicted chunks with `evicted_at = CURRENT_TIMESTAMP` and clears
     /// `file_path` to '' so loaders can early-out without dereferencing a
-    /// stale path. Caller is responsible for unlinking the returned files.
+    /// stale path. Eligible paths are queued in the SAME transaction, so failed
+    /// unlink operations remain retryable after a restart.
     pub async fn evict_media_in_range(
         &self,
         start: DateTime<Utc>,
@@ -6953,6 +6957,8 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+
+        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
 
         // Mark video_chunks as evicted (file_path -> '', evicted_at -> now)
         let video_evict = sqlx::query(
@@ -11157,6 +11163,126 @@ mod tests {
         assert_eq!(result.video_files, vec!["video.mp4"]);
     }
 
+    #[tokio::test]
+    async fn retention_eviction_failure_survives_restart_and_retries_all_media_kinds() {
+        let dir = std::env::temp_dir().join(format!(
+            "screenwise-eviction-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let database = dir.join("synthetic.sqlite");
+        let paths: Vec<String> = ["video", "audio", "snapshot"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                std::fs::create_dir(&path).unwrap(); // deterministic unlink failure
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        let retained = dir.join("retained.mp4");
+        std::fs::write(&retained, b"synthetic retained bytes").unwrap();
+        let db = DatabaseManager::new(&database.to_string_lossy(), Default::default())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO video_chunks (id, file_path) VALUES (1, ?1), (2, ?2)")
+            .bind(&paths[0])
+            .bind(retained.to_string_lossy().as_ref())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO audio_chunks (id, file_path) VALUES (1, ?1)")
+            .bind(&paths[1])
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO frames (id, video_chunk_id, offset_index, timestamp, device_name, snapshot_path) VALUES (1, 1, 0, '2026-01-02T00:00:00+00:00', 'synthetic', ?1), (2, 2, 0, '2026-01-02T00:00:00+00:00', 'synthetic', NULL), (3, 2, 1, '2026-01-04T00:00:00+00:00', 'synthetic', NULL)").bind(&paths[2]).execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO audio_transcriptions (audio_chunk_id, offset_index, timestamp, transcription) VALUES (1, 0, '2026-01-02T00:00:00+00:00', 'fixed synthetic text')").execute(&db.pool).await.unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-01-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let eviction = db.evict_media_in_range(start, end).await.unwrap();
+        assert_eq!(
+            (
+                eviction.video_chunks_evicted,
+                eviction.audio_chunks_evicted,
+                eviction.snapshots_evicted
+            ),
+            (1, 1, 1)
+        );
+        let failed = db
+            .retry_selected_media_deletions(&paths, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            (failed.pending, failed.failed, failed.bytes_freed),
+            (3, 3, 0)
+        );
+        assert!(retained.exists());
+        db.pool.close().await;
+        db.write_pool.close().await;
+        drop(db);
+        let db = DatabaseManager::new(&database.to_string_lossy(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 3);
+        for path in &paths {
+            std::fs::remove_dir(path).unwrap();
+            std::fs::write(path, b"fixed").unwrap();
+        }
+        let retried = db.retry_media_deletions(100).await.unwrap();
+        assert_eq!(
+            (
+                retried.video_files_deleted,
+                retried.audio_files_deleted,
+                retried.snapshot_files_deleted
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (retried.pending, retried.failed, retried.bytes_freed),
+            (0, 0, 15)
+        );
+        for path in &paths {
+            assert!(!std::path::Path::new(path).exists());
+        }
+        assert_eq!(
+            std::fs::read(&retained).unwrap(),
+            b"synthetic retained bytes"
+        );
+        let frame_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frames")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let transcript_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audio_transcriptions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!((frame_count, transcript_count), (3, 1));
+        db.pool.close().await;
+        db.write_pool.close().await;
+        drop(db);
+        std::fs::remove_file(&retained).unwrap();
+        // SQLite's Windows worker can release its final handle just after pool
+        // close completes. This retry is only fixture cleanup, after all durable
+        // queue/deletion assertions; never weaken the deletion checks above.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => break,
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(32) | Some(33))
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("synthetic fixture cleanup failed: {error}"),
+            }
+        }
+    }
     #[tokio::test]
     async fn orphan_cleanup_is_null_safe() {
         let db = test_database().await;

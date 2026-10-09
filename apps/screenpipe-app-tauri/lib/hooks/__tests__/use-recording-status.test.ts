@@ -28,7 +28,7 @@ describe("shared background recording status", () => {
     expect(useRecordingStatus.getState().requestFailure?.kind).toBe("invalid_response");
   });
   let stops: (() => void)[];
-  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); stops = []; fetchMock.mockReset(); useRecordingStatus.setState({ rows: [], evidence: [], deviceNames: [], audio: null, alerts: [], degraded: false, session: null, checked: null, receivedMonotonic: null, error: null, requestFailure: null, tick: Date.now(), generation: 0 }); });
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); stops = []; fetchMock.mockReset(); useRecordingStatus.setState({ rows: [], evidence: [], deviceNames: [], audio: null, alerts: [], degraded: false, session: null, checked: null, receivedMonotonic: null, error: null, requestFailure: null, tick: Date.now(), generation: 0, ageUncertain: false, lastStatuses: undefined }); });
   afterEach(() => { stops.forEach((stop) => stop()); vi.useRealTimers(); });
   it("keeps one poll loop for several consumers and survives closing one", async () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => body() });
@@ -46,11 +46,13 @@ describe("shared background recording status", () => {
     await vi.advanceTimersByTimeAsync(4999); expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1); expect(fetchMock).toHaveBeenCalledTimes(2);
   });
-  it("clears old evidence on failure and cannot freshen it by closing and opening the panel", async () => {
+  it("preserves old evidence on failure and cannot freshen it by closing and opening the panel", async () => {
     fetchMock.mockResolvedValueOnce({ ok: true, json: async () => body() }).mockRejectedValue(new Error("Offline"));
     stops.push(startRecordingStatusMonitoring()); await vi.advanceTimersByTimeAsync(0);
     expect(useRecordingStatus.getState().rows.length).toBe(1);
-    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().rows).toEqual([]);
+    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().rows).toHaveLength(1);
+    expect(useRecordingStatus.getState().lastStatuses?.microphone[0].staleAge).toBeUndefined();
+    expect(recordingStatusUnavailable(useRecordingStatus.getState())).toContain("failed");
     const checked = useRecordingStatus.getState().checked;
     stops.push(startRecordingStatusMonitoring()); expect(useRecordingStatus.getState().checked).toBe(checked);
   });
@@ -62,6 +64,13 @@ describe("shared background recording status", () => {
     expect(useRecordingStatus.getState().generation).toBe(1);
     resolve({ ok: true, json: async () => body() }); await vi.advanceTimersByTimeAsync(0);
     expect(useRecordingStatus.getState().rows).toEqual([]); expect(useRecordingStatus.getState().checked).toBeNull();
+  });
+  it("preserves observations but withholds age after clock discontinuity until recovery", async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => body() });
+    stops.push(startRecordingStatusMonitoring()); await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(Date.now() - 60000); await vi.advanceTimersByTimeAsync(1000);
+    expect(useRecordingStatus.getState().rows).toHaveLength(1); expect(useRecordingStatus.getState().ageUncertain).toBe(true);
+    await vi.advanceTimersByTimeAsync(4000); expect(useRecordingStatus.getState().ageUncertain).toBe(false);
   });
   it("rejects stale or mismatched wall and monotonic response ages", () => {
     const state = { ...useRecordingStatus.getState(), error: null, checked: 1000, receivedMonotonic: 1000, tick: 1000 };
@@ -78,7 +87,7 @@ describe("shared background recording status", () => {
     resolve({ ok: true, json: async () => body() }); await vi.advanceTimersByTimeAsync(0);
     expect(useRecordingStatus.getState().checked).toBeNull(); expect(useRecordingStatus.getState().rows).toEqual([]);
   });
-  it("replaces device names each snapshot and clears them on session changes and failures", async () => {
+  it("replaces device names each snapshot and preserves the old snapshot on failures", async () => {
     fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ...body(), live_status: { ...body().live_status, device_names: [{ channel: "microphone", device: 1, name: "USB mic" }] } }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ...body(), live_status: { ...body().live_status, session_started_at_ms: 2, device_names: [] } }) })
       .mockRejectedValue(new Error("Offline"));
@@ -86,6 +95,6 @@ describe("shared background recording status", () => {
     expect(useRecordingStatus.getState().deviceNames).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().deviceNames).toEqual([]);
     useRecordingStatus.setState({ deviceNames: [{ channel: "microphone", device: 1, name: "temporary" }] });
-    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().deviceNames).toEqual([]);
+    await vi.advanceTimersByTimeAsync(5000); expect(useRecordingStatus.getState().deviceNames).toHaveLength(1);
   });
 });

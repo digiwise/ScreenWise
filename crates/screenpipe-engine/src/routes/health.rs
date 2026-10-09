@@ -117,12 +117,14 @@ fn suspected_stall_cause(read_idle: u32, write_idle: u32) -> &'static str {
 }
 
 use screenpipe_screen::monitor::{
-    get_cached_monitor_descriptions, get_monitor_by_id, list_monitors, list_monitors_detailed,
-    MonitorListError,
+    get_cached_monitor_descriptions, list_monitors, list_monitors_detailed, MonitorListError,
 };
 
 #[derive(OaSchema, Serialize)]
 pub struct MonitorInfo {
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub display_kind: String,
     pub id: u32,
     pub stable_id: String,
     pub name: String,
@@ -1121,28 +1123,28 @@ pub(crate) fn get_verbose_instructions(unhealthy_systems: &[&str]) -> String {
 pub async fn api_list_monitors(
 ) -> Result<JsonResponse<Vec<MonitorInfo>>, (StatusCode, JsonResponse<serde_json::Value>)> {
     let monitors = list_monitors().await;
-    let monitor_info = futures::future::join_all(monitors.into_iter().map(|monitor| async move {
-        let monitor_id = monitor.id();
-        match get_monitor_by_id(monitor_id).await {
-            Some(monitor) => MonitorInfo {
+    let display_sources = screenpipe_screen::display_metadata::list_display_metadata().await;
+    // Use the same enumerated monitors rather than re-enumerating per row.
+    let monitor_info: Vec<MonitorInfo> = monitors
+        .iter()
+        .map(|monitor| {
+            let metadata = screenpipe_screen::display_metadata::metadata_for_monitor(
+                monitor,
+                &display_sources,
+            );
+            MonitorInfo {
                 id: monitor.id(),
                 stable_id: monitor.stable_id(),
                 name: monitor.name().to_string(),
                 width: monitor.width(),
                 height: monitor.height(),
                 is_default: monitor.is_primary(),
-            },
-            None => MonitorInfo {
-                id: monitor_id,
-                stable_id: format!("unknown_{}", monitor_id),
-                name: "Unknown".to_string(),
-                width: 0,
-                height: 0,
-                is_default: false,
-            },
-        }
-    }))
-    .await;
+                x: metadata.x,
+                y: metadata.y,
+                display_kind: metadata.kind.as_str().to_string(),
+            }
+        })
+        .collect();
 
     if monitor_info.is_empty() {
         Err((

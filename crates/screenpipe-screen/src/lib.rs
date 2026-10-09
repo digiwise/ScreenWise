@@ -5,6 +5,7 @@
 #[cfg(target_os = "macos")]
 pub mod apple;
 pub mod core;
+pub mod display_metadata;
 pub mod frame_comparison;
 #[cfg(any(target_os = "windows", test))]
 pub mod microsoft;

@@ -179,6 +179,9 @@ pub struct RecordingState {
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorDevice {
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub display_kind: String,
     pub id: u32,
     pub stable_id: String,
     pub name: String,
@@ -246,20 +249,28 @@ pub async fn get_available_monitors() -> Result<Vec<MonitorDevice>, String> {
         return Err("No monitors found".to_string());
     }
 
+    let display_sources = screenpipe_screen::display_metadata::list_display_metadata().await;
     let result: Vec<MonitorDevice> = monitors
         .iter()
         .enumerate()
-        .map(|(i, m)| MonitorDevice {
-            id: m.id(),
-            stable_id: m.stable_id(),
-            name: if m.name().is_empty() {
-                format!("Monitor {}", i + 1)
-            } else {
-                m.name().to_string()
-            },
-            is_default: i == 0,
-            width: m.width(),
-            height: m.height(),
+        .map(|(i, m)| {
+            let metadata =
+                screenpipe_screen::display_metadata::metadata_for_monitor(m, &display_sources);
+            MonitorDevice {
+                x: metadata.x,
+                y: metadata.y,
+                display_kind: metadata.kind.as_str().to_string(),
+                id: m.id(),
+                stable_id: m.stable_id(),
+                name: if m.name().is_empty() {
+                    format!("Monitor {}", i + 1)
+                } else {
+                    m.name().to_string()
+                },
+                is_default: m.is_primary(),
+                width: m.width(),
+                height: m.height(),
+            }
         })
         .collect();
 

@@ -7,28 +7,101 @@ use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
 
-/// Recursively walk a JSON value and convert any UTC RFC 3339 timestamp strings
-/// to local time with offset (e.g. `2026-03-04T09:30:00-05:00`).
-/// Also handles bare SQLite timestamps like `2026-03-04 14:30:00` (assumed UTC).
+/// Convert only declared timestamp metadata. Timestamp-shaped OCR, transcripts,
+/// names, input and other captured strings are never interpreted as metadata.
 pub fn convert_timestamps_to_local(value: &mut Value) {
     match value {
-        Value::String(s) => {
-            if let Some(converted) = try_convert_timestamp(s) {
-                *s = converted;
-            }
-        }
-        Value::Array(arr) => {
-            for item in arr {
+        Value::Array(items) => {
+            for item in items {
                 convert_timestamps_to_local(item);
             }
         }
         Value::Object(map) => {
-            for (_key, val) in map.iter_mut() {
-                convert_timestamps_to_local(val);
+            for (key, value) in map.iter_mut() {
+                if is_timestamp_metadata(key) {
+                    if let Value::String(text) = value {
+                        if let Some(converted) = try_convert_timestamp(text) {
+                            *text = converted;
+                        }
+                    }
+                } else if is_response_container(key) {
+                    convert_timestamps_to_local(value);
+                }
             }
         }
         _ => {}
     }
+}
+
+// Only these server-owned response containers may contain timestamp metadata.
+// User-defined objects (source_context, UIA properties, payloads, text_json,
+// metadata, etc.) are opaque even when they contain a key named timestamp.
+fn is_response_container(key: &str) -> bool {
+    matches!(
+        key,
+        "data"
+            | "content"
+            | "devices"
+            | "audio"
+            | "frames"
+            | "events"
+            | "active_intervals"
+            | "live_status"
+            | "sources"
+            | "source_conditions"
+            | "gate_observations"
+            | "capture_evidence"
+            | "storage_evidence"
+            | "intervals"
+            | "segments"
+            | "transcript"
+            | "transcriptions"
+            | "meetings"
+            | "pipeline"
+            | "audio_pipeline"
+            | "accessibility"
+            | "ui_recorder"
+            | "apps"
+            | "windows"
+            | "key_texts"
+            | "audio_summary"
+            | "top_transcriptions"
+            | "time_range"
+            | "recording"
+            | "memories"
+            | "snippets"
+    )
+}
+
+fn is_timestamp_metadata(key: &str) -> bool {
+    matches!(
+        key,
+        "timestamp"
+            | "created_at"
+            | "updated_at"
+            | "captured_at"
+            | "start_time"
+            | "end_time"
+            | "meeting_start"
+            | "meeting_end"
+            | "last_frame_timestamp"
+            | "last_audio_timestamp"
+            | "last_ui_timestamp"
+            | "last_frame_at"
+            | "last_audio_at"
+            | "initial_traversal_at"
+            | "last_cleanup"
+            | "evicted_at"
+            | "started_at"
+            | "ended_at"
+            | "last_success_at"
+            | "last_failure_at"
+            | "oldest_untranscribed_at"
+            | "start"
+            | "end"
+            | "first_seen"
+            | "last_seen"
+    )
 }
 
 /// Try to parse a string as a UTC timestamp and convert to local time.
@@ -67,6 +140,7 @@ fn try_convert_timestamp(s: &str) -> Option<String> {
 /// Pass `?timezone=utc` to opt out and keep UTC timestamps.
 pub async fn timestamp_middleware(req: Request, next: Next) -> Response {
     // Check if the client explicitly wants UTC
+    let raw_query = req.uri().path() == "/raw_sql";
     let wants_utc = req
         .uri()
         .query()
@@ -78,7 +152,9 @@ pub async fn timestamp_middleware(req: Request, next: Next) -> Response {
 
     let response = next.run(req).await;
 
-    if wants_utc {
+    // Raw SQL has caller-defined column names, including captured text named
+    // timestamp; no response schema is available to distinguish it. Keep UTC.
+    if wants_utc || raw_query {
         return response;
     }
 
@@ -138,9 +214,9 @@ mod tests {
 
     #[test]
     fn test_convert_utc_z_suffix() {
-        let mut value = Value::String("2026-03-04T14:30:00Z".to_string());
+        let mut value = serde_json::json!({ "timestamp": "2026-03-04T14:30:00Z" });
         convert_timestamps_to_local(&mut value);
-        if let Value::String(s) = &value {
+        if let Some(s) = value["timestamp"].as_str() {
             // Should not end with Z anymore
             assert!(!s.ends_with('Z'), "Expected local time, got: {}", s);
             // Should contain an offset like +XX:XX or -XX:XX
@@ -154,9 +230,9 @@ mod tests {
 
     #[test]
     fn test_convert_utc_plus_zero() {
-        let mut value = Value::String("2026-03-04T14:30:00+00:00".to_string());
+        let mut value = serde_json::json!({ "timestamp": "2026-03-04T14:30:00+00:00" });
         convert_timestamps_to_local(&mut value);
-        if let Value::String(s) = &value {
+        if let Some(s) = value["timestamp"].as_str() {
             assert!(
                 !s.ends_with("+00:00") || Local::now().offset().local_minus_utc() == 0,
                 "Expected local time, got: {}",
@@ -167,9 +243,9 @@ mod tests {
 
     #[test]
     fn test_convert_bare_sqlite_timestamp() {
-        let mut value = Value::String("2026-03-04 14:30:00".to_string());
+        let mut value = serde_json::json!({ "timestamp": "2026-03-04 14:30:00" });
         convert_timestamps_to_local(&mut value);
-        if let Value::String(s) = &value {
+        if let Some(s) = value["timestamp"].as_str() {
             assert!(!s.contains(' '), "Expected RFC3339, got: {}", s);
             assert!(s.contains('T'), "Expected RFC3339, got: {}", s);
         }
@@ -177,18 +253,18 @@ mod tests {
 
     #[test]
     fn test_convert_bare_sqlite_timestamp_with_fractional() {
-        let mut value = Value::String("2026-03-04 14:30:00.123".to_string());
+        let mut value = serde_json::json!({ "timestamp": "2026-03-04 14:30:00.123" });
         convert_timestamps_to_local(&mut value);
-        if let Value::String(s) = &value {
+        if let Some(s) = value["timestamp"].as_str() {
             assert!(!s.contains(' '), "Expected RFC3339, got: {}", s);
         }
     }
 
     #[test]
     fn test_non_timestamp_string_unchanged() {
-        let mut value = Value::String("hello world".to_string());
+        let mut value = serde_json::json!({ "timestamp": "hello world" });
         convert_timestamps_to_local(&mut value);
-        assert_eq!(value, Value::String("hello world".to_string()));
+        assert_eq!(value["timestamp"], "hello world");
     }
 
     #[test]
@@ -224,11 +300,45 @@ mod tests {
     #[test]
     fn test_already_local_timestamp_unchanged() {
         // A timestamp with a non-UTC offset should not be modified
-        let mut value = Value::String("2026-03-04T09:30:00-05:00".to_string());
+        let mut value = serde_json::json!({ "timestamp": "2026-03-04T09:30:00-05:00" });
         convert_timestamps_to_local(&mut value);
-        if let Value::String(s) = &value {
+        if let Some(s) = value["timestamp"].as_str() {
             // Should still have an offset (not Z)
             assert!(!s.ends_with('Z'), "Should not be UTC: {}", s);
         }
+    }
+    #[test]
+    fn captured_timestamp_shaped_text_is_unchanged() {
+        let captured = "2026-03-04 14:30:00";
+        let mut value = serde_json::json!({
+            "timestamp": captured,
+            "content": { "timestamp": captured, "text": captured, "transcription": captured,
+                "window_name": captured, "app_name": captured },
+            "texts": [captured], "metadata": { "timestamp": captured },
+            "text_json": { "timestamp": captured }, "payload": { "timestamp": captured },
+            "source_context": { "data": { "timestamp": captured } },
+            "properties": { "timestamp": captured }
+        });
+        convert_timestamps_to_local(&mut value);
+        assert!(value["timestamp"].as_str().unwrap().contains('T'));
+        assert!(value["content"]["timestamp"]
+            .as_str()
+            .unwrap()
+            .contains('T'));
+        for key in ["text", "transcription", "window_name", "app_name"] {
+            assert_eq!(value["content"][key], captured);
+        }
+        assert_eq!(value["texts"][0], captured);
+        assert_eq!(value["source_context"]["data"]["timestamp"], captured);
+        for key in ["metadata", "text_json", "payload", "properties"] {
+            assert_eq!(value[key]["timestamp"], captured);
+        }
+        let output = localize_json_string(
+            &serde_json::json!({"timestamp": captured, "text": captured}).to_string(),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["text"],
+            captured
+        );
     }
 }

@@ -1169,38 +1169,7 @@ pub async fn show_window(
 #[tauri::command]
 #[specta::specta]
 pub async fn show_recording_dashboard(app_handle: tauri::AppHandle) -> Result<(), String> {
-    const LABEL: &str = "recording-dashboard";
-    if let Some(window) = app_handle.get_webview_window(LABEL) {
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
-        window.show().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let mut builder = tauri::WebviewWindowBuilder::new(
-        &app_handle,
-        LABEL,
-        tauri::WebviewUrl::App("recording-dashboard".into()),
-    )
-    .title("ScreenWise recording status")
-    .inner_size(360.0, 480.0)
-    .min_inner_size(300.0, 240.0)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .resizable(true);
-    if let Ok(Some(monitor)) = app_handle.primary_monitor() {
-        let area = monitor.work_area();
-        let scale = monitor.scale_factor();
-        let x = area.position.x as f64 / scale;
-        let y = area.position.y as f64 / scale;
-        let width = area.size.width as f64 / scale;
-        let height = area.size.height as f64 / scale;
-        builder = builder.position(x + (width - 376.0).max(0.0), y + (height - 536.0).max(0.0));
-    }
-    let window = builder.build().map_err(|e| {
-        log_webview_build_failure(LABEL, "/recording-dashboard", &e);
-        e.to_string()
-    })?;
-    crate::window::finalize_webview_window(window);
-    Ok(())
+    crate::recording_dashboard::show(&app_handle, true)
 }
 
 /// Like `show_window` but forces macOS app activation first, so the target

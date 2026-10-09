@@ -901,41 +901,65 @@ fn extract_window_data_xcap(window: XcapWindow) -> Option<WindowData> {
 
 #[cfg(target_os = "windows")]
 fn get_process_exe_name(pid: u32) -> Option<String> {
-    // Use raw FFI to avoid windows-core version conflicts with xcap
+    // Limited query rights suffice; VM_READ needlessly fails for elevated apps.
     #[link(name = "kernel32")]
     extern "system" {
-        fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
-        fn CloseHandle(hObject: isize) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn QueryFullProcessImageNameW(
+            process: isize,
+            flags: u32,
+            buffer: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+        fn CloseHandle(process: isize) -> i32;
     }
-    #[link(name = "psapi")]
-    extern "system" {
-        fn GetModuleFileNameExW(
-            hProcess: isize,
-            hModule: isize,
-            lpFilename: *mut u16,
-            nSize: u32,
-        ) -> u32;
-    }
-
-    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
-    const PROCESS_VM_READ: u32 = 0x0010;
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-
     unsafe {
-        // Try full access first, fall back to limited (handles elevated processes)
-        let mut handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        let handle = OpenProcess(0x1000, 0, pid);
         if handle == 0 {
-            handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        }
-        if handle == 0 {
+            let error = std::io::Error::last_os_error();
+            sensitive_capture_error("process_identity", "OpenProcess", Some(pid), &error);
             return None;
         }
-
-        let mut buf = [0u16; 260];
-        let len = GetModuleFileNameExW(handle, 0, buf.as_mut_ptr(), buf.len() as u32);
+        let mut buffer = vec![0u16; 32768];
+        let mut length = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length);
+        let error = (ok == 0).then(std::io::Error::last_os_error);
         CloseHandle(handle);
+        if let Some(error) = error {
+            sensitive_capture_error(
+                "process_identity",
+                "QueryFullProcessImageNameW",
+                Some(pid),
+                &error,
+            );
+            return None;
+        }
+        executable_from_path_buffer(&buffer, length as usize)
+    }
+}
 
-        executable_from_path_buffer(&buf, len as usize)
+#[cfg(target_os = "windows")]
+fn sensitive_capture_error(
+    category: &'static str,
+    stage: &'static str,
+    pid: Option<u32>,
+    error: &dyn std::fmt::Debug,
+) {
+    screenpipe_config::sensitive_debug::record(
+        category,
+        || serde_json::json!({"stage":stage,"pid":pid,"error":format!("{error:#?}")}),
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn missing_foreground_reason(
+    foreground: Option<WindowsForegroundSample>,
+    recorder_pid: u32,
+) -> &'static str {
+    match foreground {
+        None => "foreground_window_unavailable",
+        Some(sample) if sample.process == recorder_pid => "recorder_ui",
+        Some(_) => "foreground_not_enumerated",
     }
 }
 
@@ -1685,17 +1709,31 @@ pub fn evaluate_windows_monitor_capture(
     let mut foreground_unsuitable = None;
     let mut foreground_seen = false;
 
-    for source in Window::all()? {
-        if source.is_minimized()? {
+    for source in Window::all().inspect_err(|error| {
+        sensitive_capture_error("window_enumeration", "Window::all", None, error)
+    })? {
+        if source.is_minimized().inspect_err(|error| {
+            sensitive_capture_error("window_metadata", "is_minimized", None, error)
+        })? {
             continue;
         }
 
-        let id = source.id()?;
+        let id = source
+            .id()
+            .inspect_err(|error| sensitive_capture_error("window_metadata", "id", None, error))?;
         let is_focused = foreground.is_some_and(|sample| sample.window == id);
-        let window_x = source.x()?;
-        let window_y = source.y()?;
-        let window_width = source.width()?;
-        let window_height = source.height()?;
+        let window_x = source
+            .x()
+            .inspect_err(|error| sensitive_capture_error("window_metadata", "x", None, error))?;
+        let window_y = source
+            .y()
+            .inspect_err(|error| sensitive_capture_error("window_metadata", "y", None, error))?;
+        let window_width = source.width().inspect_err(|error| {
+            sensitive_capture_error("window_metadata", "width", None, error)
+        })?;
+        let window_height = source.height().inspect_err(|error| {
+            sensitive_capture_error("window_metadata", "height", None, error)
+        })?;
         let bounds = Rect {
             x: window_x,
             y: window_y,
@@ -1708,20 +1746,38 @@ pub fn evaluate_windows_monitor_capture(
             continue;
         }
 
-        let process_id = source.pid()? as i32;
+        let process_id = source
+            .pid()
+            .inspect_err(|error| sensitive_capture_error("window_metadata", "pid", None, error))?
+            as i32;
         if is_focused && foreground.is_some_and(|sample| sample.process != process_id as u32) {
             return Err(
                 std::io::Error::other("foreground process changed during evaluation").into(),
             );
         }
         foreground_seen |= is_focused;
-        let app_name = source.app_name().unwrap_or_default();
+        let app_name = source
+            .app_name()
+            .inspect_err(|error| {
+                sensitive_capture_error(
+                    "window_metadata",
+                    "app_name",
+                    Some(process_id as u32),
+                    error,
+                )
+            })
+            .unwrap_or_default();
         let app_name = if app_name.is_empty() {
             get_process_exe_name(process_id as u32).unwrap_or_default()
         } else {
             app_name
         };
-        let window_name = source.title().unwrap_or_default();
+        let window_name = source
+            .title()
+            .inspect_err(|error| {
+                sensitive_capture_error("window_metadata", "title", Some(process_id as u32), error)
+            })
+            .unwrap_or_default();
         let executable = get_process_exe_name(process_id as u32);
         let diagnostic_app = diagnostic_executable_name(executable.as_deref());
         let app_name_lower = app_name.to_lowercase();
@@ -1735,7 +1791,13 @@ pub fn evaluate_windows_monitor_capture(
             match create_url_detector().get_active_url(&app_name, process_id, &window_name) {
                 Ok(url) => browser_url = url,
                 Err(error) => {
-                    debug!("failed to resolve active browser URL for capture policy: {error}");
+                    sensitive_capture_error(
+                        "browser_policy",
+                        "get_active_url",
+                        Some(process_id as u32),
+                        &error,
+                    );
+                    debug!("Active browser URL could not be verified for capture policy");
                     url_uncertain = window_filters.has_ignored_urls();
                 }
             }
@@ -1848,7 +1910,7 @@ pub fn evaluate_windows_monitor_capture(
         let app = foreground.and_then(|sample| get_process_exe_name(sample.process));
         privacy.add_blocker(
             diagnostic_executable_name(app.as_deref()),
-            vec!["foreground_window_unavailable"],
+            vec![missing_foreground_reason(foreground, std::process::id())],
             true,
         );
     }
@@ -1883,6 +1945,20 @@ pub fn evaluate_windows_monitor_capture(
         WindowsCaptureChoice::ActiveWindow(_) => WindowsCaptureOutcome::BackgroundRedacted,
         WindowsCaptureChoice::Redacted(reason) => WindowsCaptureOutcome::CaptureRedacted(*reason),
     });
+    if !matches!(choice, WindowsCaptureChoice::FullMonitor) {
+        screenpipe_config::sensitive_debug::record("capture_privacy_decision", || {
+            serde_json::json!({
+                "monitor_id":monitor.id(), "choice":format!("{choice:?}"), "privacy":privacy,
+                "native_foreground":foreground.map(|f| serde_json::json!({"hwnd":f.window,"pid":f.process,"monitor":f.monitor,"class":window_class_name(f.window),"executable":get_process_exe_name(f.process)})),
+                "final_foreground":format!("{final_foreground:?}"),
+                "candidates":runtime_windows.iter().take(64).map(|w| serde_json::json!({
+                    "hwnd":w.snapshot.id,"pid":w.process_id,"app":w.app_name,"title":w.window_name,"url":w.browser_url,
+                    "focused":w.snapshot.is_focused,"excluded":w.snapshot.is_excluded,"can_capture":w.snapshot.can_capture,
+                    "bounds":{"x":w.window_x,"y":w.window_y,"width":w.window_width,"height":w.window_height}
+                })).collect::<Vec<_>>(), "candidates_truncated":runtime_windows.len() > 64
+            })
+        });
+    }
     let plan = match choice {
         WindowsCaptureChoice::FullMonitor => WindowsMonitorCapturePlan::FullMonitor,
         WindowsCaptureChoice::Redacted(reason) => WindowsMonitorCapturePlan::Redacted(reason),
@@ -1917,7 +1993,13 @@ async fn capture_windows_monitor_privacy_safe_once(
     let started_at = std::time::Instant::now();
     let initial = match evaluate_windows_monitor_capture(monitor, window_filters) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
+            sensitive_capture_error(
+                "capture_operation",
+                "initial_privacy_evaluation",
+                None,
+                &error,
+            );
             return placeholder_capture(
                 monitor,
                 WindowsCaptureOutcome::CaptureFailed(
@@ -1925,7 +2007,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                 ),
                 started_at,
                 WindowsCapturePrivacy::default(),
-            )
+            );
         }
     };
 
@@ -1934,7 +2016,13 @@ async fn capture_windows_monitor_privacy_safe_once(
         WindowsMonitorCapturePlan::FullMonitor => {
             match crate::utils::capture_monitor_image(monitor, &[]).await {
                 Ok((image, _)) => (image, None, false),
-                Err(_) => {
+                Err(error) => {
+                    sensitive_capture_error(
+                        "capture_operation",
+                        "monitor_acquisition",
+                        None,
+                        &error,
+                    );
                     return placeholder_capture(
                         monitor,
                         WindowsCaptureOutcome::CaptureFailed(
@@ -1942,14 +2030,20 @@ async fn capture_windows_monitor_privacy_safe_once(
                         ),
                         started_at,
                         privacy,
-                    )
+                    );
                 }
             }
         }
         WindowsMonitorCapturePlan::ActiveWindow(window) => {
             match window.capture_for_monitor(monitor) {
                 Ok((image, captured_window)) => (image, Some(captured_window), true),
-                Err(_) => {
+                Err(error) => {
+                    sensitive_capture_error(
+                        "capture_operation",
+                        "active_window_acquisition",
+                        None,
+                        &error,
+                    );
                     return placeholder_capture(
                         monitor,
                         WindowsCaptureOutcome::CaptureFailed(
@@ -1957,7 +2051,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                         ),
                         started_at,
                         privacy,
-                    )
+                    );
                 }
             }
         }
@@ -1973,7 +2067,13 @@ async fn capture_windows_monitor_privacy_safe_once(
 
     let post = match evaluate_windows_monitor_capture(monitor, window_filters) {
         Ok(post) => post,
-        Err(_) => {
+        Err(error) => {
+            sensitive_capture_error(
+                "capture_operation",
+                "post_capture_privacy_evaluation",
+                None,
+                &error,
+            );
             return placeholder_capture(
                 monitor,
                 WindowsCaptureOutcome::CaptureFailed(
@@ -1981,7 +2081,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                 ),
                 started_at,
                 privacy,
-            )
+            );
         }
     };
     privacy.merge(post.privacy);
@@ -3959,4 +4059,23 @@ fn capture_diagnostic_rules_preserve_source_indices_without_matching_text() {
     let builtin = WindowFilters::new(&[], &[], &[])
         .diagnostic_rule_matches("logonui", "Lock", None, None, true);
     assert_eq!(builtin[0].origin, "builtin");
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn foreground_diagnostics_distinguish_missing_sample_enumeration_and_recorder() {
+    assert_eq!(
+        missing_foreground_reason(None, 42),
+        "foreground_window_unavailable"
+    );
+    let sample = WindowsForegroundSample {
+        window: 1,
+        process: 42,
+        monitor: Some(2),
+    };
+    assert_eq!(missing_foreground_reason(Some(sample), 42), "recorder_ui");
+    assert_eq!(
+        missing_foreground_reason(Some(sample), 100),
+        "foreground_not_enumerated"
+    );
 }

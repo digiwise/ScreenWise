@@ -898,7 +898,7 @@ function HomeContent() {
                 if (outputs.length > 0) groups.push({ key: "output", icon: Volume2, pausedIcon: VolumeX, count: outputs.length, title: outputs.map((d) => d.name).join(", "), opacity: audioOpacity, devices: outputs });
 
                 return (
-                  <div className="flex items-center gap-2 mt-1.5">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1.5 min-w-0">
                     {groups.map(({ key, icon: ActiveIcon, pausedIcon: PausedIcon, count, title, opacity, devices: groupDevices }) => {
                       const activeCount = groupDevices.filter((d: RecordingDevice) => d.active).length;
                       const allActive = groupDevices.every((d: RecordingDevice) => d.active);

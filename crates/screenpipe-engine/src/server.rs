@@ -216,6 +216,8 @@ impl SCServer {
         video_quality: String,
         api_auth_key: String,
     ) -> Self {
+        #[cfg(target_os = "macos")]
+        crate::sleep_monitor::set_health_api_context(addr, &api_auth_key);
         screenpipe_config::audio_privacy::set_audio_disabled(audio_disabled);
         {
             use screenpipe_config::capture_diagnostics::*;
@@ -278,6 +280,7 @@ impl SCServer {
     }
 
     pub async fn start(self) -> Result<(), std::io::Error> {
+        let _media_cleanup_retry = crate::retention::spawn_media_deletion_retry(self.db.clone());
         // Create the OpenAPI server
         let app = self.create_router().await;
 
@@ -413,12 +416,7 @@ impl SCServer {
         // cross-origin requests to the local API.
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|origin, _| {
-                origin.as_bytes().starts_with(b"http://localhost")
-                    || origin.as_bytes().starts_with(b"https://localhost")
-                    || origin.as_bytes().starts_with(b"tauri://localhost")
-                    || origin.as_bytes().starts_with(b"http://tauri.localhost") // Windows Tauri origin
-                    || origin.as_bytes().starts_with(b"http://127.0.0.1")
-                    || origin.as_bytes().starts_with(b"https://127.0.0.1")
+                is_allowed_local_origin(origin)
             }))
             .allow_methods(Any)
             .allow_headers(Any)
@@ -442,6 +440,7 @@ impl SCServer {
             .get("/frames/:frame_id/metadata", get_frame_metadata)
             .get("/frames/next-valid", get_next_valid_frame)
             .get("/health", health_check)
+            .get("/health/details", health_check)
             .post("/raw_sql", execute_raw_sql)
             .post("/add", add_to_database)
             .get("/speakers/unnamed", get_unnamed_speakers_handler)
@@ -649,45 +648,12 @@ impl SCServer {
                         let auth_key = auth_key.clone();
                         async move {
                             let path = req.uri().path();
-                            if path == "/health" {
-                                return next.run(req).await;
+
+                            let authorized = request_is_authorized(&req, &auth_key);
+
+                            if path == "/health" && !authorized {
+                                return minimal_readiness_response();
                             }
-
-                            // Check auth via (in priority order):
-                            // 1. Authorization: Bearer <token> header (localFetch)
-                            // 2. screenpipe_auth=<token> cookie (img src, WebSocket)
-                            // 3. ?token=<token> query param (fallback)
-                            let header_token = req
-                                .headers()
-                                .get(axum::http::header::AUTHORIZATION)
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.strip_prefix("Bearer "))
-                                .map(|s| s.to_string());
-
-                            let cookie_token = req
-                                .headers()
-                                .get(axum::http::header::COOKIE)
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|cookies| {
-                                    cookies.split(';')
-                                        .map(|c| c.trim())
-                                        .find_map(|c| c.strip_prefix("screenpipe_auth="))
-                                        .map(|s| s.to_string())
-                                });
-
-                            let query_token = req
-                                .uri()
-                                .query()
-                                .and_then(|q| {
-                                    q.split('&')
-                                        .find_map(|pair| pair.strip_prefix("token="))
-                                        .map(|s| s.to_string())
-                                });
-
-                            let token = header_token.or(cookie_token).or(query_token);
-                            let authorized = !auth_key.is_empty()
-                                && token.map(|t| auth_key == t).unwrap_or(false);
-
                             if authorized {
                                 next.run(req).await
                             } else {
@@ -729,4 +695,159 @@ impl SCServer {
             .layer(cors)
             .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()))
     }
+}
+
+/// Origin is scheme + authority only. Do not accept prefixes, suffixes,
+/// credentials, paths or queries. Local development may use an explicit port.
+fn is_allowed_local_origin(origin: &axum::http::HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if origin == "tauri://localhost"
+        || origin == "http://tauri.localhost"
+        || origin == "https://tauri.localhost"
+    {
+        return true;
+    }
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let (host, port) = if let Some(rest) = authority.strip_prefix("[::1]") {
+        ("[::1]", rest)
+    } else if let Some((host, _port)) = authority.split_once(':') {
+        (host, &authority[host.len()..])
+    } else {
+        (authority, "")
+    };
+    if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        return false;
+    }
+    port.is_empty()
+        || port.strip_prefix(':').is_some_and(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
+        })
+}
+
+fn minimal_readiness_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // HTTP readiness only; detailed capture/device/meeting state requires auth.
+    axum::Json(serde_json::json!({"status": "ok", "status_code": 200, "message": "API ready"}))
+        .into_response()
+}
+
+#[cfg(test)]
+mod access_boundary_tests {
+    use super::*;
+    #[test]
+    fn cors_matches_exact_local_authorities() {
+        for origin in [
+            "http://localhost",
+            "http://localhost:3000",
+            "https://127.0.0.1:3030",
+            "http://[::1]:3000",
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+        ] {
+            assert!(
+                is_allowed_local_origin(&origin.parse().unwrap()),
+                "{origin}"
+            );
+        }
+        for origin in [
+            "http://localhost.evil.test",
+            "https://127.0.0.1.evil.test",
+            "tauri://localhost.evil.test",
+            "http://tauri.localhost.evil.test",
+            "http://localhost@evil.test",
+            "http://localhost/path",
+            "http://localhost?x=1",
+            "http://localhost#fragment",
+            "http://localhost:",
+            "http://localhost:65536",
+            "null",
+            "http://127.0.0.10",
+        ] {
+            assert!(
+                !is_allowed_local_origin(&origin.parse().unwrap()),
+                "{origin}"
+            );
+        }
+    }
+    #[test]
+    fn health_auth_preserves_header_cookie_and_websocket_query_consumers() {
+        use axum::{body::Body, http::Request};
+        let request = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!request_is_authorized(&request, "synthetic-key"));
+        for (uri, header, value) in [
+            ("/health", "Authorization", "Bearer synthetic-key"),
+            (
+                "/health/details",
+                "Cookie",
+                "other=x; screenpipe_auth=synthetic-key",
+            ),
+            ("/ws/health?token=synthetic-key", "X-Test", "synthetic"),
+        ] {
+            let request = Request::builder()
+                .uri(uri)
+                .header(header, value)
+                .body(Body::empty())
+                .unwrap();
+            assert!(request_is_authorized(&request, "synthetic-key"));
+            assert!(!request_is_authorized(&request, "wrong-key"));
+            assert!(!request_is_authorized(&request, ""));
+        }
+    }
+    #[tokio::test]
+    async fn public_readiness_has_no_activity_or_device_details() {
+        use http_body_util::BodyExt;
+        let response = minimal_readiness_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"status": "ok", "status_code": 200, "message": "API ready"})
+        );
+    }
+}
+
+fn request_is_authorized(req: &axum::extract::Request, auth_key: &str) -> bool {
+    // Check auth via (in priority order):
+    // 1. Authorization: Bearer <token> header (localFetch)
+    // 2. screenpipe_auth=<token> cookie (img src, WebSocket)
+    // 3. ?token=<token> query param (fallback)
+    let header_token = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    let cookie_token = req
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .map(|c| c.trim())
+                .find_map(|c| c.strip_prefix("screenpipe_auth="))
+                .map(|s| s.to_string())
+        });
+
+    let query_token = req.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .map(|s| s.to_string())
+    });
+
+    let token = header_token.or(cookie_token).or(query_token);
+    !auth_key.is_empty() && token.map(|t| auth_key == t).unwrap_or(false)
 }

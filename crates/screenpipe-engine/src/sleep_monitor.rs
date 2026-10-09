@@ -544,15 +544,35 @@ fn on_did_wake(handle: &tokio::runtime::Handle) {
     });
 }
 
+// The post-wake detailed-health consumer uses the active server's port and
+// credentials. It must not depend on the unauthenticated readiness response.
+#[cfg(target_os = "macos")]
+static HEALTH_API_CONTEXT: std::sync::RwLock<Option<(std::net::SocketAddr, String)>> =
+    std::sync::RwLock::new(None);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn set_health_api_context(addr: std::net::SocketAddr, key: &str) {
+    if let Ok(mut context) = HEALTH_API_CONTEXT.write() {
+        *context = Some((addr, key.to_string()));
+    }
+}
+
 /// Check if audio and vision recording are healthy
 /// Returns (audio_healthy, vision_healthy)
 #[cfg(target_os = "macos")]
 async fn check_recording_health() -> (bool, bool) {
-    // Try to hit the local health endpoint
+    let context = HEALTH_API_CONTEXT
+        .read()
+        .ok()
+        .and_then(|context| context.clone());
+    let Some((addr, key)) = context else {
+        return (false, false);
+    };
     let client = reqwest::Client::new();
 
     match client
-        .get("http://localhost:3030/health")
+        .get(format!("http://{addr}/health/details"))
+        .bearer_auth(key)
         .timeout(Duration::from_secs(5))
         .send()
         .await

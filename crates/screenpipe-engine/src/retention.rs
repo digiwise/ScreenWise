@@ -28,12 +28,16 @@ use crate::server::AppState;
 
 pub struct RetentionState {
     inner: Arc<RwLock<Option<RetentionRuntime>>>,
+    backend_instance_id: String,
+    configured: std::sync::atomic::AtomicBool,
 }
 
 impl Default for RetentionState {
     fn default() -> Self {
         Self {
             inner: Arc::new(RwLock::new(None)),
+            backend_instance_id: uuid::Uuid::new_v4().to_string(),
+            configured: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -91,6 +95,9 @@ impl Default for RetentionConfig {
 
 #[derive(Debug, Deserialize, OaSchema)]
 pub struct RetentionConfigureRequest {
+    /// Desktop restoration must never overwrite an explicit UI/API choice.
+    #[serde(default)]
+    pub only_if_unconfigured: bool,
     pub enabled: Option<bool>,
     pub retention_days: Option<u32>,
     /// "media" (default) or "all". Omit to leave unchanged.
@@ -99,6 +106,8 @@ pub struct RetentionConfigureRequest {
 
 #[derive(Debug, Serialize, OaSchema)]
 pub struct RetentionStatusResponse {
+    pub backend_instance_id: String,
+    pub configured: bool,
     pub enabled: bool,
     pub retention_days: u32,
     pub mode: RetentionMode,
@@ -129,6 +138,21 @@ pub async fn retention_configure(
 
     let mut guard = state.retention_state.inner.write().await;
 
+    if request.only_if_unconfigured
+        && state
+            .retention_state
+            .configured
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return Ok(JsonResponse(
+            json!({"success": true, "already_configured": true}),
+        ));
+    }
+    // Protected by inner's write lock, including explicit disabled requests.
+    state
+        .retention_state
+        .configured
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let wants_enabled = request.enabled.unwrap_or(true);
 
     match guard.as_mut() {
@@ -228,6 +252,11 @@ pub async fn retention_status(
 
     match guard.as_ref() {
         None => Ok(JsonResponse(RetentionStatusResponse {
+            backend_instance_id: state.retention_state.backend_instance_id.clone(),
+            configured: state
+                .retention_state
+                .configured
+                .load(std::sync::atomic::Ordering::Relaxed),
             enabled: false,
             retention_days: 14,
             mode: RetentionMode::Media,
@@ -236,6 +265,11 @@ pub async fn retention_status(
             total_deleted: 0,
         })),
         Some(runtime) => Ok(JsonResponse(RetentionStatusResponse {
+            backend_instance_id: state.retention_state.backend_instance_id.clone(),
+            configured: state
+                .retention_state
+                .configured
+                .load(std::sync::atomic::Ordering::Relaxed),
             enabled: runtime.config.enabled,
             retention_days: runtime.config.retention_days,
             mode: runtime.config.mode,
@@ -434,15 +468,18 @@ async fn do_local_cleanup(
 
                     total += batch_total;
 
-                    for path in result
+                    let selected: Vec<String> = result
                         .video_files
                         .iter()
-                        .chain(result.audio_files.iter())
-                        .chain(result.snapshot_files.iter())
-                    {
-                        if let Err(e) = tokio::fs::remove_file(path).await {
-                            warn!("retention: failed to evict file {}: {}", path, e);
-                        }
+                        .chain(&result.audio_files)
+                        .chain(&result.snapshot_files)
+                        .cloned()
+                        .collect();
+                    let cleanup = db.retry_selected_media_deletions(&selected, 100).await?;
+                    if cleanup.pending > 0 {
+                        anyhow::bail!(
+                            "file_cleanup_incomplete: media cleanup remains queued for retry"
+                        );
                     }
                 }
                 Err(e) => {

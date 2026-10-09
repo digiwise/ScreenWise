@@ -4,6 +4,9 @@
 
 "use client";
 
+import { useRecordingMonitors } from "@/lib/hooks/use-recording-monitors";
+import { monitorDisplayLabel } from "@/lib/recording-monitor-names";
+import { MonitorAliases } from "./monitor-aliases";
 import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
 
@@ -1610,6 +1613,8 @@ export function RecordingSettings() {
   const [availableMonitors, setAvailableMonitors] = useState<MonitorDevice[]>(
     []
   );
+  const { monitors: liveMonitors, aliases: monitorAliases } = useRecordingMonitors(undefined);
+  useEffect(() => { setAvailableMonitors(liveMonitors); }, [liveMonitors]);
   const [availableAudioDevices, setAvailableAudioDevices] = useState<
     AudioDeviceInfo[]
   >([]);
@@ -3107,7 +3112,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                       </svg>
                       <div className="text-center">
                         <span className={cn("text-[11px] font-medium block", isSelected ? "text-foreground" : "text-muted-foreground")}>
-                          {monitor.name || `Monitor ${monitor.id}`}
+                          {monitorDisplayLabel(monitor, availableMonitors, monitorAliases)}
                         </span>
                         <p className="text-[10px] text-muted-foreground">{monitor.width}x{monitor.height}</p>
                       </div>
@@ -3122,6 +3127,8 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
       </div>
               </>
 
+
+      <MonitorAliases monitors={availableMonitors} />
 
       {/* Voice Training Dialog */}
       <Dialog open={voiceTraining.dialogOpen} onOpenChange={(open) => {

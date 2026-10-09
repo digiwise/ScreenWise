@@ -10,8 +10,8 @@ export const RECORDING_GROUPS = [
   { id: "input", label: "Input and activity", channels: ["keyboard", "pointer", "clipboard", "activity"] },
 ] as const;
 export type DashboardMode = "recording" | "quiet" | "paused" | "error" | "unknown";
-export type DashboardStatus = { mode: DashboardMode; label: string; scope: string; detail?: string };
-export type DashboardInput = { rows: StatusObservation[]; evidence: CaptureEvidence[]; audio: AudioActivitySnapshot | null; elapsed: number; now: number; unavailable: boolean; requestFailed?: boolean };
+export type DashboardStatus = { mode: DashboardMode; label: string; scope: string; detail?: string; staleAge?: number | null };
+export type DashboardInput = { rows: StatusObservation[]; evidence: CaptureEvidence[]; audio: AudioActivitySnapshot | null; elapsed: number; now: number; unavailable: boolean; requestFailed?: boolean; ageUncertain?: boolean; lastStatuses?: Record<string, DashboardStatus[]> };
 const rank: Record<DashboardMode, number> = { recording: 0, quiet: 1, paused: 2, unknown: 3, error: 4 };
 const globalScope = "All sources (global scope; individual monitor attribution unavailable)";
 const gateSources = new Set(["privacy admission", "content protection", "window policy", "input privacy", "power", "user preference", "permission"]);
@@ -49,6 +49,9 @@ export function worstRecordingStatus(statuses: DashboardStatus[]): DashboardStat
     statuses[0] ?? { mode: "unknown", label: "Status unavailable", scope: "" });
 }
 export function classifyRecordingType(channel: string, input: DashboardInput): DashboardStatus[] {
+  const previous = input.lastStatuses?.[channel];
+  const stale = (status: DashboardStatus, age: number | null): DashboardStatus => ({ ...status, staleAge: age });
+  if (input.unavailable && previous?.length) return previous.map((status) => stale(status, input.ageUncertain || status.staleAge === null ? null : (status.staleAge ?? 0) + Math.max(0, input.elapsed)));
   if (input.unavailable) return [{ mode: input.requestFailed ? "error" : "unknown", label: input.requestFailed ? "Status request failed — recording unconfirmed" : "Recording unconfirmed", scope: "" }];
   if (channel === "activity") return [{ mode: "unknown", label: "Activity metadata — not instrumented", scope: "" }];
   const rows = input.rows.filter((row) => row.channel === channel);
@@ -62,17 +65,21 @@ export function classifyRecordingType(channel: string, input: DashboardInput): D
     const intendedPause = matching.find(recordingPolicyStateCurrent);
     if (intendedPause) return { mode: "paused", label: recordingObservationLabel(intendedPause), scope };
     const checked = matching.filter((row) => fresh(row, input.elapsed));
-    const failed = checked.find((row) => row.condition === "failed" || row.condition === "no_callbacks");
+    const outputWaiting = (row: StatusObservation) => channel === "output_audio" && row.source === "audio processing" && row.condition === "no_callbacks";
+    const failed = checked.find((row) => row.condition === "failed" || (row.condition === "no_callbacks" && !outputWaiting(row)));
     if (failed) return { mode: "error", label: recordingObservationLabel(failed), scope };
     const paused = checked.find((row) => ["suppressed", "stopped", "redacted", "partially_redacted", "deferred"].includes(row.condition));
     if (paused) return { mode: "paused", label: recordingObservationLabel(paused), scope };
     const staleDetail = (row: StatusObservation) => `${row.source}: ${recordingObservationLabel(row)}; ${row.checkedAge === null ? "check age unavailable" : `last checked ${Math.floor((row.checkedAge + input.elapsed) / 1000)} seconds ago`}.`;
     const staleBlocker = matching.find((row) => !fresh(row, input.elapsed) && !operational(row));
-    if (staleBlocker) return { mode: "unknown", label: "Earlier blocker not freshly checked", detail: staleDetail(staleBlocker), scope };
+    const retained = previous?.find((status) => status.scope === scope);
+    const staleStatus = (row: StatusObservation): DashboardStatus => stale(retained ?? { mode: row.condition === "failed" || (row.condition === "no_callbacks" && !outputWaiting(row)) ? "error" : outputWaiting(row) ? "quiet" : operational(row) ? "unknown" : "paused", label: outputWaiting(row) ? "Listening — awaiting computer audio" : recordingObservationLabel(row), detail: staleDetail(row), scope }, row.checkedAge === null ? null : row.checkedAge + input.elapsed);
+    if (staleBlocker) return staleStatus(staleBlocker);
     const staleGate = matching.find((row) => gateSources.has(row.source) && !recordingCheckIsCurrent(row, matching, input.elapsed, relevantEvidence));
-    if (staleGate) return { mode: "unknown", label: "Some permission checks are stale", detail: staleDetail(staleGate), scope };
+    if (staleGate) return staleStatus(staleGate);
     const admitted = checked.some((row) => row.condition === "admitted" || row.condition === "active_window_only");
     if (!admitted) return { mode: "unknown", label: "Permission status unavailable", scope };
+    if (checked.some(outputWaiting)) return { mode: "quiet", label: "Listening — awaiting computer audio", detail: "No output callbacks while nothing is playing is normal. Explicit stream and device failures are reported separately.", scope };
     const successes = relevantEvidence.filter((row) => row.scope === scope);
     const recentCapture = successes.some((row) => row.captureSupported && successFresh(row.captureAge, input.elapsed));
     const recentStorage = successes.some((row) => row.storageSupported && successFresh(row.storageAge, input.elapsed));

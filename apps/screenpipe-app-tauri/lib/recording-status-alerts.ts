@@ -7,7 +7,7 @@ import { recordingCheckIsCurrent } from "@/lib/recording-status-dashboard";
 export type RecordingProblem = "status_unavailable" | "recording_error" | "delivery_at_risk";
 const quietReasons = new Set(["screen locked", "schedule paused", "user paused", "user stopped", "disabled", "session stopped", "power capture paused", "power screenshots disabled", "monitor inactive"]);
 const policyReasons = new Set(["protected content matched", "content protection gate", "excluded foreground", "excluded background", "outside include filter", "password field", "private browsing", "pii text redaction", "recorder ui", "builtin application", "shell surface"]);
-const verificationReasons = new Set(["foreground unavailable", "foreground changed", "browser url unverified", "capture check failed", "access denied", "inconsistent focus", "window metadata unavailable", "post capture check failed", "input check unavailable", "input check stale", "input focus changed", "input generation changed", "input worker contended", "monitor unverified", "permission needed", "permission lost"]);
+const verificationReasons = new Set(["foreground not enumerated", "input native focus unavailable", "input focused element failed", "input focus ownership failed", "input password property failed", "input password property unsupported", "input focus verification failed", "input worker initialization failed", "foreground unavailable", "foreground changed", "browser url unverified", "capture check failed", "access denied", "inconsistent focus", "window metadata unavailable", "post capture check failed", "input check unavailable", "input check stale", "input focus changed", "input generation changed", "input worker contended", "monitor unverified", "permission needed", "permission lost"]);
 export const RECORDING_ALERT_DELAY_MS = 60000;
 export const RECORDING_ALERT_REPEAT_MS = 15 * 60000;
 export function recordingProblems(rows: StatusObservation[], evidence: CaptureEvidence[], alerts: string[], unavailable: boolean, elapsed: number): RecordingProblem[] {
@@ -16,9 +16,11 @@ export function recordingProblems(rows: StatusObservation[], evidence: CaptureEv
   const expected = (channel: string, scope: string) => rows.some((row) => row.channel === channel && (row.scope === scope || row.scope.startsWith("All sources (global scope;")) && fresh(row)
     && row.condition !== "admitted" && !row.reasons.some((reason) => verificationReasons.has(reason))
     && (row.reasons.some((reason) => quietReasons.has(reason) || policyReasons.has(reason)) || row.rules.length > 0));
+  const outputGap = (channel: string, scope: string) => channel === "output_audio" && rows.some((row) => row.channel === channel && row.scope === scope && row.source === "audio processing" && row.condition === "no_callbacks" && fresh(row));
   let operational = false, unknown = false;
   for (const row of rows) {
     if (row.condition !== "admitted" && row.reasons.some((reason) => quietReasons.has(reason))) continue;
+    if (row.channel === "output_audio" && row.source === "audio processing" && row.condition === "no_callbacks") continue;
     const attention = row.condition === "failed" || row.condition === "no_callbacks" || row.condition === "stopped" || row.reasons.some((reason) => verificationReasons.has(reason));
     if (!attention || expected(row.channel, row.scope)) continue;
     if (fresh(row)) operational = true; else unknown = true;
@@ -26,7 +28,7 @@ export function recordingProblems(rows: StatusObservation[], evidence: CaptureEv
   // Success ages alone never establish a stall: idle input, unchanged screens and
   // silence are normal. Only a fresh continuous producer check can conflict with
   // missing samples/images. Window-policy suppression wins over a stale success.
-  operational ||= evidence.some((item) => ["microphone", "output_audio"].includes(item.channel) && !item.global && !expected(item.channel, item.scope)
+  operational ||= evidence.some((item) => ["microphone", "output_audio"].includes(item.channel) && !item.global && !expected(item.channel, item.scope) && !outputGap(item.channel, item.scope)
     && rows.some((row) => row.channel === item.channel && row.scope === item.scope && row.condition === "admitted" && ["capture operation", "audio processing"].includes(row.source)
       && fresh(row))
     && item.captureSupported && (item.captureAge === null || item.captureAge + elapsed > 60000));

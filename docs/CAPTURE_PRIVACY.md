@@ -149,3 +149,57 @@ still pair an earlier allowed-window bitmap with a later allowed-window UIA tree
 exact screenshot/tree window identity across those transitions needs separate
 work. Broader provider failures, protected playback and privacy accuracy are not
 guaranteed by these diagnostics or the deterministic tests.
+
+## Sensitive decision diagnostics (2026-10-09)
+
+Tasks 2 and 13 add an explicit opt-in sink, separate from ordinary logs, typed
+notices, SQLite, API responses and support-log exports. Set
+`SCREENWISE_SENSITIVE_DEBUG=1` **before starting the process** to enable it;
+unset it or use any other value to disable it at the next process start. The
+Windows deployment launcher carries this choice in its deployment manifest.
+The next local candidate enables it; preparing that candidate does not start
+capture or change the running installation.
+
+On Windows the files are under
+`%LOCALAPPDATA%\ScreenWise\sensitive-debug\session-<pid>-<timestamp>\decisions.jsonl`.
+A fresh, never-reused session directory is created with a protected DACL granting
+only its owner and LocalSystem full access, inherited by its children. No data is
+written if that setup fails. Unix directories/files use 0700/0600. These are
+plain-text diagnostics, not encryption, and do not protect against the same user,
+administrative takeover, malware running as that user or backups. They are not
+automatically exported or served. Existing sessions are deliberately not deleted
+by the recorder; remove them manually when the diagnosis is finished. Disable
+the option when no longer needed. Each process is capped at 8 MiB; repeated
+identical category/details are deduplicated for 30 seconds. Details larger than
+32 KiB are explicitly omitted (records have a 64 KiB ceiling). A bounded
+128-record queue drops with content-free count warnings instead of blocking
+capture; writer failures/limits also produce a fixed ordinary warning through the engine
+tracing sink, including Windows GUI builds without stderr. A typed reporter
+accepts only fixed lifecycle states and loss counts; early notices are buffered
+and replayed when the engine registers its reporter. Abrupt
+process exit can lose queued tail records. Multiple sessions accumulate until
+manually removed.
+
+The sink records full provider/OS exception representations and decision stages,
+focused native HWND/PID candidates, filtered-window app/title/URL metadata,
+policy matches and foreground transitions. It never deliberately reads or logs
+UIA Name/Value/password text to diagnose the password probe, nor captures
+keystrokes, clipboard values, pixels, audio or bearer tokens. Arbitrary provider
+exception strings and window metadata may themselves be sensitive. Do not attach
+these files to issues or commit them.
+
+Ordinary input status now identifies native focus sampling, focused UIA element,
+focus ownership, IsPassword read versus unsupported property value, final focus
+verification, worker initialization and a closed visual privacy gate. These are
+fixed allowlisted reasons; exceptions remain exclusively in the sensitive sink.
+The capture-window path distinguishes an unavailable native foreground sample
+from a sampled foreground absent from xcap's eligible-window list, and identifies
+the recorder's own process as recorder UI. This addresses an established xcap
+own-process exclusion mechanism without assuming it explains every historical
+incident. Executable lookup uses limited process-query rights and a full-length
+path buffer. Unknown identities and unstable focus continue to deny admission.
+
+Synthetic regression coverage is provided for reason presentation, fail-closed
+input stages, missing/recorder/unlisted foreground classification, storage bounds,
+deduplication and the Windows directory DACL. Native/live-provider and installed
+GUI validation remain separate; no new interactive capture was authorized here.

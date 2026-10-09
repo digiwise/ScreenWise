@@ -12,6 +12,7 @@ use crate::events::{AccessibilityNode, ElementBounds, ElementContext, WindowTree
 use chrono::Utc;
 use crossbeam_channel::{Sender, TrySendError};
 use parking_lot::Mutex;
+use screenpipe_config::capture_diagnostics::CaptureReason;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -116,6 +117,72 @@ impl NativeKeyboardFocus {
     }
 }
 
+#[derive(Debug)]
+struct PrivacyProbeFailure {
+    reason: CaptureReason,
+    stage: &'static str,
+    error: String,
+}
+fn probe_error(
+    reason: CaptureReason,
+    stage: &'static str,
+    error: impl std::fmt::Debug,
+) -> PrivacyProbeFailure {
+    PrivacyProbeFailure {
+        reason,
+        stage,
+        error: format!("{error:#?}"),
+    }
+}
+// Worker-only probe: the input hook keeps its existing atomic/cheap path.
+fn native_focus_probe() -> Result<NativeKeyboardFocus, PrivacyProbeFailure> {
+    let reason = CaptureReason::InputNativeFocusUnavailable;
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return Err(probe_error(
+                reason,
+                "GetForegroundWindow",
+                "no foreground HWND",
+            ));
+        }
+        let mut pid = 0;
+        let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if thread == 0 || pid == 0 {
+            return Err(probe_error(
+                reason,
+                "GetWindowThreadProcessId",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        GetGUIThreadInfo(thread, &mut info)
+            .map_err(|e| probe_error(reason, "GetGUIThreadInfo", e))?;
+        if info.hwndFocus.is_invalid() {
+            return Err(probe_error(
+                reason,
+                "GetGUIThreadInfo.hwndFocus",
+                "no focused control HWND",
+            ));
+        }
+        if GetForegroundWindow() != hwnd {
+            return Err(probe_error(
+                reason,
+                "GetForegroundWindow recheck",
+                "foreground changed during native sample",
+            ));
+        }
+        Ok(NativeKeyboardFocus {
+            foreground: hwnd.0 as isize,
+            control: info.hwndFocus.0 as isize,
+            pid,
+        })
+    }
+}
+
 struct KeyboardPrivacyDecision {
     generation: u64,
     focus: NativeKeyboardFocus,
@@ -133,6 +200,7 @@ pub struct KeyboardPrivacy {
     generation: AtomicU64,
     decision: Mutex<Option<KeyboardPrivacyDecision>>,
     logged_state: AtomicU8,
+    failure_reason: Mutex<Option<CaptureReason>>,
     unavailable_transitions: AtomicU64,
     reported_unavailable_transitions: AtomicU64,
     last_unavailable_notice: Mutex<Option<Instant>>,
@@ -316,7 +384,13 @@ impl KeyboardPrivacy {
             {
                 use screenpipe_config::capture_diagnostics::*;
                 let reasons = [
-                    CaptureReason::InputCheckUnavailable,
+                    self.failure_reason.lock().unwrap_or(
+                        if self.logged_state.load(Ordering::SeqCst) == KEYBOARD_PRIVACY_PASSWORD {
+                            CaptureReason::PasswordField
+                        } else {
+                            CaptureReason::InputCheckUnavailable
+                        },
+                    ),
                     CaptureReason::InputWorkerContended,
                     CaptureReason::InputGenerationChanged,
                     CaptureReason::InputFocusChanged,
@@ -341,6 +415,7 @@ impl KeyboardPrivacy {
         }
     }
 
+    #[cfg(test)]
     fn update(
         &self,
         generation: u64,
@@ -348,6 +423,23 @@ impl KeyboardPrivacy {
         is_password: Option<bool>,
         checked_at: Instant,
     ) {
+        self.update_diagnosed(generation, focus, is_password, checked_at, None);
+    }
+
+    fn update_diagnosed(
+        &self,
+        generation: u64,
+        focus: Option<NativeKeyboardFocus>,
+        is_password: Option<bool>,
+        checked_at: Instant,
+        failure: Option<CaptureReason>,
+    ) {
+        let changed_reason = {
+            let mut previous = self.failure_reason.lock();
+            let changed = *previous != failure;
+            *previous = failure;
+            changed
+        };
         let state = match (focus, is_password) {
             (Some(_), Some(false)) => KEYBOARD_PRIVACY_ALLOWED,
             (Some(_), Some(true)) => KEYBOARD_PRIVACY_PASSWORD,
@@ -363,7 +455,7 @@ impl KeyboardPrivacy {
                 }
                 _ => (
                     CaptureCondition::Suppressed,
-                    CaptureReason::InputCheckUnavailable,
+                    failure.unwrap_or(CaptureReason::InputCheckUnavailable),
                 ),
             };
             for channel in [CaptureChannel::Keyboard, CaptureChannel::Clipboard] {
@@ -376,6 +468,12 @@ impl KeyboardPrivacy {
                     Vec::new(),
                 );
             }
+        }
+        if changed_reason && failure.is_some() {
+            warn!(
+                reason_code = failure.unwrap().code(),
+                "Input privacy check failed at the reported stage; content remains fail closed"
+            );
         }
         if previous != state {
             match state {
@@ -472,35 +570,115 @@ impl UiaContext {
     fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy) {
         let started_at = Instant::now();
         let generation = privacy.generation.load(Ordering::SeqCst);
-        let focus = NativeKeyboardFocus::current();
-        let (is_password, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
-            let focus = focus?;
-            let element = self.automation.GetFocusedElement().ok()?;
-            if !element.CurrentHasKeyboardFocus().ok()?.as_bool()
-                || element.CurrentProcessId().ok()? as u32 != focus.pid
-            {
-                return None;
+        // Native/UIA candidate identities only: never ask for Name, Value or
+        // password contents just to diagnose a failed privacy decision.
+        let native = native_focus_probe();
+        let focus = native.as_ref().ok().copied();
+        let (result, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
+            let focus = native?;
+            let element = self.automation.GetFocusedElement().map_err(|e| {
+                probe_error(
+                    CaptureReason::InputFocusedElementFailed,
+                    "GetFocusedElement",
+                    e,
+                )
+            })?;
+            let owns_focus = element
+                .CurrentHasKeyboardFocus()
+                .map_err(|e| {
+                    probe_error(
+                        CaptureReason::InputFocusOwnershipFailed,
+                        "CurrentHasKeyboardFocus",
+                        e,
+                    )
+                })?
+                .as_bool();
+            let element_pid = element.CurrentProcessId().map_err(|e| {
+                probe_error(
+                    CaptureReason::InputFocusOwnershipFailed,
+                    "CurrentProcessId",
+                    e,
+                )
+            })? as u32;
+            if !owns_focus || element_pid != focus.pid {
+                return Err(probe_error(
+                    CaptureReason::InputFocusOwnershipFailed,
+                    "focus_ownership",
+                    format!(
+                        "has_keyboard_focus={owns_focus}; element_pid={element_pid}; native_pid={}",
+                        focus.pid
+                    ),
+                ));
             }
             let value = element
                 .GetCurrentPropertyValueEx(UIA_IsPasswordPropertyId, true)
-                .ok()?;
-            let is_password = bool::try_from(&value).ok()?;
-            let current = self.automation.GetFocusedElement().ok()?;
-            if NativeKeyboardFocus::current() != Some(focus)
-                || !self
-                    .automation
-                    .CompareElements(&element, &current)
-                    .ok()?
-                    .as_bool()
-            {
-                return None;
+                .map_err(|e| {
+                    probe_error(
+                        CaptureReason::InputPasswordPropertyFailed,
+                        "GetCurrentPropertyValueEx(IsPassword,ignore_default=true)",
+                        e,
+                    )
+                })?;
+            let is_password = bool::try_from(&value).map_err(|e| {
+                probe_error(
+                    CaptureReason::InputPasswordPropertyUnsupported,
+                    "IsPassword Boolean conversion",
+                    e,
+                )
+            })?;
+            let current = self.automation.GetFocusedElement().map_err(|e| {
+                probe_error(
+                    CaptureReason::InputFocusVerificationFailed,
+                    "GetFocusedElement recheck",
+                    e,
+                )
+            })?;
+            if NativeKeyboardFocus::current() != Some(focus) {
+                return Err(probe_error(
+                    CaptureReason::InputFocusVerificationFailed,
+                    "native_focus_recheck",
+                    "foreground/control changed",
+                ));
             }
-            Some(is_password)
+            if !self
+                .automation
+                .CompareElements(&element, &current)
+                .map_err(|e| {
+                    probe_error(
+                        CaptureReason::InputFocusVerificationFailed,
+                        "CompareElements",
+                        e,
+                    )
+                })?
+                .as_bool()
+            {
+                return Err(probe_error(
+                    CaptureReason::InputFocusVerificationFailed,
+                    "CompareElements",
+                    "focused element changed",
+                ));
+            }
+            Ok(is_password)
         });
-        // An event that invalidates focus while the COM query is in flight
-        // changes the generation, so this result cannot grant permission.
+        let reason = result.as_ref().err().map(|failure| failure.reason);
+        if let Err(failure) = &result {
+            screenpipe_config::sensitive_debug::record("input_privacy_probe", || {
+                serde_json::json!({
+                    "reason":failure.reason.code(), "stage":failure.stage, "error":failure.error,
+                    "native_candidate":focus.map(|f| serde_json::json!({"foreground_hwnd":f.foreground,"control_hwnd":f.control,"pid":f.pid}))
+                })
+            });
+        } else if matches!(result, Ok(true)) {
+            screenpipe_config::sensitive_debug::record("input_password_suppression", || {
+                serde_json::json!({
+                    "policy":"focused IsPassword=true; keyboard and clipboard content denied",
+                    "native_candidate":focus.map(|f| serde_json::json!({"foreground_hwnd":f.foreground,"control_hwnd":f.control,"pid":f.pid}))
+                })
+            });
+        }
+        // Focus events still invalidate permission; diagnosis never opens a gate.
         privacy.note_probe_completed(started_at, checked_at);
-        privacy.update(generation, focus, is_password, checked_at);
+        privacy.update_diagnosed(generation, focus, result.ok(), checked_at, reason);
     }
 
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
@@ -1051,9 +1229,17 @@ pub(crate) fn run_keyboard_privacy_thread(
     unsafe {
         let result = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if result.is_err() {
-            error!(
-                "Failed to initialize COM for UIA keyboard privacy worker: {:?}",
-                result
+            screenpipe_config::sensitive_debug::record(
+                "input_worker_init",
+                || serde_json::json!({"stage":"CoInitializeEx","error":format!("{result:?}")}),
+            );
+            error!("UIA keyboard privacy COM initialization failed; input remains fail closed");
+            keyboard_privacy.update_diagnosed(
+                0,
+                None,
+                None,
+                Instant::now(),
+                Some(CaptureReason::InputWorkerInitializationFailed),
             );
             keyboard_privacy.invalidate();
             return;
@@ -1065,7 +1251,6 @@ pub(crate) fn run_keyboard_privacy_thread(
             unsafe { CoUninitialize() };
             return;
         }
-        let mut last_error = None;
         for attempt in 0..4 {
             if stop.load(Ordering::Relaxed) {
                 unsafe { CoUninitialize() };
@@ -1075,21 +1260,27 @@ pub(crate) fn run_keyboard_privacy_thread(
                 Ok(context) => break 'outer context,
                 Err(error) => {
                     let delay_secs = 1u64 << attempt.min(2);
-                    warn!(
-                        "UIA keyboard privacy init attempt {} failed: {:?}, retrying in {}s",
-                        attempt + 1,
-                        error,
-                        delay_secs
+                    screenpipe_config::sensitive_debug::record(
+                        "input_worker_init",
+                        || serde_json::json!({"stage":"UiaContext::new","attempt":attempt + 1,"error":format!("{error:#?}")}),
                     );
-                    last_error = Some(error);
+                    warn!(
+                        attempt = attempt + 1,
+                        retry_seconds = delay_secs,
+                        "UIA keyboard privacy initialization failed; input remains fail closed"
+                    );
+                    keyboard_privacy.update_diagnosed(
+                        0,
+                        None,
+                        None,
+                        Instant::now(),
+                        Some(CaptureReason::InputWorkerInitializationFailed),
+                    );
                     std::thread::sleep(Duration::from_secs(delay_secs));
                 }
             }
         }
-        warn!(
-            "Failed to initialize UIA keyboard privacy worker after 4 attempts: {:?}. Will retry in 30s; keyboard/clipboard content remains fail closed.",
-            last_error
-        );
+        warn!("UIA keyboard privacy initialization failed after four attempts; retrying in 30 seconds with input fail closed");
         for _ in 0..30 {
             if stop.load(Ordering::Relaxed) {
                 unsafe { CoUninitialize() };
@@ -1106,9 +1297,17 @@ pub(crate) fn run_keyboard_privacy_thread(
     };
     let handler_interface: IUIAutomationFocusChangedEventHandler = handler.into();
     if let Err(error) = uia.subscribe_focus_changes(&handler_interface) {
-        warn!(
-            "Failed to subscribe the UIA keyboard privacy worker to focus changes: {:?}; keyboard/clipboard content remains fail closed.",
-            error
+        screenpipe_config::sensitive_debug::record(
+            "input_worker_init",
+            || serde_json::json!({"stage":"subscribe_focus_changes","error":format!("{error:#?}")}),
+        );
+        warn!("UIA keyboard privacy focus subscription failed; input remains fail closed");
+        keyboard_privacy.update_diagnosed(
+            0,
+            None,
+            None,
+            Instant::now(),
+            Some(CaptureReason::InputWorkerInitializationFailed),
         );
         keyboard_privacy.invalidate();
         unsafe { CoUninitialize() };
@@ -1124,7 +1323,17 @@ pub(crate) fn run_keyboard_privacy_thread(
             }
         }
         if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-            keyboard_privacy.invalidate();
+            keyboard_privacy.update_diagnosed(
+                keyboard_privacy.generation.load(Ordering::SeqCst),
+                None,
+                None,
+                Instant::now(),
+                Some(CaptureReason::InputVisualPrivacyClosed),
+            );
+            screenpipe_config::sensitive_debug::record(
+                "input_visual_gate",
+                || serde_json::json!({"policy":"visual capture privacy gate closed; password probe skipped; input denied"}),
+            );
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
             continue;
         }
@@ -2920,4 +3129,43 @@ mod tests {
 
         unsafe { CoUninitialize() };
     }
+}
+
+#[cfg(test)]
+#[test]
+fn diagnosed_privacy_failure_preserves_stage_without_granting_permission() {
+    let privacy = KeyboardPrivacy::default();
+    let focus = Some(NativeKeyboardFocus {
+        foreground: 1,
+        control: 2,
+        pid: 3,
+    });
+    for reason in [
+        CaptureReason::InputNativeFocusUnavailable,
+        CaptureReason::InputFocusedElementFailed,
+        CaptureReason::InputFocusOwnershipFailed,
+        CaptureReason::InputPasswordPropertyFailed,
+        CaptureReason::InputPasswordPropertyUnsupported,
+        CaptureReason::InputFocusVerificationFailed,
+        CaptureReason::InputVisualPrivacyClosed,
+        CaptureReason::InputWorkerInitializationFailed,
+    ] {
+        privacy.update_diagnosed(
+            privacy.generation.load(Ordering::SeqCst),
+            focus,
+            None,
+            Instant::now(),
+            Some(reason),
+        );
+        assert_eq!(*privacy.failure_reason.lock(), Some(reason));
+        assert!(privacy.permit(focus).is_none());
+    }
+    privacy.update(
+        privacy.generation.load(Ordering::SeqCst),
+        focus,
+        Some(false),
+        Instant::now(),
+    );
+    assert_eq!(*privacy.failure_reason.lock(), None);
+    assert!(privacy.permit(focus).is_some());
 }

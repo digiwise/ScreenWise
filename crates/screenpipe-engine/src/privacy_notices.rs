@@ -267,6 +267,7 @@ pub fn start(db: Arc<DatabaseManager>) -> PrivacyNoticeRecorder {
 }
 
 fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> PrivacyNoticeRecorder {
+    screenpipe_config::sensitive_debug::set_notice_reporter(log_sensitive_debug_notice);
     screenpipe_config::capture_diagnostics::set_delivery_reporter(log_diagnostic_delivery);
     let mut events = screenpipe_events::subscribe_to_all_events();
     crate::drm_detector::initialize_pause_notice();
@@ -390,6 +391,19 @@ fn start_with_status(db: Arc<DatabaseManager>, degraded: Arc<AtomicBool>) -> Pri
         stop,
         task: Some(task),
         degraded,
+    }
+}
+
+fn log_sensitive_debug_notice(notice: screenpipe_config::sensitive_debug::SensitiveDebugNotice) {
+    use screenpipe_config::sensitive_debug::SensitiveDebugNotice as N;
+    // Fixed enums/counts only: the sensitive payload writer never enters tracing.
+    match notice {
+        N::Enabled => tracing::info!(reason_code = "sensitive_debug_enabled", "Private decision diagnostics enabled for this process"),
+        N::StorageUnavailable => tracing::warn!(reason_code = "sensitive_debug_storage_unavailable", "Protected diagnostic storage could not be created; sensitive diagnostics are unavailable"),
+        N::WorkerUnavailable => tracing::warn!(reason_code = "sensitive_debug_worker_unavailable", "Private diagnostic worker could not start"),
+        N::WriteFailedOrLimitReached => tracing::warn!(reason_code = "sensitive_debug_write_stopped", "Private diagnostic write failed or session limit reached; further sensitive records will be omitted"),
+        N::WriterStopped => tracing::warn!(reason_code = "sensitive_debug_writer_stopped", "Private diagnostic writer stopped; further sensitive records omitted"),
+        N::QueueFull { total_dropped } => tracing::warn!(reason_code = "sensitive_debug_queue_full", total_dropped, "Private diagnostic queue full; diagnostic records were dropped"),
     }
 }
 

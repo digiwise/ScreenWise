@@ -12,7 +12,7 @@ use oasgen::{oasgen, OaSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::server::AppState;
 
@@ -160,6 +160,10 @@ pub struct EvictMediaResponse {
     pub audio_files_deleted: u64,
     pub snapshot_files_deleted: u64,
     pub bytes_freed: u64,
+    pub files_pending_cleanup: u64,
+    pub files_failed: u64,
+    pub cleanup_retry_scheduled: bool,
+    pub cleanup_status_unknown: bool,
 }
 
 /// POST /data/evict-media — reclaim mp4/wav/jpeg files in a time range
@@ -188,60 +192,23 @@ pub(crate) async fn evict_media_handler(
             )
         })?;
 
-    let mut bytes_freed: u64 = 0;
-    let mut video_files_deleted: u64 = 0;
-    for path in &result.video_files {
-        match std::fs::metadata(path) {
-            Ok(meta) => {
-                let size = meta.len();
-                match std::fs::remove_file(path) {
-                    Ok(_) => {
-                        video_files_deleted += 1;
-                        bytes_freed = bytes_freed.saturating_add(size);
-                    }
-                    Err(e) => warn!("failed to evict video file {}: {}", path, e),
-                }
-            }
-            Err(_) => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-
-    let mut audio_files_deleted: u64 = 0;
-    for path in &result.audio_files {
-        match std::fs::metadata(path) {
-            Ok(meta) => {
-                let size = meta.len();
-                match std::fs::remove_file(path) {
-                    Ok(_) => {
-                        audio_files_deleted += 1;
-                        bytes_freed = bytes_freed.saturating_add(size);
-                    }
-                    Err(e) => warn!("failed to evict audio file {}: {}", path, e),
-                }
-            }
-            Err(_) => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-
-    let mut snapshot_files_deleted: u64 = 0;
-    for path in &result.snapshot_files {
-        match std::fs::metadata(path) {
-            Ok(meta) => {
-                let size = meta.len();
-                if std::fs::remove_file(path).is_ok() {
-                    snapshot_files_deleted += 1;
-                    bytes_freed = bytes_freed.saturating_add(size);
-                }
-            }
-            Err(_) => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
+    let selected: Vec<String> = result
+        .video_files
+        .iter()
+        .chain(&result.audio_files)
+        .chain(&result.snapshot_files)
+        .cloned()
+        .collect();
+    let cleanup = state
+        .db
+        .retry_selected_media_deletions(&selected, 100)
+        .await;
+    let cleanup_status_unknown = cleanup.is_err();
+    let cleanup = cleanup.unwrap_or_default();
+    let bytes_freed = cleanup.bytes_freed;
+    let video_files_deleted = cleanup.video_files_deleted;
+    let audio_files_deleted = cleanup.audio_files_deleted;
+    let snapshot_files_deleted = cleanup.snapshot_files_deleted;
 
     // Hot cache holds frame metadata that points at the evicted media files;
     // drop those entries so streaming consumers don't get 404s on /frames/:id.
@@ -249,6 +216,11 @@ pub(crate) async fn evict_media_handler(
         .hot_frame_cache
         .evict_range(payload.start, payload.end)
         .await;
+
+    state.search_cache.invalidate_all();
+    if let Some(cache) = &state.frame_image_cache {
+        cache.lock().await.clear();
+    }
 
     Ok(JsonResponse(EvictMediaResponse {
         video_chunks_evicted: result.video_chunks_evicted,
@@ -258,6 +230,10 @@ pub(crate) async fn evict_media_handler(
         audio_files_deleted,
         snapshot_files_deleted,
         bytes_freed,
+        files_pending_cleanup: cleanup.pending,
+        files_failed: cleanup.failed,
+        cleanup_retry_scheduled: cleanup_status_unknown || cleanup.pending > 0,
+        cleanup_status_unknown,
     }))
 }
 

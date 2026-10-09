@@ -68,3 +68,18 @@ describe("consolidated recording alerts", () => {
     expect(recordingProblems([row({ checkedAge: 60000 }), { ...policy, checkedAge: null }], [], [], false, 0)).toEqual(["status_unavailable"]);
   });
 });
+
+it("does not alert on output callback waiting but does alert on explicit faults", () => {
+  const output = row({ channel: "output_audio", condition: "no_callbacks", reasons: ["no audio callbacks"] });
+  expect(recordingProblems([output], [], [], false, 0)).toEqual([]);
+  expect(recordingProblems([output, { ...output, source: "capture operation", condition: "admitted", reasons: ["gate open"] }], [evidence({ channel: "output_audio", captureAge: 70000 })], [], false, 0)).toEqual([]);
+  expect(recordingProblems([{ ...output, condition: "failed", reasons: ["device stream failed"] }], [], [], false, 0)).toContain("recording_error");
+  expect(recordingProblems([{ ...output, channel: "microphone" }], [], [], false, 0)).toContain("recording_error");
+});
+
+it("reports diagnosed safety verification failures while leaving expected closed gates quiet", () => {
+  for (const reason of ["foreground not enumerated", "input native focus unavailable", "input focused element failed", "input focus ownership failed", "input password property failed", "input password property unsupported", "input focus verification failed", "input worker initialization failed"]) {
+    expect(recordingProblems([row({ channel: "keyboard", condition: "suppressed", reasons: [reason] })], [], [], false, 0)).toContain("recording_error");
+  }
+  expect(recordingProblems([row({ channel: "keyboard", condition: "suppressed", reasons: ["input visual privacy closed"] })], [], [], false, 0)).toEqual([]);
+});

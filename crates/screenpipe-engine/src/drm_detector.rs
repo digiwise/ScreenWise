@@ -848,23 +848,35 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
     // content while recording is paused.
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_check",
+            || serde_json::json!({"stage":"GetForegroundWindow","failure":"no native foreground HWND"}),
+        );
         return WindowsForegroundAssessment::Unknown;
     }
 
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     if pid == 0 {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_check",
+            || serde_json::json!({"stage":"GetWindowThreadProcessId","hwnd":hwnd.0 as usize,"error":format!("{:?}", std::io::Error::last_os_error())}),
+        );
         return WindowsForegroundAssessment::Unknown;
     }
 
     let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(process) => process,
         Err(error) => {
+            screenpipe_config::sensitive_debug::record(
+                "content_protection_check",
+                || serde_json::json!({"stage":"OpenProcess","hwnd":hwnd.0 as usize,"pid":pid,"error":format!("{error:#?}")}),
+            );
             return if error.code().0 as u32 == 0x80070005 {
                 WindowsForegroundAssessment::AccessDenied
             } else {
                 WindowsForegroundAssessment::CheckFailed
-            }
+            };
         }
     };
     let mut path = [0u16; 1024];
@@ -881,6 +893,10 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
         let _ = CloseHandle(process);
     }
     if let Err(error) = query_result {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_check",
+            || serde_json::json!({"stage":"QueryFullProcessImageNameW","hwnd":hwnd.0 as usize,"pid":pid,"error":format!("{error:#?}")}),
+        );
         return if error.code().0 as u32 == 0x80070005 {
             WindowsForegroundAssessment::AccessDenied
         } else {
@@ -888,6 +904,10 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
         };
     }
     if path_len == 0 {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_check",
+            || serde_json::json!({"stage":"QueryFullProcessImageNameW","hwnd":hwnd.0 as usize,"pid":pid,"failure":"empty process path"}),
+        );
         return WindowsForegroundAssessment::Unknown;
     }
 
@@ -897,6 +917,10 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
         .next()
         .unwrap_or(process_path.as_ref());
     if is_drm_app(process_name) {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_policy",
+            || serde_json::json!({"policy":"protected application matched","hwnd":hwnd.0 as usize,"pid":pid,"process_path":process_path}),
+        );
         return WindowsForegroundAssessment::Drm;
     }
 
@@ -919,6 +943,10 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
         current_hwnd.0 as usize,
         current_pid,
     ) {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_check",
+            || serde_json::json!({"stage":"foreground_recheck","before_hwnd":hwnd.0 as usize,"before_pid":pid,"after_hwnd":current_hwnd.0 as usize,"after_pid":current_pid,"candidate_path":process_path}),
+        );
         return WindowsForegroundAssessment::Changed;
     }
 
@@ -929,6 +957,10 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
 pub fn poll_drm_clear() -> bool {
     let foreground = windows_foreground_assessment();
     if windows_poll_should_stay_paused(foreground) {
+        screenpipe_config::sensitive_debug::record(
+            "content_protection_pause",
+            || serde_json::json!({"assessment":format!("{foreground:?}"),"policy":"paused until a verified non-protected foreground; browser URL unknown retains existing pause"}),
+        );
         report_pause_reason(true, foreground.notice_reason());
         debug!(
             "Windows content protection gate retained capture suppression; assessment={:?}",

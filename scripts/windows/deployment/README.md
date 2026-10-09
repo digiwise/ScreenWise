@@ -188,7 +188,7 @@ Older manifests without the option remain off, and startup removes any inherited
 opt-in before applying the manifest. This does not edit settings in a running app.
 Sensitive diagnostics are separate from ordinary safe notices and logs; they may
 contain private decision context and must not be published. See
-[the diagnostics guide](../../../docs/CAPTURE_DIAGNOSTICS.md) for storage and limits.
+[the sensitive diagnostics guide](../../../docs/CAPTURE_PRIVACY.md#sensitive-decision-diagnostics-2026-10-09) for storage and limits.
 Preparation here does not start a diagnostic capture or inspect existing captures.
 
 ## Prompt Parakeet transcription

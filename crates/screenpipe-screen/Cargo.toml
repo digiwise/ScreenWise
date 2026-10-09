@@ -16,6 +16,7 @@ ocr-bench = ["dep:strsim"]
 
 [dependencies]
 screenpipe-a11y = { path = "../screenpipe-a11y" }
+screenpipe-config = { path = "../screenpipe-config" }
 serde_json = "1.0"
 chrono = { version = "0.4.31", features = ["serde"] }
 
@@ -96,6 +97,8 @@ memory-stats = "1.2.0"
 xcap = { version = "0.9", features = ["wgc"] }
 uiautomation = { version = "0.16.1" }
 windows = { version = "0.58", features = [
+  "Win32_Devices_Display",
+  "Win32_Foundation",
   "Graphics_Imaging",
   "Globalization",
   "Media_Ocr",

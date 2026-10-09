@@ -3625,6 +3625,7 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
                 "browser_url_unavailable" => CaptureReason::BrowserUrlUnverified,
                 "foreground_changed_during_evaluation" => CaptureReason::ForegroundChanged,
                 "foreground_window_unavailable" => CaptureReason::ForegroundUnavailable,
+                "foreground_not_enumerated" => CaptureReason::ForegroundNotEnumerated,
                 "window_metadata_unavailable" => CaptureReason::WindowMetadataUnavailable,
                 "recorder_ui" => CaptureReason::RecorderUi,
                 "builtin_application_skip" | "builtin_exclusion" => {

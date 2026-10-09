@@ -5,10 +5,12 @@
 import { create } from "zustand";
 import { localFetch } from "@/lib/api";
 import { parseRecordingStatus, parseLiveStatus, STATUS_MAX_AGE_MS, type StatusObservation, type CaptureEvidence, type RecordingDeviceName } from "@/lib/recording-status";
+import { classifyRecordingType, type DashboardStatus } from "@/lib/recording-status-dashboard";
+import { DATA_TYPES } from "@/lib/recording-status";
 import { parseAudioActivity, type AudioActivitySnapshot } from "@/lib/audio-activity";
 
 export type RecordingRequestFailure = { kind: "request_failed" | "request_timeout" | "http_error" | "invalid_response"; httpStatus?: number };
-export type RecordingStatusState = { rows: StatusObservation[]; evidence: CaptureEvidence[]; deviceNames: RecordingDeviceName[]; audio: AudioActivitySnapshot | null; alerts: string[]; degraded: boolean; session: number | null; checked: number | null; receivedMonotonic: number | null; error: string | null; requestFailure?: RecordingRequestFailure | null; tick: number; generation: number };
+export type RecordingStatusState = { rows: StatusObservation[]; evidence: CaptureEvidence[]; deviceNames: RecordingDeviceName[]; audio: AudioActivitySnapshot | null; alerts: string[]; degraded: boolean; session: number | null; checked: number | null; receivedMonotonic: number | null; error: string | null; requestFailure?: RecordingRequestFailure | null; tick: number; generation: number; ageUncertain?: boolean; lastStatuses?: Record<string, DashboardStatus[]> };
 const blank = { rows: [], evidence: [], deviceNames: [], audio: null, alerts: [], degraded: false, checked: null, receivedMonotonic: null, requestFailure: null };
 export function recordingRequestFailureMessage(failure: RecordingRequestFailure): string {
   if (failure.kind === "request_timeout") return "Recorder status request timed out after 8 seconds. Recording remains unconfirmed.";
@@ -38,15 +40,15 @@ export function startRecordingStatusMonitoring(): () => void {
 function startLoop(): () => void {
   let stopped = false, generation = 0, timer: ReturnType<typeof setTimeout> | undefined, controller: AbortController | undefined;
   let lastWall = Date.now(), lastMono = performance.now();
-  const invalidate = (message: string) => {
+  const invalidate = (message: string, ageUncertain = false) => {
     generation++; controller?.abort();
-    useRecordingStatus.setState((state) => ({ ...blank, error: message, generation: state.generation + 1, tick: Date.now() }));
+    useRecordingStatus.setState((state) => ({ requestFailure: null, ageUncertain: state.ageUncertain || ageUncertain, error: message, generation: state.generation + 1, tick: Date.now() }));
   };
   const visibility = () => invalidate("Recording status unavailable after visibility change. Waiting for a fresh recorder response.");
   document.addEventListener("visibilitychange", visibility);
   const freshnessTimer = setInterval(() => {
     const wall = Date.now(), mono = performance.now();
-    if (wall < lastWall || mono < lastMono || mono - lastMono > STATUS_MAX_AGE_MS || Math.abs((wall - lastWall) - (mono - lastMono)) > 2000) invalidate("Recording status unavailable after a clock or suspension change. Waiting for a fresh recorder response.");
+    if (wall < lastWall || mono < lastMono || mono - lastMono > STATUS_MAX_AGE_MS || Math.abs((wall - lastWall) - (mono - lastMono)) > 2000) invalidate("Recording status unavailable after a clock or suspension change. Waiting for a fresh recorder response.", true);
     lastWall = wall; lastMono = mono;
     useRecordingStatus.setState({ tick: wall });
   }, 1000);
@@ -69,15 +71,18 @@ function startLoop(): () => void {
       if (requestController.signal.aborted || requestGeneration !== generation || elapsed < 0 || monoElapsed < 0 || elapsed > STATUS_MAX_AGE_MS || monoElapsed > STATUS_MAX_AGE_MS || Math.abs(elapsed - monoElapsed) > 2000) { failure = null; throw new Error("Expired response"); }
       if (stopped) return;
       const age = Math.ceil(Math.max(elapsed, monoElapsed));
-      useRecordingStatus.setState({ rows: status.rows.map((row) => ({ ...row, checkedAge: row.checkedAge === null ? null : row.checkedAge + age })),
+      const snapshot = { rows: status.rows.map((row) => ({ ...row, checkedAge: row.checkedAge === null ? null : row.checkedAge + age })),
         evidence: live.evidence.map((row) => ({ ...row, captureAge: row.captureAge === null ? null : row.captureAge + age, storageAge: row.storageAge === null ? null : row.storageAge + age })),
         audio: progress === null ? null : { ...progress, devices: progress.devices.map((row) => ({ ...row, pendingAge: row.pendingAge === null ? null : row.pendingAge + age })) },
-        deviceNames: live.deviceNames, session: live.session, alerts: status.alerts, degraded: status.degraded, checked: received, receivedMonotonic: receivedMono, tick: received, error: null, requestFailure: null });
+        deviceNames: live.deviceNames, session: live.session, alerts: status.alerts, degraded: status.degraded, checked: received, receivedMonotonic: receivedMono, tick: received, error: null, requestFailure: null, ageUncertain: false };
+      const old = useRecordingStatus.getState();
+      const lastStatuses = Object.fromEntries(Object.keys(DATA_TYPES).map((channel) => [channel, classifyRecordingType(channel, { ...snapshot, elapsed: 0, now: received, unavailable: false, lastStatuses: old.session === live.session ? old.lastStatuses : undefined })]));
+      useRecordingStatus.setState({ ...snapshot, lastStatuses });
     } catch {
       if (!stopped) {
         const actualFailure = requestGeneration !== generation ? null : timedOut ? { kind: "request_timeout" as const } : failure;
-        useRecordingStatus.setState({ ...blank, requestFailure: actualFailure,
-          error: actualFailure ? recordingRequestFailureMessage(actualFailure) : "Recording status unavailable after a stale or interrupted response. Waiting for a fresh response.", tick: Date.now() });
+        useRecordingStatus.setState((state) => ({ requestFailure: actualFailure, ageUncertain: state.ageUncertain || (actualFailure === null && requestGeneration === generation),
+          error: actualFailure ? recordingRequestFailureMessage(actualFailure) : "Recording status unavailable after a stale or interrupted response. Waiting for a fresh response.", tick: Date.now() }));
       }
     } finally {
       clearTimeout(timeout);
