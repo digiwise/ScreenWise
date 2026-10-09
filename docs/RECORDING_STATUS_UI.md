@@ -385,3 +385,39 @@ statuses, session/device identity, ordinary output gaps versus explicit failure,
 named monitors and specific input/foreground failure stages. Validate against the
 actual local-profile candidate; no new capture or interactive trial is authorised
 by this preparation document.
+
+### Additional batch scope agreed in chat (2026-10-09)
+
+The next implementation batch also includes these owner-requested dashboard tasks:
+
+- Persist dashboard visibility, position, size and selected summary/detail level.
+  Restore it on startup if visible at the previous shutdown. Validate geometry
+  against current monitor work areas and DPI; recover a usable on-screen position
+  when a monitor is disconnected or the saved placement no longer fits. Restoring
+  the dashboard must not start or resume recording.
+- Add a system-tray action to show/reopen the floating recording dashboard.
+- Add monitor aliases, upgrading the earlier optional-alias proposal to included
+  scope. Keep aliases separate from current runtime IDs and expose the underlying
+  identity in details; do not attach an alias to an uncertain historical monitor.
+- Make the main-window status/control row wrap, with a logical two-line layout
+  when needed. Preserve readable status labels and access to every control at
+  narrow widths and increased display scaling.
+- Add level 1 as a complete compact overview without scrolling at the intended
+  default size. The existing view becomes level 2, with existing More details as
+  level 3. Summaries must expose mixed states, errors, pauses and staleness rather
+  than hide them behind one green group icon. Keep clear access to drill-down and
+  recording controls.
+- Remove the permanent footer from level 1. Put the preference-restart explanation
+  in hover/focus help on the relevant checkboxes. Preserve the practical distinction
+  that device controls apply to the current session in help on those controls,
+  without permanently taking space. Keep derived/source relationships in level 3
+  labels/help, where they affect interpretation. Remove duplicate footer sentences.
+
+These extend the prepared stale-status, foreground/input diagnostics, named-monitor
+and normal-output-gap work above. The same next batch also includes owner-priority
+findings SW-R04, SW-R06, SW-R08, SW-R12 and SW-R15 from the validation register,
+and deployment that automatically starts only after existing firewall rules and
+the full startup preflight pass, with an explicit prepare-only option. Finish with
+focused regressions, required checks, one settled local-profile build/export,
+documentation and commits. Actual deployment/interactive validation remain separate
+actions. This section records scope only; none of these new changes is implemented.
