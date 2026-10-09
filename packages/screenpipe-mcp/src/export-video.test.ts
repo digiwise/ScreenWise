@@ -51,7 +51,7 @@ describe("export-video MCP tool", () => {
     });
 
     await new Promise<void>((resolve) => {
-      mockHttpServer.listen(0, () => {
+      mockHttpServer.listen(0, "127.0.0.1", () => {
         serverPort = (mockHttpServer.address() as { port: number }).port;
         resolve();
       });
@@ -65,7 +65,7 @@ describe("export-video MCP tool", () => {
   });
 
   it("exports a real-time video with synced audio via POST /export", async () => {
-    const response = await fetch(`http://localhost:${serverPort}/export`, {
+    const response = await fetch(`http://127.0.0.1:${serverPort}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ start: "2024-01-15T10:00:00Z", end: "2024-01-15T10:30:00Z" }),
@@ -100,7 +100,7 @@ describe("export-video MCP tool", () => {
 
   it("forwards output_path to /export when provided", async () => {
     const target = "/Users/test/Downloads/clip.mp4";
-    const response = await fetch(`http://localhost:${serverPort}/export`, {
+    const response = await fetch(`http://127.0.0.1:${serverPort}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ start: "5m ago", end: "now", output_path: target }),
@@ -112,7 +112,7 @@ describe("export-video MCP tool", () => {
   });
 
   it("returns 400 from /export when neither meeting_id nor start/end is given", async () => {
-    const response = await fetch(`http://localhost:${serverPort}/export`, {
+    const response = await fetch(`http://127.0.0.1:${serverPort}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),

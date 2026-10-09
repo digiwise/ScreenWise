@@ -231,6 +231,24 @@ recording resumption: other privacy gates and user preferences still apply.
 Document which paths meet this rule and which remain outstanding; internal audio
 queue reporting is not covered merely because general event-bus tests pass.
 
+## Loopback listeners — development and tests too
+
+Bind every local API, development server, preview, test API, WebSocket/HMR
+listener and synthetic fixture explicitly to `127.0.0.1` or `::1` by default.
+An omitted host is not evidence of loopback: many Node/Vite/Next implementations
+bind all interfaces. Never default to `0.0.0.0`, `::`, wildcard or a LAN address.
+Inspect secondary listeners as well as the main HTTP listener; disabling HMR
+client injection does not necessarily disable its WebSocket server. Keep runner
+APIs and unnecessary HMR listeners off. Verify resolved configuration and actual
+listener addresses with non-capture metadata when running a server.
+
+Do not allow Node.js through Windows Firewall, weaken or change firewall rules,
+or accept an inbound-access prompt to make development/tests work. A genuine
+need for LAN/non-loopback access is a material owner decision: explain the
+listener, purpose and exposure before implementing the exception. This applies
+to inherited tools and test fixtures as well as application code. Source fixes
+and loopback-only regression checks do not authorise capture or deployment.
+
 ## Interactive validation
 
 Read [the reusable test guide](scripts/windows/interactive-validation/README.md)

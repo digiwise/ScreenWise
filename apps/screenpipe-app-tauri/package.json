@@ -2,8 +2,9 @@
   "name": "screenpipe",
   "private": true,
   "scripts": {
-    "dev": "node node_modules/next/dist/bin/next dev -p 1420",
-    "test": "bun run test:vitest && bun run test:bun",
+    "dev": "node node_modules/next/dist/bin/next dev --hostname 127.0.0.1 -p 1420",
+    "test": "bun run test:loopback && bun run test:vitest && bun run test:bun",
+    "test:loopback": "node --test scripts/test-loopback-listeners.mjs",
     "test:vitest": "node node_modules/vitest/vitest.mjs run --config vitest.config.mts",
     "test:bun": "bun test lib/utils/redact-pii.test.ts lib/utils/meeting-state.test.ts lib/utils/sanitize-tool-call-xml.test.ts components/__tests__/url-detection-benchmark.test.ts lib/hooks/__tests__/timeline-reconnection.test.ts lib/hooks/__tests__/timeline-store-logic.test.ts lib/hooks/__tests__/use-meetings.test.ts lib/hooks/__tests__/server-push-old-frames.test.ts lib/hooks/__tests__/window-focus-refresh.test.ts lib/hooks/__tests__/timeline-ui-issues.test.ts lib/events/__tests__/types.test.ts lib/hooks/__tests__/server-poll-logic.test.ts lib/events/__tests__/bus.test.ts",
     "test:watch": "node node_modules/vitest/vitest.mjs --config vitest.config.mts",
