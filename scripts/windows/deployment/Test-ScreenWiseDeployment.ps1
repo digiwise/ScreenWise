@@ -117,7 +117,16 @@ foreach ($selectedProfile in @('release-local', 'release')) {
 }
 $preparePlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -PrepareOnly -SensitiveDebugLogging $false | Out-String | ConvertFrom-Json)
 Check (!$preparePlan.launch -and $preparePlan.prepare_only) 'prepare-only suppresses automatic startup'
+Check (!$preparePlan.graceful_shutdown -and $preparePlan.shutdown_timeout_seconds -eq 60) 'prepare-only suppresses shutdown with bounded default'
 Check (!$preparePlan.sensitive_debug_logging) 'sensitive diagnostics explicit opt-out'
+Check ($plan.graceful_shutdown -and $plan.shutdown_timeout_seconds -eq 60) 'ordinary deployment plans graceful shutdown'
+$planOnlyDirectory = Join-Path $root 'plan-does-not-write'
+$inertPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -Build -ProvisionPi -RegisterStartup `
+    -DeploymentDirectory $planOnlyDirectory -DataDirectory (Join-Path $root 'plan-data') `
+    -RuntimeManifestPath (Join-Path $root 'missing-runtime.json') -PiRuntimePath (Join-Path $root 'missing-pi') `
+    -ShutdownTimeoutSeconds 7 | Out-String | ConvertFrom-Json)
+Check (!(Test-Path -LiteralPath $planOnlyDirectory) -and $inertPlan.shutdown_timeout_seconds -eq 7) 'plan-only neither prepares files nor invokes requested build/provision/register/shutdown'
+Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -ShutdownTimeoutSeconds 0 } 'invalid shutdown timeout rejected'
 Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -PrepareOnly -Launch } 'conflicting startup switches rejected'
 # Execute the dispatch with a synthetic launcher only. No actual GUI or firewall access.
 $stubStartup = Join-Path $root 'synthetic-start.ps1'
@@ -210,4 +219,152 @@ $module = Get-Module Deployment
     if (!$caught) { throw 'Permission failure treated as absent firewall rule.' }
 }
 $script:checks += 4
+# Shutdown tests use synthetic text binaries and module-local process/IPC doubles.
+# No real process is launched, signaled, waited on or killed.
+$quitSource = Join-Path $root 'quit-fixture.exe'
+[IO.File]::WriteAllText($quitSource, ('x' * 65525) + 'ScreenWise.GracefulQuit.v1' + ' synthetic never execute')
+Check (Test-DeploymentQuitCapability $quitSource) 'capability marker spanning read boundary detected without execution'
+Check (!(Test-DeploymentQuitCapability $exe)) 'unsupported binary capability rejected without execution'
+$quitInfo = Get-Item -LiteralPath $quitSource
+$quitManifest = [pscustomobject]@{binary_directory=$root; gui_executable=$quitSource;
+    graceful_quit_protocol='ScreenWise.GracefulQuit.v1'; gui_sha256=(Get-FileHash -LiteralPath $quitSource).Hash;
+    files=@([pscustomobject]@{path=$quitSource;length=$quitInfo.Length;modified_utc=$quitInfo.LastWriteTimeUtc.ToString('o')})}
+$module = Get-Module Deployment
+$shutdownChecks = & $module {
+    param($FixtureManifest)
+    $script:syntheticChecks = 0
+    function AcceptSynthetic([scriptblock]$Action) { & $Action; $script:syntheticChecks++ }
+    function RejectSynthetic([scriptblock]$Action) {
+        $caught=$false
+        try { & $Action } catch { $caught=$true }
+        if (!$caught) { throw 'Synthetic shutdown action was unexpectedly accepted.' }
+        $script:syntheticChecks++
+    }
+    $script:fixtureDate = [DateTime]::Parse('2026-10-09T03:18:54.5556740Z').ToUniversalTime()
+    $script:fixtureGui = [pscustomobject]@{Name='screenpipe-app.exe'; ExecutablePath=$FixtureManifest.gui_executable;
+        ProcessId=417; CreationDate=$script:fixtureDate}
+    $script:fixtureChild = [pscustomobject]@{Name='bun.exe'; ExecutablePath=(Join-Path $FixtureManifest.binary_directory 'bun.exe');
+        ProcessId=418; CreationDate=$script:fixtureDate}
+    $script:fixtureExitCode = 0
+    $script:requests = 0
+    $script:inventories = 0
+    $script:scenario = 'idle'
+    function Get-CimInstance {
+        param($ClassName, $OperationTimeoutSec, $ErrorAction)
+        $script:inventories++
+        switch ($script:scenario) {
+            'idle' { return @() }
+            'unrelated' { return [pscustomobject]@{Name='screenpipe-app.exe';ExecutablePath='C:\unrelated\screenpipe-app.exe'} }
+            'unknown' { return [pscustomobject]@{Name='screenpipe-app.exe';ExecutablePath=$null} }
+            'unknown-helper' { return [pscustomobject]@{Name='bun.exe';ExecutablePath=$null} }
+            'child-only' { return $script:fixtureChild }
+            'replaced' {
+                if ($script:inventories -gt 1) {
+                    return [pscustomobject]@{Name='screenpipe-app.exe';ExecutablePath=$FixtureManifest.gui_executable;
+                        ProcessId=417;CreationDate=$script:fixtureDate.AddSeconds(1)}
+                }
+                return $script:fixtureGui
+            }
+            'quit' { if (!$script:requests) { return $script:fixtureGui }; return @() }
+            'child-timeout' { if (!$script:requests) { return $script:fixtureGui }; return $script:fixtureChild }
+            default { return $script:fixtureGui }
+        }
+    }
+    function Get-DeploymentProcessHandle {
+        param($TargetProcessId)
+        if ($TargetProcessId -ne 417) { throw 'Wrong target process ID.' }
+        $h = [pscustomobject]@{StartTime=$script:fixtureDate.AddTicks(5);HasExited=$true;ExitCode=$script:fixtureExitCode}
+        $h | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+        return $h
+    }
+    function Invoke-DeploymentQuitRequest {
+        param($Executable, $TargetProcessId, $TimeoutMilliseconds)
+        if ($Executable -cne $FixtureManifest.gui_executable -or $TargetProcessId -ne 417 -or $TimeoutMilliseconds -lt 1000) {
+            throw 'Wrong graceful shutdown request scope.'
+        }
+        $script:requests++
+        if ($script:scenario -eq 'request-failed') { throw 'Synthetic IPC dispatch failure.' }
+    }
+    if (!(Test-DeploymentProcessStartTime $script:fixtureDate.AddTicks(5) $script:fixtureDate)) { throw 'CIM/native timestamp precision mismatch.' }
+    $script:syntheticChecks++
+    if (Test-DeploymentProcessStartTime $script:fixtureDate.AddTicks(10) $script:fixtureDate) { throw 'Different start timestamp accepted.' }
+    $script:syntheticChecks++
+    AcceptSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:scenario='unrelated'
+    AcceptSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:scenario='unknown'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:scenario='unknown-helper'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:scenario='child-only'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:scenario='running'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest -PrepareOnly }
+    $legacy=[pscustomobject]@{binary_directory=$FixtureManifest.binary_directory;gui_executable=$FixtureManifest.gui_executable}
+    RejectSynthetic { Stop-DeploymentInstance $legacy }
+    $savedHash=$FixtureManifest.gui_sha256
+    $FixtureManifest.gui_sha256='0' * 64
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $FixtureManifest.gui_sha256=$savedHash
+    $savedFiles=$FixtureManifest.files
+    $FixtureManifest.files=@()
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $FixtureManifest.files=@($savedFiles + $savedFiles)
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $FixtureManifest.files=$savedFiles
+    $savedLength=$FixtureManifest.files[0].length
+    $FixtureManifest.files[0].length++
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $FixtureManifest.files[0].length=$savedLength
+    if ($script:requests -ne 0) { throw 'Quit was dispatched before support and ownership checks passed.' }
+    $script:syntheticChecks++
+    $script:scenario='replaced'; $script:inventories=0
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    if ($script:requests -ne 0) { throw 'Quit was dispatched to a replaced process identity.' }
+    $script:syntheticChecks++
+    $script:scenario='quit'
+    AcceptSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    if ($script:requests -ne 1) { throw 'Exactly scoped quit dispatch did not occur.' }
+    $script:syntheticChecks++
+    $script:scenario='quit'; $script:requests=0; $script:fixtureExitCode=3
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:fixtureExitCode=0; $script:requests=0; $script:scenario='request-failed'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    $script:requests=0; $script:scenario='running'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest -TimeoutSeconds 1 }
+    $script:requests=0; $script:scenario='child-timeout'
+    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest -TimeoutSeconds 1 }
+    # Remove doubles so any later module call uses actual definitions again.
+    Remove-Item Function:Get-CimInstance
+    Remove-Item Function:Get-DeploymentProcessHandle
+    Remove-Item Function:Invoke-DeploymentQuitRequest
+    return $script:syntheticChecks
+} $quitManifest
+$script:checks += $shutdownChecks
+# Data readiness is configuration-only and must fail before any interruption.
+$configRoot = Join-Path $root 'config-data'
+Assert-DeploymentDataConfiguration $configRoot 31579 $private
+Check $true 'absent fresh data directory accepted without creation'
+$null = New-Item -ItemType Directory -Path $configRoot
+[IO.File]::WriteAllText((Join-Path $configRoot 'store.bin'), (@{settings=@{dataDir=$configRoot;port=31579}} | ConvertTo-Json))
+Assert-DeploymentDataConfiguration $configRoot 31579 $private
+Check $true 'existing matched GUI configuration accepted'
+Reject { Assert-DeploymentDataConfiguration $configRoot 31580 $private } 'saved GUI port mismatch refused before shutdown'
+[IO.File]::WriteAllText((Join-Path $configRoot 'store.bin'), (@{settings=@{dataDir=$data;port=31579}} | ConvertTo-Json))
+Reject { Assert-DeploymentDataConfiguration $configRoot 31579 $private } 'saved GUI data mismatch refused before shutdown'
+Remove-Item -LiteralPath (Join-Path $configRoot 'store.bin')
+[IO.File]::WriteAllText((Join-Path $configRoot 'synthetic-existing-data'), 'synthetic never capture')
+Reject { Assert-DeploymentDataConfiguration $configRoot 31579 $private } 'nonempty data without GUI configuration refused before shutdown'
+# Verify complete stage readiness separately from publication, while live files remain intact.
+$prepared = New-DeploymentStaging $binary $copies
+Check ((Get-Content -Raw -LiteralPath (Join-Path $prepared 'screenpipe-app.exe')) -like '*two*') 'candidate staging complete before shutdown/publication'
+Reject { Publish-DeploymentFiles -BinaryDirectory $binary -StagingDirectory $prepared -ActiveExecutables @((Join-Path $binary 'screenpipe-app.exe')) } 'live process still refuses prepared candidate publication'
+Check (Test-Path -LiteralPath $prepared) 'failed process recheck retains prepared candidate'
+Check ((Get-Content -Raw -LiteralPath (Join-Path $binary 'screenpipe-app.exe')) -like '*two*') 'failed process recheck preserves installed binary'
+Reject { Publish-DeploymentFiles -BinaryDirectory $binary -StagingDirectory $source } 'foreign staging directory refused'
+# Source ordering regression covers dispatch from the real deploy orchestrator.
+$deploymentText=Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1')
+Check ($deploymentText.IndexOf('New-DeploymentStaging $binary $copies') -lt $deploymentText.IndexOf('Stop-DeploymentInstance -Manifest $old') -and
+    $deploymentText.IndexOf('Copy-Item -LiteralPath (Join-Path $PSScriptRoot "pi\$name")') -lt $deploymentText.IndexOf('Stop-DeploymentInstance -Manifest $old') -and
+    $deploymentText.IndexOf('Stop-DeploymentInstance -Manifest $old') -lt $deploymentText.IndexOf('Publish-DeploymentFiles -BinaryDirectory $binary')) 'complete candidate staging precedes shutdown and publication'
 Write-Host "Passed $script:checks deployment checks. Synthetic evidence: $root"

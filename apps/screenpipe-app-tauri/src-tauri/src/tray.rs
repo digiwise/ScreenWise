@@ -32,6 +32,64 @@ use tracing::{debug, error, info};
 /// handler in main.rs knows this is an intentional quit (not just a window close).
 pub static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+fn claim_quit(flag: &AtomicBool) -> bool {
+    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Shared intentional-shutdown path for tray Quit and deployment control.
+/// Claim once, then block new resource startups before asynchronous cleanup.
+pub fn request_quit(app_handle: &AppHandle) {
+    if !claim_quit(&QUIT_REQUESTED) {
+        return;
+    }
+    if crate::crash_recovery::begin_shutdown() {
+        tracing::warn!(
+            "ScreenWise startup was still in progress at quit; clean shutdown cannot be confirmed."
+        );
+    }
+    debug!("Quit requested");
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        info!("Stopping screenpipe recording before quit...");
+        if let Some(state) = app.try_state::<RecordingState>() {
+            if let Some(session) = state.capture.lock().await.take() {
+                session.stop().await;
+            }
+            if let Some(server) = state.server.lock().await.take() {
+                server.shutdown().await;
+            }
+            info!("Screenpipe server + recording stopped successfully");
+        }
+        // Windows Exit performs the existing synchronous Pi and session-marker
+        // cleanup. Preserve the Unix destructor workaround used by tray Quit.
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn _exit(status: i32) -> !;
+            }
+            unsafe {
+                _exit(0);
+            }
+        }
+        #[cfg(not(unix))]
+        app.exit(0);
+    });
+}
+
+#[cfg(test)]
+mod graceful_quit_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_quit_requests_have_one_cleanup_owner() {
+        let flag = AtomicBool::new(false);
+        assert!(claim_quit(&flag));
+        assert!(!claim_quit(&flag));
+        assert!(!claim_quit(&flag));
+    }
+}
+
 /// Pre-fetched data for building the tray menu. All store reads, settings
 /// deserialization, and permission checks happen OFF the main thread; only
 /// the lightweight menu-item construction runs on the main thread.
@@ -1158,47 +1216,7 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                 let _ = ShowRewindWindow::Onboarding.show(&app);
             });
         }
-        "quit" => {
-            debug!("Quit requested");
-
-            // Signal that this is an intentional quit so the ExitRequested
-            // handler in main.rs won't prevent it.
-            QUIT_REQUESTED.store(true, Ordering::SeqCst);
-
-            // Stop recording before exiting
-            let app_handle_clone = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                info!("Stopping screenpipe recording before quit...");
-                if let Some(recording_state) = app_handle_clone.try_state::<RecordingState>() {
-                    // Stop capture first (self-contained)
-                    if let Some(session) = recording_state.capture.lock().await.take() {
-                        session.stop().await;
-                    }
-                    // Then shutdown server
-                    if let Some(server) = recording_state.server.lock().await.take() {
-                        server.shutdown().await;
-                    }
-                    info!("Screenpipe server + recording stopped successfully");
-                }
-                info!("All tasks stopped, exiting process");
-                // Use _exit() instead of exit() to skip C++ atexit/static destructors.
-                // The whisper/ggml Metal GPU context registers a global destructor that
-                // asserts during teardown (ggml_metal_rsets_free), causing SIGABRT.
-                // We've already done our own cleanup above, so atexit handlers have
-                // nothing useful left to do.
-                #[cfg(unix)]
-                {
-                    extern "C" {
-                        fn _exit(status: i32) -> !;
-                    }
-                    unsafe {
-                        _exit(0);
-                    }
-                }
-                #[cfg(not(unix))]
-                app_handle_clone.exit(0);
-            });
-        }
+        "quit" => request_quit(app_handle),
         _ => debug!("Unhandled menu event: {:?}", event.id()),
     }
 }

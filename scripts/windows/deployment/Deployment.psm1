@@ -183,24 +183,174 @@ function Read-DeploymentManifest {
     return $m
 }
 
-function Publish-DeploymentFiles {
-    param([string]$BinaryDirectory, [object[]]$Copies, [string[]]$ActiveExecutables = @())
-    # Caller inventories exact process paths first. Never kill an instance to update it.
-    foreach ($active in $ActiveExecutables) {
-        if ($active -and $active.StartsWith($BinaryDirectory + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Quit the deployed ScreenWise instance from its tray before updating.'
+function Test-DeploymentQuitCapability {
+    param([Parameter(Mandatory)][string]$Executable)
+    # Read a linked, versioned marker without ever executing an unknown GUI.
+    # A chunk overlap permits the marker to span a read boundary.
+    $marker = 'ScreenWise.GracefulQuit.v1'
+    $stream = [IO.File]::OpenRead((Convert-DeploymentNativePath $Executable))
+    try {
+        $buffer = New-Object byte[] 65536
+        $tail = ''
+        while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $chunk = $tail + [Text.Encoding]::ASCII.GetString($buffer, 0, $count)
+            if ($chunk.Contains($marker)) { return $true }
+            $tail = $chunk.Substring([Math]::Max(0, $chunk.Length - $marker.Length + 1))
         }
+        return $false
+    } finally { $stream.Dispose() }
+}
+
+function Get-DeploymentProcesses {
+    param([Parameter(Mandatory)][string]$BinaryDirectory)
+    $all = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
+    # A known deployed executable with unavailable identity cannot be scoped safely.
+    if (@($all | Where-Object { !$_.ExecutablePath -and
+        $_.Name -in @('screenpipe-app.exe','screenpipe.exe','bun.exe','ffmpeg.exe','ffprobe.exe') }).Count) {
+        throw 'A ScreenWise/runtime process identity is unavailable. Deployment cannot safely determine ownership.'
     }
+    return @($all | Where-Object { $_.ExecutablePath -and
+        $_.ExecutablePath.StartsWith($BinaryDirectory + '\', [StringComparison]::OrdinalIgnoreCase) })
+}
+
+function Invoke-DeploymentQuitRequest {
+    param([string]$Executable, [uint32]$TargetProcessId, [int]$TimeoutMilliseconds)
+    if ($Executable.Contains('"')) { throw 'Invalid graceful-quit executable path.' }
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $Executable
+    $psi.Arguments = '--screenwise-quit {0} "{1}"' -f $TargetProcessId, $Executable
+    $psi.WorkingDirectory = Split-Path -Parent $Executable
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    # Quit-only dispatch happens before runtime/session initialization in the app.
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    try {
+        if (!$process.Start()) { throw 'Could not dispatch the graceful-quit request.' }
+        if (!$process.WaitForExit($TimeoutMilliseconds)) {
+            throw 'Graceful-quit client timed out. No process was killed; installed files were not replaced.'
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "Graceful-quit request failed (exit $($process.ExitCode)). Installed files were not replaced."
+        }
+    } finally { $process.Dispose() }
+}
+
+function Get-DeploymentProcessHandle {
+    param([uint32]$TargetProcessId)
+    $process = [Diagnostics.Process]::GetProcessById([int]$TargetProcessId)
+    try { $null = $process.Handle; return $process }
+    catch { $process.Dispose(); throw }
+}
+
+function Test-DeploymentProcessStartTime {
+    param([DateTime]$NativeTime, [DateTime]$CimTime)
+    # Win32_Process DMTF datetimes truncate native 100ns ticks to microseconds.
+    $ticks = $NativeTime.ToUniversalTime().Ticks
+    return ($ticks - ($ticks % 10)) -eq $CimTime.ToUniversalTime().Ticks
+}
+
+function Stop-DeploymentInstance {
+    param([Parameter(Mandatory)]$Manifest, [ValidateRange(1,300)][int]$TimeoutSeconds = 60,
+        [switch]$PrepareOnly)
+    $active = @(Get-DeploymentProcesses $Manifest.binary_directory)
+    if (!$active.Count) { return }
+    if ($PrepareOnly) { throw '-PrepareOnly never stops a running app. Quit the deployed instance from its tray before preparing files.' }
+    $gui = @($active | Where-Object { $_.ExecutablePath -ieq $Manifest.gui_executable })
+    if ($gui.Count -ne 1) { throw 'Expected exactly one owned deployed GUI to request graceful shutdown. Quit remaining deployed processes manually; no process was killed.' }
+    if (!$Manifest.PSObject.Properties['graceful_quit_protocol'] -or
+        $Manifest.graceful_quit_protocol -cne 'ScreenWise.GracefulQuit.v1' -or
+        !$Manifest.PSObject.Properties['gui_sha256'] -or $Manifest.gui_sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw 'The installed version has no verified graceful-quit capability. Bootstrap requires one last manual tray Quit, then rerun deployment. No command was sent.'
+    }
+    $recordedGui = @($Manifest.files | Where-Object { $_.path -ieq $Manifest.gui_executable })
+    if ($recordedGui.Count -ne 1) { throw 'Installed GUI integrity metadata is missing or ambiguous; no quit command was sent.' }
+    Assert-DeploymentFiles ([pscustomobject]@{files=$recordedGui})
+    if ((Get-FileHash -LiteralPath $Manifest.gui_executable -Algorithm SHA256).Hash -ine $Manifest.gui_sha256 -or
+        !(Test-DeploymentQuitCapability $Manifest.gui_executable)) {
+        throw 'Installed GUI graceful-quit capability/integrity differs from its manifest; no command was sent.'
+    }
+    $target = $gui[0]
+    if (!$target.CreationDate -or [uint32]$target.ProcessId -eq 0) { throw 'Installed GUI process identity is incomplete; no quit command was sent.' }
+    # Recheck PID, executable and creation identity after capability inspection.
+    $current = @(Get-DeploymentProcesses $Manifest.binary_directory)
+    $same = @($current | Where-Object { $_.ProcessId -eq $target.ProcessId -and
+        $_.ExecutablePath -ieq $target.ExecutablePath -and $_.CreationDate -eq $target.CreationDate })
+    if ($same.Count -ne 1) { throw 'Installed GUI changed during shutdown preflight; rerun deployment. No command was sent.' }
+    $handle = Get-DeploymentProcessHandle ([uint32]$target.ProcessId)
+    try {
+        if (!(Test-DeploymentProcessStartTime $handle.StartTime ([DateTime]$target.CreationDate))) {
+            throw 'Installed GUI process handle identity changed; no quit command was sent.'
+        }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        Write-Host "Requesting graceful shutdown of deployed ScreenWise (PID $($target.ProcessId)); timeout ${TimeoutSeconds}s."
+        Invoke-DeploymentQuitRequest $Manifest.gui_executable ([uint32]$target.ProcessId) ($TimeoutSeconds * 1000)
+        do {
+            if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                throw 'Graceful shutdown timed out. No process was killed; installed files were not replaced. Use tray Quit and retry.'
+            }
+            $remaining = @(Get-DeploymentProcesses $Manifest.binary_directory)
+            if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                throw 'Graceful shutdown timed out while verifying deployed processes. No process was killed; installed files were not replaced.'
+            }
+            if (!$remaining.Count) {
+                if (!$handle.HasExited -or $handle.ExitCode -ne 0) {
+                    throw 'Installed GUI reported failed graceful cleanup or an unconfirmed exit. Installed files were not replaced.'
+                }
+                return
+            }
+            if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                throw 'Graceful shutdown timed out with deployed processes still running. No process was killed; installed files were not replaced. Use tray Quit and retry.'
+            }
+            Start-Sleep -Milliseconds 200
+        } while ($true)
+    } finally { $handle.Dispose() }
+}
+
+function Assert-DeploymentDataConfiguration {
+    param([string]$DataDirectory, [int]$Port, [string]$PrivateRoot)
+    $storePath = Assert-DeploymentPath (Join-Path $DataDirectory 'store.bin') $PrivateRoot
+    if (Test-Path -LiteralPath $storePath) {
+        # Configuration only: never open captured records or media.
+        $store = Get-Content -Raw -LiteralPath $storePath | ConvertFrom-Json
+        if ($store.settings.dataDir -ine $DataDirectory -or [int]$store.settings.port -ne $Port) {
+            throw 'Saved GUI data directory or port differs from this deployment. Resolve the settings explicitly.'
+        }
+    } elseif ((Test-Path -LiteralPath $DataDirectory) -and
+        @(Get-ChildItem -LiteralPath $DataDirectory -Force -ErrorAction Stop).Count) {
+        throw 'Nonempty recording directory has no GUI settings. Refusing to initialize over existing data.'
+    }
+}
+
+function New-DeploymentStaging {
+    param([string]$BinaryDirectory, [object[]]$Copies)
     $staging = "$BinaryDirectory-staging-$([Guid]::NewGuid().ToString('N'))"
-    $backup = "$BinaryDirectory-previous-$([Guid]::NewGuid().ToString('N'))"
     $null = New-Item -ItemType Directory -Path $staging
     foreach ($copy in $Copies) {
         if ($copy.Name -notmatch '^[a-zA-Z0-9_.-]+$' -or $copy.Name -in @('.', '..')) {
             throw 'Invalid deployed file name.'
         }
-        $destination = Join-Path $staging $copy.Name
-        Copy-Item -LiteralPath $copy.Source -Destination $destination -Recurse -ErrorAction Stop
+        Copy-Item -LiteralPath $copy.Source -Destination (Join-Path $staging $copy.Name) -Recurse -ErrorAction Stop
     }
+    return $staging
+}
+
+function Publish-DeploymentFiles {
+    param([string]$BinaryDirectory, [object[]]$Copies, [string[]]$ActiveExecutables = @(), [string]$StagingDirectory)
+    # Caller inventories exact process paths immediately before publication.
+    foreach ($active in $ActiveExecutables) {
+        if ($active -and $active.StartsWith($BinaryDirectory + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Quit the deployed ScreenWise instance from its tray before updating.'
+        }
+    }
+    $staging = $StagingDirectory
+    if (!$staging) { $staging = New-DeploymentStaging $BinaryDirectory $Copies }
+    if ((Split-Path -Parent $staging) -ine (Split-Path -Parent $BinaryDirectory) -or
+        !(Split-Path -Leaf $staging).StartsWith((Split-Path -Leaf $BinaryDirectory) + '-staging-', [StringComparison]::Ordinal) -or
+        (Get-Item -LiteralPath $staging -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Invalid deployment staging directory.'
+    }
+    $backup = "$BinaryDirectory-previous-$([Guid]::NewGuid().ToString('N'))"
     $hadPrevious = Test-Path -LiteralPath $BinaryDirectory
     if ($hadPrevious) { Move-Item -LiteralPath $BinaryDirectory -Destination $backup -ErrorAction Stop }
     try { Move-Item -LiteralPath $staging -Destination $BinaryDirectory -ErrorAction Stop }
@@ -234,4 +384,5 @@ function Invoke-DeploymentStartup {
 
 Export-ModuleMember -Function Assert-DeploymentPath, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
-    Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup
+    Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, New-DeploymentStaging,
+    Test-DeploymentQuitCapability, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration

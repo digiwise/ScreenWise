@@ -2,15 +2,22 @@
 
 ## TLDR
 
-From the repository root, quit any deployed ScreenWise instance, then run:
+From the repository root, run:
 
 ```powershell
 # Reuse built release-local binaries and start when all checks pass.
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1
 ```
 
+For the first update from a version without graceful-quit support, **Quit from
+the tray once**, then run the command above. Closing the window leaves the app
+running. Later normal deployments request graceful shutdown automatically after
+validating ownership, configuration and the prepared candidate.
+
 For first-time firewall preparation, or to stage without capture, use
-`Deploy-ScreenWise.ps1 -PrepareOnly`. If startup reports missing rules, run
+`Deploy-ScreenWise.ps1 -PrepareOnly`. This mode neither requests shutdown nor
+starts the app; manually quit a running installation before using it. If startup
+reports missing rules, run
 `Set-ScreenWiseDeploymentFirewall.ps1` explicitly in elevated PowerShell, then
 run `Start-ScreenWise.ps1 -PreflightOnly` and `Start-ScreenWise.ps1` from ordinary
 PowerShell after confirming the rule output.
@@ -135,7 +142,7 @@ status/logging and crash markers remain; absence of a warning does not establish
 complete capture or firewall enforcement. A scoped live deployment check remains
 necessary before claiming runtime validation of these new paths.
 
-To rebuild and update later, quit the deployed app first, then:
+To rebuild and update later:
 
 ```powershell
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1 -Build
@@ -146,8 +153,11 @@ prebuild hooks, and invokes the canonical locked/offline root and desktop builds
 with the selected `-BuildProfile` and `-PlanOnly` before each. Full release builds
 are reserved for explicit owner requests or inadequate local-profile performance;
 ordinary deployment does not require them. Dependency provisioning is
-separate. Running installed processes prevent an update; the script never kills
-them. Existing data and previous application binaries/assets are retained. After
+separate. Normal updates request shutdown through the installed app's existing
+single-instance IPC and wait for the intended GUI and installed helpers to exit.
+Unsupported capability, rejected requests, failed cleanup or timeout abort the
+update without force-killing processes or replacing in-use binaries. Existing
+data and previous application binaries/assets are retained. After
 a successful replacement, `release-previous-*` archives exclude `bun.exe`,
 `ffmpeg.exe`, `ffprobe.exe`, `libopenblas.dll` and `onnxruntime.dll`. Failed
 replacement restores the complete previous runtime; manual rollback from a
@@ -177,6 +187,41 @@ registration, model downloads or GUI launch):
 ```powershell
 & .\scripts\windows\deployment\Test-ScreenWiseDeployment.ps1
 ```
+
+## Graceful shutdown during updates
+
+`-PlanOnly` returns the intended mode and source paths without building, staging,
+requesting shutdown, registering startup or launching an app. `-PrepareOnly`
+validates and stages an installation but refuses running installed processes;
+it neither shuts down an existing app nor invokes startup. Normal deployment
+performs candidate and ownership checks before requesting shutdown, then retains
+the existing publication, rollback and automatic-start flow. Startup still owns
+the firewall, authentication, runtime-integrity, model and port checks.
+
+Support requires matching protocol metadata and a SHA-256 recorded by deployment,
+plus the exact `ScreenWise.GracefulQuit.v1` marker read from the installed
+executable. An unsupported executable is never launched to probe it. The supported
+client invocation is
+`screenpipe-app.exe --screenwise-quit <PID> <absolute-installed-exe>`.
+It runs before logging, Tauri, stores, models or recording initialization. A
+missing or mismatched target fails without starting a replacement session.
+The request validates the PID and executable identity and uses the existing
+Windows single-instance window transport with a bounded send; it opens no new
+network listener and does not focus the app. Tray Quit and external Quit share
+one idempotent recording/server cleanup path. Deployment separately waits for
+process exit and requires successful cleanup before publishing the candidate.
+The shutdown deadline defaults to 60 seconds; use `-ShutdownTimeoutSeconds`
+(1–300) for an explicit bounded override. A staged candidate may remain beside
+the installation after an aborted update; no running installation is replaced.
+An accepted shutdown can still finish after deployment times out; the timeout
+aborts the update and does not cancel cleanup. Missing session markers or known
+cleanup failures are treated as unsuccessful external shutdown.
+
+The legacy installed version needs one final manual **tray Quit**. If deployment
+reports unsupported graceful shutdown, quit it manually and rerun the same
+deployment command. Do not pass control flags to that legacy executable.
+Synthetic checks cover decisions and transport fixtures; real installed shutdown
+and subsequent capture startup still require a separately authorised deployment.
 
 ## Sensitive diagnostics option
 

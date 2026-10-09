@@ -51,6 +51,7 @@ mod owned_browser;
 // GCM + WebView2) and Linux (libsecret + webkit2gtk) readers land.
 mod crash_recovery;
 mod engine_events;
+mod external_quit;
 mod monitor_events;
 mod owned_browser_cookies;
 mod permissions;
@@ -398,8 +399,26 @@ fn run_outbound_tcp_probe() -> i32 {
     }
 }
 
+fn main() {
+    let args = std::env::args_os()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if let Some(request) = external_quit::parse_arguments(&args) {
+        // Run before Tokio, Tauri, WebView, settings, log or session setup.
+        let result = request.and_then(|request| external_quit::run_client(&request));
+        match result {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(2);
+            }
+        }
+    }
+    run_application();
+}
+
 #[tokio::main]
-async fn main() {
+async fn run_application() {
     if outbound_tcp_probe_requested(std::env::args()) {
         std::process::exit(run_outbound_tcp_probe());
     }
@@ -704,6 +723,16 @@ async fn main() {
         ;
     #[cfg(not(target_os = "linux"))]
     let app = app.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if let Some(request) = external_quit::parse_arguments(&args) {
+            match request {
+                Ok(request) if external_quit::targets_current_process(&request, &args[0]) => {
+                    external_quit::note_external_request();
+                    tray::request_quit(app);
+                }
+                _ => warn!("Rejected graceful-quit request with invalid process identity."),
+            }
+            return;
+        }
         // Defer off event stack: plugin may invoke this from run loop (nounwind).
         let app_for_closure = app.clone();
         let args_clone = args.clone();
@@ -1466,6 +1495,13 @@ async fn main() {
                     } else {
                         error!("ScreenWise could not confirm a clean session marker; the next startup will report interrupted recovery.");
                     }
+                    if external_quit::external_request_active()
+                        && external_quit::shutdown_exit_code(marked_clean) != 0
+                    {
+                        // Deployment retains the original process handle and
+                        // checks this status before replacing any binaries.
+                        std::process::exit(external_quit::shutdown_exit_code(false));
+                    }
                 }
 
                 tauri::RunEvent::WindowEvent {
@@ -1501,7 +1537,11 @@ async fn main() {
             }
         })); // end catch_unwind
         if let Err(e) = result {
+            crash_recovery::note_shutdown_incomplete();
             error!("panic in run event handler: {:?}", e);
+            if external_quit::external_request_active() {
+                std::process::exit(external_quit::shutdown_exit_code(false));
+            }
         }
     });
 }

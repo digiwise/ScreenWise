@@ -17,6 +17,7 @@ param(
     [switch]$RegisterStartup,
     [switch]$Launch, # Compatibility: startup is now the default.
     [switch]$PrepareOnly,
+    [ValidateRange(1,300)][int]$ShutdownTimeoutSeconds = 60,
     [bool]$SensitiveDebugLogging = $true,
     [switch]$PlanOnly
 )
@@ -46,16 +47,10 @@ if ($PlanOnly) {
     [pscustomobject]@{ build_requested = [bool]$Build; profile = $BuildProfile; deployment = $binary;
         gui_source = $guiBuild; recorder_source = $cliBuild;
         data = $DataDirectory; port = $Port; register_startup = [bool]$RegisterStartup;
-        launch = !$PrepareOnly; prepare_only = [bool]$PrepareOnly; sensitive_debug_logging = $SensitiveDebugLogging; webview_manifest = $RuntimeManifestPath; pi_included = $true;
+        launch = !$PrepareOnly; prepare_only = [bool]$PrepareOnly; graceful_shutdown = !$PrepareOnly; shutdown_timeout_seconds = $ShutdownTimeoutSeconds;
+        sensitive_debug_logging = $SensitiveDebugLogging; webview_manifest = $RuntimeManifestPath; pi_included = $true;
         pi_runtime = $PiRuntimePath; pi_tool_mode = 'recording-api-only'; provision_pi = [bool]$ProvisionPi } | ConvertTo-Json
     return
-}
-# Refuse updates while an installed process uses these binaries, before any build/copy.
-$active = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { $_.ExecutablePath })
-foreach ($path in $active) {
-    if ($path -and $path.StartsWith($binary + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Quit the deployed ScreenWise instance from its tray before updating.'
-    }
 }
 $old = $null
 if (Test-Path -LiteralPath $manifestPath) {
@@ -65,6 +60,26 @@ if (Test-Path -LiteralPath $manifestPath) {
     }
 } elseif (Test-Path -LiteralPath $binary) {
     throw 'Existing binary directory has no deployment manifest; refusing to replace unowned files.'
+}
+Assert-DeploymentDataConfiguration $DataDirectory $Port $private
+if ($PrepareOnly -and @(Get-DeploymentProcesses $binary).Count) {
+    throw '-PrepareOnly never stops a running app. Quit the deployed instance from its tray before preparing files.'
+}
+# Validate registration errors before spending on a candidate or stopping capture.
+$startupValue = $null
+if ($RegisterStartup) {
+    $powershell = (Get-Process -Id $PID).Path
+    if ((Split-Path -Leaf $powershell) -notin @('pwsh.exe', 'powershell.exe')) {
+        throw 'Register login startup from a normal PowerShell console, not an embedded host.'
+    }
+    if ((Get-ExecutionPolicy) -in @('Restricted', 'AllSigned')) {
+        throw 'The current script execution policy does not allow this unsigned startup launcher. No policy was changed.'
+    }
+    $startupValue = '"{0}" -NoProfile -WindowStyle Hidden -File "{1}" -ManifestPath "{2}"' -f $powershell, $launchScript, $manifestPath
+    $startupKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $startupName = 'ScreenWiseLocalDeployment'
+    $existing = Get-ItemPropertyValue -LiteralPath $startupKey -Name $startupName -ErrorAction SilentlyContinue
+    if ($existing -and $existing -cne $startupValue) { throw 'Conflicting login-startup entry; it was not overwritten.' }
 }
 if (!$PiRuntimePath -and $old -and $old.PSObject.Properties['pi_runtime_directory']) {
     $PiRuntimePath = $old.pi_runtime_directory
@@ -117,10 +132,16 @@ if ($Build) {
 $guiFile = Get-Item -LiteralPath (Join-Path $guiBuild 'screenpipe-app.exe')
 foreach ($input in @('apps\screenpipe-app-tauri\src-tauri\src\pi.rs',
     'apps\screenpipe-app-tauri\src-tauri\src\pi_runtime.rs',
+    'apps\screenpipe-app-tauri\src-tauri\src\external_quit.rs',
+    'apps\screenpipe-app-tauri\src-tauri\src\main.rs',
+    'apps\screenpipe-app-tauri\src-tauri\src\tray.rs',
     'scripts\windows\deployment\pi\recording-api.ts','scripts\windows\deployment\pi\recording-api-core.mjs')) {
     if ((Get-Item -LiteralPath (Join-Path $repo $input)).LastWriteTimeUtc -gt $guiFile.LastWriteTimeUtc) {
-        throw 'The selected GUI predates Pi deployment support. Build the settled candidate before deploying (-Build).'
+        throw 'The selected GUI predates deployment/shutdown support. Build the settled candidate before deploying (-Build).'
     }
+}
+if (!(Test-DeploymentQuitCapability $guiFile.FullName)) {
+    throw 'The selected GUI does not advertise graceful-quit support. Build the settled candidate before deploying (-Build).'
 }
 $runtime = Get-Content -Raw -LiteralPath $RuntimeManifestPath | ConvertFrom-Json
 if ($runtime.schema -cne 'screenwise.gui-trial-runtime.v1') { throw 'Unsupported prepared WebView2 manifest.' }
@@ -147,14 +168,30 @@ foreach ($copy in $copies) {
     }
 }
 $null = New-Item -ItemType Directory -Path $DeploymentDirectory -Force
-# Repeat process inventory just before publishing in case a build took time.
-$active = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { $_.ExecutablePath })
-Publish-DeploymentFiles -BinaryDirectory $binary -Copies $copies -ActiveExecutables $active
-$extensionDirectory = Join-Path $binary 'assets\pi'
+# Complete all candidate copies before interrupting the installed app.
+$staging = New-DeploymentStaging $binary $copies
+$extensionDirectory = Join-Path $staging 'assets\pi'
 $null = New-Item -ItemType Directory -Path $extensionDirectory -Force
 foreach ($name in @('recording-api.ts','recording-api-core.mjs')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "pi\$name") -Destination (Join-Path $extensionDirectory $name) -ErrorAction Stop
 }
+$candidateFiles = @(Get-ChildItem -LiteralPath $staging -File -Recurse) +
+    @(Get-Item -LiteralPath $webview) + @($piItems | Where-Object { !$_.PSIsContainer }) + @(Get-Item -LiteralPath $ollamaPaths)
+$candidate = [pscustomobject]@{files=@($candidateFiles | ForEach-Object {
+    [pscustomobject]@{path=$_.FullName; length=$_.Length; modified_utc=$_.LastWriteTimeUtc.ToString('o')}
+})}
+$guiHash = (Get-FileHash -LiteralPath (Join-Path $staging 'screenpipe-app.exe') -Algorithm SHA256).Hash
+if (!(Test-DeploymentQuitCapability (Join-Path $staging 'screenpipe-app.exe'))) {
+    throw 'The staged GUI does not advertise graceful-quit support; no shutdown was requested.'
+}
+Assert-DeploymentFiles $candidate
+Assert-DeploymentDataConfiguration $DataDirectory $Port $private
+if ($old) { Stop-DeploymentInstance -Manifest $old -TimeoutSeconds $ShutdownTimeoutSeconds -PrepareOnly:$PrepareOnly }
+elseif (@(Get-DeploymentProcesses $binary).Count) { throw 'Unowned deployed processes are running; no command was sent.' }
+# Recheck prepared runtime and process quiescence immediately before replacement.
+Assert-DeploymentFiles $candidate
+$active = @(Get-DeploymentProcesses $binary | ForEach-Object { $_.ExecutablePath })
+Publish-DeploymentFiles -BinaryDirectory $binary -StagingDirectory $staging -ActiveExecutables $active
 $null = New-Item -ItemType Directory -Path $DataDirectory -Force
 $group = if ($old) { $old.firewall_group } else { 'ScreenWise-Deployment-' + [Guid]::NewGuid().ToString('N') }
 $files = @(Get-ChildItem -LiteralPath $binary -File -Recurse | ForEach-Object {
@@ -169,6 +206,7 @@ $manifest = [ordered]@{
     schema='screenwise.local-deployment.v2'; profile=$BuildProfile; sensitive_debug_logging=$SensitiveDebugLogging; deployed_utc=[DateTime]::UtcNow.ToString('o');
     binary_directory=$binary; data_directory=$DataDirectory; port=$Port; firewall_group=$group;
     gui_executable=(Join-Path $binary 'screenpipe-app.exe'); cli_executable=(Join-Path $binary 'screenpipe.exe');
+    graceful_quit_protocol='ScreenWise.GracefulQuit.v1'; gui_sha256=$guiHash;
     bun_executable=(Join-Path $binary 'bun.exe'); ffmpeg_executable=(Join-Path $binary 'ffmpeg.exe');
     ffprobe_executable=(Join-Path $binary 'ffprobe.exe'); webview2_executable=$webview;
     webview2_directory=(Split-Path -Parent $webview); initial_ignored_windows=@($IgnoredWindow); files=$files;
@@ -178,20 +216,10 @@ $manifest = [ordered]@{
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 if ($RegisterStartup) {
     # Startup uses the same fail-closed launcher, never a direct executable command.
-    $powershell = (Get-Process -Id $PID).Path
-    if ((Split-Path -Leaf $powershell) -notin @('pwsh.exe', 'powershell.exe')) {
-        throw 'Register login startup from a normal PowerShell console, not an embedded host.'
-    }
-    if ((Get-ExecutionPolicy) -in @('Restricted', 'AllSigned')) {
-        throw 'The current script execution policy does not allow this unsigned startup launcher. No policy was changed.'
-    }
-    $value = '"{0}" -NoProfile -WindowStyle Hidden -File "{1}" -ManifestPath "{2}"' -f $powershell, $launchScript, $manifestPath
-    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $name = 'ScreenWiseLocalDeployment'
-    $existing = Get-ItemPropertyValue -LiteralPath $key -Name $name -ErrorAction SilentlyContinue
-    if ($existing -and $existing -cne $value) { throw 'Conflicting login-startup entry; it was not overwritten.' }
-    $null = New-Item -Path $key -Force
-    Set-ItemProperty -LiteralPath $key -Name $name -Value $value
+    $existing = Get-ItemPropertyValue -LiteralPath $startupKey -Name $startupName -ErrorAction SilentlyContinue
+    if ($existing -and $existing -cne $startupValue) { throw 'Conflicting login-startup entry; it was not overwritten.' }
+    $null = New-Item -Path $startupKey -Force
+    Set-ItemProperty -LiteralPath $startupKey -Name $startupName -Value $startupValue
 }
 Write-Host "Deployed $BuildProfile binaries: $binary"
 Write-Host "Persistent recording data: $DataDirectory"
