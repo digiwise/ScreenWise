@@ -579,6 +579,24 @@ impl VisionManager {
         Ok(handle)
     }
 
+    /// Reconcile only a successful hardware enumeration. Policy stops are not disconnects.
+    pub async fn reconcile_monitor_topology(&self, connected: &[u32]) -> Result<()> {
+        screenpipe_config::live_capture_status::observe_monitor_topology(connected);
+        // Include HD-only handles and tasks which have already completed.
+        let ids: std::collections::HashSet<u32> = self
+            .recording_tasks
+            .iter()
+            .map(|entry| *entry.key())
+            .chain(self.hd_recording_tasks.iter().map(|entry| *entry.key()))
+            .collect();
+        for id in ids {
+            if !connected.contains(&id) {
+                self.stop_monitor(id).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Stop recording on a specific monitor
     pub async fn stop_monitor(&self, monitor_id: u32) -> Result<()> {
         // Stop the HD recorder first. Aborting drops its ffmpeg stdin, which
@@ -706,6 +724,31 @@ mod tests {
             capture_on_clipboard: None,
         };
         VisionManager::new(config, db, Handle::current())
+    }
+
+    #[tokio::test]
+    async fn disconnected_monitors_stop_synthetic_capture_and_hd_tasks() {
+        let vm = make_vm_with_monitor_ids(Vec::new()).await;
+        let removed = tokio::spawn(std::future::pending::<()>());
+        let removed_hd = tokio::spawn(std::future::pending::<()>());
+        let kept = tokio::spawn(std::future::pending::<()>());
+        let removed_abort = removed.abort_handle();
+        let hd_abort = removed_hd.abort_handle();
+        vm.recording_tasks.insert(900_011, removed);
+        vm.hd_recording_tasks.insert(900_011, removed_hd);
+        vm.recording_tasks.insert(900_012, kept);
+        vm.reconcile_monitor_topology(&[900_012]).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(removed_abort.is_finished());
+        assert!(hd_abort.is_finished());
+        assert!(!vm.recording_tasks.contains_key(&900_011));
+        assert!(!vm.hd_recording_tasks.contains_key(&900_011));
+        assert!(vm.recording_tasks.contains_key(&900_012));
+        vm.reconcile_monitor_topology(&[]).await.unwrap();
+        assert!(vm.recording_tasks.is_empty());
+        // Reconnection reconciliation alone does not create a recording task.
+        vm.reconcile_monitor_topology(&[900_011]).await.unwrap();
+        assert!(vm.recording_tasks.is_empty());
     }
 
     /// When the allowlist is stale but physical monitors exist, fall back to

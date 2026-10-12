@@ -49,6 +49,10 @@ describe("recording status", () => {
     expect(() => parseRecordingStatus(response({ ...observation, [field]: "private value" }))).toThrow();
   });
   it("does not invent an active state for missing observations", () => expect(parseRecordingStatus({ active_intervals: [], persistence_degraded: false }).rows).toEqual([]));
+  it("accepts the fixed disconnected-monitor lifecycle reason", () => {
+    const parsed = parseRecordingStatus(response({ ...observation, channel: "screen", scope: { monitor: 42 }, condition: "stopped", reasons: ["monitor_disconnected"] } as typeof observation)).rows[0];
+    expect(recordingObservationLabel(parsed)).toBe("Monitor disconnected");
+  });
   it("rejects impossible timestamps", () => expect(() => parseRecordingStatus(response({ ...observation, since_ms: 300 }))).toThrow());
   it("explains event loss, audio queue capacity, confirmed and possible loss, and shutdown failures", () => {
     const result = parseRecordingStatus({ ...response(), event_delivery: { near_capacity: true, dropped_events: 3 },
@@ -100,6 +104,23 @@ const evidence = { channel: "microphone", scope: { device: 2 }, capture_supporte
 const live = (row: unknown = evidence) => ({ live_status: { schema_version: 1, snapshot_at_ms: 300, session_started_at_ms: 100,
   session_uptime_ms: 200, evidence_available: true, evidence: [row], interval_checks: [] } });
 describe("current session recording evidence", () => {
+  const topology = { available: true, checked_age_ms: 1, monitors: [{ monitor_id: 42, connected: false, last_seen_at_ms: 100, last_seen_age_ms: 200 }] };
+  const withTopology = (monitor_topology: unknown) => ({ live_status: { ...live().live_status, monitor_topology } });
+  it("parses bounded monitor presence independently of capture and accepts older recorders without inferring removal", () => {
+    const parsed = parseLiveStatus(withTopology(topology));
+    expect(parsed.monitorTopology).toEqual({ available: true, checkedAge: 1, monitors: [{ id: 42, connected: false, lastSeen: 100, lastSeenAge: 200 }] });
+    expect(parsed.evidence).toHaveLength(1);
+    expect(parseLiveStatus(live()).monitorTopology).toBeUndefined();
+    expect(JSON.stringify(parseLiveStatus(withTopology({ ...topology, message: "private", monitors: [{ ...topology.monitors[0], name: "secret title" }] })))).not.toMatch(/private|secret/);
+  });
+  it.each([
+    { ...topology, available: "yes" }, { ...topology, checked_age_ms: null },
+    { ...topology, monitors: [topology.monitors[0], topology.monitors[0]] },
+    { ...topology, monitors: [{ ...topology.monitors[0], monitor_id: -1 }] },
+    { ...topology, monitors: [{ ...topology.monitors[0], connected: "false" }] },
+    { ...topology, monitors: [{ ...topology.monitors[0], last_seen_age_ms: null }] },
+    { ...topology, monitors: [{ ...topology.monitors[0], connected: true, last_seen_at_ms: null, last_seen_age_ms: null }] },
+  ])("rejects invalid monitor topology without silently hiding a recording source", (invalid) => expect(() => parseLiveStatus(withTopology(invalid))).toThrow());
   it("keeps capture success independent of absent storage success", () => {
     const result = parseLiveStatus(live()).evidence[0];
     expect(result.captureAge).toBe(2000); expect(result.storageAge).toBeNull();

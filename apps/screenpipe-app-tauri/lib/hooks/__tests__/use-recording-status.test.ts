@@ -7,6 +7,18 @@ vi.mock("@/lib/api", () => ({ localFetch: fetchMock }));
 import { startRecordingStatusMonitoring, useRecordingStatus, recordingStatusUnavailable } from "../use-recording-status";
 const body = () => ({ persistence_degraded: false, active_intervals: [{ channel: "microphone", source: "audio_processing", scope: { device: 1 }, condition: "silent", reasons: ["silent_input"], rules: [], since_ms: 1, observed_at_ms: 2 }], live_status: { schema_version: 1, snapshot_at_ms: Date.now(), session_started_at_ms: 1, session_uptime_ms: 1000, evidence_available: true, evidence: [], interval_checks: [{ channel: "microphone", source: "audio_processing", scope: { device: 1 }, checked_at_ms: Date.now(), checked_age_ms: 1000 }] } });
 describe("shared background recording status", () => {
+  it("carries monitor topology ages across transport and clears it when a later response omits it", async () => {
+    const current = body();
+    const value = { ...current, live_status: { ...current.live_status, monitor_topology: { available: true, checked_age_ms: 10,
+      monitors: [{ monitor_id: 7, connected: false, last_seen_at_ms: 1, last_seen_age_ms: 1000 }] } } };
+    fetchMock.mockResolvedValueOnce({ ok: true, json: () => new Promise((resolve) => setTimeout(() => resolve(value), 250)) })
+      .mockResolvedValueOnce({ ok: true, json: async () => body() });
+    stops.push(startRecordingStatusMonitoring()); await vi.advanceTimersByTimeAsync(250);
+    expect(useRecordingStatus.getState().monitorTopology?.checkedAge).toBe(260);
+    expect(useRecordingStatus.getState().monitorTopology?.monitors[0].lastSeenAge).toBe(1250);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(useRecordingStatus.getState().monitorTopology).toBeUndefined();
+  });
   it("classifies request failures safely and clears them after recovery and visibility changes", async () => {
     fetchMock.mockRejectedValueOnce(new Error("secret token and private path"))
       .mockResolvedValueOnce({ ok: true, json: async () => body() });

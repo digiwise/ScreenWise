@@ -19,19 +19,34 @@ const evidence = { channel: "microphone", scope: { device: 2 }, capture_supporte
 const audioDevice = { channel: "microphone", scope: { device: 2 }, samples_observed_ms: 60000, silent_samples_ms: 40000, non_silent_samples_ms: 20000,
   vad_processed_audio_ms: 15000, vad_detected_speech_ms: 12000, vad_uncertain_audio_ms: 0, vad_available: true, pending_vad_speech_ms: 3000, pending_tasks: 1,
   oldest_pending_age_ms: 5000, transcript_words_stored: 2, transcript_results_stored: 1, transcription_deferred_audio_ms: 0 };
-function seed(options: { observations?: unknown[]; evidence?: unknown[]; audio?: unknown[]; deviceNames?: unknown[] } = {}) {
+function seed(options: { observations?: unknown[]; evidence?: unknown[]; audio?: unknown[]; deviceNames?: unknown[]; monitorTopology?: unknown } = {}) {
   const observations = options.observations ?? [observation];
   const body = { persistence_degraded: false, active_intervals: observations, live_status: { schema_version: 1, snapshot_at_ms: Date.now(), session_started_at_ms: Date.now(), session_uptime_ms: 60000,
-    evidence_available: true, evidence: options.evidence ?? [evidence], device_names: options.deviceNames ?? [], interval_checks: observations.map((raw) => { const row = raw as typeof observation; return { channel: row.channel, source: row.source, scope: row.scope, checked_at_ms: Date.now(), checked_age_ms: 0 }; }),
+    evidence_available: true, evidence: options.evidence ?? [evidence], device_names: options.deviceNames ?? [], monitor_topology: options.monitorTopology, interval_checks: observations.map((raw) => { const row = raw as typeof observation; return { channel: row.channel, source: row.source, scope: row.scope, checked_at_ms: Date.now(), checked_age_ms: 0 }; }),
     ...(options.audio ? { audio_activity: { schema_version: 1, window_ms: 60000, available: true, devices: options.audio } } : {}) } };
   const parsed = parseRecordingStatus(body), live = parseLiveStatus(body);
-  useRecordingStatus.setState({ rows: parsed.rows, evidence: live.evidence, deviceNames: live.deviceNames, audio: parseAudioActivity(body), session: live.session,
+  useRecordingStatus.setState({ rows: parsed.rows, evidence: live.evidence, deviceNames: live.deviceNames, monitorTopology: live.monitorTopology, audio: parseAudioActivity(body), session: live.session,
     checked: Date.now(), receivedMonotonic: performance.now(), error: null, requestFailure: null, tick: Date.now(), alerts: [], degraded: false });
 }
 function open() { useStatusDialog.getState().open(); render(<RecordingStatusDialog />); }
 function expand(group: string, type: string) { fireEvent.click(screen.getByRole("button", { name: `${group} details` })); fireEvent.click(screen.getByRole("button", { name: `${type} details` })); }
 
 describe("compact recording dashboard", () => {
+  it("keeps disconnected lock rows out of high-level views and names them with last-seen time in drill-down", () => {
+    const old = { ...observation, channel: "screen", source: "window_policy", scope: { monitor: 1 }, condition: "stopped", reasons: ["screen_locked"] };
+    const current = { ...old, source: "monitor_capture", scope: { monitor: 2 }, condition: "admitted", reasons: ["gate_open"] };
+    seed({ observations: [old, current], evidence: [{ ...evidence, channel: "screen", scope: { monitor: 2 } }],
+      monitorTopology: { available: true, checked_age_ms: 0, monitors: [{ monitor_id: 1, connected: false, last_seen_at_ms: 100, last_seen_age_ms: 248000000 }] } });
+    open();
+    expect(screen.queryByText("Disconnected")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Visual details" }));
+    expect(screen.queryByText("Disconnected")).toBeNull();
+    expect(screen.queryByText(/Computer is locked/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Screen images and video details" }));
+    expect(screen.getByText("Disconnected")).toBeVisible();
+    expect(screen.getByText(/Last seen.*absent from the current enumeration/)).toBeVisible();
+    expect(screen.queryByText(/Computer is locked/)).toBeNull();
+  });
   it("shows deliberate maximised-window scoping without invented blockers", () => {
     seed({ observations: [{ ...observation, channel: "screen", source: "window_policy", scope: { monitor: 1 }, condition: "active_window_only", reasons: ["maximised_window_only"] }], evidence: [] });
     open(); expand("Visual", "Screen images and video");

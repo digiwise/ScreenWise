@@ -60,12 +60,24 @@ pub async fn start_monitor_watcher(
         // Initialize with current monitors
         match list_monitors_detailed().await {
             Ok(monitors) => {
+                if let Err(error) = vision_manager
+                    .reconcile_monitor_topology(
+                        &monitors
+                            .iter()
+                            .map(|monitor| monitor.id())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await
+                {
+                    warn!(?error, "Could not stop disconnected monitor producers");
+                }
                 for monitor in &monitors {
                     known_monitors.insert(monitor.id(), monitor.name().to_string());
                 }
                 permission_denied_logged = false;
             }
             Err(MonitorListError::PermissionDenied) => {
+                screenpipe_config::live_capture_status::monitor_topology_unavailable();
                 warn!("Screen recording permission denied. Vision capture is disabled. Grant access in System Settings > Privacy & Security > Screen Recording");
                 permission_denied_logged = true;
                 permission_monitor::report_state(
@@ -75,6 +87,7 @@ pub async fn start_monitor_watcher(
                 );
             }
             Err(e) => {
+                screenpipe_config::live_capture_status::monitor_topology_unavailable();
                 warn!("Failed to list monitors on startup: {}", e);
             }
         }
@@ -87,6 +100,7 @@ pub async fn start_monitor_watcher(
             // 3. Only poll the focused app via Accessibility APIs
             // This ensures macOS DRM sees no active ScreenCaptureKit usage.
             if drm_detector::drm_content_paused() {
+                screenpipe_config::live_capture_status::monitor_topology_unavailable();
                 if !drm_stopped {
                     info!("Content protection gate closed — stopping vision monitors");
                     if let Err(e) = vision_manager.stop().await {
@@ -125,6 +139,17 @@ pub async fn start_monitor_watcher(
                 suppress_next_topology_event = true;
                 // Re-populate known_monitors after restart
                 if let Ok(monitors) = list_monitors_detailed().await {
+                    if let Err(error) = vision_manager
+                        .reconcile_monitor_topology(
+                            &monitors
+                                .iter()
+                                .map(|monitor| monitor.id())
+                                .collect::<Vec<_>>(),
+                        )
+                        .await
+                    {
+                        warn!(?error, "Could not stop disconnected monitor producers");
+                    }
                     known_monitors = monitors
                         .iter()
                         .map(|m| (m.id(), m.name().to_string()))
@@ -138,6 +163,7 @@ pub async fn start_monitor_watcher(
             // When outside the work-hours schedule stop all capture so no data
             // is recorded outside the user's defined window.
             if crate::schedule_monitor::schedule_paused() {
+                screenpipe_config::live_capture_status::monitor_topology_unavailable();
                 if !schedule_stopped {
                     info!("outside work-hours schedule — stopping all capture");
                     if let Err(e) = vision_manager.stop().await {
@@ -171,6 +197,17 @@ pub async fn start_monitor_watcher(
                 schedule_stopped = false;
                 suppress_next_topology_event = true;
                 if let Ok(monitors) = list_monitors_detailed().await {
+                    if let Err(error) = vision_manager
+                        .reconcile_monitor_topology(
+                            &monitors
+                                .iter()
+                                .map(|monitor| monitor.id())
+                                .collect::<Vec<_>>(),
+                        )
+                        .await
+                    {
+                        warn!(?error, "Could not stop disconnected monitor producers");
+                    }
                     known_monitors = monitors
                         .iter()
                         .map(|m| (m.id(), m.name().to_string()))
@@ -204,6 +241,17 @@ pub async fn start_monitor_watcher(
                         info!("VisionManager recovered after previous start failure");
                         recovery_retry_warned = false;
                         if let Ok(monitors) = list_monitors_detailed().await {
+                            if let Err(error) = vision_manager
+                                .reconcile_monitor_topology(
+                                    &monitors
+                                        .iter()
+                                        .map(|monitor| monitor.id())
+                                        .collect::<Vec<_>>(),
+                                )
+                                .await
+                            {
+                                warn!(?error, "Could not stop disconnected monitor producers");
+                            }
                             known_monitors = monitors
                                 .iter()
                                 .map(|m| (m.id(), m.name().to_string()))
@@ -211,6 +259,7 @@ pub async fn start_monitor_watcher(
                         }
                     }
                     Err(e) => {
+                        screenpipe_config::live_capture_status::monitor_topology_unavailable();
                         if recovery_retry_warned {
                             debug!(?e, "VisionManager retry still failing");
                         } else {
@@ -237,6 +286,7 @@ pub async fn start_monitor_watcher(
                     monitors
                 }
                 Err(MonitorListError::PermissionDenied) => {
+                    screenpipe_config::live_capture_status::monitor_topology_unavailable();
                     if !permission_denied_logged {
                         warn!("Screen recording permission denied. Vision capture is disabled. Grant access in System Settings > Privacy & Security > Screen Recording");
                         permission_denied_logged = true;
@@ -251,11 +301,22 @@ pub async fn start_monitor_watcher(
                     continue;
                 }
                 Err(MonitorListError::NoMonitorsFound) => {
-                    debug!("No monitors found, will retry");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
+                    // xcap returns this only for a successful empty enumeration.
+                    // macOS can also return it for an SCK error; do not infer removal.
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        Vec::new()
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        screenpipe_config::live_capture_status::monitor_topology_unavailable();
+                        debug!("No monitors found, will retry");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
                 }
                 Err(e) => {
+                    screenpipe_config::live_capture_status::monitor_topology_unavailable();
                     warn!("Failed to list monitors: {}", e);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
@@ -266,6 +327,14 @@ pub async fn start_monitor_watcher(
             // Get currently recording monitors
             let active_ids: HashSet<u32> =
                 vision_manager.active_monitors().await.into_iter().collect();
+            // Stop removed producers before starting replacements. Publication
+            // also retires observations for missing scopes whose tasks already died.
+            if let Err(error) = vision_manager
+                .reconcile_monitor_topology(&current_ids.iter().copied().collect::<Vec<_>>())
+                .await
+            {
+                warn!(?error, "Could not stop disconnected monitor producers");
+            }
 
             // Empty active set on a populated known set means this is steady-state
             // boot, not a hot-plug — suppress the notification so the user doesn't

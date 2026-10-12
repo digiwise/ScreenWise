@@ -7,6 +7,16 @@ import { statusScope, type StatusObservation, type CaptureEvidence } from "../re
 const row = (patch: Partial<StatusObservation> = {}): StatusObservation => ({ key: "microphone:audio processing:Device 1", channel: "microphone", source: "audio processing", scope: "Device 1", condition: "failed", status: "Failed", reasons: ["device stream failed"], rules: [], since: 0, observed: 0, checkedAge: 0, ...patch });
 const evidence = (patch: Partial<CaptureEvidence> = {}): CaptureEvidence => ({ key: "microphone:Device 1", channel: "microphone", scope: "Device 1", global: false, captureSupported: true, storageSupported: true, captured: 1, stored: null, captureAge: 61000, storageAge: null, ...patch });
 describe("consolidated recording alerts", () => {
+  it("excludes disconnected monitor failures while retaining connected failures and unavailable-topology warnings", () => {
+    const old = row({ channel: "screen", scope: "Monitor 1", checkedAge: 248000000, reasons: ["foreground changed"] });
+    const current = row({ channel: "screen", scope: "Monitor 2", reasons: ["capture failure"] });
+    const topology = { available: true, checkedAge: 0, monitors: [{ id: 1, connected: false, lastSeen: 1, lastSeenAge: 248000000 }] };
+    expect(recordingProblems([old], [], [], false, 0, topology)).toEqual([]);
+    expect(recordingProblems([old, current], [], [], false, 0, topology)).toEqual(["recording_error"]);
+    expect(recordingProblems([old], [], [], false, 0, { ...topology, available: false })).toEqual(["status_unavailable"]);
+    expect(recordingProblems([old], [], [], false, 90001, topology)).toEqual(["status_unavailable"]);
+    expect(recordingProblems([old], [], [], true, 0, topology)).toEqual(["status_unavailable"]);
+  });
   it("debounces for 60 seconds then repeats every 15 minutes across changing data types", () => {
     const tracker = new RecordingAlertTracker(); const notices: number[] = [];
     for (let second = 0; second <= 960; second++) if (tracker.update(second % 2 ? ["recording_error", "delivery_at_risk"] : ["status_unavailable"], second * 1000)) notices.push(second);

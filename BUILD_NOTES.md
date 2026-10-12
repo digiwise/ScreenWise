@@ -1,7 +1,8 @@
 # ScreenWise Windows build notes
 
-The latest candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md), based on
-the existing graceful deployment implementation. Earlier release entries
+The latest build work is the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
+The previous deployed candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md),
+based on the existing graceful deployment implementation. Earlier release entries
 describe their historical candidates.
 
 The portable build and test instructions are in
@@ -17,6 +18,18 @@ release workflow without installing dependencies or starting the bridge. Pi's
 `screenwise_recordings` extension uses the authenticated recorder HTTP API directly
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
+## Disconnected monitor recording/status (2026-10-12)
+
+The watcher stops removed capture/HD producers and retires current monitor
+diagnostics while preserving history. Summaries/alerts omit fresh confirmed
+disconnected scopes; source drill-down shows Disconnected and last-seen time.
+Unavailable enumeration and connected producer stalls remain unconfirmed/visible.
+The [implementation note](docs/DISCONNECTED_MONITORS.md) records the exact
+behavior, 200 passing focused checks, TypeScript, RootFmt, 16-page export and
+release-local artifact evidence. Hardware disconnect/reconnect remains untested.
+Both Rust lockfiles are unchanged; no dependencies, caches or profiles were
+changed. No deployment, recording restart, new capture or firewall change occurred.
 
 ## Capture fixes candidate (2026-10-09)
 

@@ -115,6 +115,7 @@ pub enum CaptureReason {
     InputWorkerContended,
     ActiveInputDeferral,
     MonitorInactive,
+    MonitorDisconnected,
     CaptureFailure,
     TranscriptionDeferred,
     PrivacyGenerationInvalidated,
@@ -181,6 +182,7 @@ impl CaptureReason {
             Self::InputWorkerContended => "capture_input_worker_contended",
             Self::ActiveInputDeferral => "capture_active_input_deferral",
             Self::MonitorInactive => "capture_monitor_inactive",
+            Self::MonitorDisconnected => "capture_monitor_disconnected",
             Self::CaptureFailure => "capture_failed",
             Self::TranscriptionDeferred => "transcription_deferred",
             Self::PrivacyGenerationInvalidated => "capture_privacy_generation_invalidated",
@@ -592,6 +594,11 @@ pub fn observe(
     reasons: Vec<CaptureReason>,
     rules: Vec<RuleReference>,
 ) {
+    if crate::live_capture_status::monitor_disconnected(scope)
+        && reasons != [CaptureReason::MonitorDisconnected]
+    {
+        return;
+    }
     crate::live_capture_status::checked(channel, source, scope);
     let now = now_ms();
     let notices = match store().lock() {
@@ -624,6 +631,9 @@ pub fn observe_window(
     rules: Vec<RuleReference>,
     mut excluded_apps: Vec<String>,
 ) {
+    if crate::live_capture_status::monitor_disconnected(scope) {
+        return;
+    }
     crate::live_capture_status::checked(channel, DiagnosticSource::WindowPolicy, scope);
     excluded_apps.retain(|app| {
         app.len() <= 120
@@ -677,6 +687,32 @@ pub fn current() -> Vec<CaptureDiagnostic> {
             DEGRADED.store(true, Ordering::Relaxed);
             Vec::new()
         }
+    }
+}
+/// Retire current producer states without deleting their queued/persisted history.
+pub(crate) fn disconnect_monitor(id: u32) {
+    for event in current()
+        .into_iter()
+        .filter(|event| event.scope == CaptureScope::Monitor(id))
+    {
+        observe(
+            event.channel,
+            event.source,
+            event.scope,
+            CaptureCondition::Stopped,
+            vec![CaptureReason::MonitorDisconnected],
+            Vec::new(),
+        );
+    }
+}
+pub(crate) fn reset_monitor(id: u32) {
+    if let Ok(mut state) = store().lock() {
+        state
+            .current
+            .retain(|(_, _, scope), _| *scope != CaptureScope::Monitor(id));
+        state
+            .transitions
+            .retain(|(_, _, scope), _| *scope != CaptureScope::Monitor(id));
     }
 }
 pub fn degraded() -> bool {

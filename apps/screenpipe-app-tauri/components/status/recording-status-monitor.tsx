@@ -42,7 +42,7 @@ export function RecordingStatusMonitor() {
     if (!leader) return;
     if (previous.current.generation !== status.generation || (previous.current.session !== null && status.session !== null && previous.current.session !== status.session)) { tracker.current.reset(); setMessage(null); }
     previous.current = { session: status.session, generation: status.generation };
-    const problems = recordingProblems(status.rows, status.evidence, status.alerts, recordingStatusUnavailable(status) !== null, status.checked === null ? 0 : status.tick - status.checked);
+    const problems = recordingProblems(status.rows, status.evidence, status.alerts, recordingStatusUnavailable(status) !== null, status.checked === null ? 0 : status.tick - status.checked, status.monitorTopology);
     if (!problems.length) { tracker.current.update([], performance.now()); setMessage(null); return; }
     if (!tracker.current.update(problems, performance.now())) return;
     const body = recordingAlertMessage(problems);
@@ -53,7 +53,7 @@ export function RecordingStatusMonitor() {
         if (!("__TAURI_INTERNALS__" in window) || platform() === "linux") return;
         if (await isPermissionGranted()) {
           const latest = useRecordingStatus.getState();
-          if (latest.generation === status.generation && latest.session === status.session && recordingProblems(latest.rows, latest.evidence, latest.alerts, recordingStatusUnavailable(latest) !== null, latest.checked === null ? 0 : latest.tick - latest.checked).length)
+          if (latest.generation === status.generation && latest.session === status.session && recordingProblems(latest.rows, latest.evidence, latest.alerts, recordingStatusUnavailable(latest) !== null, latest.checked === null ? 0 : latest.tick - latest.checked, latest.monitorTopology).length)
             sendNotification({ title: "ScreenWise recording status", body });
         }
       } catch { /* The local subdued banner remains available. Never prompt for permission. */ }

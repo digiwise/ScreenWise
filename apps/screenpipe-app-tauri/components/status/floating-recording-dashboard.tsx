@@ -20,7 +20,7 @@ export function FloatingRecordingDashboard() {
   const { settings, updateSettings, isSettingsLoaded } = useSettings();
   const { monitors, aliases } = useRecordingMonitors(state.session);
   const unavailable = recordingStatusUnavailable(state);
-  const input = { rows: state.rows, evidence: state.evidence, audio: state.audio, elapsed: state.checked === null ? 0 : Math.max(0, state.tick - state.checked), now: state.tick, unavailable: !!unavailable, requestFailed: !!state.requestFailure, lastStatuses: state.lastStatuses, ageUncertain: state.ageUncertain };
+  const input = { rows: state.rows, evidence: state.evidence, monitorTopology: state.monitorTopology, audio: state.audio, elapsed: state.checked === null ? 0 : Math.max(0, state.tick - state.checked), now: state.tick, unavailable: !!unavailable, requestFailed: !!state.requestFailure, lastStatuses: state.lastStatuses, ageUncertain: state.ageUncertain };
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [level, setLevel] = useState<1 | 2 | 3>(1);
@@ -66,12 +66,13 @@ export function FloatingRecordingDashboard() {
           {channel === "pointer" && <p className="text-[10px] text-muted-foreground">Hooks still trigger screen capture.</p>}
           {["screen_storage", "ocr", "accessibility"].includes(channel) && <p className="text-[10px] text-muted-foreground">Linked to visual capture.</p>}
           {channel === "transcription" && <p className="text-[10px] text-muted-foreground">Linked to audio capture.</p>}
-          {classifyRecordingType(channel, input).map((status) => {
+          {classifyRecordingType(channel, input, true).map((status) => {
             const device = state.deviceNames.find((name) => name.channel === channel && status.scope === `Device ${name.device}`);
             const scope = recordingMonitorScope(recordingDeviceScope(status.scope, channel, state.deviceNames), monitors, aliases);
             return <div key={status.scope} className="mt-1">
               <p className="text-[11px] text-muted-foreground truncate" title={scope}>{scope.startsWith("All sources (") ? "All sources" : scope}</p>
               <RecordingStateIcon status={status} />
+              {status.mode === "disconnected" && <p className="text-[10px] text-muted-foreground">{status.detail}</p>}
               {device && <div className="flex gap-2 mt-1"><button title="Device controls apply to this recorder session." disabled={busy || !!unavailable} className="text-xs rounded border px-2 disabled:opacity-50" onClick={() => void request(() => requestAudioDevice(device.device, device.channel, true))}>Start device</button><button title="Device controls apply to this recorder session." disabled={busy || !!unavailable} className="text-xs rounded border px-2 disabled:opacity-50" onClick={() => void request(() => requestAudioDevice(device.device, device.channel, false))}>Pause device</button></div>}
             </div>;
           })}

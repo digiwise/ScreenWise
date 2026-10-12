@@ -21,12 +21,19 @@ struct Evidence {
     captured: Option<Observation>,
     stored: Option<Observation>,
 }
+#[derive(Default)]
+struct MonitorPresence {
+    connected: Option<bool>,
+    last_seen: Option<Observation>,
+}
 struct Store {
     started_at_ms: u64,
     started: Instant,
     evidence: HashMap<(CaptureChannel, CaptureScope), Evidence>,
     checks: HashMap<(CaptureChannel, DiagnosticSource, CaptureScope), Observation>,
     device_names: HashMap<(CaptureChannel, u64), String>,
+    monitors: HashMap<u32, MonitorPresence>,
+    topology_check: Option<Observation>,
     truncated: bool,
 }
 impl Default for Store {
@@ -37,6 +44,8 @@ impl Default for Store {
             evidence: HashMap::new(),
             checks: HashMap::new(),
             device_names: HashMap::new(),
+            monitors: HashMap::new(),
+            topology_check: None,
             truncated: false,
         }
     }
@@ -67,6 +76,7 @@ pub struct IntervalCheck {
 }
 #[derive(Serialize)]
 pub struct LiveStatus {
+    pub monitor_topology: MonitorTopology,
     /// Ephemeral hardware metadata for the authenticated current-session UI.
     /// Never included in diagnostic notices or persisted history.
     pub device_names: Vec<DeviceName>,
@@ -78,6 +88,104 @@ pub struct LiveStatus {
     pub evidence: Vec<LiveEvidence>,
     pub evidence_available: bool,
     pub interval_checks: Vec<IntervalCheck>,
+}
+#[derive(Serialize, Default)]
+pub struct MonitorTopology {
+    pub available: bool,
+    pub checked_age_ms: Option<u64>,
+    pub monitors: Vec<MonitorStatus>,
+}
+#[derive(Serialize)]
+pub struct MonitorStatus {
+    pub monitor_id: u32,
+    pub connected: Option<bool>,
+    pub last_seen_at_ms: Option<u64>,
+    pub last_seen_age_ms: Option<u64>,
+}
+
+/// Only a successful hardware enumeration may establish presence/removal.
+/// Returns newly disconnected scopes, including producers whose tasks already exited.
+pub fn observe_monitor_topology(ids: &[u32]) -> Vec<u32> {
+    // Desktop session restarts can retain current diagnostic rows from the
+    // previous session even though live evidence was reset. Reconcile them too.
+    let old_scopes: Vec<_> = crate::capture_diagnostics::current()
+        .into_iter()
+        .map(|row| row.scope)
+        .collect();
+    let Ok(mut state) = store().lock() else {
+        return Vec::new();
+    };
+    for scope in old_scopes {
+        track_monitor(&mut state, scope);
+    }
+    let observation = Observation {
+        at_ms: now_ms(),
+        clock: Instant::now(),
+    };
+    let mut reconnected = Vec::new();
+    for &id in ids {
+        if state.monitors.len() >= 1024 && !state.monitors.contains_key(&id) {
+            state.truncated = true;
+            continue;
+        }
+        let monitor = state.monitors.entry(id).or_default();
+        if monitor.connected == Some(false) {
+            reconnected.push(id);
+        }
+        monitor.connected = Some(true);
+        monitor.last_seen = Some(observation);
+    }
+    let mut disconnected = Vec::new();
+    for (&id, monitor) in &mut state.monitors {
+        if !ids.contains(&id) && monitor.connected != Some(false) {
+            monitor.connected = Some(false);
+            disconnected.push(id);
+        }
+    }
+    // A reconnected native ID must earn fresh producer evidence. Historical
+    // diagnostic deliveries stay queued/persisted; only current state is reset.
+    for &id in &reconnected {
+        state
+            .evidence
+            .retain(|(_, scope), _| *scope != CaptureScope::Monitor(id));
+        state
+            .checks
+            .retain(|(_, _, scope), _| *scope != CaptureScope::Monitor(id));
+    }
+    state.topology_check = Some(observation);
+    drop(state);
+    for id in reconnected {
+        crate::capture_diagnostics::reset_monitor(id);
+    }
+    for &id in &disconnected {
+        crate::capture_diagnostics::disconnect_monitor(id);
+    }
+    disconnected
+}
+pub fn monitor_topology_unavailable() {
+    if let Ok(mut state) = store().lock() {
+        state.topology_check = None;
+    }
+}
+pub(crate) fn monitor_disconnected(scope: CaptureScope) -> bool {
+    let CaptureScope::Monitor(id) = scope else {
+        return false;
+    };
+    store().lock().is_ok_and(|state| {
+        state
+            .monitors
+            .get(&id)
+            .is_some_and(|monitor| monitor.connected == Some(false))
+    })
+}
+fn track_monitor(state: &mut Store, scope: CaptureScope) {
+    if let CaptureScope::Monitor(id) = scope {
+        if state.monitors.len() < 1024 || state.monitors.contains_key(&id) {
+            state.monitors.entry(id).or_default();
+        } else {
+            state.truncated = true;
+        }
+    }
 }
 #[derive(Serialize)]
 pub struct DeviceName {
@@ -119,6 +227,7 @@ pub fn start_session() {
 }
 pub(crate) fn checked(channel: CaptureChannel, source: DiagnosticSource, scope: CaptureScope) {
     if let Ok(mut state) = store().lock() {
+        track_monitor(&mut state, scope);
         let key = (channel, source, scope);
         if state.checks.len() < 4096 || state.checks.contains_key(&key) {
             state.checks.insert(
@@ -134,7 +243,11 @@ pub(crate) fn checked(channel: CaptureChannel, source: DiagnosticSource, scope: 
     }
 }
 fn record(channel: CaptureChannel, scope: CaptureScope, stored: bool) {
+    if monitor_disconnected(scope) {
+        return;
+    }
     if let Ok(mut state) = store().lock() {
+        track_monitor(&mut state, scope);
         let key = (channel, scope);
         if state.evidence.len() >= 4086 && !state.evidence.contains_key(&key) {
             state.truncated = true;
@@ -161,6 +274,7 @@ pub fn stored(channel: CaptureChannel, scope: CaptureScope) {
 }
 pub fn snapshot() -> LiveStatus {
     let mut output = LiveStatus {
+        monitor_topology: MonitorTopology::default(),
         device_names: Vec::new(),
         audio_activity: crate::audio_activity::snapshot(),
         schema_version: 1,
@@ -179,6 +293,28 @@ pub fn snapshot() -> LiveStatus {
     output.evidence_available = !state.truncated;
     output.session_started_at_ms = state.started_at_ms;
     output.session_uptime_ms = now.saturating_duration_since(state.started).as_millis() as u64;
+    output.monitor_topology = MonitorTopology {
+        available: state.topology_check.is_some() && !state.truncated,
+        checked_age_ms: state
+            .topology_check
+            .map(|value| now.saturating_duration_since(value.clock).as_millis() as u64),
+        monitors: state
+            .monitors
+            .iter()
+            .map(|(&monitor_id, monitor)| MonitorStatus {
+                monitor_id,
+                connected: monitor.connected,
+                last_seen_at_ms: monitor.last_seen.map(|value| value.at_ms),
+                last_seen_age_ms: monitor
+                    .last_seen
+                    .map(|value| now.saturating_duration_since(value.clock).as_millis() as u64),
+            })
+            .collect(),
+    };
+    output
+        .monitor_topology
+        .monitors
+        .sort_by_key(|monitor| monitor.monitor_id);
     output.device_names = state
         .device_names
         .iter()
@@ -244,6 +380,185 @@ pub fn snapshot() -> LiveStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture_diagnostics::{self as diagnostics, CaptureCondition, CaptureReason};
+    #[test]
+    fn monitor_topology_retires_lock_state_and_preserves_history_on_reconnect() {
+        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap();
+        start_session();
+        let scope = CaptureScope::Monitor(900_001);
+        let source = DiagnosticSource::MonitorCapture;
+        observe_monitor_topology(&[900_001, 900_002]);
+        diagnostics::observe(
+            CaptureChannel::Screen,
+            source,
+            scope,
+            CaptureCondition::Suppressed,
+            vec![CaptureReason::ScreenLocked],
+            Vec::new(),
+        );
+        captured(CaptureChannel::Screen, scope);
+        let seen = snapshot()
+            .monitor_topology
+            .monitors
+            .iter()
+            .find(|row| row.monitor_id == 900_001)
+            .unwrap()
+            .last_seen_at_ms;
+        assert_eq!(observe_monitor_topology(&[900_002]), vec![900_001]);
+        let retired = diagnostics::current()
+            .into_iter()
+            .find(|row| row.scope == scope)
+            .unwrap();
+        assert_eq!(retired.condition, CaptureCondition::Stopped);
+        assert_eq!(retired.reasons, vec![CaptureReason::MonitorDisconnected]);
+        assert!(observe_monitor_topology(&[900_002]).is_empty());
+        let disconnected = snapshot();
+        assert_eq!(
+            disconnected
+                .monitor_topology
+                .monitors
+                .iter()
+                .find(|row| row.monitor_id == 900_001)
+                .unwrap()
+                .connected,
+            Some(false)
+        );
+        assert_eq!(
+            disconnected
+                .monitor_topology
+                .monitors
+                .iter()
+                .find(|row| row.monitor_id == 900_001)
+                .unwrap()
+                .last_seen_at_ms,
+            seen
+        );
+        // An aborted/blocking producer completing late cannot resurrect its old scope.
+        diagnostics::observe(
+            CaptureChannel::Screen,
+            source,
+            scope,
+            CaptureCondition::Admitted,
+            vec![CaptureReason::GateOpen],
+            Vec::new(),
+        );
+        assert!(diagnostics::current()
+            .iter()
+            .any(|row| row.scope == scope && row.condition == CaptureCondition::Stopped));
+        observe_monitor_topology(&[900_001, 900_002]);
+        assert!(!diagnostics::current().iter().any(|row| row.scope == scope));
+        assert!(!snapshot().evidence.iter().any(|row| row.scope == scope));
+        assert!(!snapshot()
+            .interval_checks
+            .iter()
+            .any(|row| row.scope == scope));
+        let history = diagnostics::drain();
+        assert!(history
+            .iter()
+            .any(|row| row.scope == scope && row.reasons == [CaptureReason::ScreenLocked]));
+        assert!(history
+            .iter()
+            .any(|row| row.scope == scope && row.reasons == [CaptureReason::MonitorDisconnected]));
+        diagnostics::observe(
+            CaptureChannel::Screen,
+            source,
+            scope,
+            CaptureCondition::Admitted,
+            vec![CaptureReason::GateOpen],
+            Vec::new(),
+        );
+        assert!(snapshot()
+            .interval_checks
+            .iter()
+            .any(|row| row.scope == scope));
+        diagnostics::reset_monitor(900_001);
+        start_session();
+    }
+    #[test]
+    fn monitor_topology_distinguishes_failure_empty_enumeration_and_dead_producers() {
+        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap();
+        start_session();
+        observe_monitor_topology(&[900_003]);
+        monitor_topology_unavailable();
+        let failed = snapshot().monitor_topology;
+        assert!(!failed.available);
+        assert_eq!(
+            failed
+                .monitors
+                .iter()
+                .find(|row| row.monitor_id == 900_003)
+                .unwrap()
+                .connected,
+            Some(true)
+        );
+        assert_eq!(failed.checked_age_ms, None);
+        assert_eq!(observe_monitor_topology(&[]), vec![900_003]);
+        assert!(snapshot().monitor_topology.available);
+        assert_eq!(
+            snapshot()
+                .monitor_topology
+                .monitors
+                .iter()
+                .find(|row| row.monitor_id == 900_003)
+                .unwrap()
+                .connected,
+            Some(false)
+        );
+        // A producer may have exited before the watcher saw its old native ID.
+        checked(
+            CaptureChannel::Screen,
+            DiagnosticSource::CaptureOperation,
+            CaptureScope::Monitor(900_004),
+        );
+        assert!(observe_monitor_topology(&[900_005]).contains(&900_004));
+        assert_eq!(
+            snapshot()
+                .monitor_topology
+                .monitors
+                .iter()
+                .find(|row| row.monitor_id == 900_004)
+                .unwrap()
+                .last_seen_at_ms,
+            None
+        );
+        start_session();
+        assert!(snapshot().monitor_topology.monitors.is_empty());
+        assert!(!snapshot().monitor_topology.available);
+    }
+    #[test]
+    fn monitor_topology_reconciles_retained_diagnostics_after_session_restart() {
+        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap();
+        start_session();
+        let scope = CaptureScope::Monitor(900_006);
+        diagnostics::observe(
+            CaptureChannel::Screen,
+            DiagnosticSource::MonitorCapture,
+            scope,
+            CaptureCondition::Suppressed,
+            vec![CaptureReason::ScreenLocked],
+            Vec::new(),
+        );
+        start_session();
+        assert!(observe_monitor_topology(&[900_007]).contains(&900_006));
+        assert_eq!(
+            snapshot()
+                .monitor_topology
+                .monitors
+                .iter()
+                .find(|row| row.monitor_id == 900_006)
+                .unwrap()
+                .connected,
+            Some(false)
+        );
+        diagnostics::reset_monitor(900_006);
+        start_session();
+    }
     #[test]
     fn live_evidence_separates_stages_and_resets_session() {
         let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK

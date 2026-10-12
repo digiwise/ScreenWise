@@ -4,14 +4,14 @@
 "use client";
 import { create } from "zustand";
 import { localFetch } from "@/lib/api";
-import { parseRecordingStatus, parseLiveStatus, STATUS_MAX_AGE_MS, type StatusObservation, type CaptureEvidence, type RecordingDeviceName } from "@/lib/recording-status";
+import { parseRecordingStatus, parseLiveStatus, STATUS_MAX_AGE_MS, type StatusObservation, type CaptureEvidence, type RecordingDeviceName, type RecordingMonitorTopology } from "@/lib/recording-status";
 import { classifyRecordingType, type DashboardStatus } from "@/lib/recording-status-dashboard";
 import { DATA_TYPES } from "@/lib/recording-status";
 import { parseAudioActivity, type AudioActivitySnapshot } from "@/lib/audio-activity";
 
 export type RecordingRequestFailure = { kind: "request_failed" | "request_timeout" | "http_error" | "invalid_response"; httpStatus?: number };
-export type RecordingStatusState = { rows: StatusObservation[]; evidence: CaptureEvidence[]; deviceNames: RecordingDeviceName[]; audio: AudioActivitySnapshot | null; alerts: string[]; degraded: boolean; session: number | null; checked: number | null; receivedMonotonic: number | null; error: string | null; requestFailure?: RecordingRequestFailure | null; tick: number; generation: number; ageUncertain?: boolean; lastStatuses?: Record<string, DashboardStatus[]> };
-const blank = { rows: [], evidence: [], deviceNames: [], audio: null, alerts: [], degraded: false, checked: null, receivedMonotonic: null, requestFailure: null };
+export type RecordingStatusState = { rows: StatusObservation[]; evidence: CaptureEvidence[]; deviceNames: RecordingDeviceName[]; monitorTopology?: RecordingMonitorTopology; audio: AudioActivitySnapshot | null; alerts: string[]; degraded: boolean; session: number | null; checked: number | null; receivedMonotonic: number | null; error: string | null; requestFailure?: RecordingRequestFailure | null; tick: number; generation: number; ageUncertain?: boolean; lastStatuses?: Record<string, DashboardStatus[]> };
+const blank = { rows: [], evidence: [], deviceNames: [], monitorTopology: undefined, audio: null, alerts: [], degraded: false, checked: null, receivedMonotonic: null, requestFailure: null };
 export function recordingRequestFailureMessage(failure: RecordingRequestFailure): string {
   if (failure.kind === "request_timeout") return "Recorder status request timed out after 8 seconds. Recording remains unconfirmed.";
   if (failure.kind === "invalid_response") return "Recorder returned an invalid status response. Recording remains unconfirmed.";
@@ -74,9 +74,11 @@ function startLoop(): () => void {
       const snapshot = { rows: status.rows.map((row) => ({ ...row, checkedAge: row.checkedAge === null ? null : row.checkedAge + age })),
         evidence: live.evidence.map((row) => ({ ...row, captureAge: row.captureAge === null ? null : row.captureAge + age, storageAge: row.storageAge === null ? null : row.storageAge + age })),
         audio: progress === null ? null : { ...progress, devices: progress.devices.map((row) => ({ ...row, pendingAge: row.pendingAge === null ? null : row.pendingAge + age })) },
+        monitorTopology: live.monitorTopology ? { ...live.monitorTopology, checkedAge: live.monitorTopology.checkedAge === null ? null : live.monitorTopology.checkedAge + age,
+          monitors: live.monitorTopology.monitors.map((monitor) => ({ ...monitor, lastSeenAge: monitor.lastSeenAge === null ? null : monitor.lastSeenAge + age })) } : undefined,
         deviceNames: live.deviceNames, session: live.session, alerts: status.alerts, degraded: status.degraded, checked: received, receivedMonotonic: receivedMono, tick: received, error: null, requestFailure: null, ageUncertain: false };
       const old = useRecordingStatus.getState();
-      const lastStatuses = Object.fromEntries(Object.keys(DATA_TYPES).map((channel) => [channel, classifyRecordingType(channel, { ...snapshot, elapsed: 0, now: received, unavailable: false, lastStatuses: old.session === live.session ? old.lastStatuses : undefined })]));
+      const lastStatuses = Object.fromEntries(Object.keys(DATA_TYPES).map((channel) => [channel, classifyRecordingType(channel, { ...snapshot, elapsed: 0, now: received, unavailable: false, lastStatuses: old.session === live.session ? old.lastStatuses : undefined }, true)]));
       useRecordingStatus.setState({ ...snapshot, lastStatuses });
     } catch {
       if (!stopped) {

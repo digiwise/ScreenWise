@@ -12,14 +12,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStatusDialog } from "@/lib/hooks/use-status-dialog";
 import { useRecordingStatus, recordingStatusUnavailable, type RecordingStatusState } from "@/lib/hooks/use-recording-status";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { evidenceAge, DATA_TYPES, recordingDeviceScope, recordingObservationLabel, recordingPolicyExplanation, recordingReason } from "@/lib/recording-status";
+import { evidenceAge, DATA_TYPES, disconnectedRecordingMonitor, recordingDeviceScope, recordingObservationLabel, recordingPolicyExplanation, recordingReason } from "@/lib/recording-status";
 import { audioDuration, audioLowOutput } from "@/lib/audio-activity";
 import { RECORDING_GROUPS, classifyRecordingType, worstRecordingStatus, recordingPolicyObservation, recordingCheckIsCurrent, type DashboardInput } from "@/lib/recording-status-dashboard";
 import { RecordingGroupIcon, RecordingGroupCounts, RecordingStateIcon } from "./recording-status-dashboard";
 import { RecordingStatusLog } from "./recording-status-log";
 
 function dashboardInput(state: RecordingStatusState): DashboardInput {
-  return { rows: state.rows, evidence: state.evidence, audio: state.audio,
+  return { rows: state.rows, evidence: state.evidence, monitorTopology: state.monitorTopology, audio: state.audio,
     elapsed: state.checked === null ? 0 : Math.max(0, state.tick - state.checked), now: state.tick,
     unavailable: recordingStatusUnavailable(state) !== null, requestFailed: !!state.requestFailure, lastStatuses: state.lastStatuses, ageUncertain: state.ageUncertain };
 }
@@ -90,14 +90,19 @@ function RecordingTypeSection({ channel, state, input, monitors, aliases }: { ch
 function RecordingTypeDetail({ channel, state, unavailable, elapsed, monitors, aliases }: { channel: string; state: RecordingStatusState; unavailable: boolean; elapsed: number; monitors: MonitorDevice[]; aliases: MonitorAliases }) {
   const { rows, evidence, audio } = state;
   const names = state.deviceNames;
-const observations = unavailable ? [] : rows.filter((row) => row.channel === channel);
-        const channelEvidence = unavailable ? [] : evidence.filter((row) => row.channel === channel);
+const observations = unavailable ? [] : rows.filter((row) => row.channel === channel && !disconnectedRecordingMonitor(row.scope, state.monitorTopology, elapsed));
+        const channelEvidence = unavailable ? [] : evidence.filter((row) => row.channel === channel && !disconnectedRecordingMonitor(row.scope, state.monitorTopology, elapsed));
+        const disconnected = classifyRecordingType(channel, dashboardInput(state), true).filter((status) => status.mode === "disconnected");
         const scopedSuccess = channelEvidence.some((row) => !row.global && (row.captured !== null || row.stored !== null));
         const successes = channelEvidence.filter((row) => !(scopedSuccess && row.global && row.captured === null && row.stored === null));
         const audioDevices = unavailable ? [] : audio?.devices.filter((row) => row.channel === channel) ?? [];
         return <div className="space-y-2 border-t pt-3">
-          {!observations.length && <p className="text-sm text-muted-foreground">Status unavailable — no current observation.</p>}
-          {!successes.length && <p className="text-sm text-muted-foreground">Capture and storage evidence unavailable — no instrumented source reported.</p>}
+          {disconnected.map((status) => <div key={status.scope} className="text-sm mt-2 border-l-2 pl-2 text-muted-foreground">
+            <div>{status.scope} · <RecordingStateIcon status={status} /></div>
+            <p className="text-xs">{status.detail}</p>
+          </div>)}
+          {!observations.length && !disconnected.length && <p className="text-sm text-muted-foreground">Status unavailable — no current observation.</p>}
+          {!successes.length && !disconnected.length && <p className="text-sm text-muted-foreground">Capture and storage evidence unavailable — no instrumented source reported.</p>}
           {successes.map((row) => <div key={row.key} className="text-sm mt-2 border-l-2 pl-2">
             <div>{row.global && row.captured === null && row.stored === null ? "Instrumentation coverage — no source-specific evidence reported" : recordingMonitorScope(recordingDeviceScope(row.scope, channel, names), monitors, aliases)}</div>
             <div>{channel === "microphone" || channel === "output_audio" ? "Last samples received" : "Last captured"}: {row.captureSupported ? evidenceAge(row.captureAge, elapsed) : "Status unavailable — capture not instrumented"}</div>

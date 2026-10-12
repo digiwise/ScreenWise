@@ -8,6 +8,40 @@ const row: StatusObservation = { key: "microphone:privacy", channel: "microphone
 const success: CaptureEvidence = { key: "microphone:device2", channel: "microphone", scope: "Device 2", global: false, captureSupported: true, storageSupported: true, captured: 1000, stored: 1000, captureAge: 0, storageAge: 0 };
 const input = (values: Partial<DashboardInput> = {}): DashboardInput => ({ rows: [row], evidence: [success], audio: null, elapsed: 0, now: 100000, unavailable: false, ...values });
 describe("truthful compact recording classification", () => {
+  const topology = { available: true, checkedAge: 0, monitors: [{ id: 1, connected: false, lastSeen: 1000, lastSeenAge: 248000000 }, { id: 2, connected: true, lastSeen: 100000, lastSeenAge: 0 }] };
+  const oldMonitor = { ...row, key: "old", channel: "screen", source: "window policy", scope: "Monitor 1", condition: "stopped", reasons: ["screen locked"], checkedAge: 248000000 };
+  const activeMonitor = { ...row, key: "active", channel: "screen", source: "monitor capture", scope: "Monitor 2" };
+  const monitorInput = () => input({ monitorTopology: topology, rows: [oldMonitor, activeMonitor], evidence: [{ ...success, channel: "screen", scope: "Monitor 2" }] });
+  it("excludes obsolete lock rows from summaries and shows disconnected last-seen details", () => {
+    expect(classifyRecordingType("screen", monitorInput()).map((status) => status.scope)).toEqual(["Monitor 2"]);
+    const details = classifyRecordingType("screen", monitorInput(), true);
+    const retired = details.find((status) => status.scope === "Monitor 1")!;
+    expect(retired.mode).toBe("disconnected"); expect(retired.label).toBe("Disconnected");
+    expect(retired.detail).toContain("Last seen"); expect(retired.staleAge).toBeUndefined();
+    expect(worstRecordingStatus(details).mode).toBe("recording");
+  });
+  it("does not mistake failed/stale/absent topology or a connected producer stall for disconnection", () => {
+    for (const monitorTopology of [undefined, { ...topology, available: false }, { ...topology, checkedAge: 90001 }, { ...topology, monitors: topology.monitors.map((monitor) => ({ ...monitor, connected: true })) }]) {
+      const statuses = classifyRecordingType("screen", { ...monitorInput(), monitorTopology });
+      expect(statuses.some((status) => status.scope === "Monitor 1" && status.staleAge !== undefined)).toBe(true);
+    }
+  });
+  it("reports no connected sources when all recording monitors are removed, without reviving old errors", () => {
+    const statuses = classifyRecordingType("screen", input({ monitorTopology: topology, rows: [oldMonitor], evidence: [] }));
+    expect(statuses[0].label).toBe("No connected recording monitors"); expect(statuses[0].staleAge).toBeUndefined();
+    expect(classifyRecordingType("screen", input({ monitorTopology: topology, rows: [oldMonitor], evidence: [] }), true)[0].mode).toBe("disconnected");
+  });
+  it("keeps current lock state on connected monitors and requires fresh checks after reconnection", () => {
+    const locked = { ...activeMonitor, condition: "suppressed", reasons: ["screen locked"] };
+    expect(classifyRecordingType("screen", { ...monitorInput(), rows: [oldMonitor, locked] })[0].label).toContain("Computer is locked");
+    const reconnected = { ...topology, monitors: topology.monitors.map((monitor) => ({ ...monitor, connected: true })) };
+    expect(classifyRecordingType("screen", { ...monitorInput(), monitorTopology: reconnected }).find((status) => status.scope === "Monitor 1")!.staleAge).toBe(248000000);
+  });
+  it("retains disconnected details during outages without reintroducing them into summaries", () => {
+    const lastStatuses = { screen: classifyRecordingType("screen", monitorInput(), true) };
+    expect(classifyRecordingType("screen", { ...monitorInput(), unavailable: true, lastStatuses }).map((status) => status.scope)).toEqual(["Monitor 2"]);
+    expect(classifyRecordingType("screen", { ...monitorInput(), unavailable: true, lastStatuses }, true).find((status) => status.scope === "Monitor 1")!.label).toBe("Disconnected (last known)");
+  });
   it("keeps maximised-window permission distinct from successful capture", () => {
     const selected = { ...row, channel: "screen", source: "window policy", condition: "active_window_only", reasons: ["maximised window only"] };
     const pending = classifyRecordingType("screen", input({ rows: [selected], evidence: [] }))[0];

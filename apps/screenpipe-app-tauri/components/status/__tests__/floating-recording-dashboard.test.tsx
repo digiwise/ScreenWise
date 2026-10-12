@@ -4,16 +4,26 @@
 vi.mock("@/lib/hooks/use-recording-monitors", () => ({ useRecordingMonitors: () => ({ monitors: [], aliases: {} }) }));
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn(), all: vi.fn(), apply: vi.fn(), save: vi.fn(), open: vi.fn(), loaded: true, requestFailure: false }));
+const mocks = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn(), all: vi.fn(), apply: vi.fn(), save: vi.fn(), open: vi.fn(), loaded: true, requestFailure: false, status: {} as Record<string, unknown> }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ close: async () => {} }) }));
-vi.mock("@/lib/hooks/use-recording-status", () => ({ useRecordingStatus: () => ({ rows: [], evidence: [], deviceNames: [], audio: null, checked: 0, tick: 0, requestFailure: mocks.requestFailure ? { kind: "request_failed" } : null }), recordingStatusUnavailable: () => mocks.requestFailure ? "Recorder status request failed" : null, startRecordingStatusMonitoring: mocks.start }));
+vi.mock("@/lib/hooks/use-recording-status", () => ({ useRecordingStatus: () => ({ rows: [], evidence: [], deviceNames: [], audio: null, checked: 0, tick: 0, ...mocks.status, requestFailure: mocks.requestFailure ? { kind: "request_failed" } : null }), recordingStatusUnavailable: () => mocks.requestFailure ? "Recorder status request failed" : null, startRecordingStatusMonitoring: mocks.start }));
 vi.mock("@/lib/hooks/use-settings", () => ({ useSettings: () => ({ settings: {}, updateSettings: mocks.save, isSettingsLoaded: mocks.loaded }) }));
 vi.mock("@/lib/hooks/use-status-dialog", () => ({ useStatusDialog: { getState: () => ({ open: mocks.open }) } }));
 vi.mock("@/lib/recording-dashboard-controls", () => ({ requestAllRecording: mocks.all, requestAudioDevice: vi.fn(), applyRecordingPreference: mocks.apply }));
 vi.mock("../recording-status-dialog", () => ({ RecordingStatusDialog: () => null }));
 import { FloatingRecordingDashboard } from "../floating-recording-dashboard";
-beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); mocks.loaded = true; mocks.requestFailure = false; mocks.start.mockReturnValue(mocks.stop); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); mocks.loaded = true; mocks.requestFailure = false; mocks.status = {}; mocks.start.mockReturnValue(mocks.stop); });
 afterEach(cleanup);
+it("omits disconnected monitors in overview and shows their last-seen time under Sources", () => {
+  mocks.status = { rows: [{ key: "old", channel: "screen", source: "window policy", scope: "Monitor 1", condition: "stopped", status: "Stopped", reasons: ["screen locked"], rules: [], since: 1, observed: 2, checkedAge: 248000000 }],
+    monitorTopology: { available: true, checkedAge: 0, monitors: [{ id: 1, connected: false, lastSeen: 1000, lastSeenAge: 248000000 }] } };
+  render(<FloatingRecordingDashboard />);
+  expect(screen.queryByText("Monitor 1")).toBeNull(); expect(screen.queryByText("Disconnected")).toBeNull();
+  expect(screen.queryByText(/Computer is locked/)).toBeNull();
+  fireEvent.click(screen.getByText("Sources"));
+  expect(screen.getByText("Monitor 1")).toBeTruthy(); expect(screen.getByText("Disconnected")).toBeTruthy();
+  expect(screen.getByText(/Last seen/)).toBeTruthy(); expect(screen.queryByText(/Computer is locked/)).toBeNull();
+});
 it("shows a failed status request as an error rather than an unconfirmed startup", () => {
   mocks.requestFailure = true;
   render(<FloatingRecordingDashboard />);
