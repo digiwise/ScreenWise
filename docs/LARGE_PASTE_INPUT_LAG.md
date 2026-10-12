@@ -4,6 +4,17 @@ Large multiline JSON copy/paste was reported to cause multi-second cursor lag in
 Firefox's developer console and the Excel Claude add-in. The source baseline was
 `1875062aa`; the installed application was left running and unchanged.
 
+The owner subsequently reported that pasting into Notepad was OK, while Firefox's
+console and Claude in Excel experienced the lag. Excel's add-in was suspected to
+use a WebView; that hosting detail has not been verified in this investigation.
+This is reported behavior, not a controlled comparison performed by this task.
+It raises the priority of destination-specific UIA provider work and browser/editor
+processing as explanations. If the same clipboard payload and capture admission
+were used in all cases, a purely payload-size-dependent redaction cost would be
+less persuasive. Those conditions were not independently checked, and clipboard
+interaction can also differ between applications. The confirmed hook-thread
+defect remains valid; its repair alone is not proof that these incidents are fixed.
+
 ## Confirmed source defect
 
 Windows installs both global low-level input hooks on `run_native_hooks`' thread.

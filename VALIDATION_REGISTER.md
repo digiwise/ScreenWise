@@ -27,6 +27,10 @@ other applications, but did not identify the reported Firefox/Excel incidents or
 measure clipboard processing duration. The separate unbounded UIA subtree/provider
 call remains an outstanding possible contributor. See the
 [investigation, evidence and limits](docs/LARGE_PASTE_INPUT_LAG.md).
+The owner subsequently reported that Notepad pasting was OK while Firefox's
+console and Claude in Excel lagged. This raises destination-specific UIA/provider
+and browser/editor work as investigation priorities; the Excel WebView hosting
+detail and a controlled comparison remain unverified.
 
 199 accessibility unit tests passed, with 23 live tests ignored; eight new
 regressions exercise synthetic stalled readers, large JSON, overload, privacy and
