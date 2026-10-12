@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-09. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-12. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -13,6 +13,41 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 Latest candidate: [capture status, event-flap and maximised-window fixes](docs/CAPTURE_FIX_HANDOFF.md). Previous implementation: [graceful deployment shutdown](docs/GRACEFUL_DEPLOYMENT_SHUTDOWN.md). Earlier hashes below belong to their historical candidates.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Outstanding stale monitor status (2026-10-12)
+
+**SW-R16 — Open; repair deferred by owner: Obsolete monitor scopes remain in current status.**
+The dashboard displayed a generic monitor row saying "Computer is locked" with
+a check age of approximately 248,000 seconds alongside current named displays
+with different status. Read-only authenticated status and monitor metadata
+confirmed that the affected monitor ID was absent from the current enumeration;
+its retained lock-related check had aged to approximately 249,000 seconds.
+Current monitor checks and global privacy admission were fresh and admitted.
+Windows session lock applies to all monitors; these rows do not establish that
+one display remained independently locked. Check age measures time since that
+observer's last check, not the duration of a confirmed continuing lock.
+
+The process-session diagnostic and evidence stores retain entries by numeric
+monitor scope. Monitor task shutdown does not retire those scopes, and the
+dashboard constructs its source list from all retained observations/evidence.
+IDs missing from current monitor metadata fall back to generic "Monitor" labels,
+allowing historical lock/redaction states to appear beside current displays and
+affect aggregate status. The exact topology event that changed the IDs was not
+established by this investigation.
+
+Follow-up: retire obsolete scopes from current status while preserving diagnostic
+history, distinguish unavailable topology from confirmed monitor removal, and
+keep stale warnings for current monitors whose producers stop reporting. Add
+synthetic regressions for monitor-ID replacement, disconnect/reconnect, global
+lock/unlock, unavailable topology and aggregate status. No runtime repair, new
+capture session, recording restart, deployment, firewall change or captured-content
+inspection was performed; this note records diagnosis only.
+
+Sources: [live evidence/check store](crates/screenpipe-config/src/live_capture_status.rs),
+[diagnostic current-state store](crates/screenpipe-config/src/capture_diagnostics.rs),
+[monitor task lifecycle](crates/screenpipe-engine/src/vision_manager/manager.rs),
+[dashboard classification](apps/screenpipe-app-tauri/lib/recording-status-dashboard.ts),
+[monitor label fallback](apps/screenpipe-app-tauri/lib/recording-monitor-names.ts).
 
 ## Graceful deployment shutdown (2026-10-09)
 
