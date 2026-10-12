@@ -1,6 +1,7 @@
 # ScreenWise Windows build notes
 
-The latest build work is the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
+The latest build work is the [large clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
+The preceding candidate includes the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
 The previous deployed candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md),
 based on the existing graceful deployment implementation. Earlier release entries
 describe their historical candidates.
@@ -18,6 +19,22 @@ release workflow without installing dependencies or starting the bridge. Pi's
 `screenwise_recordings` extension uses the authenticated recorder HTTP API directly
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
+## Large clipboard input lag (2026-10-12)
+
+Clipboard reads and typed/clipboard redaction now use a bounded separate worker
+instead of blocking the thread that services Windows' global input hooks. The
+[investigation](docs/LARGE_PASTE_INPUT_LAG.md) records production metadata,
+privacy/overload/shutdown behavior and the remaining unbounded UIA provider path.
+The exact Firefox/Excel incidents remain unconfirmed; no live desktop reproduction
+was attempted.
+
+RootFmt, 199 accessibility tests (23 live ignored) and inert recorder CLI smoke
+passed. Eight new regressions use synthetic readers/content and no real clipboard
+or hook installation. Sequential single-job release-local builds passed: root
+3m54s, 785 external reused/zero rebuilt; desktop 8m53s, 1,080 external reused/zero
+rebuilt. Both lockfiles are unchanged. No capture, deployment, restart, dependency
+acquisition, full-release build or firewall change occurred.
 
 ## Disconnected monitor recording/status (2026-10-12)
 

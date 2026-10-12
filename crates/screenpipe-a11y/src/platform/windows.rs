@@ -17,7 +17,7 @@ use screenpipe_core::pii_removal::remove_pii;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
 use super::windows_uia::{
@@ -48,6 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 static UI_EVENT_QUEUE_FULL_DROPS: AtomicU64 = AtomicU64::new(0);
 static UI_EVENT_QUEUE_DISCONNECTED_DROPS: AtomicU64 = AtomicU64::new(0);
+static INPUT_CONTENT_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
 
 fn try_send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
     match tx.try_send(event) {
@@ -62,6 +63,13 @@ fn try_send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
 }
 
 fn report_ui_event_queue_drops() {
+    let content_drops = INPUT_CONTENT_QUEUE_DROPS.swap(0, Ordering::Relaxed);
+    if content_drops > 0 {
+        warn!(
+            "Windows input content worker dropped {} request(s) because its queue was unavailable",
+            content_drops
+        );
+    }
     let full = UI_EVENT_QUEUE_FULL_DROPS.swap(0, Ordering::Relaxed);
     let disconnected = UI_EVENT_QUEUE_DISCONNECTED_DROPS.swap(0, Ordering::Relaxed);
     if full > 0 {
@@ -260,6 +268,31 @@ impl UiRecorder {
         // 0 = no input observed yet.
         let last_input_at_ms = Arc::new(AtomicU64::new(0));
 
+        // Clipboard providers and PII processing must never run on the thread
+        // servicing global LL hooks, even between hook callbacks.
+        let (content_tx, content_rx) = bounded(INPUT_CONTENT_QUEUE_CAPACITY);
+        let content_events = tx.clone();
+        let content_stop = stop.clone();
+        let content_config = self.config.clone();
+        let content_privacy = keyboard_privacy.clone();
+        threads.push(thread::spawn(move || {
+            apply_extraction_thread_priority(content_config.extraction_thread_priority);
+            run_input_content_worker(
+                content_rx,
+                &content_events,
+                &content_stop,
+                &content_config,
+                get_clipboard_text,
+                || {
+                    if !content_config.skip_password_fields {
+                        Some(0)
+                    } else {
+                        content_privacy.permit(NativeKeyboardFocus::current())
+                    }
+                },
+            );
+        }));
+
         // Thread 1: Native Windows hooks for input events
         let tx1 = tx.clone();
         let stop1 = stop.clone();
@@ -284,6 +317,7 @@ impl UiRecorder {
                 focused_element1,
                 keyboard_privacy1,
                 last_input_at_ms1,
+                content_tx,
             );
         }));
 
@@ -316,7 +350,7 @@ impl UiRecorder {
             windows_uia::run_keyboard_privacy_thread(keyboard_privacy3, stop3, config3);
         }));
 
-        // Thread 4: UI Automation worker (tree capture, element context, clipboard)
+        // Thread 4: UI Automation worker (tree capture and element context)
         let (element_tx, element_rx) = bounded::<(ClickElementRequest, ElementContext)>(100);
         let stop4 = stop.clone();
         let config4 = self.config.clone();
@@ -389,8 +423,7 @@ impl UiRecorder {
 // Thread-local state for hook callbacks
 // ============================================================================
 
-/// A deferred clipboard read request, queued from the LL hook and processed
-/// in the message loop where blocking is safe.
+/// A deferred clipboard read request processed on a separate content worker.
 struct PendingClipboard {
     operation: char,
     timestamp: chrono::DateTime<Utc>,
@@ -398,6 +431,153 @@ struct PendingClipboard {
     app_name: Option<String>,
     window_title: Option<String>,
     privacy_generation: Option<u64>,
+    queued_at: Instant,
+}
+
+const INPUT_CONTENT_QUEUE_CAPACITY: usize = 32;
+const CLIPBOARD_REQUEST_MAX_AGE: Duration = Duration::from_secs(1);
+
+enum InputContentWork {
+    Clipboard(PendingClipboard),
+    // Text was admitted in its source field before focus invalidation.
+    Text(UiEvent),
+}
+
+impl PendingClipboard {
+    fn into_event(self, content: Option<String>) -> UiEvent {
+        UiEvent {
+            id: None,
+            timestamp: self.timestamp,
+            relative_ms: self.relative_ms,
+            data: EventData::Clipboard {
+                operation: self.operation,
+                content,
+            },
+            app_name: self.app_name,
+            window_title: self.window_title,
+            browser_url: None,
+            element: None,
+            frame_id: None,
+        }
+    }
+}
+
+fn queue_input_content(state: &HookState, work: InputContentWork) {
+    if let Err(err) = state.content_tx.try_send(work) {
+        INPUT_CONTENT_QUEUE_DROPS.fetch_add(1, Ordering::Relaxed);
+        // Keep trigger/operation metadata on overload without reading content.
+        let work = match err {
+            TrySendError::Full(work) | TrySendError::Disconnected(work) => work,
+        };
+        if let InputContentWork::Clipboard(pending) = work {
+            try_send_ui_event(&state.tx, pending.into_event(None));
+        }
+    }
+}
+
+fn process_input_content(
+    work: InputContentWork,
+    config: &UiCaptureConfig,
+    read_clipboard: &mut impl FnMut() -> Result<Option<String>, ClipboardReadFailure>,
+    permit: &impl Fn() -> Option<u64>,
+    admitted: &impl Fn() -> bool,
+) -> Option<UiEvent> {
+    if !admitted() {
+        return None;
+    }
+    let started = Instant::now();
+    let event = match work {
+        InputContentWork::Clipboard(pending) => {
+            let permitted = || {
+                admitted()
+                    && pending.queued_at.elapsed() <= CLIPBOARD_REQUEST_MAX_AGE
+                    && pending.privacy_generation.is_some()
+                    && permit() == pending.privacy_generation
+            };
+            let content = if config.capture_clipboard_content && permitted() {
+                match read_clipboard() {
+                    Ok(content) if permitted() => {
+                        let content = content.map(|c| {
+                            if config.apply_pii_removal {
+                                remove_pii(&c)
+                            } else {
+                                c
+                            }
+                        });
+                        // A slow read/redaction must not carry content across a
+                        // changed focus, expired permission, pause or shutdown.
+                        if permitted() {
+                            content
+                        } else {
+                            None
+                        }
+                    }
+                    Ok(_) => None,
+                    Err(ClipboardReadFailure::Initialize) => {
+                        warn!("clipboard content unavailable: clipboard initialization failed");
+                        None
+                    }
+                    Err(ClipboardReadFailure::Read) => {
+                        warn!("clipboard content unavailable: clipboard text read failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            pending.into_event(content)
+        }
+        InputContentWork::Text(mut event) => {
+            if let EventData::Text {
+                content,
+                char_count,
+            } = &mut event.data
+            {
+                if config.apply_pii_removal {
+                    *content = remove_pii(content);
+                    *char_count = Some(content.chars().count());
+                }
+            }
+            event
+        }
+    };
+    if started.elapsed() >= Duration::from_millis(100) {
+        warn!(
+            "Windows input content worker processing was slow: duration_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+    admitted().then_some(event)
+}
+
+fn run_input_content_worker(
+    rx: Receiver<InputContentWork>,
+    tx: &Sender<UiEvent>,
+    stop: &AtomicBool,
+    config: &UiCaptureConfig,
+    mut read_clipboard: impl FnMut() -> Result<Option<String>, ClipboardReadFailure>,
+    permit: impl Fn() -> Option<u64>,
+) {
+    // Drain until the hook thread drops its sender, preserving its final
+    // already-admitted text flush. Never acquire clipboard content after stop.
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(work) => {
+                let is_text = matches!(work, InputContentWork::Text(_));
+                let admitted = || {
+                    (is_text || !stop.load(Ordering::Relaxed))
+                        && screenpipe_config::audio_privacy::visual_capture_allowed()
+                };
+                if let Some(event) =
+                    process_input_content(work, config, &mut read_clipboard, &permit, &admitted)
+                {
+                    try_send_ui_event(tx, event);
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }
 
 /// Consecutive `WM_MOUSEWHEEL` ticks within this window are coalesced into a
@@ -436,8 +616,8 @@ struct HookState {
     click_queue: Arc<Mutex<Vec<ClickElementRequest>>>,
     focused_element: Arc<Mutex<Option<ElementContext>>>,
     keyboard_privacy: Arc<KeyboardPrivacy>,
-    /// Clipboard operations deferred from the LL hook to the message loop.
-    pending_clipboard: Vec<PendingClipboard>,
+    /// Nonblocking handoff; no clipboard read or PII work on this thread.
+    content_tx: Sender<InputContentWork>,
     /// Shared timestamp (ms since start) of the most recent input event.
     /// Updated unconditionally at the top of mouse_hook_proc / keyboard_hook_proc so the UIA
     /// worker can defer tree captures while the user is actively typing/clicking/scrolling.
@@ -497,6 +677,7 @@ fn run_native_hooks(
     focused_element: Arc<Mutex<Option<ElementContext>>>,
     keyboard_privacy: Arc<KeyboardPrivacy>,
     last_input_at_ms: Arc<AtomicU64>,
+    content_tx: Sender<InputContentWork>,
 ) {
     debug!("Starting native Windows hooks");
 
@@ -517,7 +698,7 @@ fn run_native_hooks(
             click_queue,
             focused_element,
             keyboard_privacy,
-            pending_clipboard: Vec::new(),
+            content_tx,
             last_input_at_ms,
             scroll_aggregator: None,
         }));
@@ -585,61 +766,6 @@ fn run_native_hooks(
                         if needs_idle_flush {
                             if let Some(agg) = s.scroll_aggregator.take() {
                                 emit_aggregated_scroll(&s.tx, agg);
-                            }
-                        }
-
-                        // Process deferred clipboard operations — safe to block here
-                        // since we're in the message loop, not a LL hook callback.
-                        if !s.pending_clipboard.is_empty() {
-                            let pending = std::mem::take(&mut s.pending_clipboard);
-                            if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-                                discard_text_buffer(s);
-                                s.pending_text.clear();
-                                s.scroll_aggregator = None;
-                                return;
-                            }
-                            let capture_content = s.config.capture_clipboard_content;
-                            let apply_pii = s.config.apply_pii_removal;
-                            for p in pending {
-                                let content = if capture_content
-                                    && p.privacy_generation.is_some_and(|generation| {
-                                        keyboard_capture_permit(s) == Some(generation)
-                                    }) {
-                                    match get_clipboard_text() {
-                                        Ok(content) => content.map(|c| {
-                                            if apply_pii {
-                                                remove_pii(&c)
-                                            } else {
-                                                c
-                                            }
-                                        }),
-                                        Err(ClipboardReadFailure::Initialize) => {
-                                            warn!("clipboard content unavailable: clipboard initialization failed");
-                                            None
-                                        }
-                                        Err(ClipboardReadFailure::Read) => {
-                                            warn!("clipboard content unavailable: clipboard text read failed");
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-                                let event = UiEvent {
-                                    id: None,
-                                    timestamp: p.timestamp,
-                                    relative_ms: p.relative_ms,
-                                    data: EventData::Clipboard {
-                                        operation: p.operation,
-                                        content,
-                                    },
-                                    app_name: p.app_name,
-                                    window_title: p.window_title,
-                                    browser_url: None,
-                                    element: None,
-                                    frame_id: None,
-                                };
-                                try_send_ui_event(&s.tx, event);
                             }
                         }
                     }
@@ -710,21 +836,10 @@ fn take_text_buffer_with_permit(state: &mut HookState, permit: Option<u64>) -> O
     ))
 }
 
-fn emit_text(state: &HookState, mut event: UiEvent) {
-    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-        return;
+fn emit_text(state: &HookState, event: UiEvent) {
+    if screenpipe_config::audio_privacy::visual_capture_allowed() {
+        queue_input_content(state, InputContentWork::Text(event));
     }
-    if let EventData::Text {
-        content,
-        char_count,
-    } = &mut event.data
-    {
-        if state.config.apply_pii_removal {
-            *content = remove_pii(content);
-            *char_count = Some(content.chars().count());
-        }
-    }
-    try_send_ui_event(&state.tx, event);
 }
 
 fn discard_text_buffer(state: &mut HookState) {
@@ -812,7 +927,6 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 if !screenpipe_config::audio_privacy::visual_capture_allowed() {
                     discard_text_buffer(s);
                     s.pending_text.clear();
-                    s.pending_clipboard.clear();
                     return;
                 }
 
@@ -873,7 +987,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 // Check for clipboard operations (Ctrl+C, Ctrl+X, Ctrl+V)
                 // IMPORTANT: Do NOT read clipboard or apply PII regex here — this is
                 // a low-level hook callback that must return in <10ms or it stalls the
-                // entire system input queue. Instead, defer to the message loop.
+                // entire system input queue. Hand off to the separate worker.
                 if mods & 0x02 != 0 && s.config.capture_clipboard {
                     // Ctrl is pressed
                     let op = match vk_code {
@@ -883,21 +997,25 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         _ => None,
                     };
                     if let Some(operation) = op {
-                        s.pending_clipboard.push(PendingClipboard {
-                            operation,
-                            timestamp,
-                            relative_ms: t,
-                            app_name: app_name.clone(),
-                            window_title: window_title.clone(),
-                            privacy_generation,
-                        });
+                        queue_input_content(
+                            s,
+                            InputContentWork::Clipboard(PendingClipboard {
+                                operation,
+                                timestamp,
+                                relative_ms: t,
+                                app_name: app_name.clone(),
+                                window_title: window_title.clone(),
+                                privacy_generation,
+                                queued_at: Instant::now(),
+                            }),
+                        );
                         return;
                     }
                 }
 
                 // Clipboard operation metadata above contains no key/text
                 // content. Its optional content is independently gated again
-                // when read in the message loop.
+                // before and after the worker reads it.
                 let Some(privacy_generation) = privacy_generation else {
                     return;
                 };
@@ -1008,7 +1126,6 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 if !screenpipe_config::audio_privacy::visual_capture_allowed() {
                     discard_text_buffer(s);
                     s.pending_text.clear();
-                    s.pending_clipboard.clear();
                     s.scroll_aggregator = None;
                     return;
                 }
@@ -1945,6 +2062,251 @@ fn get_process_name_uncached(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn clipboard_work(generation: Option<u64>) -> InputContentWork {
+        InputContentWork::Clipboard(PendingClipboard {
+            operation: 'v',
+            timestamp: Utc::now(),
+            relative_ms: 42,
+            app_name: Some("synthetic.exe".into()),
+            window_title: None,
+            privacy_generation: generation,
+            queued_at: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn content_worker_stall_does_not_block_handoff_or_event_delivery() {
+        // No hooks, GUI, OS clipboard or input injection. A channel simulates
+        // a hung provider deterministically without loading the workstation.
+        let (events_tx, events_rx) = bounded(64);
+        let (mut state, content_rx) = make_test_state(events_tx.clone(), "");
+        state.config.apply_pii_removal = false;
+        let config = state.config.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (entered_tx, entered_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        let worker = thread::spawn(move || {
+            run_input_content_worker(
+                content_rx,
+                &events_tx,
+                &worker_stop,
+                &config,
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(Some("synthetic clipboard".into()))
+                },
+                || Some(0),
+            );
+        });
+        queue_input_content(&state, clipboard_work(Some(0)));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Fill the bounded queue while the reader remains blocked. The last
+        // request must fall back to content-free metadata immediately.
+        for _ in 0..=INPUT_CONTENT_QUEUE_CAPACITY {
+            queue_input_content(&state, clipboard_work(Some(0)));
+        }
+        assert_eq!(state.content_tx.len(), INPUT_CONTENT_QUEUE_CAPACITY);
+        assert!(matches!(
+            events_rx.try_recv().unwrap().data,
+            EventData::Clipboard {
+                content: None,
+                operation: 'v'
+            }
+        ));
+        try_send_ui_event(
+            &state.tx,
+            UiEvent::text(Utc::now(), 0, "ordinary event".into()),
+        );
+        assert!(matches!(
+            events_rx.try_recv().unwrap().data,
+            EventData::Text { .. }
+        ));
+        stop.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        drop(state);
+        worker.join().unwrap();
+        assert!(
+            events_rx.try_recv().is_err(),
+            "shutdown must suppress the in-flight content"
+        );
+    }
+
+    #[test]
+    fn clipboard_worker_rechecks_permission_after_read_and_before_redaction() {
+        let config = UiCaptureConfig::default();
+        let generation = AtomicU64::new(0);
+        let mut reads = 0;
+        let event = process_input_content(
+            clipboard_work(Some(0)),
+            &config,
+            &mut || {
+                reads += 1;
+                generation.store(1, Ordering::SeqCst);
+                Ok(Some("synthetic secret".into()))
+            },
+            &|| Some(generation.load(Ordering::SeqCst)),
+            &|| true,
+        )
+        .unwrap();
+        assert_eq!(reads, 1);
+        assert!(matches!(
+            event.data,
+            EventData::Clipboard { content: None, .. }
+        ));
+    }
+
+    #[test]
+    fn clipboard_worker_denied_disabled_and_expired_requests_do_not_read() {
+        for case in 0..4 {
+            let mut config = UiCaptureConfig::default();
+            let mut work = clipboard_work(Some(0));
+            match case {
+                0 => work = clipboard_work(None),
+                1 => config.capture_clipboard_content = false,
+                2 => {
+                    if let InputContentWork::Clipboard(pending) = &mut work {
+                        pending.queued_at = Instant::now() - Duration::from_secs(2);
+                    }
+                }
+                _ => {}
+            }
+            let event = process_input_content(
+                work,
+                &config,
+                &mut || panic!("must not read the OS clipboard"),
+                &|| if case == 3 { Some(1) } else { Some(0) },
+                &|| true,
+            )
+            .unwrap();
+            assert!(matches!(
+                event.data,
+                EventData::Clipboard { content: None, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn clipboard_worker_pause_during_read_discards_event() {
+        let allowed = AtomicBool::new(true);
+        let event = process_input_content(
+            clipboard_work(Some(0)),
+            &UiCaptureConfig::default(),
+            &mut || {
+                allowed.store(false, Ordering::SeqCst);
+                Ok(Some("synthetic secret".into()))
+            },
+            &|| Some(0),
+            &|| allowed.load(Ordering::SeqCst),
+        );
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn clipboard_worker_rechecks_permission_after_redaction() {
+        let checks = std::cell::Cell::new(0);
+        let event = process_input_content(
+            clipboard_work(Some(0)),
+            &UiCaptureConfig::default(),
+            &mut || Ok(Some("synthetic.person@example.com".into())),
+            &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() <= 2 {
+                    Some(0)
+                } else {
+                    Some(1)
+                }
+            },
+            &|| true,
+        )
+        .unwrap();
+        assert_eq!(checks.get(), 3);
+        assert!(matches!(
+            event.data,
+            EventData::Clipboard { content: None, .. }
+        ));
+    }
+
+    #[test]
+    fn clipboard_worker_large_multiline_json_preserves_content_and_redacts_pii() {
+        let json = format!(
+            "[\n{}{{\"email\":\"synthetic.person@example.com\"}}\n]",
+            "{\"value\":\"synthetic ordinary text\"},\n".repeat(6500)
+        );
+        assert!(json.len() > 239_000);
+        let event = process_input_content(
+            clipboard_work(Some(0)),
+            &UiCaptureConfig::default(),
+            &mut || Ok(Some(json.clone())),
+            &|| Some(0),
+            &|| true,
+        )
+        .unwrap();
+        if let EventData::Clipboard {
+            content: Some(content),
+            operation,
+        } = event.data
+        {
+            assert_eq!(operation, 'v');
+            assert!(content.contains("[EMAIL]"));
+            assert!(!content.contains("synthetic.person@example.com"));
+            assert_eq!(content.lines().count(), json.lines().count());
+        } else {
+            panic!("expected admitted, redacted clipboard content");
+        }
+    }
+
+    #[test]
+    fn clipboard_worker_read_failure_preserves_operation_metadata() {
+        for failure in [ClipboardReadFailure::Initialize, ClipboardReadFailure::Read] {
+            let event = process_input_content(
+                clipboard_work(Some(0)),
+                &UiCaptureConfig::default(),
+                &mut || Err(failure),
+                &|| Some(0),
+                &|| true,
+            )
+            .unwrap();
+            assert!(matches!(
+                event.data,
+                EventData::Clipboard {
+                    content: None,
+                    operation: 'v'
+                }
+            ));
+            assert_eq!(event.relative_ms, 42);
+        }
+    }
+
+    #[test]
+    fn content_worker_drains_final_admitted_text_without_reading_clipboard_on_stop() {
+        let (content_tx, content_rx) = bounded(4);
+        let (event_tx, event_rx) = bounded(4);
+        content_tx
+            .try_send(clipboard_work(Some(0)))
+            .unwrap_or_else(|_| panic!("queue full"));
+        content_tx
+            .try_send(InputContentWork::Text(UiEvent::text(
+                Utc::now(),
+                0,
+                "synthetic.person@example.com".into(),
+            )))
+            .unwrap_or_else(|_| panic!("queue full"));
+        drop(content_tx);
+        run_input_content_worker(
+            content_rx,
+            &event_tx,
+            &AtomicBool::new(true),
+            &UiCaptureConfig::default(),
+            || panic!("no clipboard read after stop"),
+            || Some(0),
+        );
+        assert!(matches!(event_rx.try_recv().unwrap().data,
+            EventData::Text { content, .. } if content.contains("[EMAIL]")));
+        assert!(event_rx.try_recv().is_err());
+    }
+
     #[test]
     fn test_permission_check() {
         let recorder = UiRecorder::with_defaults();
@@ -2021,42 +2383,64 @@ mod tests {
         assert_eq!(0x08, 8); // Win
     }
 
-    fn make_test_state(tx: crossbeam_channel::Sender<UiEvent>, text: &str) -> HookState {
+    fn make_test_state(
+        tx: crossbeam_channel::Sender<UiEvent>,
+        text: &str,
+    ) -> (HookState, Receiver<InputContentWork>) {
         let mut config = crate::config::UiCaptureConfig::default();
         // These buffer-unit tests do not depend on the user's real desktop.
         config.skip_password_fields = false;
-        HookState {
-            tx,
-            start: std::time::Instant::now(),
-            config,
-            last_mouse_pos: (0, 0),
-            text_buf: text.to_string(),
-            last_text_time: if text.is_empty() {
-                None
-            } else {
-                Some(std::time::Instant::now())
+        let (content_tx, content_rx) = bounded(INPUT_CONTENT_QUEUE_CAPACITY);
+        (
+            HookState {
+                tx,
+                start: std::time::Instant::now(),
+                config,
+                last_mouse_pos: (0, 0),
+                text_buf: text.to_string(),
+                last_text_time: if text.is_empty() {
+                    None
+                } else {
+                    Some(std::time::Instant::now())
+                },
+                text_privacy_generation: (!text.is_empty()).then_some(0),
+                pending_text: Vec::new(),
+                current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
+                current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
+                activity_feed: None,
+                click_queue: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                focused_element: Arc::new(parking_lot::Mutex::new(None)),
+                keyboard_privacy: Arc::new(KeyboardPrivacy::default()),
+                content_tx,
+                last_input_at_ms: Arc::new(AtomicU64::new(0)),
+                scroll_aggregator: None,
             },
-            text_privacy_generation: (!text.is_empty()).then_some(0),
-            pending_text: Vec::new(),
-            current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
-            current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
-            activity_feed: None,
-            click_queue: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            focused_element: Arc::new(parking_lot::Mutex::new(None)),
-            keyboard_privacy: Arc::new(KeyboardPrivacy::default()),
-            pending_clipboard: Vec::new(),
-            last_input_at_ms: Arc::new(AtomicU64::new(0)),
-            scroll_aggregator: None,
+            content_rx,
+        )
+    }
+
+    fn drain_test_content(state: &HookState, rx: &Receiver<InputContentWork>) {
+        for work in rx.try_iter() {
+            let event = process_input_content(
+                work,
+                &state.config,
+                &mut || panic!("no real clipboard reads"),
+                &|| Some(0),
+                &|| true,
+            )
+            .unwrap();
+            try_send_ui_event(&state.tx, event);
         }
     }
 
     #[test]
     fn test_flush_text_buffer() {
         let (tx, rx) = crossbeam_channel::bounded(64);
-        let mut state = make_test_state(tx, "hello world");
+        let (mut state, content_rx) = make_test_state(tx, "hello world");
 
         // Buffer has content — flush should send a Text event
         flush_text_buffer(&mut state);
+        drain_test_content(&state, &content_rx);
         assert!(state.text_buf.is_empty());
         assert!(state.last_text_time.is_none());
 
@@ -2072,18 +2456,20 @@ mod tests {
     #[test]
     fn test_flush_empty_buffer_is_noop() {
         let (tx, rx) = crossbeam_channel::bounded(64);
-        let mut state = make_test_state(tx, "");
+        let (mut state, content_rx) = make_test_state(tx, "");
 
         flush_text_buffer(&mut state);
+        drain_test_content(&state, &content_rx);
         assert!(rx.try_recv().is_err()); // No event sent
     }
 
     #[test]
     fn keyboard_privacy_drops_buffer_on_unknown_focus_and_invalidation() {
         let (tx, rx) = crossbeam_channel::bounded(64);
-        let mut state = make_test_state(tx, "synthetic secret");
+        let (mut state, content_rx) = make_test_state(tx, "synthetic secret");
         state.config.skip_password_fields = true;
         flush_text_buffer(&mut state);
+        drain_test_content(&state, &content_rx);
         assert!(rx.try_recv().is_err());
         assert!(state.text_buf.is_empty());
         assert!(state.last_text_time.is_none());
@@ -2100,15 +2486,16 @@ mod tests {
     #[test]
     fn keyboard_privacy_preserves_confirmed_text_before_navigation_and_applies_pii() {
         let (tx, rx) = crossbeam_channel::bounded(64);
-        let mut state = make_test_state(tx, "synthetic.person@example.com");
+        let (mut state, content_rx) = make_test_state(tx, "synthetic.person@example.com");
         state.config.skip_password_fields = true;
         state.config.apply_pii_removal = true;
         // The hook snapshots a buffer confirmed safe in its source field. It
         // then invalidates the generation before forwarding navigation, and
-        // the message loop applies PII before emitting the deferred buffer.
+        // the content worker applies PII before emitting the deferred buffer.
         let event = take_text_buffer_with_permit(&mut state, Some(0)).unwrap();
         state.keyboard_privacy.invalidate();
         emit_text(&state, event);
+        drain_test_content(&state, &content_rx);
         assert!(state.text_buf.is_empty());
         match rx.try_recv().unwrap().data {
             EventData::Text {
@@ -2132,7 +2519,7 @@ mod tests {
     fn keyboard_privacy_suppresses_key_and_text_but_preserves_activity() {
         for capture_text in [false, true] {
             let (tx, rx) = crossbeam_channel::bounded(64);
-            let mut state = make_test_state(tx, "synthetic old buffer");
+            let (mut state, content_rx) = make_test_state(tx, "synthetic old buffer");
             state.config.skip_password_fields = true;
             state.config.capture_keystrokes = true;
             state.config.capture_text = capture_text;
@@ -2154,7 +2541,7 @@ mod tests {
             let state = HOOK_STATE.with(|slot| slot.borrow_mut().take().unwrap());
             assert!(rx.try_recv().is_err());
             assert!(state.text_buf.is_empty());
-            assert!(state.pending_clipboard.is_empty());
+            assert!(content_rx.is_empty());
             assert!(feed.is_typing());
         }
     }

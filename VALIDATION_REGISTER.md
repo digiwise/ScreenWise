@@ -10,9 +10,31 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest build: [disconnected-monitor recording/status repair](docs/DISCONNECTED_MONITORS.md), not deployed. Previous deployed candidate: [capture status, event-flap and maximised-window fixes](docs/CAPTURE_FIX_HANDOFF.md). Earlier hashes below belong to their historical candidates.
+Latest build: [large clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md), not deployed. Preceding build: [disconnected-monitor recording/status repair](docs/DISCONNECTED_MONITORS.md), not deployed. Previous deployed candidate: [capture status, event-flap and maximised-window fixes](docs/CAPTURE_FIX_HANDOFF.md). Earlier hashes below belong to their historical candidates.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Large clipboard input lag (2026-10-12)
+
+**SW-R17 — Hook-thread defect repaired; incident attribution and live validation outstanding.**
+Clipboard reads and PII redaction previously ran in the same Windows message loop
+that services global keyboard/mouse hooks. Expensive work now uses a separate
+worker and a bounded nonblocking queue, with privacy rechecks, overload warnings,
+content-free metadata fallback and preserved admitted-text shutdown flushing.
+
+Read-only production diagnostics confirmed large multiline JSON paste records in
+other applications, but did not identify the reported Firefox/Excel incidents or
+measure clipboard processing duration. The separate unbounded UIA subtree/provider
+call remains an outstanding possible contributor. See the
+[investigation, evidence and limits](docs/LARGE_PASTE_INPUT_LAG.md).
+
+199 accessibility unit tests passed, with 23 live tests ignored; eight new
+regressions exercise synthetic stalled readers, large JSON, overload, privacy and
+shutdown. RootFmt and inert recorder CLI smoke passed. The release-local recorder
+build passed with 785 external artifacts reused and zero rebuilt. DesktopBuild
+passed with all 1,080 external artifacts reused; artifact hashes and exact scope
+are recorded in the investigation. No capture, live
+paste reproduction, deployment, restart or firewall change was performed.
 
 ## Outstanding stale monitor status (2026-10-12)
 
