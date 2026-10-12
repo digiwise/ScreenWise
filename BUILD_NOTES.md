@@ -1,6 +1,6 @@
 # ScreenWise Windows build notes
 
-The latest build work is the [large clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
+The latest build work is the [bounded UIA and clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
 The preceding candidate includes the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
 The previous deployed candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md),
 based on the existing graceful deployment implementation. Earlier release entries
@@ -20,12 +20,33 @@ release workflow without installing dependencies or starting the bridge. Pi's
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
 
+## Bounded UIA work (2026-10-13)
+
+UIA trees and focused/click elements use single-element cache requests, with
+native connection/transaction waits capped at 50 ms, a 250 ms walk deadline,
+node/depth/decoded-text limits and a one-second failure cooldown. Incomplete
+inspection withholds the frame before persistence/OCR; oversized or slow windows
+may therefore lose captures. Password checks remain fail closed. Windows timeouts
+limit client waits, without promising provider cancellation or a hard total
+wall-clock limit. The [follow-up](docs/LARGE_PASTE_INPUT_LAG.md#bounded-uia-follow-up-2026-10-13)
+records the exact behavior and remaining Firefox/Excel attribution limits.
+
+RootFmt, 213 accessibility tests (23 live ignored), 45 scoped engine capture tests
+and inert CLI smoke passed. Fourteen new UIA regressions use simulated providers
+and synthetic strings without real desktop/clipboard access. Sequential single-job,
+reduced-priority release-local builds passed: root 5m10s, 785 external reused/zero
+rebuilt; desktop 10m16s, 1,080 external reused/zero rebuilt. Artifact hashes and
+private evidence identifiers are recorded in the follow-up. Both lockfiles are
+unchanged. No deployment, restart, capture, dependency acquisition, full-release
+build or firewall change occurred.
+
 ## Large clipboard input lag (2026-10-12)
 
 Clipboard reads and typed/clipboard redaction now use a bounded separate worker
 instead of blocking the thread that services Windows' global input hooks. The
 [investigation](docs/LARGE_PASTE_INPUT_LAG.md) records production metadata,
-privacy/overload/shutdown behavior and the remaining unbounded UIA provider path.
+privacy/overload/shutdown behavior and the UIA provider path subsequently bounded
+in the follow-up above.
 The exact Firefox/Excel incidents remain unconfirmed; no live desktop reproduction
 was attempted.
 

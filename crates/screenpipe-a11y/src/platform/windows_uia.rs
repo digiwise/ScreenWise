@@ -20,21 +20,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 
-use windows::core::{implement, BSTR, VARIANT};
+#[path = "windows_uia_budget.rs"]
+mod budget;
+pub(crate) use budget::UiaLimits;
+use budget::{ProviderBackoff, TreeProvider, UiaStop, WalkBudget, PROVIDER_TIMEOUT_MS};
+use windows::core::{implement, Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Accessibility::{
-    AutomationElementMode_Full, AutomationElementMode_None, CUIAutomation, IUIAutomation,
-    IUIAutomationCacheRequest, IUIAutomationElement, IUIAutomationFocusChangedEventHandler,
-    IUIAutomationFocusChangedEventHandler_Impl, IUIAutomationTreeWalker, TreeScope_Element,
-    TreeScope_Subtree, UIA_AcceleratorKeyPropertyId, UIA_AccessKeyPropertyId,
-    UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId,
-    UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId,
-    UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsPasswordPropertyId,
-    UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId, UIA_ValueValuePropertyId,
-    UIA_PROPERTY_ID,
+    AutomationElementMode_Full, AutomationElementMode_None, CUIAutomation8, IUIAutomation,
+    IUIAutomation2, IUIAutomationCacheRequest, IUIAutomationElement,
+    IUIAutomationFocusChangedEventHandler, IUIAutomationFocusChangedEventHandler_Impl,
+    IUIAutomationTreeWalker, TreeScope_Element, UIA_AcceleratorKeyPropertyId,
+    UIA_AccessKeyPropertyId, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
+    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId,
+    UIA_HelpTextPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
+    UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
+    UIA_ValueValuePropertyId, UIA_PROPERTY_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -584,8 +588,10 @@ pub struct ClickElementRequest {
 /// UIA context holding COM objects (single-thread only, not Send)
 pub(crate) struct UiaContext {
     automation: IUIAutomation,
+    timeouts: IUIAutomation2,
+    backoff: ProviderBackoff,
     cache_request: IUIAutomationCacheRequest,
-    /// Per-element cache request for TreeWalker fallback (Chromium/Electron).
+    /// Per-element cache request for bounded TreeWalker navigation.
     /// Uses Full mode so walked elements retain live COM references for navigation.
     walker_cache_request: IUIAutomationCacheRequest,
     tree_walker: IUIAutomationTreeWalker,
@@ -596,14 +602,35 @@ impl UiaContext {
     /// the actual focused element, explicitly disallowing UIA default values:
     /// an unsupported IsPassword property must not become a false permission.
     fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy) {
+        if !self.provider_ready() {
+            privacy.invalidate();
+            return;
+        }
         let started_at = Instant::now();
         let generation = privacy.generation.load(Ordering::SeqCst);
         // Native/UIA candidate identities only: never ask for Name, Value or
         // password contents just to diagnose a failed privacy decision.
         let native = native_focus_probe();
         let focus = native.as_ref().ok().copied();
+        let budget = WalkBudget::new(UiaLimits {
+            timeout: Duration::from_millis(50),
+            ..UiaLimits::tree(1)
+        });
+        let prepare = || {
+            budget
+                .request_timeout()
+                .and_then(|ms| self.set_request_timeout(ms))
+                .map_err(|_| {
+                    probe_error(
+                        CaptureReason::InputFocusedElementFailed,
+                        "provider_budget",
+                        "UIA privacy budget unavailable",
+                    )
+                })
+        };
         let (result, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
             let focus = native?;
+            prepare()?;
             let element = self.automation.GetFocusedElement().map_err(|e| {
                 probe_error(
                     CaptureReason::InputFocusedElementFailed,
@@ -611,6 +638,7 @@ impl UiaContext {
                     e,
                 )
             })?;
+            prepare()?;
             let owns_focus = element
                 .CurrentHasKeyboardFocus()
                 .map_err(|e| {
@@ -621,6 +649,7 @@ impl UiaContext {
                     )
                 })?
                 .as_bool();
+            prepare()?;
             let element_pid = element.CurrentProcessId().map_err(|e| {
                 probe_error(
                     CaptureReason::InputFocusOwnershipFailed,
@@ -638,6 +667,7 @@ impl UiaContext {
                     ),
                 ));
             }
+            prepare()?;
             let value = element
                 .GetCurrentPropertyValueEx(UIA_IsPasswordPropertyId, true)
                 .map_err(|e| {
@@ -654,6 +684,7 @@ impl UiaContext {
                     e,
                 )
             })?;
+            prepare()?;
             let current = self.automation.GetFocusedElement().map_err(|e| {
                 probe_error(
                     CaptureReason::InputFocusVerificationFailed,
@@ -668,6 +699,7 @@ impl UiaContext {
                     "foreground/control changed",
                 ));
             }
+            prepare()?;
             if !self
                 .automation
                 .CompareElements(&element, &current)
@@ -686,10 +718,12 @@ impl UiaContext {
                     "focused element changed",
                 ));
             }
+            prepare()?;
             Ok(is_password)
         });
         let reason = result.as_ref().err().map(|failure| failure.reason);
         if let Err(failure) = &result {
+            self.backoff.failed();
             screenpipe_config::sensitive_debug::record("input_privacy_probe", || {
                 serde_json::json!({
                     "reason":failure.reason.code(), "stage":failure.stage, "error":failure.error,
@@ -712,7 +746,11 @@ impl UiaContext {
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
     pub(crate) fn new() -> windows::core::Result<Self> {
         unsafe {
-            let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)?;
+            // Do not fall back to the old class with its long default waits.
+            let timeouts: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_ALL)?;
+            timeouts.SetConnectionTimeout(PROVIDER_TIMEOUT_MS)?;
+            timeouts.SetTransactionTimeout(PROVIDER_TIMEOUT_MS)?;
+            let automation: IUIAutomation = timeouts.cast()?;
 
             // Create cache request with all properties we need
             let cache_request = automation.CreateCacheRequest()?;
@@ -738,10 +776,10 @@ impl UiaContext {
             // Cached-only mode: no live COM references, less memory
             cache_request.SetAutomationElementMode(AutomationElementMode_None)?;
 
-            // Tree scope: entire subtree (single COM call caches everything)
-            cache_request.SetTreeScope(TreeScope_Subtree)?;
+            // Context lookups must never cache descendants of a large editor.
+            cache_request.SetTreeScope(TreeScope_Element)?;
 
-            // Create walker-specific cache request for Chromium/Electron fallback.
+            // Create a single-element cache request for every tree navigation step.
             // Same properties, but Element scope (one node at a time) and Full
             // mode (live COM references needed to continue walking).
             let walker_cache_request = automation.CreateCacheRequest()?;
@@ -768,6 +806,8 @@ impl UiaContext {
 
             Ok(Self {
                 automation,
+                timeouts,
+                backoff: ProviderBackoff::default(),
                 cache_request,
                 walker_cache_request,
                 tree_walker,
@@ -775,120 +815,78 @@ impl UiaContext {
         }
     }
 
-    /// Capture the full accessibility tree of a window by HWND.
-    /// Uses CacheRequest to batch all property reads into minimal cross-process calls.
-    /// Falls back to TreeWalker for apps whose UIA providers don't populate
-    /// the cached subtree (Chromium, Electron, etc.).
+    /// Refuse retries for one second after incomplete/failed provider work.
+    fn provider_ready(&self) -> bool {
+        self.backoff.ready()
+    }
+
+    fn set_request_timeout(&self, millis: u32) -> Result<(), UiaStop> {
+        unsafe {
+            self.timeouts
+                .SetConnectionTimeout(millis)
+                .map_err(|_| UiaStop::Provider)?;
+            self.timeouts
+                .SetTransactionTimeout(millis)
+                .map_err(|_| UiaStop::Provider)
+        }
+    }
+
     pub(crate) fn capture_window_tree(
         &self,
         hwnd: HWND,
         max_elements: usize,
     ) -> Option<AccessibilityNode> {
-        unsafe {
-            let element = self
-                .automation
-                .ElementFromHandleBuildCache(hwnd, &self.cache_request)
-                .ok()?;
-
-            let mut count = 0;
-            let root = self.build_node(&element, max_elements, &mut count);
-
-            // Some UIA providers (notably Chromium/Electron) don't populate the
-            // cached subtree via ElementFromHandleBuildCache, returning only a
-            // handful of titlebar nodes. When this happens, fall back to
-            // TreeWalker which makes individual COM calls per element.
-            if count <= 10 {
-                if let Some(walker_root) = self.capture_window_tree_walker(hwnd, max_elements) {
-                    let walker_count = walker_root.node_count();
-                    if walker_count > count {
-                        debug!(
-                            "Cache returned {} nodes, walker returned {} - using walker result",
-                            count, walker_count
-                        );
-                        return Some(walker_root);
-                    }
-                }
-            }
-
-            Some(root)
-        }
+        self.capture_window_tree_bounded(hwnd, UiaLimits::tree(max_elements))
+            .ok()
     }
 
-    /// Fallback tree capture using TreeWalker for UIA providers that don't
-    /// support cached subtree (e.g. Chromium, Electron apps).
-    /// Walks the tree element-by-element via GetFirstChild/GetNextSibling.
-    fn capture_window_tree_walker(
+    /// No subtree-cache request: limits are checked before each one-element
+    /// request. Partial trees are discarded, never reported as complete.
+    pub(crate) fn capture_window_tree_bounded(
         &self,
         hwnd: HWND,
-        max_elements: usize,
-    ) -> Option<AccessibilityNode> {
-        unsafe {
-            // Get a live element (required for TreeWalker navigation)
-            let live_element = self.automation.ElementFromHandle(hwnd).ok()?;
-            // Cache properties on the root element
-            let cached_root = live_element
-                .BuildUpdatedCache(&self.walker_cache_request)
-                .ok()?;
-
-            let mut count = 0;
-            Some(self.build_node_walker(&cached_root, max_elements, &mut count))
+        limits: UiaLimits,
+    ) -> Result<AccessibilityNode, UiaStop> {
+        if !self.provider_ready() {
+            return Err(UiaStop::Backoff);
         }
+        let started = Instant::now();
+        let result = budget::walk(&WindowProvider { uia: self, hwnd }, limits);
+        if let Err(reason) = result {
+            self.backoff.failed();
+            // Fixed reason and numeric duration only; never provider text.
+            debug!(
+                ?reason,
+                elapsed_ms = started.elapsed().as_millis(),
+                "UIA tree withheld; bounded walk incomplete"
+            );
+        }
+        result
     }
 
-    /// Recursively build an AccessibilityNode using TreeWalker navigation.
-    /// Unlike build_node which reads pre-cached children, this walks the tree
-    /// one element at a time via COM calls.
-    fn build_node_walker(
+    fn cached_node(
         &self,
         element: &IUIAutomationElement,
-        max_elements: usize,
-        count: &mut usize,
+        budget: &mut WalkBudget,
     ) -> AccessibilityNode {
-        *count += 1;
-
         let control_type = self.get_control_type_name(element);
-        let name = self.get_cached_string(element, UIA_NamePropertyId);
-        let automation_id = self.get_cached_string(element, UIA_AutomationIdPropertyId);
-        let class_name = self.get_cached_string(element, UIA_ClassNamePropertyId);
-        let value = self.get_cached_string(element, UIA_ValueValuePropertyId);
+        let name = self.get_cached_string_bounded(element, UIA_NamePropertyId, budget);
+        let automation_id =
+            self.get_cached_string_bounded(element, UIA_AutomationIdPropertyId, budget);
+        let class_name = self.get_cached_string_bounded(element, UIA_ClassNamePropertyId, budget);
+        let value = self.get_cached_string_bounded(element, UIA_ValueValuePropertyId, budget);
         let bounds = self.get_cached_bounds(element);
         let is_enabled = self.get_cached_bool(element, UIA_IsEnabledPropertyId);
         let is_focused = self.get_cached_bool_opt(element, UIA_HasKeyboardFocusPropertyId);
         let is_keyboard_focusable =
             self.get_cached_bool_opt(element, UIA_IsKeyboardFocusablePropertyId);
-        let help_text = self.get_cached_string(element, UIA_HelpTextPropertyId);
+        let help_text = self.get_cached_string_bounded(element, UIA_HelpTextPropertyId, budget);
         let is_password = self.get_cached_bool_opt(element, UIA_IsPasswordPropertyId);
-        let accelerator_key = self.get_cached_string(element, UIA_AcceleratorKeyPropertyId);
-        let access_key = self.get_cached_string(element, UIA_AccessKeyPropertyId);
+        let accelerator_key =
+            self.get_cached_string_bounded(element, UIA_AcceleratorKeyPropertyId, budget);
+        let access_key = self.get_cached_string_bounded(element, UIA_AccessKeyPropertyId, budget);
         let localized_control_type =
-            self.get_cached_string(element, UIA_LocalizedControlTypePropertyId);
-
-        let mut children = Vec::new();
-        if *count < max_elements {
-            unsafe {
-                // Navigate to first child via TreeWalker
-                if let Ok(child) = self
-                    .tree_walker
-                    .GetFirstChildElementBuildCache(element, &self.walker_cache_request)
-                {
-                    children.push(self.build_node_walker(&child, max_elements, count));
-                    // Iterate siblings
-                    let mut current = child;
-                    while *count < max_elements {
-                        match self
-                            .tree_walker
-                            .GetNextSiblingElementBuildCache(&current, &self.walker_cache_request)
-                        {
-                            Ok(next) => {
-                                children.push(self.build_node_walker(&next, max_elements, count));
-                                current = next;
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-            }
-        }
+            self.get_cached_string_bounded(element, UIA_LocalizedControlTypePropertyId, budget);
 
         AccessibilityNode {
             control_type,
@@ -907,73 +905,7 @@ impl UiaContext {
             accelerator_key,
             access_key,
             localized_control_type,
-            children,
-        }
-    }
-
-    /// Recursively build an AccessibilityNode from a cached UIA element.
-    fn build_node(
-        &self,
-        element: &IUIAutomationElement,
-        max_elements: usize,
-        count: &mut usize,
-    ) -> AccessibilityNode {
-        *count += 1;
-
-        let control_type = self.get_control_type_name(element);
-        let name = self.get_cached_string(element, UIA_NamePropertyId);
-        let automation_id = self.get_cached_string(element, UIA_AutomationIdPropertyId);
-        let class_name = self.get_cached_string(element, UIA_ClassNamePropertyId);
-        let value = self.get_cached_string(element, UIA_ValueValuePropertyId);
-        let bounds = self.get_cached_bounds(element);
-        let is_enabled = self.get_cached_bool(element, UIA_IsEnabledPropertyId);
-        let is_focused = self.get_cached_bool_opt(element, UIA_HasKeyboardFocusPropertyId);
-        let is_keyboard_focusable =
-            self.get_cached_bool_opt(element, UIA_IsKeyboardFocusablePropertyId);
-        let help_text = self.get_cached_string(element, UIA_HelpTextPropertyId);
-        let is_password = self.get_cached_bool_opt(element, UIA_IsPasswordPropertyId);
-        let accelerator_key = self.get_cached_string(element, UIA_AcceleratorKeyPropertyId);
-        let access_key = self.get_cached_string(element, UIA_AccessKeyPropertyId);
-        let localized_control_type =
-            self.get_cached_string(element, UIA_LocalizedControlTypePropertyId);
-
-        let mut children = Vec::new();
-        if *count < max_elements {
-            unsafe {
-                // Walk cached children (already fetched via TreeScope_Subtree)
-                if let Ok(child_array) = element.GetCachedChildren() {
-                    if let Ok(len) = child_array.Length() {
-                        for i in 0..len {
-                            if *count >= max_elements {
-                                break;
-                            }
-                            if let Ok(child) = child_array.GetElement(i) {
-                                children.push(self.build_node(&child, max_elements, count));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        AccessibilityNode {
-            control_type,
-            name,
-            automation_id,
-            class_name,
-            value,
-            bounds,
-            is_enabled,
-            is_focused,
-            is_keyboard_focusable,
-            help_text,
-            is_password,
-            is_selected: None,
-            is_expanded: None,
-            accelerator_key,
-            access_key,
-            localized_control_type,
-            children,
+            children: Vec::new(),
         }
     }
 
@@ -989,21 +921,18 @@ impl UiaContext {
         }
     }
 
-    /// Get a cached string property, returning None for empty/missing
-    fn get_cached_string(
+    /// Borrow a VT_BSTR while its VARIANT owns it. Avoid the full BSTR/PROPVARIANT
+    /// copies made by TryFrom followed by unbounded UTF-8 conversion.
+    fn get_cached_string_bounded(
         &self,
         element: &IUIAutomationElement,
         property_id: UIA_PROPERTY_ID,
+        budget: &mut WalkBudget,
     ) -> Option<String> {
+        budget.request_timeout().ok()?;
         unsafe {
             let variant: VARIANT = element.GetCachedPropertyValue(property_id).ok()?;
-            let bstr = BSTR::try_from(&variant).ok()?;
-            let s = bstr.to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
+            cached_variant_string(&variant, budget)
         }
     }
 
@@ -1071,33 +1000,46 @@ impl UiaContext {
 
     /// Get element at screen position using ElementFromPoint
     fn element_from_point(&self, x: i32, y: i32) -> Option<ElementContext> {
+        if !self.provider_ready() {
+            return None;
+        }
+        self.set_request_timeout(PROVIDER_TIMEOUT_MS).ok()?;
         unsafe {
             let point = POINT { x, y };
             let element = self
                 .automation
                 .ElementFromPointBuildCache(point, &self.cache_request)
+                .map_err(|_| self.backoff.failed())
                 .ok()?;
-            Some(self.element_to_context(&element))
+            self.element_to_context(&element)
         }
     }
 
     /// Get the currently focused element
     fn get_focused_element(&self) -> Option<ElementContext> {
+        if !self.provider_ready() {
+            return None;
+        }
+        self.set_request_timeout(PROVIDER_TIMEOUT_MS).ok()?;
         unsafe {
             let element = self
                 .automation
                 .GetFocusedElementBuildCache(&self.cache_request)
+                .map_err(|_| self.backoff.failed())
                 .ok()?;
-            Some(self.element_to_context(&element))
+            self.element_to_context(&element)
         }
     }
 
     /// Convert a UIA element to ElementContext
-    fn element_to_context(&self, element: &IUIAutomationElement) -> ElementContext {
+    fn element_to_context(&self, element: &IUIAutomationElement) -> Option<ElementContext> {
         let role = self.get_control_type_name(element);
-        let mut name = self.get_cached_string(element, UIA_NamePropertyId);
-        let mut value = self.get_cached_string(element, UIA_ValueValuePropertyId);
-        let automation_id = self.get_cached_string(element, UIA_AutomationIdPropertyId);
+        let mut budget = WalkBudget::new(UiaLimits::tree(1));
+        let mut name = self.get_cached_string_bounded(element, UIA_NamePropertyId, &mut budget);
+        let mut value =
+            self.get_cached_string_bounded(element, UIA_ValueValuePropertyId, &mut budget);
+        let automation_id =
+            self.get_cached_string_bounded(element, UIA_AutomationIdPropertyId, &mut budget);
         let bounds = self.get_cached_bounds(element);
         let click_privacy = redact_click_element_text(
             self.get_cached_bool_opt(element, UIA_IsPasswordPropertyId),
@@ -1136,14 +1078,18 @@ impl UiaContext {
             }
         }
 
-        ElementContext {
+        if budget.request_timeout().is_err() {
+            self.backoff.failed();
+            return None;
+        }
+        Some(ElementContext {
             role,
             name,
             value,
             description: None,
             automation_id,
             bounds,
-        }
+        })
     }
 
     /// Subscribe to focus change events
@@ -1163,12 +1109,88 @@ impl UiaContext {
     }
 }
 
-/// Timestamp a UIA privacy result only after the provider calls complete.
-///
-/// Some cross-process providers take longer than the permit's maximum age. A
-/// timestamp captured before those calls would make a freshly validated result
-/// stale as soon as it was stored. Generation and native-focus checks still
-/// reject any focus transition that occurs while the probe is in flight.
+fn cached_variant_string(variant: &VARIANT, budget: &mut WalkBudget) -> Option<String> {
+    unsafe {
+        let raw = variant.as_raw().Anonymous.Anonymous;
+        // VT_BSTR == 8. Reject BYREF, other variant types and default/unsupported values.
+        if raw.vt != 8 {
+            return None;
+        }
+        // ManuallyDrop borrows the allocation: VariantClear remains its sole owner.
+        let borrowed = std::mem::ManuallyDrop::new(BSTR::from_raw(raw.Anonymous.bstrVal));
+        budget.string(borrowed.as_wide())
+    }
+}
+
+struct WindowProvider<'a> {
+    uia: &'a UiaContext,
+    hwnd: HWND,
+}
+impl TreeProvider for WindowProvider<'_> {
+    type Element = IUIAutomationElement;
+    fn root(&self, ms: u32) -> Result<Self::Element, UiaStop> {
+        self.uia.set_request_timeout(ms)?;
+        unsafe {
+            self.uia
+                .automation
+                .ElementFromHandleBuildCache(self.hwnd, &self.uia.walker_cache_request)
+                .map_err(|_| UiaStop::Provider)
+        }
+    }
+    fn node(&self, element: &Self::Element, budget: &mut WalkBudget) -> AccessibilityNode {
+        self.uia.cached_node(element, budget)
+    }
+    fn first_child(
+        &self,
+        element: &Self::Element,
+        ms: u32,
+    ) -> Result<Option<Self::Element>, UiaStop> {
+        self.uia.set_request_timeout(ms)?;
+        navigation_result(|output| unsafe {
+            (Interface::vtable(&self.uia.tree_walker).GetFirstChildElementBuildCache)(
+                Interface::as_raw(&self.uia.tree_walker),
+                Interface::as_raw(element),
+                Interface::as_raw(&self.uia.walker_cache_request),
+                output,
+            )
+        })
+    }
+    fn next_sibling(
+        &self,
+        element: &Self::Element,
+        ms: u32,
+    ) -> Result<Option<Self::Element>, UiaStop> {
+        self.uia.set_request_timeout(ms)?;
+        navigation_result(|output| unsafe {
+            (Interface::vtable(&self.uia.tree_walker).GetNextSiblingElementBuildCache)(
+                Interface::as_raw(&self.uia.tree_walker),
+                Interface::as_raw(element),
+                Interface::as_raw(&self.uia.walker_cache_request),
+                output,
+            )
+        })
+    }
+}
+
+fn navigation_result(
+    call: impl FnOnce(*mut *mut std::ffi::c_void) -> windows::core::HRESULT,
+) -> Result<Option<IUIAutomationElement>, UiaStop> {
+    // windows-rs maps a successful null interface (end of children/siblings) to
+    // E_POINTER, losing the distinction from an actual provider E_POINTER.
+    // Preserve the original HRESULT and null output from the COM call.
+    let mut raw = std::ptr::null_mut();
+    let result = call(&mut raw);
+    let element = if raw.is_null() {
+        None
+    } else {
+        Some(unsafe { IUIAutomationElement::from_raw(raw) })
+    };
+    result.ok().map_err(|_| UiaStop::Provider)?;
+    Ok(element)
+}
+
+/// Timestamp only after provider calls complete. Generation and native-focus
+/// checks still reject any focus transition while the probe is in flight.
 fn complete_keyboard_privacy_probe<T>(probe: impl FnOnce() -> T) -> (T, Instant) {
     let result = probe();
     (result, Instant::now())
@@ -1928,6 +1950,34 @@ fn control_type_id_to_name(id: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_null_navigation_is_distinct_from_provider_error() {
+        assert!(navigation_result(|_| windows::Win32::Foundation::S_OK)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            navigation_result(|_| windows::Win32::Foundation::E_POINTER).unwrap_err(),
+            UiaStop::Provider
+        );
+    }
+
+    #[test]
+    fn cached_bstr_decode_is_bounded_and_does_not_take_variant_ownership() {
+        let text = "synthetic\n".repeat(30_000);
+        let variant = VARIANT::from(text.as_str());
+        let mut budget = WalkBudget::new(UiaLimits::tree(10));
+        let result = cached_variant_string(&variant, &mut budget).unwrap();
+        assert_eq!(result.len(), 16 * 1024);
+        assert_eq!(budget.request_timeout(), Err(UiaStop::Text));
+        // The borrowed BSTR must still belong to the VARIANT and be reusable.
+        assert_eq!(BSTR::try_from(&variant).unwrap().len(), text.len());
+        assert!(cached_variant_string(
+            &VARIANT::from(42u32),
+            &mut WalkBudget::new(UiaLimits::tree(10))
+        )
+        .is_none());
+    }
 
     fn test_keyboard_focus() -> NativeKeyboardFocus {
         NativeKeyboardFocus {

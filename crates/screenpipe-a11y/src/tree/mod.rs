@@ -534,6 +534,8 @@ pub enum SkipReason {
     DifferentMonitor,
     /// Monitor/focus association could not be established safely.
     MonitorUnverified,
+    /// UIA did not inspect the complete tree within its work/provider budgets.
+    AccessibilityIncomplete,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -547,6 +549,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::DifferentMonitor => {
                 write!(f, "foreground window belongs to another monitor")
             }
+            SkipReason::AccessibilityIncomplete => write!(f, "accessibility inspection incomplete"),
             SkipReason::MonitorUnverified => {
                 write!(f, "foreground monitor association unavailable")
             }

@@ -12,7 +12,7 @@ use super::{
     TreeWalkerPlatform,
 };
 use crate::events::AccessibilityNode;
-use crate::platform::windows_uia::UiaContext;
+use crate::platform::windows_uia::{UiaContext, UiaLimits};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -323,13 +323,21 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
 
         // Check timeout budget
         if start.elapsed() >= effective_timeout {
-            return Ok(TreeWalkResult::NotFound);
+            return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete));
         }
 
-        // Capture the accessibility tree
-        let root = match uia.capture_window_tree(hwnd, effective_max_nodes) {
-            Some(tree) => tree,
-            None => return Ok(TreeWalkResult::NotFound),
+        // Apply adaptive budgets before provider work, not after a subtree cache.
+        let root = match uia.capture_window_tree_bounded(
+            hwnd,
+            UiaLimits {
+                timeout: effective_timeout.saturating_sub(start.elapsed()),
+                nodes: effective_max_nodes,
+                depth: self.config.max_depth,
+                text_bytes: self.config.max_text_length.saturating_mul(4),
+            },
+        ) {
+            Ok(tree) => tree,
+            Err(_) => return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete)),
         };
 
         // Use the admitted capture monitor for normalizing element bounds.
@@ -400,7 +408,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             walk_duration
         );
 
-        // Windows walker doesn't have timeout-based truncation yet — report as complete
+        // Only complete, bounded UIA trees reach this point.
         // Per-app document_path resolution from on-disk state files
         // (Obsidian config + VS Code-fork state.vscdb). Returns None
         // for any unknown app or any failure — never panics.

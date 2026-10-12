@@ -2497,7 +2497,9 @@ async fn do_capture(
                 CaptureCondition::Suppressed,
                 match reason {
                     S::DifferentMonitor => CaptureReason::MonitorInactive,
-                    S::MonitorUnverified => CaptureReason::CaptureCheckFailed,
+                    S::MonitorUnverified | S::AccessibilityIncomplete => {
+                        CaptureReason::CaptureCheckFailed
+                    }
                     S::Incognito => CaptureReason::PrivateBrowsing,
                     S::NotInIncludeList => CaptureReason::OutsideIncludeFilter,
                     S::UserIgnored | S::ExcludedApp | S::BlockedUrl => {
@@ -2519,6 +2521,21 @@ async fn do_capture(
         TreeWalkResult::Found(snap) => Some(snap),
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor) => None,
         #[cfg(target_os = "windows")]
+        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::AccessibilityIncomplete) => {
+            windows_privacy.foreground_blocked("accessibility_incomplete");
+            return persist_windows_placeholder(
+                params,
+                trigger,
+                captured_at,
+                WindowsCaptureOutcome::CaptureFailed(
+                    WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                ),
+                screenshot_disabled,
+                &windows_privacy,
+            )
+            .await;
+        }
+        #[cfg(target_os = "windows")]
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::MonitorUnverified) => {
             warn!("Windows accessibility monitor association could not be verified; withholding frame");
             windows_privacy.foreground_blocked("monitor_unverified");
@@ -2537,6 +2554,9 @@ async fn do_capture(
                     screenpipe_a11y::tree::SkipReason::NotInIncludeList => "not_in_include_list",
                     screenpipe_a11y::tree::SkipReason::BlockedUrl => "blocked_url",
                     screenpipe_a11y::tree::SkipReason::MonitorUnverified => "monitor_unverified",
+                    screenpipe_a11y::tree::SkipReason::AccessibilityIncomplete => {
+                        "accessibility_incomplete"
+                    }
                     screenpipe_a11y::tree::SkipReason::DifferentMonitor => "different_monitor",
                 });
                 let outcome = WindowsCaptureOutcome::CaptureRedacted(
