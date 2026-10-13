@@ -6,12 +6,14 @@
 [CmdletBinding()]
 param(
     [switch]$SelfTest,
+    [ValidateSet('Manual', 'Auto')][string]$Variant = 'Manual',
     [string]$Compiler = (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe')
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
 $outputDir = Join-Path $repoRoot 'target\uia-privacy-fixture'
-$executable = Join-Path $outputDir 'FreshBulkPrivacyFixture.exe'
+$basename = if ($Variant -eq 'Auto') { 'FreshBulkPrivacyFixtureAuto' } else { 'FreshBulkPrivacyFixture' }
+$executable = Join-Path $outputDir ($basename + '.exe')
 if (-not [IO.Path]::IsPathRooted($Compiler) -or -not (Test-Path -LiteralPath $Compiler -PathType Leaf)) {
     throw 'Supply an existing absolute Framework csc.exe path; this builder acquires no dependencies.'
 }
@@ -20,7 +22,7 @@ $references = @('UIAutomationProvider.dll', 'UIAutomationTypes.dll', 'WindowsBas
 foreach ($reference in $references) {
     if (-not (Test-Path -LiteralPath (Join-Path $wpfDir $reference) -PathType Leaf)) { throw "Missing provisioned Framework assembly: $reference" }
 }
-$running = @(Get-Process -Name FreshBulkPrivacyFixture -ErrorAction SilentlyContinue)
+$running = @(Get-Process -Name $basename -ErrorAction SilentlyContinue)
 if ($running.Count -gt 0) { throw 'Close any running fresh bulk privacy fixture before rebuilding; no process is stopped by this builder.' }
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 $compilerArgs = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', "/out:$executable", '/reference:System.dll', '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll')

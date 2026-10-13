@@ -170,23 +170,37 @@ internal sealed class FixtureSurface : Control
 
 internal sealed class FreshBulkPrivacyFixture : Form
 {
+    private sealed class AutoStep
+    {
+        internal readonly string Phase;
+        internal readonly int Milliseconds;
+        internal readonly bool Rapid;
+        internal AutoStep(string phase, int milliseconds, bool rapid)
+        { Phase = phase; Milliseconds = milliseconds; Rapid = rapid; }
+    }
+    private static readonly string[] BlockerCases = new string[]
+        { "native-title", "document-name", "document-value", "nested-window", "extension-child", "document-url" };
+    private static readonly AutoStep[] AutoPlan = MakeAutoPlan();
     private readonly FixtureSurface surface = new FixtureSurface();
     private readonly Label status = new Label();
     private readonly System.Windows.Forms.Timer rapid = new System.Windows.Forms.Timer();
     private readonly System.Windows.Forms.Timer refresh = new System.Windows.Forms.Timer();
+    private readonly System.Windows.Forms.Timer automatic = new System.Windows.Forms.Timer();
     private readonly TextBox ordinary = new TextBox();
     private readonly TextBox password = new TextBox();
     private int generation = 1, bytes = 4096, tick;
     private string phase = "allowed", rapidCase = "document-name";
+    private int automaticIndex = -1;
+    private bool automaticComplete;
     private Form peer;
-    internal FreshBulkPrivacyFixture()
+    internal FreshBulkPrivacyFixture(bool autoCycle)
     {
         Text = "SW ALLOWED Fresh Bulk Fixture";
         StartPosition = FormStartPosition.CenterScreen; ClientSize = new Size(930, 675);
         MinimumSize = Size; Font = new Font("Segoe UI", 10); BackColor = Color.White;
         FlowLayoutPanel actions = new FlowLayoutPanel(); actions.Dock = DockStyle.Top; actions.Height = 155;
         Add(actions, "Allow / stop rapid", delegate { rapid.Stop(); Apply("allowed"); });
-        foreach (string item in new string[] { "native-title", "document-name", "document-value", "nested-window", "extension-child", "document-url" })
+        foreach (string item in BlockerCases)
         {
             string choice = item;
             Add(actions, choice, delegate { rapid.Stop(); rapidCase = choice; Apply(choice); });
@@ -206,19 +220,62 @@ internal sealed class FreshBulkPrivacyFixture : Form
         ordinary.SetBounds(12, 505, 895, 30); ordinary.Text = "SW_ORDINARY_POSITIVE"; ordinary.AccessibleName = "Synthetic ordinary field"; Controls.Add(ordinary);
         Label passwordLabel = new Label(); passwordLabel.Text = "Password field: fixed fake value; UIA must redact value, not the whole ordinary screen"; passwordLabel.SetBounds(12, 548, 895, 25); Controls.Add(passwordLabel);
         password.SetBounds(12, 578, 895, 30); password.UseSystemPasswordChar = true; password.Text = "SW_FAKE_PASSWORD"; password.AccessibleName = "Synthetic password field"; Controls.Add(password);
-        Label note = new Label(); note.SetBounds(12, 625, 895, 35); note.Text = "Manual owner trial only. No clipboard, network, input injection, recorder control, or capture. Escape closes."; Controls.Add(note);
+        Label note = new Label(); note.SetBounds(12, 625, 895, 35); note.Text = "Owner-run fixture. Auto mode changes synthetic UIA properties only; no input injection or recorder control. Escape closes."; Controls.Add(note);
         rapid.Interval = 125;
         rapid.Tick += delegate { tick++; Apply(tick % 2 == 0 ? "allowed" : rapidCase); if (tick >= 40) { rapid.Stop(); Apply("allowed"); } };
         refresh.Interval = 250; refresh.Tick += delegate { Apply(phase); };
-        LocationChanged += delegate { surface.RefreshBounds(); }; Shown += delegate { surface.RefreshBounds(); };
+        automatic.Tick += delegate { AdvanceAutomatic(); };
+        LocationChanged += delegate { surface.RefreshBounds(); };
+        Shown += delegate { surface.RefreshBounds(); if (autoCycle) AdvanceAutomatic(); };
         KeyPreview = true; KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); };
-        FormClosed += delegate { rapid.Dispose(); refresh.Dispose(); if (peer != null) peer.Close(); };
+        FormClosed += delegate { rapid.Dispose(); refresh.Dispose(); automatic.Dispose(); if (peer != null) peer.Close(); };
         Apply("allowed");
     }
-    private static void Add(FlowLayoutPanel panel, string text, Action action)
+    private void Add(FlowLayoutPanel panel, string text, Action action)
     {
         Button button = new Button(); button.Text = text; button.AutoSize = true;
-        button.Click += delegate { action(); }; panel.Controls.Add(button);
+        button.Click += delegate { StopAutomatic(); action(); }; panel.Controls.Add(button);
+    }
+    private static AutoStep[] MakeAutoPlan()
+    {
+        System.Collections.Generic.List<AutoStep> steps = new System.Collections.Generic.List<AutoStep>();
+        steps.Add(new AutoStep("allowed", 8000, false));
+        foreach (string blocker in BlockerCases)
+        {
+            steps.Add(new AutoStep(blocker, 8000, false));
+            steps.Add(new AutoStep("allowed", 8000, false));
+            steps.Add(new AutoStep(blocker, 5000, true));
+            steps.Add(new AutoStep("allowed", 8000, false));
+        }
+        return steps.ToArray();
+    }
+    private void StopAutomatic()
+    {
+        automatic.Stop(); rapid.Stop();
+        automaticIndex = -1; automaticComplete = false;
+    }
+    private void AdvanceAutomatic()
+    {
+        automatic.Stop(); rapid.Stop();
+        automaticIndex++;
+        if (automaticIndex == AutoPlan.Length)
+        {
+            automaticComplete = true;
+            Apply("allowed");
+            return;
+        }
+        AutoStep step = AutoPlan[automaticIndex];
+        bytes = 4096;
+        if (step.Rapid)
+        {
+            rapidCase = step.Phase;
+            tick = 0;
+            Apply("allowed");
+            rapid.Start();
+        }
+        else Apply(step.Phase);
+        automatic.Interval = step.Milliseconds;
+        automatic.Start();
     }
     private void Apply(string value)
     {
@@ -230,7 +287,10 @@ internal sealed class FreshBulkPrivacyFixture : Form
     private void UpdateStatus()
     {
         status.Text = "Phase: " + phase + "; generation " + generation + "; " + bytes + " ASCII bytes. Churn: " + (refresh.Enabled ? "ON" : "OFF") +
-            "\nRapid target: " + rapidCase + ". UIA stable runtime IDs; changing field Value exposes stale cached content.";
+            "\n" + (automaticComplete ? "Auto sequence complete; Allow steady." :
+                automaticIndex >= 0 ? "Auto step " + (automaticIndex + 1) + "/" + AutoPlan.Length +
+                    (AutoPlan[automaticIndex].Rapid ? " rapid " : " steady ") + AutoPlan[automaticIndex].Phase :
+                    "Rapid target: " + rapidCase + ". UIA stable runtime IDs; changing field Value exposes stale cached content.");
     }
     private void OpenPeer()
     {
@@ -264,6 +324,16 @@ internal sealed class FreshBulkPrivacyFixture : Form
         root.State = new FixtureState("extension-child", 12, 4096); Assert(root.Nodes[1].Value.StartsWith("chrome-extension://")); Assert((string)root.Nodes[2].GetPropertyValue(AutomationElementIdentifiers.NameProperty.Id) == "SWEXTBLOCK");
         root.State = new FixtureState("document-url", 13, 4096); Assert(root.Nodes[1].Value == "https://blocked.fixture.invalid/synthetic");
         root.State = new FixtureState("allowed", 14, 327680); Assert(root.Nodes[5].Value.Length == 327680);
+        Assert(AutoPlan.Length == 1 + BlockerCases.Length * 4);
+        Assert(AutoPlan[0].Phase == "allowed" && !AutoPlan[0].Rapid && AutoPlan[0].Milliseconds == 8000);
+        for (int i = 0; i < BlockerCases.Length; i++)
+        {
+            int start = 1 + i * 4;
+            Assert(AutoPlan[start].Phase == BlockerCases[i] && !AutoPlan[start].Rapid && AutoPlan[start].Milliseconds == 8000);
+            Assert(AutoPlan[start + 1].Phase == "allowed" && !AutoPlan[start + 1].Rapid && AutoPlan[start + 1].Milliseconds == 8000);
+            Assert(AutoPlan[start + 2].Phase == BlockerCases[i] && AutoPlan[start + 2].Rapid && AutoPlan[start + 2].Milliseconds == 5000);
+            Assert(AutoPlan[start + 3].Phase == "allowed" && !AutoPlan[start + 3].Rapid && AutoPlan[start + 3].Milliseconds == 8000);
+        }
     }
     [STAThread]
     private static int Main(string[] args)
@@ -272,8 +342,9 @@ internal sealed class FreshBulkPrivacyFixture : Form
         {
             try { SelfTest(); return 0; } catch { return 1; }
         }
-        if (args.Length != 1 || args[0] != "--interactive") return 2;
+        bool autoCycle = args.Length == 2 && args[0] == "--interactive" && args[1] == "--auto-cycle";
+        if (!autoCycle && (args.Length != 1 || args[0] != "--interactive")) return 2;
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new FreshBulkPrivacyFixture()); return 0;
+        Application.Run(new FreshBulkPrivacyFixture(autoCycle)); return 0;
     }
 }

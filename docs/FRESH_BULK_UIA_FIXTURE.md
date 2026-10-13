@@ -1,17 +1,18 @@
 # Fresh bulk UIA privacy fixture
 
 > **Developer-only, unsupported, and not a privacy guarantee.** This synthetic
-> manual trial is preparation for the selected ScreenWise candidate. The owner
+> trial is preparation for the selected ScreenWise candidate. The owner
 > and Digiwise provide no support. Compilation and the inert self-test do not
 > establish live capture, provider compatibility, or privacy-rule behavior.
 
-The separate executable is `FreshBulkPrivacyFixture.exe`. Its source is
+The separate executables are `FreshBulkPrivacyFixture.exe` (manual) and
+`FreshBulkPrivacyFixtureAuto.exe` (automatic sequence). Their source is
 [`FreshBulkPrivacyFixture.cs`](../scripts/windows/interactive-validation/FreshBulkPrivacyFixture.cs).
 It is locally authored, without upstream or Litepipe implementation copying.
 It never controls the recorder, reads a database, uses the clipboard, injects
 input, starts a listener, opens a browser, downloads dependencies, or changes
-settings or firewall rules. With no arguments it exits with code 2. Only an
-owner-run `--interactive` invocation opens its windows. The historical staged
+settings or firewall rules. With no arguments either executable exits with code
+2. Only an owner-run `--interactive` invocation opens its windows. The historical staged
 kit and `source-manifest.json` are separate; this fixture is built directly from
 the new source and is not silently added to those pinned live controllers.
 
@@ -26,7 +27,9 @@ From the repository root, using the existing Windows Framework C# compiler:
 The builder uses existing `System.Windows.Forms`, `UIAutomationProvider`,
 `UIAutomationTypes` and `WindowsBase` assemblies. It writes only
 `target/uia-privacy-fixture/FreshBulkPrivacyFixture.exe`, refuses to replace a
-running fixture, and prints the resulting SHA-256. `-Compiler <absolute csc.exe
+running executable of the selected variant, and prints the resulting SHA-256.
+Use `-Variant Auto` to write `FreshBulkPrivacyFixtureAuto.exe` without replacing
+the manual executable. `-Compiler <absolute csc.exe
 path>` selects an already provisioned compiler. No Cargo build, restore,
 package acquisition, recording, visible window, or active desktop inspection is
 performed. The inert executable checks its provider roles, values, tree links,
@@ -52,6 +55,28 @@ part of a build or self-test:
 ```powershell
 & .\target\uia-privacy-fixture\FreshBulkPrivacyFixture.exe --interactive
 ```
+
+For an owner-run automatic rule-transition sequence, close the manual fixture
+and run:
+
+```powershell
+& .\scripts\windows\interactive-validation\Build-FreshBulkPrivacyFixture.ps1 -Variant Auto -SelfTest
+& .\target\uia-privacy-fixture\FreshBulkPrivacyFixtureAuto.exe --interactive --auto-cycle
+```
+
+The automatic mode starts when its window is shown. It holds the initial Allow
+state for eight seconds, then runs each of the six blocker phases for eight
+seconds, returns to Allow for eight seconds, alternates that blocker with Allow
+every requested 125 ms for five seconds, and returns to Allow for eight seconds.
+It finishes in steady Allow after roughly three minutes and remains open for
+inspection. Bring it to the foreground as soon as it appears. The visible
+status shows the current step; clicking any button
+cancels the remaining sequence. This changes only the fixture's synthetic title
+and UIA properties. It does not focus the window, type, click, control ScreenWise,
+or establish that recording admitted or suppressed a frame. Keep the window
+foreground during the sequence and compare completed capture timestamps and
+rule/reason diagnostics afterward. Focus switches, ordinary/password input,
+oversized values, and provider inspection still need their separate manual checks.
 
 The owner checks that the correct foreground window and intended text field are
 actually visible and focused before typing. Use only the fixed synthetic values
