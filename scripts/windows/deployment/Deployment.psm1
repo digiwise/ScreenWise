@@ -204,11 +204,11 @@ function Test-DeploymentQuitCapability {
 function Get-DeploymentProcesses {
     param([Parameter(Mandatory)][string]$BinaryDirectory)
     $all = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
-    # A known deployed executable with unavailable identity cannot be scoped safely.
-    if (@($all | Where-Object { !$_.ExecutablePath -and
-        $_.Name -in @('screenpipe-app.exe','screenpipe.exe','bun.exe','ffmpeg.exe','ffprobe.exe') }).Count) {
-        throw 'A ScreenWise/runtime process identity is unavailable. Deployment cannot safely determine ownership.'
-    }
+    # ExecutablePath may be unavailable for an unrelated protected or exiting
+    # process. Name alone cannot establish that it belongs to this private
+    # deployment, so only a resolved path beneath BinaryDirectory is ownership
+    # evidence. A deployed executable still open at publication prevents the
+    # directory replacement; never infer ownership from a matching filename.
     return @($all | Where-Object { $_.ExecutablePath -and
         $_.ExecutablePath.StartsWith($BinaryDirectory + '\', [StringComparison]::OrdinalIgnoreCase) })
 }

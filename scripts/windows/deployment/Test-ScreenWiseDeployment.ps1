@@ -293,9 +293,9 @@ $shutdownChecks = & $module {
     $script:scenario='unrelated'
     AcceptSynthetic { Stop-DeploymentInstance $FixtureManifest }
     $script:scenario='unknown'
-    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    AcceptSynthetic { Stop-DeploymentInstance $FixtureManifest }
     $script:scenario='unknown-helper'
-    RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
+    AcceptSynthetic { Stop-DeploymentInstance $FixtureManifest }
     $script:scenario='child-only'
     RejectSynthetic { Stop-DeploymentInstance $FixtureManifest }
     $script:scenario='running'
