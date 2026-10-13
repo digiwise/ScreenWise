@@ -16,9 +16,17 @@ use crate::platform::windows_uia::UiaContext;
 
 #[path = "windows_bulk.rs"]
 mod bulk;
+#[path = "windows_timing.rs"]
+mod timing;
 
 pub(super) fn bulk_metrics_snapshot() -> serde_json::Value {
-    bulk::metrics_snapshot()
+    let mut metrics = bulk::metrics_snapshot();
+    metrics["timing"] = timing::metrics_snapshot();
+    metrics
+}
+
+pub(super) fn timed_ignored_url_check(check: impl FnOnce() -> bool) -> bool {
+    timing::rule_check(timing::RuleGroup::IgnoredUrl, check)
 }
 
 fn is_extension_url(value: &str) -> bool {
@@ -220,6 +228,7 @@ impl Drop for WindowsTreeWalker {
 impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
+        timing::begin(start);
         let mut stage = "target_identity";
         let mut candidate_hwnd = None;
         let mut candidate_pid = None;
@@ -257,6 +266,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             };
 
             stage = "window_policy";
+            timing::enter(timing::Stage::NativePolicy);
 
             // Skip transient shell-internal windows (MSCTFIME UI, Shell_TrayWnd, CiceroUIWndFrame).
             // On Windows 11 24H2+ a TSF/IME regression causes these explorer.exe-owned windows to
@@ -313,7 +323,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
 
             // Skip incognito / private browsing windows (localized title check)
             if self.config.ignore_incognito_windows
-                && crate::incognito::is_title_private(&window_name)
+                && timing::rule_check(timing::RuleGroup::Incognito, || {
+                    crate::incognito::is_title_private(&window_name)
+                })
             {
                 debug!("a11y: private window exclusion");
                 return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
@@ -324,20 +336,25 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             let window_lower = window_name.to_lowercase();
             let ignored_patterns = WindowPattern::parse_list(&self.config.ignored_windows);
             let included_patterns = WindowPattern::parse_list(&self.config.included_windows);
-            if window_pattern::matches_any(&ignored_patterns, &app_lower, &window_lower) {
+            if timing::rule_check(timing::RuleGroup::NativeIgnoredWindow, || {
+                window_pattern::matches_any(&ignored_patterns, &app_lower, &window_lower)
+            }) {
                 debug!("a11y: skipped — matched user ignored pattern");
                 return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
             }
 
             // Scoped includes act as per-app whitelists; other apps fall back to
             // global semantics — see `window_pattern::passes_includes`.
-            if !window_pattern::passes_includes(&included_patterns, &app_lower, &window_lower) {
+            if timing::rule_check(timing::RuleGroup::NativeIncludedWindow, || {
+                !window_pattern::passes_includes(&included_patterns, &app_lower, &window_lower)
+            }) {
                 debug!("a11y: skipped — not in include list");
                 return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
             }
 
             // Native privacy checks do not depend on UIA initialization or text retrieval.
             stage = "uia_initialization";
+            timing::enter(timing::Stage::UiaInitialization);
             let uia = match unsafe { self.ensure_init() } {
                 Ok(uia) => uia,
                 Err(error) => {
@@ -365,6 +382,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             stage = "pre_walk_budget";
             // Check timeout budget
             if start.elapsed() >= effective_timeout {
+                timing::timeout();
                 return Ok(TreeWalkResult::Skipped(
                     SkipReason::AccessibilityRetrievalFailed(AccessibilityFailure::after_native_policy(
                         screenpipe_config::capture_diagnostics::AccessibilityStopReason::Timeout,
@@ -381,6 +399,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             let window_rect = get_window_rect(hwnd);
 
             stage = "fresh_bulk_admission";
+            timing::enter(timing::Stage::BulkSetup);
             let deadline = start + effective_timeout.min(std::time::Duration::from_millis(250));
             let mut attempt = match bulk::Attempt::new(
                 uia,
@@ -450,6 +469,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 let mut scratch_nodes = Vec::new();
                 let mut url = None;
                 let mut blocked = false;
+                timing::enter(timing::Stage::PolicyProjection);
                 extract_text_from_tree(
                     &policy_root,
                     0,
@@ -489,6 +509,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     scratch_nodes.clear();
                     url = None;
                     blocked = false;
+                    timing::enter(timing::Stage::RecordingProjection);
                     extract_text_from_tree(
                         &root,
                         0,
@@ -524,6 +545,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 // Focus or monitor ownership can change while a provider is being read.
                 // Discard the acquired tree instead of attaching stale text to a frame.
                 stage = "post_walk_identity";
+                timing::enter(timing::Stage::FocusVerification);
                 let identity_changed = match self.config.windows_target {
                     Some(target) => !selected_tree_identity_is_current(target),
                     None => (unsafe { GetForegroundWindow() }) != hwnd,
@@ -547,6 +569,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 // for any unknown app or any failure — never panics.
                 let document_path =
                     super::electron_docs::resolve_electron_doc_path(&app_name.to_lowercase());
+                timing::enter(timing::Stage::Finalization);
                 let content_hash = TreeSnapshot::compute_hash(&scratch);
                 let simhash = TreeSnapshot::compute_simhash(&scratch);
                 attempt.check()?;
@@ -596,6 +619,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     .effective_walk_timeout()
                     .min(std::time::Duration::from_millis(250))
         {
+            timing::timeout();
             result = Ok(TreeWalkResult::Skipped(
                 SkipReason::AccessibilityRetrievalFailed(
                     AccessibilityFailure::after_native_policy(
@@ -614,6 +638,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 SkipReason::AccessibilityRetrievalFailed(_)
             ))
         ) {
+            timing::enter(timing::Stage::FailureRecheck);
             let target = super::WindowsTreeTarget {
                 hwnd: candidate_hwnd.unwrap_or_default(),
                 process_id: candidate_pid.unwrap_or_default(),
@@ -695,7 +720,24 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 })
             });
         }
-        bulk::record_attempt(start.elapsed(), &result);
+        let elapsed = start.elapsed();
+        let (reason, rules) = match &result {
+            Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => (
+                Some(failure.cause.code()),
+                failure.unresolved_rules.as_slice(),
+            ),
+            _ => (None, &[][..]),
+        };
+        timing::finish(
+            Instant::now(),
+            elapsed,
+            self.config
+                .effective_walk_timeout()
+                .min(std::time::Duration::from_millis(250)),
+            reason,
+            rules,
+        );
+        bulk::record_attempt(elapsed, &result);
         result
     }
 }
@@ -911,7 +953,13 @@ fn extract_text_from_tree(
     if depth > 0
         && ct.eq_ignore_ascii_case("Window")
         && node.name.as_deref().is_some_and(|name| {
-            window_pattern::matches_any(ignored_patterns, focused_app_lower, &name.to_lowercase())
+            timing::rule_check(timing::RuleGroup::NestedWindow, || {
+                window_pattern::matches_any(
+                    ignored_patterns,
+                    focused_app_lower,
+                    &name.to_lowercase(),
+                )
+            })
         })
     {
         *hit_ignored_subtree = true;
@@ -997,12 +1045,20 @@ fn extract_text_from_tree(
             // carry the extension name in `name` and a chrome-extension:// URL in `value`.
             // If either matches an ignored-window pattern, skip the entire subtree.
             if !ignored_patterns.is_empty() {
-                let matches = |val: &str| {
-                    let lower = val.to_lowercase();
-                    window_pattern::matches_any(ignored_patterns, focused_app_lower, &lower)
+                let matches = |val: &str, group| {
+                    timing::rule_check(group, || {
+                        let lower = val.to_lowercase();
+                        window_pattern::matches_any(ignored_patterns, focused_app_lower, &lower)
+                    })
                 };
-                if node.name.as_deref().is_some_and(|n| matches(n))
-                    || node.value.as_deref().is_some_and(|v| matches(v))
+                if node
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| matches(n, timing::RuleGroup::DocumentName))
+                    || node
+                        .value
+                        .as_deref()
+                        .is_some_and(|v| matches(v, timing::RuleGroup::DocumentValue))
                 {
                     *hit_ignored_subtree = true;
                     return;
@@ -1019,7 +1075,9 @@ fn extract_text_from_tree(
                         || v.starts_with("ms-browser-extension://")
                 });
                 if is_extension_popup
-                    && extension_subtree_matches_ignored(node, ignored_patterns, focused_app_lower)
+                    && timing::rule_check(timing::RuleGroup::ExtensionShallow, || {
+                        extension_subtree_matches_ignored(node, ignored_patterns, focused_app_lower)
+                    })
                 {
                     *hit_ignored_subtree = true;
                     return;

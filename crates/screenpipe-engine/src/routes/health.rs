@@ -1213,6 +1213,55 @@ mod tests {
                         .is_some()
                     );
                 }
+            } else if key == "timing" {
+                let timing = value.as_object().expect("fixed timing schema");
+                let stage_names = timing
+                    .get("stage_names")
+                    .and_then(|v| v.as_array())
+                    .expect("stage names");
+                let rule_names = timing
+                    .get("rule_type_names")
+                    .and_then(|v| v.as_array())
+                    .expect("rule names");
+                for names in [stage_names, rule_names] {
+                    assert!(!names.is_empty());
+                    assert!(names.iter().all(|entry| entry.as_str().is_some_and(|name| {
+                        !name.is_empty()
+                            && name.len() <= 40
+                            && name
+                                .bytes()
+                                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    })));
+                }
+                for (name, expected) in [
+                    ("timeout_stage_counts", stage_names.len()),
+                    ("rule_match_counts", rule_names.len()),
+                ] {
+                    let counts = timing
+                        .get(name)
+                        .and_then(|v| v.as_array())
+                        .expect("numeric timing counts");
+                    assert_eq!(counts.len(), expected);
+                    assert!(counts.iter().all(serde_json::Value::is_number));
+                }
+                for (name, expected) in [
+                    ("stages", stage_names.len()),
+                    ("rule_types", rule_names.len()),
+                ] {
+                    let counters = timing
+                        .get(name)
+                        .and_then(|v| v.as_object())
+                        .expect("fixed counter group");
+                    assert_eq!(counters.len(), 3);
+                    for field in ["calls", "total_us", "max_us"] {
+                        let counts = counters
+                            .get(field)
+                            .and_then(|v| v.as_array())
+                            .expect("numeric timing values");
+                        assert_eq!(counts.len(), expected);
+                        assert!(counts.iter().all(serde_json::Value::is_number));
+                    }
+                }
             } else if let Some(values) = value.as_array() {
                 assert!(values
                     .iter()

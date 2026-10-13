@@ -37,6 +37,17 @@ claims; it does not weaken the implementation requirements below.
 
 ## Start and preserve
 
+### Temporary UIA timing checkpoint (2026-10-14)
+
+`crates/screenpipe-a11y/src/tree/windows_timing.rs` is temporary diagnostic
+instrumentation for the current UIA timeout investigation. Before beginning
+significant work outside UIA timing, either harden it for ongoing production use
+or remove it. Hardening must settle log volume/rate limiting, schema stability,
+the distinction between shared acquisition and individual rule cost, and an
+external watchdog for COM calls that never return. Validate the timing data on
+an owner-run live trial before treating it as a performance conclusion. This
+checkpoint does not authorize deployment, capture, or reduced privacy checks.
+
 Inspect branch, status and recent history before changing files; do not assume a
 documented historical HEAD is current. Development currently uses `screenwise`.
 Read [CONTRIBUTING.md](CONTRIBUTING.md), [BUILD_NOTES.md](BUILD_NOTES.md),

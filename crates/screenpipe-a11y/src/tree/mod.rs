@@ -730,7 +730,13 @@ impl TreeWalkerPlatform for UrlFilteredWalker {
         let result = self.inner.walk_focused_window()?;
         if let TreeWalkResult::Found(ref snapshot) = result {
             if let Some(ref url) = snapshot.browser_url {
-                if crate::url_filter::is_url_blocked(url, &self.ignored_urls) {
+                #[cfg(target_os = "windows")]
+                let blocked = windows::timed_ignored_url_check(|| {
+                    crate::url_filter::is_url_blocked(url, &self.ignored_urls)
+                });
+                #[cfg(not(target_os = "windows"))]
+                let blocked = crate::url_filter::is_url_blocked(url, &self.ignored_urls);
+                if blocked {
                     screenpipe_config::sensitive_debug::record("uia_url_policy_refusal", || {
                         serde_json::json!({"reason":"blocked_url", "stage":"snapshot_url_policy",
                             "app":snapshot.app_name,"window_title":snapshot.window_name,"browser_url":url,
