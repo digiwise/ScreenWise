@@ -111,6 +111,7 @@ foreach ($selectedProfile in @('release-local', 'release')) {
     Check ($plan.launch -eq $true -and !$plan.prepare_only) "automatic $selectedProfile startup selected"
     Check ($plan.sensitive_debug_logging -eq $true) "local sensitive diagnostics selected"
     Check ($plan.profile -ceq $selectedProfile) "deployment selects $selectedProfile"
+    Check (!$plan.build_requested -and @($plan.build_tasks).Count -eq 0) "no $selectedProfile build without -Build"
     Check ($plan.gui_source -eq (Join-Path $repo "apps\screenpipe-app-tauri\src-tauri\target\$selectedProfile") -and
         $plan.recorder_source -eq (Join-Path $repo "target\$selectedProfile")) "matched $selectedProfile source paths"
     Check ($plan.deployment -eq (Join-Path $private 'deployment\release')) "stable $selectedProfile deployed directory"
@@ -126,6 +127,12 @@ $inertPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -Bui
     -RuntimeManifestPath (Join-Path $root 'missing-runtime.json') -PiRuntimePath (Join-Path $root 'missing-pi') `
     -ShutdownTimeoutSeconds 7 | Out-String | ConvertFrom-Json)
 Check (!(Test-Path -LiteralPath $planOnlyDirectory) -and $inertPlan.shutdown_timeout_seconds -eq 7) 'plan-only neither prepares files nor invokes requested build/provision/register/shutdown'
+Check ($inertPlan.build_scope -ceq 'Desktop' -and
+    @($inertPlan.build_tasks).Count -eq 1 -and $inertPlan.build_tasks[0] -ceq 'DesktopBuild') 'normal build selects desktop only'
+$bothPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -Build -BuildScope DesktopAndCli | Out-String | ConvertFrom-Json)
+Check (@($bothPlan.build_tasks).Count -eq 2 -and $bothPlan.build_tasks[0] -ceq 'DesktopBuild' -and
+    $bothPlan.build_tasks[1] -ceq 'RootBuild') 'explicit desktop and CLI build selects both'
+Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -BuildScope DesktopAndCli } 'build scope requires build'
 Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -ShutdownTimeoutSeconds 0 } 'invalid shutdown timeout rejected'
 Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -PrepareOnly -Launch } 'conflicting startup switches rejected'
 # Execute the dispatch with a synthetic launcher only. No actual GUI or firewall access.

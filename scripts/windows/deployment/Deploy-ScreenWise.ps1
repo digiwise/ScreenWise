@@ -14,6 +14,7 @@ param(
     [string[]]$IgnoredWindow = @('firefox::', 'excel::'),
     [ValidateSet('release-local', 'release')][string]$BuildProfile = 'release-local',
     [switch]$Build,
+    [ValidateSet('Desktop', 'DesktopAndCli')][string]$BuildScope = 'Desktop',
     [switch]$RegisterStartup,
     [switch]$Launch, # Compatibility: startup is now the default.
     [switch]$PrepareOnly,
@@ -23,6 +24,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if ($Launch -and $PrepareOnly) { throw 'Choose automatic startup or -PrepareOnly, not both.' }
+if ($PSBoundParameters.ContainsKey('BuildScope') -and !$Build) { throw '-BuildScope requires -Build.' }
 Import-Module (Join-Path $PSScriptRoot 'Deployment.psm1') -Force
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $private = Join-Path $repo '.local'
@@ -43,8 +45,12 @@ $manifestPath = Join-Path $DeploymentDirectory 'deployment.json'
 $guiBuild = Join-Path $repo "apps\screenpipe-app-tauri\src-tauri\target\$BuildProfile"
 $cliBuild = Join-Path $repo "target\$BuildProfile"
 $launchScript = Join-Path $PSScriptRoot 'Start-ScreenWise.ps1'
+$buildTasks = if (!$Build) { @() } elseif ($BuildScope -eq 'DesktopAndCli') {
+    @('DesktopBuild', 'RootBuild')
+} else { @('DesktopBuild') }
 if ($PlanOnly) {
-    [pscustomobject]@{ build_requested = [bool]$Build; profile = $BuildProfile; deployment = $binary;
+    [pscustomobject]@{ build_requested = [bool]$Build; build_scope = $BuildScope; build_tasks = @($buildTasks);
+        profile = $BuildProfile; deployment = $binary;
         gui_source = $guiBuild; recorder_source = $cliBuild;
         data = $DataDirectory; port = $Port; register_startup = [bool]$RegisterStartup;
         launch = !$PrepareOnly; prepare_only = [bool]$PrepareOnly; graceful_shutdown = !$PrepareOnly; shutdown_timeout_seconds = $ShutdownTimeoutSeconds;
@@ -52,6 +58,7 @@ if ($PlanOnly) {
         pi_runtime = $PiRuntimePath; pi_tool_mode = 'recording-api-only'; provision_pi = [bool]$ProvisionPi } | ConvertTo-Json
     return
 }
+Write-Host "Starting ScreenWise $BuildProfile deployment."
 $old = $null
 if (Test-Path -LiteralPath $manifestPath) {
     $old = Read-DeploymentManifest $manifestPath $private
@@ -117,15 +124,36 @@ foreach ($path in $ollamaPaths) { $null = Get-Item -LiteralPath $path -ErrorActi
 if ($Build) {
     $builder = Join-Path $repo 'scripts\windows\build\Invoke-ScreenWiseBuild.ps1'
     $frontend = Join-Path $repo 'apps\screenpipe-app-tauri'
-    Push-Location $frontend
+    $buildLog = Join-Path $DeploymentDirectory ('build-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.log')
+    $null = New-Item -ItemType Directory -Path $DeploymentDirectory -Force
     try {
-        # Export with provisioned packages; skip acquisition-capable prebuild hooks.
-        & node node_modules/next/dist/bin/next build
-        if ($LASTEXITCODE -ne 0) { throw 'Frontend export failed.' }
-    } finally { Pop-Location }
-    foreach ($task in @('RootBuild', 'DesktopBuild')) {
-        & $builder -Task $task -BuildProfile $BuildProfile -PlanOnly
-        & $builder -Task $task -BuildProfile $BuildProfile
+        Write-Host 'Building frontend assets...'
+        Push-Location $frontend
+        try {
+            # Export with provisioned packages; skip acquisition-capable prebuild hooks.
+            if ($VerbosePreference -eq 'Continue') {
+                & node node_modules/next/dist/bin/next build
+            } else {
+                & node node_modules/next/dist/bin/next build *> $buildLog
+            }
+            if ($LASTEXITCODE -ne 0) { throw "Frontend export failed (exit $LASTEXITCODE)." }
+        } finally { Pop-Location }
+        foreach ($task in $buildTasks) {
+            Write-Host "Building $task ($BuildProfile)..."
+            $null = & $builder -Task $task -BuildProfile $BuildProfile -PlanOnly
+            if ($VerbosePreference -eq 'Continue') {
+                & $builder -Task $task -BuildProfile $BuildProfile
+            } else {
+                & $builder -Task $task -BuildProfile $BuildProfile *>> $buildLog
+            }
+        }
+    } catch {
+        if (Test-Path -LiteralPath $buildLog) {
+            Write-Host 'Build output (last 80 lines):'
+            Get-Content -LiteralPath $buildLog -Tail 80 | ForEach-Object { Write-Host $_ }
+            Write-Host "Full build output: $buildLog"
+        }
+        throw
     }
 }
 # Refuse a build that predates the explicit shared-runtime/tool implementation.
@@ -169,6 +197,7 @@ foreach ($copy in $copies) {
 }
 $null = New-Item -ItemType Directory -Path $DeploymentDirectory -Force
 # Complete all candidate copies before interrupting the installed app.
+Write-Host 'Staging deployment files...'
 $staging = New-DeploymentStaging $binary $copies
 $extensionDirectory = Join-Path $staging 'assets\pi'
 $null = New-Item -ItemType Directory -Path $extensionDirectory -Force
@@ -186,11 +215,13 @@ if (!(Test-DeploymentQuitCapability (Join-Path $staging 'screenpipe-app.exe'))) 
 }
 Assert-DeploymentFiles $candidate
 Assert-DeploymentDataConfiguration $DataDirectory $Port $private
+Write-Host 'Checking the running ScreenWise instance...'
 if ($old) { Stop-DeploymentInstance -Manifest $old -TimeoutSeconds $ShutdownTimeoutSeconds -PrepareOnly:$PrepareOnly }
 elseif (@(Get-DeploymentProcesses $binary).Count) { throw 'Unowned deployed processes are running; no command was sent.' }
 # Recheck prepared runtime and process quiescence immediately before replacement.
 Assert-DeploymentFiles $candidate
 $active = @(Get-DeploymentProcesses $binary | ForEach-Object { $_.ExecutablePath })
+Write-Host 'Copying files into the deployment...'
 Publish-DeploymentFiles -BinaryDirectory $binary -StagingDirectory $staging -ActiveExecutables $active
 $null = New-Item -ItemType Directory -Path $DataDirectory -Force
 $group = if ($old) { $old.firewall_group } else { 'ScreenWise-Deployment-' + [Guid]::NewGuid().ToString('N') }
@@ -221,16 +252,17 @@ if ($RegisterStartup) {
     $null = New-Item -Path $startupKey -Force
     Set-ItemProperty -LiteralPath $startupKey -Name $startupName -Value $startupValue
 }
-Write-Host "Deployed $BuildProfile binaries: $binary"
-Write-Host "Persistent recording data: $DataDirectory"
-Write-Host "Shared Pi 0.75.4 (reused, not copied): $PiRuntimePath"
-Write-Host "If startup reports missing firewall rules, explicitly install them in elevated PowerShell:"
-Write-Host ("& '{0}' -ManifestPath '{1}'" -f (Join-Path $PSScriptRoot 'Set-ScreenWiseDeploymentFirewall.ps1').Replace("'", "''"), $manifestPath.Replace("'", "''"))
-Write-Host "To retry startup after resolving a prerequisite, use ordinary PowerShell:"
-Write-Host ("& '{0}' -ManifestPath '{1}'" -f $launchScript.Replace("'", "''"), $manifestPath.Replace("'", "''"))
+Write-Host "Deployed $BuildProfile binaries."
+Write-Verbose "Deployment directory: $binary"
+Write-Verbose "Persistent recording data: $DataDirectory"
+Write-Verbose "Shared Pi runtime: $PiRuntimePath"
 if ($PrepareOnly) {
-    Write-Host 'Prepared only; startup checks and capture were not started.'
+    Write-Host 'Prepared only; ScreenWise was not started.'
 } else {
-    Write-Host 'Checking existing firewall rules and startup prerequisites before automatic launch.'
-    Invoke-DeploymentStartup -StartupScript $launchScript -ManifestPath $manifestPath
+    Write-Host 'Checking startup prerequisites and starting ScreenWise...'
+    try { Invoke-DeploymentStartup -StartupScript $launchScript -ManifestPath $manifestPath }
+    catch {
+        Write-Host ("To retry after fixing the error: & '{0}' -ManifestPath '{1}'" -f $launchScript.Replace("'", "''"), $manifestPath.Replace("'", "''"))
+        throw
+    }
 }

@@ -107,6 +107,11 @@ This change does not invalidate or delete the old profile's artifacts.
 
 Executables are now `<repo>\target\release-local\screenpipe.exe` and
 `<repo>\apps\screenpipe-app-tauri\src-tauri\target\release-local\screenpipe-app.exe`.
+For normal GUI-run capture changes, `DesktopBuild` compiles the shared recorder
+crates into `screenpipe-app.exe`; a separate `RootBuild` is needed only when the
+standalone CLI is being changed or validated. The deployment wrapper's `-Build`
+defaults to desktop-only; `-BuildScope DesktopAndCli` explicitly builds both.
+Deployment packaging still reuses an existing matching-profile CLI artifact.
 Stage the reviewed native DLLs and sidecars for these exact directories and refresh
 runtime/configuration hashes. Existing firewall rules for `release` or `release-dev`
 paths do not cover these paths. Complete the owner-run firewall preparation before

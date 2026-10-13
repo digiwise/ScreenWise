@@ -25,7 +25,9 @@ PowerShell after confirming the rule output.
 Leave Ollama running on loopback with `ministral-3` already installed. Pi is
 included with read-only recording retrieval; no shell/file-writing tools are
 enabled. Data and chats persist in `.local/production-data`. Quit using the tray.
-Later updates can use `Deploy-ScreenWise.ps1 -Build`; startup at login is opt-in
+Later GUI updates can use `Deploy-ScreenWise.ps1 -Build`, which builds the desktop
+application and reuses the existing CLI artifact. Use `-BuildScope DesktopAndCli`
+when the standalone CLI recorder also needs updating. Startup at login is opt-in
 with `-RegisterStartup`. Nothing downloads unless you explicitly request
 `-ProvisionPi` for a missing package. Full details follow.
 
@@ -146,12 +148,20 @@ To rebuild and update later:
 
 ```powershell
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1 -Build
+# When standalone screenpipe.exe changes too:
+& .\scripts\windows\deployment\Deploy-ScreenWise.ps1 -Build -BuildScope DesktopAndCli
 ```
 
 `-Build` exports the frontend with provisioned Node/packages, skipping acquisition
-prebuild hooks, and invokes the canonical locked/offline root and desktop builds
-with the selected `-BuildProfile` and `-PlanOnly` before each. Full release builds
-are reserved for explicit owner requests or inadequate local-profile performance;
+prebuild hooks, and invokes the canonical locked/offline desktop build with the
+selected `-BuildProfile` and `-PlanOnly`. `-BuildScope DesktopAndCli` also builds
+the standalone CLI. Desktop-only builds still require a provisioned CLI artifact
+and native sidecars in the matching profile directory for deployment packaging;
+the script does not silently replace or compile a missing one. Normal output shows
+deployment milestones; `-Verbose` shows full build output and path details. A
+failed build in normal mode prints the last 80 lines and path of its private
+`.local/deployment/build-*.log`. Full release builds are reserved for explicit
+owner requests or inadequate local-profile performance;
 ordinary deployment does not require them. Dependency provisioning is
 separate. Normal updates request shutdown through the installed app's existing
 single-instance IPC and wait for the intended GUI and installed helpers to exit.

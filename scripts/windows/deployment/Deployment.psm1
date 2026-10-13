@@ -368,7 +368,7 @@ function Publish-DeploymentFiles {
             $file = Join-Path $backup $name
             if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -ErrorAction Stop }
         }
-        Write-Host "Previous application binaries/assets retained (third-party binaries excluded): $backup"
+        Write-Verbose "Previous application binaries/assets retained (third-party binaries excluded): $backup"
     }
 }
 
