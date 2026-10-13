@@ -27,6 +27,26 @@ UIA_METRICS = ("schema_version", "attempts", "completed", "failed", "denied", "r
                "bulk_acquisition_calls", "root_acquisition_calls", "event_registration_calls",
                "event_cleanup_calls", "event_cleanup_failures",
                "hierarchy_structure_acquisitions", "accessibility_recording_acquisitions")
+TIMING_STAGE_COUNT = 21
+TIMING_RULE_COUNT = 8
+
+
+def timing_projection(source):
+    """Retain only fixed-size numeric vectors; never persist labels or content."""
+    def vector(value, length):
+        return ([numeric(item) for item in value] if isinstance(value, list)
+                and len(value) == length else None)
+
+    def counters(value, length):
+        value = value if isinstance(value, dict) else {}
+        return {key: vector(value.get(key), length)
+                for key in ("calls", "total_us", "max_us")}
+
+    source = source if isinstance(source, dict) else {}
+    return {"stages": counters(source.get("stages"), TIMING_STAGE_COUNT),
+            "timeout_stage_counts": vector(source.get("timeout_stage_counts"), TIMING_STAGE_COUNT),
+            "rule_types": counters(source.get("rule_types"), TIMING_RULE_COUNT),
+            "rule_match_counts": vector(source.get("rule_match_counts"), TIMING_RULE_COUNT)}
 
 
 def uia_projection(source):
@@ -111,7 +131,7 @@ def sample(deployment, token, connection, since):
               "vision_http_status": vision_status, "health_http_ms": health_ms,
               "vision_http_ms": vision_ms,
               "uia_http_status": uia_status, "uia_http_ms": uia_ms,
-              "uia": uia_projection(uia),
+              "uia": uia_projection(uia), "timing": timing_projection(uia.get("timing")),
               "vision": {key: numeric(vision.get(key)) for key in METRICS},
               "health": {key: numeric(health.get(key)) for key in
                          ("vision_db_write_stalled", "drm_content_paused", "schedule_paused")},

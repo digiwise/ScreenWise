@@ -62,6 +62,25 @@ class NumericTrialTests(unittest.TestCase):
         self.assertEqual(result["histogram_counts"], [1, None, 2])
         self.assertNotIn("PRIVATE_CANARY", json.dumps(result))
 
+    def test_timing_projection_keeps_only_fixed_numeric_vectors(self):
+        source = {"stage_names": ["PRIVATE_CANARY"],
+                  "stages": {"calls": [1] * trial.TIMING_STAGE_COUNT,
+                             "total_us": [2] * trial.TIMING_STAGE_COUNT,
+                             "max_us": [3] * trial.TIMING_STAGE_COUNT,
+                             "content": "PRIVATE_CANARY"},
+                  "timeout_stage_counts": [4] * trial.TIMING_STAGE_COUNT,
+                  "rule_type_names": ["PRIVATE_CANARY"],
+                  "rule_types": {"calls": [5] * trial.TIMING_RULE_COUNT,
+                                 "total_us": [6] * trial.TIMING_RULE_COUNT,
+                                 "max_us": [7] * trial.TIMING_RULE_COUNT},
+                  "rule_match_counts": [8] * trial.TIMING_RULE_COUNT}
+        result = trial.timing_projection(source)
+        self.assertEqual(result["stages"]["calls"][0], 1)
+        self.assertEqual(result["rule_match_counts"][-1], 8)
+        self.assertNotIn("PRIVATE_CANARY", json.dumps(result))
+        self.assertIsNone(trial.timing_projection({"timeout_stage_counts": [1]})
+                          ["timeout_stage_counts"])
+
     def test_recovery_only_counts_confirmed_outcomes_on_same_device(self):
         self.db.execute("ALTER TABLE frames ADD COLUMN device_name TEXT")
         rows = [("2026-10-13T10:00:00.000Z", "capture_failed", "a"),

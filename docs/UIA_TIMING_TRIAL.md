@@ -15,6 +15,10 @@ log record with stage durations, rule-type durations, the first timeout stage,
 and up to 64 applicable rule references. It contains no captured text, URL,
 title, app identity, pattern, HWND, PID or file path.
 
+The desktop GUI owns the live loopback API and links `screenpipe-a11y` directly.
+Build and deploy the desktop executable as well as the recorder for a live trial;
+updating `screenpipe.exe` alone leaves this endpoint on the previous schema.
+
 The stages separate native policy, UIA initialization, root lookup, event
 registration, cache configuration, hierarchy cache, document-value query,
 Window/Document-name query, extension-child query, cached decoding, policy
