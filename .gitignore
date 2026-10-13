@@ -55,6 +55,8 @@ app.py
 !scripts/windows/deployment/pi/check-recording-agent.test.py
 !scripts/windows/day-to-day-trial/check_recovery_rows.py
 !scripts/windows/day-to-day-trial/test_recovery_rows.py
+!scripts/windows/day-to-day-trial/numeric_uia_trial.py
+!scripts/windows/day-to-day-trial/test_numeric_uia_trial.py
 !scripts/windows/day-to-day-trial/pi_rpc_smoke.py
 !scripts/windows/day-to-day-trial/pi_console_host.py
 !scripts/windows/day-to-day-trial/test_pi_rpc_smoke.py

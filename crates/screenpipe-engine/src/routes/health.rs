@@ -21,6 +21,19 @@ use crate::ui_recorder::{
     tree_walker_snapshot, ui_recorder_status_snapshot, TreeWalkerSnapshot, UiRecorderStatus,
 };
 
+/// Content-free aggregate attempt timings/counters, under normal bearer auth.
+/// No accessibility tree, window identity, permission, or captured text is held.
+pub(crate) async fn uia_metrics_handler() -> JsonResponse<serde_json::Value> {
+    #[cfg(target_os = "windows")]
+    {
+        JsonResponse(screenpipe_a11y::tree::windows_bulk_metrics_snapshot())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        JsonResponse(json!({"supported": false}))
+    }
+}
+
 /// Cached health response to avoid recomputing on every poll.
 /// Multiple WebSocket clients + HTTP polls can call /health dozens of
 /// times per second. The response only changes meaningfully every ~1s.
@@ -1187,6 +1200,43 @@ pub async fn api_vision_status() -> JsonResponse<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn uia_metrics_exposes_only_numeric_aggregates_and_fixed_codes() {
+        let axum::Json(value) = super::uia_metrics_handler().await;
+        for (key, value) in value.as_object().expect("metrics object") {
+            if key == "reason_codes" {
+                for code in value.as_array().expect("fixed reason list") {
+                    assert!(
+                        screenpipe_config::capture_diagnostics::AccessibilityStopReason::from_code(
+                            code.as_str().expect("fixed code")
+                        )
+                        .is_some()
+                    );
+                }
+            } else if let Some(values) = value.as_array() {
+                assert!(values
+                    .iter()
+                    .all(|entry| entry.is_number() || entry.is_null()));
+            } else {
+                assert!(
+                    value.is_number() || value.is_boolean() || value.is_null(),
+                    "non-numeric metric {key}"
+                );
+            }
+        }
+        for sensitive in [
+            "app_name",
+            "window_name",
+            "browser_url",
+            "tree",
+            "text_content",
+            "hwnd",
+            "process_id",
+            "allowed",
+        ] {
+            assert!(value.get(sensitive).is_none());
+        }
+    }
     use super::*;
     use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 

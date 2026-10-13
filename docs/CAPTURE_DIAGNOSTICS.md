@@ -109,6 +109,14 @@ it. Include-admission, built-in exclusions and URL title heuristics carry fixed
 rule kinds; a refusal without a verified matching rule has no fabricated reference.
 No raw pattern, matched title or URL is serialized in a generic notice.
 
+Generic notice messages summarize counts by rule origin and kind instead of
+repeating every index. Exact indices remain in `diagnostic.rules`, including for
+UIA failures with many unresolved subtree exclusions. This compacts payloads;
+notices remain included in input search and the number of returned rows is
+unchanged. Gate-cleared/admission codes on AudioProcessing intervals can describe
+usable samples following silence; inspect source, condition and reason before
+inferring a privacy pause or device restart.
+
 `frames.capture_privacy.rule_matches` preserves the same references with verified
 executable basenames and foreground role. Existing per-frame decision metadata
 remains additive; it is not a substitute for pause notices when no frame exists.

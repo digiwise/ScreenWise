@@ -600,6 +600,13 @@ pub(crate) struct UiaContext {
 }
 
 impl UiaContext {
+    pub(crate) fn bulk_automation(&self) -> &IUIAutomation {
+        &self.automation
+    }
+
+    pub(crate) fn bulk_timeouts(&self) -> &IUIAutomation2 {
+        &self.timeouts
+    }
     /// Refresh keyboard privacy independently of tree capture/debouncing. Query
     /// the actual focused element, explicitly disallowing UIA default values:
     /// an unsupported IsPassword property must not become a false permission.
@@ -1999,7 +2006,7 @@ pub fn get_clipboard_text_impl() -> Result<Option<String>, ClipboardReadFailure>
 // Control Type ID to Name Mapping
 // ============================================================================
 
-fn control_type_id_to_name(id: i32) -> &'static str {
+pub(crate) fn control_type_id_to_name(id: i32) -> &'static str {
     match id {
         50000 => "Button",
         50001 => "Calendar",

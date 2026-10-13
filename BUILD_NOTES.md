@@ -1,7 +1,8 @@
 # ScreenWise Windows build notes
 
-The current source candidate repairs [UIA probe and traversal budgets and failed-target attribution](docs/UIA_CAPTURE_REGRESSION_20261013.md).
-The latest confirmed owner deployment is the [accessibility/privacy candidate](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), verified against installed GUI and recorder hashes. The [subsequent budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records the supplied failure report and remaining limits.
+The current candidate adds [fresh bulk UIA privacy acquisition](docs/FRESH_BULK_UIA_HANDOFF.md), together with [fresh foreground attribution to failed placeholders and compact rule messages](docs/CONSUMER_REPORT_20261013.md). The handoff identifies validation, exact artifacts and the deployment confirmation boundary.
+The preceding built candidate repairs [UIA probe and traversal budgets and failed-target attribution](docs/UIA_CAPTURE_REGRESSION_20261013.md).
+The latest owner-reported deployment is the [14:46 checkpoint](docs/CONSUMER_REPORT_20261013.md), with keyboard recovery but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13) was independently verified against installed GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier failure report and remaining limits.
 Earlier builds include the [bounded UIA and clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
 The preceding candidate includes the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
 The previous deployed candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md),
@@ -21,6 +22,30 @@ release workflow without installing dependencies or starting the bridge. Pi's
 `screenwise_recordings` extension uses the authenticated recorder HTTP API directly
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
+## Post-14:46 consumer follow-up (2026-10-13)
+
+The subsequent [fresh bulk UIA candidate](docs/FRESH_BULK_UIA_HANDOFF.md) passed
+238 accessibility tests (23 live ignored), 54 engine capture tests and two focused
+endpoint/persistence checks. Numeric collector six and rollback four checks,
+fixture compilation/inert checks, RootFmt and DesktopCheck passed. Sequential
+single-job, locked/offline release-local RootBuild (4m34s) and DesktopBuild
+(8m35s) reused all 785/1,080 external artifacts, with zero rebuilt. Exact hashes,
+broader acquisition and live validation gaps are in the handoff. Both Rust
+lockfiles and frontend source are unchanged. Deployment and the 20-minute
+numeric comparison await owner confirmation.
+
+The [consumer report and source follow-up](docs/CONSUMER_REPORT_20261013.md)
+records keyboard recovery and continued Screen/OCR, focus and audio failures.
+Failed placeholders gain freshly verified foreground executable metadata;
+notice rule descriptions are grouped while exact structured indices remain.
+RootFmt, 53 final engine capture tests, 13 diagnostic tests, one native-identity
+sampling simulation and one notice storage/query test passed. External artifacts
+were reused with zero rebuilds; both Rust lockfiles are unchanged. No new
+application build, deployment or capture was included at that checkpoint. The
+owner declined the persistent-worker change and selected fresh per-attempt bulk
+acquisition; the [new handoff](docs/FRESH_BULK_UIA_HANDOFF.md) supersedes candidate
+readiness details without superseding the historical tests.
 
 ## UIA capture regression repair (2026-10-13)
 

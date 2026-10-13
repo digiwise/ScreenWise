@@ -377,23 +377,35 @@ impl CaptureDiagnostic {
             message.push_str(" Screenshot storage and OCR proceed despite accessibility retrieval failure; applicable privacy checks passed independently.");
         }
         if !self.rules.is_empty() {
+            // Exact rule indices already live in diagnostic.rules. Group the
+            // fixed human description rather than duplicating each reference
+            // in every screen/OCR notice and input-search privacy row.
+            let mut groups: Vec<(RuleOrigin, RuleKind, usize)> = Vec::new();
+            for rule in &self.rules {
+                if let Some(group) = groups
+                    .iter_mut()
+                    .find(|group| group.0 == rule.origin && group.1 == rule.kind)
+                {
+                    group.2 += 1;
+                } else {
+                    groups.push((rule.origin, rule.kind, 1));
+                }
+            }
             message.push_str(&format!(
                 " Rules: {}.",
-                self.rules
+                groups
                     .iter()
-                    .map(|rule| {
-                        let check = match rule.kind {
+                    .map(|(origin, kind, count)| {
+                        let check = match kind {
                             RuleKind::UiaSubtreeExclusion => "nested window/document exclusion",
                             RuleKind::UiaDocumentUrl => "accessibility document URL exclusion",
                             RuleKind::NativeWindowPolicy => {
                                 "current window identity/title privacy verification"
                             }
                             RuleKind::DrmUrl => "protected-content document URL policy",
-                            _ => {
-                                return format!("{:?}[{}] {:?}", rule.origin, rule.index, rule.kind)
-                            }
+                            _ => return format!("{origin:?}: {count} {kind:?}"),
                         };
-                        format!("{:?}[{}] {check} unresolved", rule.origin, rule.index)
+                        format!("{origin:?}: {count} {check} unresolved")
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -853,6 +865,40 @@ pub fn close_source(scope: CaptureScope, source: DiagnosticSource, reason: Captu
 mod tests {
     use super::*;
     static DELIVERY_NOTICES: Mutex<Vec<DiagnosticDeliveryNotice>> = Mutex::new(Vec::new());
+
+    #[test]
+    fn repeated_uia_rule_messages_are_compact_and_keep_exact_structured_references() {
+        let mut event = fixture(CaptureChannel::Screen, 100);
+        event.reasons = vec![
+            CaptureReason::UiaWalkTimeout,
+            CaptureReason::AccessibilityPrivacyUnverified,
+        ];
+        event.rules = (0..22)
+            .map(|index| RuleReference {
+                origin: RuleOrigin::IgnoredWindows,
+                index,
+                kind: RuleKind::UiaSubtreeExclusion,
+            })
+            .collect();
+        event.rules.push(RuleReference {
+            origin: RuleOrigin::Builtin,
+            index: 0,
+            kind: RuleKind::DrmUrl,
+        });
+        let message = event.message();
+        assert!(message.contains("IgnoredWindows: 22 nested window/document exclusion unresolved"));
+        assert!(message.contains("Builtin: 1 protected-content document URL policy unresolved"));
+        assert!(message.contains("blocks screenshot storage and OCR"));
+        assert_eq!(
+            message.matches("nested window/document exclusion").count(),
+            1
+        );
+        assert!(message.len() < 500);
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["rules"].as_array().unwrap().len(), 23);
+        assert_eq!(json["rules"][21]["index"], 21);
+        assert_eq!(json["rules"][22]["kind"], "drm_url");
+    }
 
     fn simulated_event(
         channel: CaptureChannel,

@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-13. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-14. **Partial validation, not a completed privacy/firewall certification.**
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -10,11 +10,49 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest confirmed owner deployment: [accessibility retrieval versus privacy verification](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including the [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13). The owner subsequently deployed this accessibility/privacy candidate; installed GUI and recorder hashes match its public artifact pins. The original build run included no deployment. The [subsequent budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records the supplied failure report and scoped source defects. Useful live capture coverage and the reported brief startup disconnection remain unresolved. Earlier hashes below belong to their historical candidates.
+Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
-Current source candidate: [UIA budget and failed-target attribution repair](docs/UIA_CAPTURE_REGRESSION_20261013.md), with focused synthetic checks and both release-local builds passed. Repaired candidate hashes and the separate owner-run deployment step are recorded in that note; the repair has not been deployed by this investigation. Useful live Screen/OCR and keyboard coverage remain unverified.
+Current candidate: [fresh bulk UIA handoff](docs/FRESH_BULK_UIA_HANDOFF.md), including [failed-foreground attribution and compact notices](docs/CONSUMER_REPORT_20261013.md). The old installed GUI/CLI hashes were verified for the owner-authorized numeric baseline after Windows restart. Candidate deployment and a new live comparison await owner confirmation; old hashes do not identify the new artifacts.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Fresh bulk UIA candidate (2026-10-14)
+
+**SW-R18 remains open pending live production comparison.** Fresh per-attempt
+property caches replace provider traversal; no tree or permission is reused
+across attempts. Original-deadline invalidation retries, required-property checks,
+fail-closed handling and independent focus checks remain. Hierarchy structure,
+extension child/grandchild fallback and accessibility recording require broader
+acquisition, detailed in the [handoff](docs/FRESH_BULK_UIA_HANDOFF.md).
+
+Accessibility tests passed 238 with 23 live tests ignored; engine capture tests
+passed 54, plus one numeric-endpoint and one notice-storage/query check. Numeric
+collector tests passed six and isolated rollback PlanOnly tests passed four.
+The separate manual fixture compiled and passed inert self-tests, without GUI
+launch. DesktopCheck reused 1,084 external artifacts with zero rebuilt.
+Release-local build results and exact hashes are recorded in the handoff.
+
+The fresh baseline covers only about 456 seconds since the current ScreenWise
+startup: 355 frames, 193 failed placeholders, 195 UIA-timeout-cause rows. Old
+admission latency is unavailable. Recovery is a metadata proxy, not proof of
+readable or correctly admitted capture. No unattended sampling was continued.
+Production latency, asynchronous live event completeness, fixture provider/rule
+transitions, input completeness and audio recovery remain unvalidated. No new
+deployment, capture startup, visible fixture or firewall change was performed.
+
+## Consumer report after 14:46 deployment (2026-10-13)
+
+**SW-R18 remains open for useful live Screen/OCR coverage.** The owner reports
+renewed keyboard text, but 419/452 and 531/558 active-monitor frames still fail
+UIA inspection. Failed-placeholder foreground attribution and compact rule
+messages are implemented as uncommitted source changes. RootFmt, 53 final engine
+capture tests, 13 diagnostic tests, one simulated foreground sampling test and
+one notice storage/query test passed with zero external artifact rebuilds.
+No new application binary, deployment, production data read, capture or live
+UIA/input test is included. Input completeness, native content-protection pauses
+and audio delivery remain unresolved. The
+[full bounded report and persistent-worker proposal](docs/CONSUMER_REPORT_20261013.md)
+distinguishes supplied observations, source findings and outstanding validation.
 
 ## UIA capture regression repair (2026-10-13)
 

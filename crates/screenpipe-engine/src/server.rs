@@ -34,7 +34,7 @@ use crate::{
         },
         health::{
             api_list_monitors, api_vision_status, audio_metrics_handler, health_check,
-            vision_metrics_handler,
+            uia_metrics_handler, vision_metrics_handler,
         },
         meetings::{
             bulk_delete_meetings_handler, delete_meeting_handler, export_handler,
@@ -514,6 +514,7 @@ impl SCServer {
             .route("/vision/status", get(api_vision_status))
             // Vision/audio pipeline metrics (not in OpenAPI spec — external types)
             .route("/vision/metrics", get(vision_metrics_handler))
+            .route("/vision/uia-metrics", get(uia_metrics_handler))
             .route("/audio/metrics", get(audio_metrics_handler))
             // HD recording — bound sessions (meeting / timer / prewarm-pending),
             // no indefinite mode. Every session has a natural end condition.

@@ -24,6 +24,19 @@ mod windows;
 #[cfg(target_os = "windows")]
 mod windows_lines;
 
+/// Content-free cumulative Windows fresh-bulk diagnostics. No tree, text,
+/// window identity, or admission result is retained by this interface.
+pub fn windows_bulk_metrics_snapshot() -> serde_json::Value {
+    #[cfg(target_os = "windows")]
+    {
+        windows::bulk_metrics_snapshot()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        serde_json::json!({"available":false})
+    }
+}
+
 pub mod cache;
 pub mod enhanced_mode_cache;
 
@@ -409,6 +422,14 @@ pub struct TreeWalkerConfig {
     /// When paired window capture selects a target, never follow global focus.
     #[cfg(target_os = "windows")]
     pub windows_target: Option<WindowsTreeTarget>,
+    /// Windows bulk admission can omit optional text extraction. Each attempt
+    /// still acquires fresh hierarchy and rule properties; no result is reused.
+    #[cfg(target_os = "windows")]
+    pub windows_privacy_only: bool,
+    /// Acquire Document URL evidence even when no configured URL rule exists
+    /// (for example the caller's DRM content policy).
+    #[cfg(target_os = "windows")]
+    pub windows_require_browser_url: bool,
     /// How often to walk the tree (default: 3s).
     pub walk_interval: Duration,
     /// Maximum recursion depth (default: 35).
@@ -468,6 +489,10 @@ impl Default for TreeWalkerConfig {
         Self {
             #[cfg(target_os = "windows")]
             windows_target: None,
+            #[cfg(target_os = "windows")]
+            windows_privacy_only: false,
+            #[cfg(target_os = "windows")]
+            windows_require_browser_url: false,
             walk_interval: Duration::from_secs(3),
             max_depth: 35,
             max_nodes: 5000,

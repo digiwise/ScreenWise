@@ -421,8 +421,7 @@ pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tr
     match walker.walk_focused_window() {
         Ok(TreeWalkResult::Found(snapshot)) => {
             debug!(
-                "tree walk: app={}, text_len={}, nodes={}, structured_nodes={}, dur={:?}",
-                snapshot.app_name,
+                "tree walk: text_len={}, nodes={}, structured_nodes={}, dur={:?}",
                 snapshot.text_content.len(),
                 snapshot.node_count,
                 snapshot.nodes.len(),

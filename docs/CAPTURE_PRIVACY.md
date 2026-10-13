@@ -43,9 +43,16 @@ Generic timeline notices and local logs keep their existing fixed messages.
 `blockers` deduplicates by executable and foreground/background role. It preserves
 restrictions observed both before and after acquisition and immediately before
 UIA, even when they disappear during the operation. It is limited to 32 entries;
-`blockers_truncated` explicitly reports omitted entries. A later UIA refusal has
-an unknown app identity because its skip result cannot safely establish the
-executable after a possible focus change. Do not infer it from earlier focus.
+`blockers_truncated` explicitly reports omitted entries. Failed placeholders now
+sample native foreground HWND/PID before and after executable lookup, adding a
+`foreground: true` blocker with fixed reason `capture_failure`. This is the app
+observed at failure, not an exclusion match, a provider-fault attribution or the
+owner of an earlier inspected tree. Unknown/changing identity stays null; titles
+remain absent. The sample is not included in diagnostic `excluded_apps` and never
+comes from previous input/focus events. See the
+[post-deployment consumer follow-up](CONSUMER_REPORT_20261013.md).
+Monitor samples surrounding this extra lookup merge with earlier provenance;
+disagreement or unavailable association makes the active-monitor fields unknown.
 
 Foreground blockers are now observed globally, including an excluded foreground
 window on another monitor when this monitor has no permitted foreground fallback.
@@ -437,3 +444,16 @@ no monitor-disconnected transition. Cold focus-policy capture is reported as
 `monitor_inactive`, which does not establish hardware disconnection. Existing
 logs do not preserve the exact initial topology/status response, so that brief
 UI report cannot be reconstructed from this evidence.
+
+### Fresh bulk admission candidate (2026-10-14)
+
+The [candidate handoff](FRESH_BULK_UIA_HANDOFF.md) records fresh per-attempt UIA
+bulk caches, event-revision invalidation, original-deadline retries and cleanup
+before publication. Trees and admission decisions do not survive an attempt.
+Native identity, focus and fail-closed checks remain. Scoped property queries
+retain existing rule semantics; structural hierarchy, extension fallback and
+accessibility recording require the documented broader acquisition. Fixed rule
+IDs, reasons and aggregate counts replace content-bearing acquisition logging.
+The authenticated numeric endpoint supports the pending comparison. Synthetic
+tests/builds do not prove provider event completeness or useful live capture;
+deployment and the 20-minute numeric trial await owner confirmation.

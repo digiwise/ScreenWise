@@ -1282,6 +1282,23 @@ impl WindowsCapturePrivacy {
         self.add_blocker(None, vec![reason], true);
     }
 
+    /// Attribute a failed placeholder to freshly sampled native foreground
+    /// identity. This describes the failure phase, not an exclusion match or
+    /// the owner of a previously inspected tree. Never copy a title or old focus.
+    pub fn attribute_failed_foreground(&mut self, captured_monitor: u32) {
+        if self.outcome == "capture_failed" {
+            self.refresh_foreground_monitor(captured_monitor);
+            self.add_blocker(
+                sample_failure_foreground_executable(),
+                vec!["capture_failure"],
+                true,
+            );
+            // The added native lookup crosses another scheduling boundary.
+            // Its surrounding monitor samples must agree with earlier phases.
+            self.refresh_foreground_monitor(captured_monitor);
+        }
+    }
+
     /// Preserve restrictions observed before and after acquisition, even if the
     /// final plan changes to full-monitor. Earlier restrictions still shaped pixels.
     pub fn merge(&mut self, other: Self) {
@@ -1376,6 +1393,79 @@ fn diagnostic_executable_name(value: Option<&str>) -> Option<String> {
     } else {
         format!("{value}.exe")
     })
+}
+
+#[cfg(target_os = "windows")]
+fn sample_failure_foreground_executable() -> Option<String> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowThreadProcessId(hwnd: isize, process: *mut u32) -> u32;
+    }
+    failure_foreground_executable(
+        || unsafe {
+            let hwnd = GetForegroundWindow();
+            let mut pid = 0;
+            if hwnd == 0 || GetWindowThreadProcessId(hwnd, &mut pid) == 0 || pid == 0 {
+                return None;
+            }
+            (GetForegroundWindow() == hwnd).then_some((hwnd, pid))
+        },
+        get_process_exe_name,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn failure_foreground_executable(
+    mut sample: impl FnMut() -> Option<(isize, u32)>,
+    read_executable: impl FnOnce(u32) -> Option<String>,
+) -> Option<String> {
+    let before = sample()?;
+    if before.0 == 0 || before.1 == 0 {
+        return None;
+    }
+    let executable = read_executable(before.1);
+    if sample() != Some(before) {
+        return None;
+    }
+    diagnostic_executable_name(executable.as_deref())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn failed_foreground_attribution_requires_stable_hwnd_pid_and_safe_basename() {
+    for (before, after, name, expected) in [
+        (
+            Some((100, 42)),
+            Some((100, 42)),
+            Some("Code.exe"),
+            Some("code.exe"),
+        ),
+        (None, Some((100, 42)), Some("Code.exe"), None),
+        (Some((100, 42)), None, Some("Code.exe"), None),
+        (Some((100, 42)), Some((101, 42)), Some("Code.exe"), None),
+        (Some((100, 42)), Some((100, 43)), Some("Code.exe"), None),
+        (Some((100, 42)), Some((100, 42)), None, None),
+        (
+            Some((100, 42)),
+            Some((100, 42)),
+            Some("C:\\private\\Code.exe"),
+            None,
+        ),
+    ] {
+        let mut samples = [before, after].into_iter();
+        assert_eq!(
+            failure_foreground_executable(
+                || samples.next().unwrap(),
+                |pid| {
+                    assert_eq!(pid, 42);
+                    name.map(str::to_owned)
+                },
+            )
+            .as_deref(),
+            expected
+        );
+    }
 }
 
 /// Sample the executable of the exact failed inspection target. Do not substitute

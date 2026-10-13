@@ -1853,7 +1853,9 @@ async fn persist_windows_placeholder(
     let marker = outcome
         .marker_text()
         .expect("placeholder capture outcomes always expose marker text");
-    report_windows_privacy(params.monitor_id, &privacy.clone().with_outcome(outcome));
+    let mut privacy = privacy.clone().with_outcome(outcome);
+    privacy.attribute_failed_foreground(params.monitor_id);
+    report_windows_privacy(params.monitor_id, &privacy);
     let notice = outcome
         .notice()
         .expect("placeholder capture outcomes always expose a disclosure notice");
@@ -1869,7 +1871,7 @@ async fn persist_windows_placeholder(
             windows_outcome: outcome,
         });
     }
-    let capture_privacy_json = serde_json::to_string(&privacy.clone().with_outcome(outcome))?;
+    let capture_privacy_json = serde_json::to_string(&privacy)?;
     let ctx = CaptureContext {
         db: params.db,
         snapshot_writer: params.snapshot_writer,
@@ -2008,6 +2010,11 @@ fn windows_tree_config_for_bitmap(
     config.windows_target = bitmap_owner
         .map(|(hwnd, process_id)| screenpipe_a11y::tree::WindowsTreeTarget { hwnd, process_id });
     config
+}
+
+#[cfg(target_os = "windows")]
+fn windows_requires_fresh_drm_url(enabled: bool, selected_url: Option<&str>) -> bool {
+    enabled && selected_url.is_none()
 }
 
 #[cfg(target_os = "windows")]
@@ -2325,6 +2332,18 @@ async fn do_capture(
         params.tree_walker_config.clone(),
         selected_window.map(|target| (target.hwnd, target.process_id)),
     );
+    #[cfg(target_os = "windows")]
+    {
+        // Request the same fresh Document URL evidence that the engine requires
+        // on a retrieval failure. Never discharge DRM from an earlier attempt.
+        config.windows_require_browser_url = windows_requires_fresh_drm_url(
+            params.pause_on_drm_content,
+            selected_metadata
+                .as_ref()
+                .and_then(|window| window.browser_url.as_ref())
+                .map(String::as_str),
+        );
+    }
 
     // Get the focused app name for budget decisions. AppSwitch triggers carry
     // the name directly; for all other triggers (visual change, idle, manual)
@@ -2433,11 +2452,13 @@ async fn do_capture(
         screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure),
     ) = &tree_walk_result
     {
-        let requires_drm_url = params.pause_on_drm_content
-            && selected_metadata
+        let requires_drm_url = windows_requires_fresh_drm_url(
+            params.pause_on_drm_content,
+            selected_metadata
                 .as_ref()
                 .and_then(|window| window.browser_url.as_ref())
-                .is_none();
+                .map(String::as_str),
+        );
         apply_windows_accessibility_failure(&mut windows_privacy, failure, requires_drm_url);
         use screenpipe_config::capture_diagnostics::*;
         observe(
@@ -3101,6 +3122,18 @@ fn is_frame_mostly_black(image: &image::DynamicImage) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drm_bulk_request_and_failure_gate_share_evidence_requirements() {
+        // Embedded Documents in non-browser applications retain the existing
+        // URL obligation; app identity cannot substitute for URL evidence.
+        assert!(windows_requires_fresh_drm_url(true, None));
+        assert!(!windows_requires_fresh_drm_url(false, None));
+        assert!(!windows_requires_fresh_drm_url(
+            true,
+            Some("https://fixture.invalid")
+        ));
+    }
     #[cfg(target_os = "windows")]
     #[test]
     fn paired_windows_tree_uses_exact_screenshot_owner_without_foreground_fallback() {
@@ -4027,6 +4060,7 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
                 "uia_aggregate_text_limit" => CaptureReason::UiaAggregateTextLimit,
                 "uia_provider_failure" => CaptureReason::UiaProviderFailure,
                 "uia_backoff" => CaptureReason::UiaBackoff,
+                "capture_failure" => CaptureReason::CaptureFailure,
                 _ => CaptureReason::NoSafeWindow,
             });
         }
@@ -4097,6 +4131,14 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
     let apps = privacy
         .blockers
         .iter()
+        // A foreground sampled at failure is activity attribution, not an
+        // application verified to have matched an exclusion.
+        .filter(|blocker| {
+            blocker
+                .reasons
+                .iter()
+                .any(|reason| *reason != "capture_failure")
+        })
         .filter_map(|blocker| blocker.app.clone())
         .collect::<Vec<_>>();
     for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
@@ -4108,6 +4150,42 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
             rules.clone(),
             apps.clone(),
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_failure_foreground_is_not_reported_as_an_exclusion() {
+    use screenpipe_config::capture_diagnostics::*;
+    use screenpipe_screen::capture_screenshot_by_window::WindowsCaptureBlocker;
+    let privacy = WindowsCapturePrivacy {
+        blockers: vec![WindowsCaptureBlocker {
+            app: Some("code.exe".into()),
+            reasons: vec!["capture_failure"],
+            foreground: true,
+        }],
+        ..WindowsCapturePrivacy::default().with_outcome(WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::AccessibilityInspection,
+        ))
+    };
+    let json = serde_json::to_value(&privacy).unwrap();
+    assert_eq!(json["blockers"][0]["app"], "code.exe");
+    assert_eq!(json["blockers"][0]["foreground"], true);
+    report_windows_privacy(991_083, &privacy);
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        let row = current()
+            .into_iter()
+            .find(|row| {
+                row.channel == channel
+                    && row.source == DiagnosticSource::WindowPolicy
+                    && row.scope == CaptureScope::Monitor(991_083)
+            })
+            .unwrap();
+        assert_eq!(row.condition, CaptureCondition::Failed);
+        assert!(row.excluded_apps.is_empty());
+        assert!(row.reasons.contains(&CaptureReason::CaptureFailure));
+        assert!(!row.reasons.contains(&CaptureReason::ExcludedForeground));
+        assert!(!row.message().contains("code.exe"));
     }
 }
 
