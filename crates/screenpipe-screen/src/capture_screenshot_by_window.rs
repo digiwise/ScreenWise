@@ -1140,6 +1140,9 @@ pub struct WindowsAccessibilityDecision {
     pub processing: &'static str,
     pub unresolved_rules: Vec<screenpipe_config::capture_diagnostics::RuleReference>,
     pub rules_truncated: bool,
+    /// Verified executable sampled from the inspected target; not an exclusion match.
+    /// Unknown remains null. Titles, URLs and raw native identities are never stored here.
+    pub sampled_target_app: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1373,6 +1376,85 @@ fn diagnostic_executable_name(value: Option<&str>) -> Option<String> {
     } else {
         format!("{value}.exe")
     })
+}
+
+/// Sample the executable of the exact failed inspection target. Do not substitute
+/// foreground identity or an app label supplied by an accessibility provider.
+#[cfg(target_os = "windows")]
+pub fn sample_inspected_target_executable(hwnd: isize, process_id: u32) -> Option<String> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowThreadProcessId(hwnd: isize, process: *mut u32) -> u32;
+    }
+    inspected_target_executable(
+        hwnd,
+        process_id,
+        || unsafe {
+            let mut current_pid = 0;
+            let thread = GetWindowThreadProcessId(hwnd, &mut current_pid);
+            (thread != 0 && current_pid != 0).then_some(current_pid)
+        },
+        || get_process_exe_name(process_id),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn inspected_target_executable(
+    hwnd: isize,
+    process_id: u32,
+    mut sample_pid: impl FnMut() -> Option<u32>,
+    read_executable: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if hwnd == 0 || process_id == 0 || sample_pid() != Some(process_id) {
+        return None;
+    }
+    let executable = read_executable();
+    // A destroyed/reused window or unavailable identity invalidates attribution.
+    if sample_pid() != Some(process_id) {
+        return None;
+    }
+    diagnostic_executable_name(executable.as_deref())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn inspected_target_attribution_rechecks_identity_and_sanitizes_executable() {
+    use std::cell::Cell;
+    for (before, after, expected) in [
+        (Some(42), Some(42), Some("notepad.exe")),
+        (None, Some(42), None),
+        (Some(43), Some(42), None),
+        (Some(42), None, None),
+        (Some(42), Some(43), None),
+    ] {
+        let mut samples = [before, after].into_iter();
+        let reads = Cell::new(0);
+        let result = inspected_target_executable(
+            100,
+            42,
+            || samples.next().unwrap(),
+            || {
+                reads.set(reads.get() + 1);
+                Some("NOTEPAD.exe".into())
+            },
+        );
+        assert_eq!(result.as_deref(), expected);
+        assert_eq!(reads.get(), usize::from(before == Some(42)));
+    }
+    for name in [None, Some("C:\\private\\secret.exe"), Some("unknown/title")] {
+        assert!(
+            inspected_target_executable(100, 42, || Some(42), || name.map(str::to_owned)).is_none()
+        );
+    }
+    for (hwnd, pid) in [(0, 42), (100, 0)] {
+        assert!(inspected_target_executable(
+            hwnd,
+            pid,
+            || panic!("invalid target queried"),
+            || panic!("invalid executable queried")
+        )
+        .is_none());
+    }
 }
 
 /// The Explorer executable also owns the desktop/taskbar. Only known folder

@@ -316,6 +316,18 @@ Validation is synthetic; no fresh desktop/UIA inspection, capture, restart,
 deployment, historical cleanup or firewall change is authorized by this fix.
 
 
+### UIA budget regression repair (2026-10-13)
+
+The [subsequent investigation and repair](UIA_CAPTURE_REGRESSION_20261013.md)
+records confirmed owner-deployed identity, sanitized authorized diagnostics,
+keyboard-probe work/freshness bounds, actual-deadline traversal checks and separate
+sampled-target executable attribution. RootFmt and 317 distinct synthetic tests
+passed, followed by sequential single-job release-local recorder and desktop
+builds. The note records repaired artifact hashes and remaining live-validation
+limits. These builds did not deploy, restart or start capture; useful real-window
+coverage remains unverified. The earlier artifact and build records below retain
+their historical scope.
+
 ### Accessibility retrieval versus privacy verification (2026-10-13)
 
 Native app/title, include-list, private-window and monitor/target checks run before
@@ -386,7 +398,10 @@ and the brief startup disconnected-status report remain unresolved.
 ### Deployed timeout diagnosis (2026-10-13)
 
 Owner deployment metadata matched the GUI hash recorded in the reporting
-follow-up; the current accessibility/privacy candidate has not been deployed.
+follow-up at that historical checkpoint. The owner subsequently deployed the
+accessibility/privacy candidate: installed GUI and recorder hashes match the
+artifact pins above. The [subsequent budget-regression investigation](UIA_CAPTURE_REGRESSION_20261013.md)
+records the supplied failure report and limits.
 Read-only diagnostic projections exposed two separate timeout defects: Windows
 returned `UIA_E_TIMEOUT` (`0x80131505`) during root and navigation calls, but the
 reporting helper classified it as a generic provider failure; remaining walk time
@@ -396,8 +411,10 @@ setter-only probe, with no element requests or desktop inspection, reproduced
 [documents the native timeout error](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-error-codes);
 the 50 ms setter boundary here is local experimental evidence.
 
-The follow-up source stops before another provider request when less than 50 ms
-remain, and preserves native timeout classification while retaining the exact
+That historical follow-up stopped before another provider request when less than
+50 ms remained. The [current full-deadline budget correction](UIA_CAPTURE_REGRESSION_20261013.md#deterministic-source-defects)
+supersedes that reservation rule, while preserving native timeout classification
+and retaining the exact
 HRESULT and call stage in sensitive diagnostics. Existing time/node/depth/text
 limits and incomplete-tree text rejection remain in force. This corrects manufactured
 provider errors and misleading reason changes; it does not establish useful live
@@ -409,7 +426,9 @@ Root formatting passed; 264 external dependencies were reused, none rebuilt.
 Private evidence IDs: `20261013T000836840Z-Root-Fmt-d67488af` and
 `20261013T000849257Z-Root-Test-f93656f9`. At that checkpoint the source correction had
 not been rebuilt into the GUI or deployed. The current accessibility/privacy
-candidate includes it, with validation recorded above; deployment remains separate.
+candidate includes it, with validation recorded above, and was subsequently
+owner-deployed. That deployment does not establish useful live coverage; see the
+[budget-regression investigation](UIA_CAPTURE_REGRESSION_20261013.md).
 No new capture, input, desktop UIA inspection, restart or firewall change occurred.
 
 The reported startup disconnection remains unconfirmed: recording producers

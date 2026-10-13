@@ -31,6 +31,12 @@ impl UiaLimits {
             text_bytes: self.text_bytes.min(MAX_TEXT_BYTES),
         }
     }
+    /// The focused-state probe has its own total budget for three provider
+    /// requests; native per-request waits do not define evidence freshness.
+    pub fn keyboard_privacy() -> Self {
+        Self::tree(1)
+    }
+
     pub fn tree(nodes: usize) -> Self {
         Self {
             timeout: MAX_WALK_TIME,
@@ -65,6 +71,8 @@ pub(crate) struct WalkBudget {
     text_bytes: usize,
     stop: Option<UiaStop>,
     deepest_attempted: Cell<usize>,
+    #[cfg(test)]
+    clock: Option<std::rc::Rc<Cell<Instant>>>,
 }
 
 impl WalkBudget {
@@ -76,32 +84,52 @@ impl WalkBudget {
             text_bytes: 0,
             stop: None,
             deepest_attempted: Cell::new(0),
+            #[cfg(test)]
+            clock: None,
         }
     }
 
-    /// Before every cross-process request. A deadline cannot cancel a request
-    /// already executing; UIA's native timeout bounds the client wait for that request.
-    pub fn request_timeout(&self) -> Result<u32, UiaStop> {
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return clock.get();
+        }
+        Instant::now()
+    }
+
+    /// Local decoding and completion need no reservation for another request.
+    pub fn check_complete(&self) -> Result<(), UiaStop> {
+        self.check_complete_at(self.now())
+    }
+
+    fn check_complete_at(&self, now: Instant) -> Result<(), UiaStop> {
         if let Some(stop) = self.stop {
             return Err(stop);
         }
-        let remaining = self
-            .limits
-            .timeout
-            .checked_sub(self.start.elapsed())
-            .ok_or(UiaStop::Timeout)?;
-        // Windows rejects both UIA timeout setters below 50 ms. Do not
-        // start another request when its minimum wait exceeds our deadline.
-        if remaining < Duration::from_millis(PROVIDER_TIMEOUT_MS as u64) {
+        if now.duration_since(self.start) >= self.limits.timeout {
             return Err(UiaStop::Timeout);
         }
+        Ok(())
+    }
+
+    /// Start requests only before the actual deadline. Native timeout setters
+    /// require at least 50 ms, so a final in-flight request may return late.
+    /// Every response is deadline-checked and late trees are discarded.
+    pub fn request_timeout(&self) -> Result<u32, UiaStop> {
+        self.request_timeout_at(self.now())
+    }
+
+    fn request_timeout_at(&self, now: Instant) -> Result<u32, UiaStop> {
+        self.check_complete_at(now)?;
+        // A valid native wait is not a reservation: fast providers can finish
+        // within the remaining budget even when it is less than 50 ms.
         Ok(PROVIDER_TIMEOUT_MS)
     }
 
     fn admit_node(&self, depth: usize) -> Result<(), UiaStop> {
         self.deepest_attempted
             .set(self.deepest_attempted.get().max(depth));
-        self.request_timeout()?;
+        self.check_complete()?;
         if self.nodes >= self.limits.nodes {
             return Err(UiaStop::Nodes);
         }
@@ -162,17 +190,24 @@ pub(crate) fn walk(
     provider: &impl TreeProvider,
     limits: UiaLimits,
 ) -> Result<AccessibilityNode, UiaStop> {
-    let mut budget = WalkBudget::new(limits);
+    walk_with_budget(provider, WalkBudget::new(limits))
+}
+
+fn walk_with_budget(
+    provider: &impl TreeProvider,
+    mut budget: WalkBudget,
+) -> Result<AccessibilityNode, UiaStop> {
     let result = (|| {
         budget.admit_node(0)?;
         let root = provider.root(budget.request_timeout()?)?;
+        budget.check_complete()?;
         visit(provider, &root, 0, &mut budget)
     })();
     if let Err(reason) = result {
         screenpipe_config::sensitive_debug::record("uia_walk_progress", || {
             serde_json::json!({"reason":reason.code(),"visited_nodes":budget.nodes,
                 "decoded_text_bytes":budget.text_bytes,"deepest_attempted":budget.deepest_attempted.get(),
-                "elapsed_ms":budget.start.elapsed().as_millis()})
+                "elapsed_ms":budget.now().duration_since(budget.start).as_millis()})
         });
     }
     result
@@ -192,13 +227,15 @@ fn visit<P: TreeProvider>(
     // must not authorize a frame whose private subtree/URL wasn't inspected.
     budget.admit_node(depth + 1)?;
     let mut child = provider.first_child(element, budget.request_timeout()?)?;
+    budget.check_complete()?;
     while let Some(current) = child {
         node.children
             .push(visit(provider, &current, depth + 1, budget)?);
         budget.admit_node(depth + 1)?;
         child = provider.next_sibling(&current, budget.request_timeout()?)?;
+        budget.check_complete()?;
     }
-    budget.request_timeout()?;
+    budget.check_complete()?;
     Ok(node)
 }
 
@@ -375,20 +412,146 @@ mod tests {
         assert_eq!(budget.request_timeout(), Err(UiaStop::AggregateText));
     }
     #[test]
-    fn subminimum_remaining_time_stops_before_contacting_provider() {
-        for millis in [1, 5, 25, 49] {
-            let provider = Fake::new();
-            let limits = UiaLimits {
-                timeout: Duration::from_millis(millis),
-                ..UiaLimits::tree(10)
-            };
-            assert_eq!(walk(&provider, limits).unwrap_err(), UiaStop::Timeout);
-            assert!(provider.calls.borrow().is_empty());
-        }
+    fn completion_uses_deadline_without_reserving_a_new_provider_request() {
+        let mut budget = WalkBudget::new(UiaLimits::tree(10));
+        let now = Instant::now();
+        budget.start = now - Duration::from_millis(225);
+        assert_eq!(budget.request_timeout_at(now), Ok(PROVIDER_TIMEOUT_MS));
+        assert_eq!(budget.check_complete_at(now), Ok(()));
         assert_eq!(
-            WalkBudget::new(UiaLimits::tree(10)).request_timeout(),
-            Ok(50)
+            budget.check_complete_at(budget.start + Duration::from_millis(250)),
+            Err(UiaStop::Timeout)
         );
+        budget.stop = Some(UiaStop::PropertyText);
+        assert_eq!(budget.check_complete_at(now), Err(UiaStop::PropertyText));
+    }
+
+    #[test]
+    fn focused_privacy_budget_admits_three_minimum_native_waits() {
+        let mut budget = WalkBudget::new(UiaLimits::keyboard_privacy());
+        let now = Instant::now();
+        for elapsed in [1, 51, 101] {
+            budget.start = now - Duration::from_millis(elapsed);
+            assert_eq!(budget.request_timeout_at(now), Ok(PROVIDER_TIMEOUT_MS));
+        }
+        budget.start = now - Duration::from_millis(151);
+        assert_eq!(budget.check_complete_at(now), Ok(()));
+    }
+
+    #[test]
+    fn positive_remaining_time_allows_valid_native_wait_until_actual_deadline() {
+        let budget = WalkBudget::new(UiaLimits::tree(10));
+        for millis in [1, 5, 25, 49, 249] {
+            assert_eq!(
+                budget.request_timeout_at(budget.start + Duration::from_millis(millis)),
+                Ok(PROVIDER_TIMEOUT_MS)
+            );
+        }
+        for millis in [250, 251] {
+            assert_eq!(
+                budget.request_timeout_at(budget.start + Duration::from_millis(millis)),
+                Err(UiaStop::Timeout)
+            );
+        }
+    }
+
+    struct Timed {
+        clock: std::rc::Rc<Cell<Instant>>,
+        requests: RefCell<std::collections::VecDeque<(&'static str, u64)>>,
+        decoded: Cell<usize>,
+        one_child: bool,
+    }
+
+    impl Timed {
+        fn request(&self, stage: &'static str, timeout_ms: u32) {
+            assert_eq!(timeout_ms, PROVIDER_TIMEOUT_MS);
+            let (expected, millis) = self.requests.borrow_mut().pop_front().unwrap();
+            assert_eq!(stage, expected);
+            self.clock
+                .set(self.clock.get() + Duration::from_millis(millis));
+        }
+
+        fn run(
+            steps: &[(&'static str, u64)],
+            one_child: bool,
+        ) -> (Result<AccessibilityNode, UiaStop>, usize) {
+            let start = Instant::now();
+            let clock = std::rc::Rc::new(Cell::new(start));
+            let provider = Self {
+                clock: clock.clone(),
+                requests: RefCell::new(steps.iter().copied().collect()),
+                decoded: Cell::new(0),
+                one_child,
+            };
+            let budget = WalkBudget {
+                start,
+                clock: Some(clock),
+                ..WalkBudget::new(UiaLimits::tree(10))
+            };
+            let result = walk_with_budget(&provider, budget);
+            assert!(provider.requests.borrow().is_empty());
+            (result, provider.decoded.get())
+        }
+    }
+
+    impl TreeProvider for Timed {
+        type Element = usize;
+        fn root(&self, ms: u32) -> Result<usize, UiaStop> {
+            self.request("root", ms);
+            Ok(0)
+        }
+        fn node(&self, _: &usize, _: &mut WalkBudget) -> AccessibilityNode {
+            self.decoded.set(self.decoded.get() + 1);
+            AccessibilityNode::default()
+        }
+        fn first_child(&self, element: &usize, ms: u32) -> Result<Option<usize>, UiaStop> {
+            self.request("child", ms);
+            Ok((self.one_child && *element == 0).then_some(1))
+        }
+        fn next_sibling(&self, _: &usize, ms: u32) -> Result<Option<usize>, UiaStop> {
+            self.request("sibling", ms);
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn complete_provider_response_at_225_ms_is_admitted() {
+        let (result, decoded) = Timed::run(&[("root", 0), ("child", 225)], false);
+        assert_eq!(result.unwrap().node_count(), 1);
+        assert_eq!(decoded, 1);
+    }
+
+    #[test]
+    fn request_at_240_ms_can_complete_inside_actual_deadline() {
+        let (result, decoded) = Timed::run(&[("root", 240), ("child", 5)], false);
+        assert_eq!(result.unwrap().node_count(), 1);
+        assert_eq!(decoded, 1);
+    }
+
+    #[test]
+    fn late_root_response_is_never_decoded() {
+        for millis in [250, 260] {
+            let (result, decoded) = Timed::run(&[("root", millis)], false);
+            assert_eq!(result.unwrap_err(), UiaStop::Timeout);
+            assert_eq!(decoded, 0);
+        }
+    }
+
+    #[test]
+    fn late_null_child_response_discards_partial_tree() {
+        let (result, decoded) = Timed::run(&[("root", 240), ("child", 20)], false);
+        assert_eq!(result.unwrap_err(), UiaStop::Timeout);
+        assert_eq!(decoded, 1);
+    }
+
+    #[test]
+    fn late_null_sibling_response_discards_partial_tree() {
+        let (result, decoded) = Timed::run(
+            &[("root", 0), ("child", 0), ("child", 240), ("sibling", 20)],
+            true,
+        );
+        assert_eq!(result.unwrap_err(), UiaStop::Timeout);
+        assert_eq!(decoded, 2);
     }
     #[test]
     fn failed_provider_is_deferred_without_waiting_or_spawning_work() {

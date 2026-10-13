@@ -38,7 +38,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId,
     UIA_HelpTextPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
     UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
-    UIA_ValueValuePropertyId, UIA_E_TIMEOUT, UIA_PROPERTY_ID,
+    UIA_ProcessIdPropertyId, UIA_ValueValuePropertyId, UIA_E_TIMEOUT, UIA_PROPERTY_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -591,6 +591,8 @@ pub(crate) struct UiaContext {
     timeouts: IUIAutomation2,
     backoff: ProviderBackoff,
     cache_request: IUIAutomationCacheRequest,
+    /// Focus ownership/password state only; never requests text or descendants.
+    privacy_cache_request: IUIAutomationCacheRequest,
     /// Per-element cache request for bounded TreeWalker navigation.
     /// Uses Full mode so walked elements retain live COM references for navigation.
     walker_cache_request: IUIAutomationCacheRequest,
@@ -612,10 +614,7 @@ impl UiaContext {
         // password contents just to diagnose a failed privacy decision.
         let native = native_focus_probe();
         let focus = native.as_ref().ok().copied();
-        let budget = WalkBudget::new(UiaLimits {
-            timeout: Duration::from_millis(50),
-            ..UiaLimits::tree(1)
-        });
+        let budget = WalkBudget::new(UiaLimits::keyboard_privacy());
         let prepare = || {
             budget
                 .request_timeout()
@@ -631,29 +630,53 @@ impl UiaContext {
         let (result, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
             let focus = native?;
             prepare()?;
-            let element = self.automation.GetFocusedElement().map_err(|e| {
+            let element = self
+                .automation
+                .GetFocusedElementBuildCache(&self.privacy_cache_request)
+                .map_err(|e| {
+                    probe_error(
+                        CaptureReason::InputFocusedElementFailed,
+                        "GetFocusedElementBuildCache",
+                        e,
+                    )
+                })?;
+            let evidence_at = Instant::now();
+            budget.check_complete().map_err(|_| {
                 probe_error(
                     CaptureReason::InputFocusedElementFailed,
-                    "GetFocusedElement",
-                    e,
+                    "cached_state_budget",
+                    "UIA privacy deadline expired",
                 )
             })?;
-            prepare()?;
             let owns_focus = element
-                .CurrentHasKeyboardFocus()
+                .GetCachedPropertyValueEx(UIA_HasKeyboardFocusPropertyId, true)
                 .map_err(|e| {
                     probe_error(
                         CaptureReason::InputFocusOwnershipFailed,
-                        "CurrentHasKeyboardFocus",
+                        "GetCachedPropertyValueEx(HasKeyboardFocus,ignore_default=true)",
                         e,
                     )
-                })?
-                .as_bool();
-            prepare()?;
-            let element_pid = element.CurrentProcessId().map_err(|e| {
+                })?;
+            let owns_focus = bool::try_from(&owns_focus).map_err(|e| {
                 probe_error(
                     CaptureReason::InputFocusOwnershipFailed,
-                    "CurrentProcessId",
+                    "HasKeyboardFocus Boolean conversion",
+                    e,
+                )
+            })?;
+            let element_pid = element
+                .GetCachedPropertyValueEx(UIA_ProcessIdPropertyId, true)
+                .map_err(|e| {
+                    probe_error(
+                        CaptureReason::InputFocusOwnershipFailed,
+                        "GetCachedPropertyValueEx(ProcessId,ignore_default=true)",
+                        e,
+                    )
+                })?;
+            let element_pid = i32::try_from(&element_pid).map_err(|e| {
+                probe_error(
+                    CaptureReason::InputFocusOwnershipFailed,
+                    "ProcessId integer conversion",
                     e,
                 )
             })? as u32;
@@ -667,17 +690,16 @@ impl UiaContext {
                     ),
                 ));
             }
-            prepare()?;
             let value = element
-                .GetCurrentPropertyValueEx(UIA_IsPasswordPropertyId, true)
+                .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
                 .map_err(|e| {
                     probe_error(
                         CaptureReason::InputPasswordPropertyFailed,
-                        "GetCurrentPropertyValueEx(IsPassword,ignore_default=true)",
+                        "GetCachedPropertyValueEx(IsPassword,ignore_default=true)",
                         e,
                     )
                 })?;
-            let is_password = bool::try_from(&value).map_err(|e| {
+            let is_password = explicit_cached_password_state(&value).map_err(|e| {
                 probe_error(
                     CaptureReason::InputPasswordPropertyUnsupported,
                     "IsPassword Boolean conversion",
@@ -718,8 +740,17 @@ impl UiaContext {
                     "focused element changed",
                 ));
             }
-            prepare()?;
-            Ok(is_password)
+            budget.check_complete().map_err(|_| {
+                probe_error(
+                    CaptureReason::InputFocusVerificationFailed,
+                    "completed_probe_budget",
+                    "UIA privacy deadline expired",
+                )
+            })?;
+            Ok((is_password, evidence_at))
+        });
+        let result = result.and_then(|(is_password, evidence_at)| {
+            validated_password_evidence(is_password, evidence_at, checked_at)
         });
         let reason = result.as_ref().err().map(|failure| failure.reason);
         if let Err(failure) = &result {
@@ -730,7 +761,7 @@ impl UiaContext {
                     "native_candidate":focus.map(|f| serde_json::json!({"foreground_hwnd":f.foreground,"control_hwnd":f.control,"pid":f.pid}))
                 })
             });
-        } else if matches!(result, Ok(true)) {
+        } else if matches!(result, Ok((true, _))) {
             screenpipe_config::sensitive_debug::record("input_password_suppression", || {
                 serde_json::json!({
                     "policy":"focused IsPassword=true; keyboard and clipboard content denied",
@@ -740,7 +771,11 @@ impl UiaContext {
         }
         // Focus events still invalidate permission; diagnosis never opens a gate.
         privacy.note_probe_completed(started_at, checked_at);
-        privacy.update_diagnosed(generation, focus, result.ok(), checked_at, reason);
+        let (is_password, evidence_at) = match result {
+            Ok((is_password, evidence_at)) => (Some(is_password), evidence_at),
+            Err(_) => (None, checked_at),
+        };
+        privacy.update_diagnosed(generation, focus, is_password, evidence_at, reason);
     }
 
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
@@ -802,6 +837,13 @@ impl UiaContext {
             walker_cache_request.SetAutomationElementMode(AutomationElementMode_Full)?;
             walker_cache_request.SetTreeScope(TreeScope_Element)?;
 
+            let privacy_cache_request = automation.CreateCacheRequest()?;
+            privacy_cache_request.AddProperty(UIA_IsPasswordPropertyId)?;
+            privacy_cache_request.AddProperty(UIA_ProcessIdPropertyId)?;
+            privacy_cache_request.AddProperty(UIA_HasKeyboardFocusPropertyId)?;
+            privacy_cache_request.SetTreeScope(TreeScope_Element)?;
+            privacy_cache_request.SetAutomationElementMode(AutomationElementMode_Full)?;
+
             let tree_walker = automation.ControlViewWalker()?;
 
             Ok(Self {
@@ -809,6 +851,7 @@ impl UiaContext {
                 timeouts,
                 backoff: ProviderBackoff::default(),
                 cache_request,
+                privacy_cache_request,
                 walker_cache_request,
                 tree_walker,
             })
@@ -939,7 +982,7 @@ impl UiaContext {
         property_id: UIA_PROPERTY_ID,
         budget: &mut WalkBudget,
     ) -> Option<String> {
-        budget.request_timeout().ok()?;
+        budget.check_complete().ok()?;
         unsafe {
             let variant: VARIANT = element.GetCachedPropertyValue(property_id).ok()?;
             cached_variant_string(&variant, budget)
@@ -1088,7 +1131,7 @@ impl UiaContext {
             }
         }
 
-        if budget.request_timeout().is_err() {
+        if budget.check_complete().is_err() {
             self.backoff.failed();
             return None;
         }
@@ -1220,6 +1263,33 @@ fn navigation_result_at(
         .ok()
         .map_err(|error| tree_provider_failure(stage, error))?;
     Ok(element)
+}
+
+fn validated_password_evidence(
+    is_password: bool,
+    evidence_at: Instant,
+    completed_at: Instant,
+) -> Result<(bool, Instant), PrivacyProbeFailure> {
+    if completed_at.duration_since(evidence_at) > KEYBOARD_PRIVACY_MAX_AGE {
+        return Err(probe_error(
+            CaptureReason::InputCheckStale,
+            "cached_password_evidence_age",
+            "cached password state expired during focus verification",
+        ));
+    }
+    // Identity rechecks must not renew the age of an older IsPassword sample.
+    Ok((is_password, evidence_at))
+}
+
+fn explicit_cached_password_state(value: &VARIANT) -> windows::core::Result<bool> {
+    // VariantToBoolean also coerces other types; only a provider's explicit
+    // VT_BOOL is evidence. Unsupported/default/empty values remain unknown.
+    if unsafe { value.as_raw().Anonymous.Anonymous.vt } != 11 {
+        return Err(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_INVALIDARG,
+        ));
+    }
+    bool::try_from(value)
 }
 
 /// Timestamp only after provider calls complete. Generation and native-focus
@@ -2070,6 +2140,16 @@ mod tests {
     }
 
     #[test]
+    fn cached_password_state_requires_an_explicit_boolean() {
+        assert!(!explicit_cached_password_state(&VARIANT::from(false)).unwrap());
+        assert!(explicit_cached_password_state(&VARIANT::from(true)).unwrap());
+        assert!(explicit_cached_password_state(&VARIANT::default()).is_err());
+        assert!(explicit_cached_password_state(&VARIANT::from(0i32)).is_err());
+        assert!(explicit_cached_password_state(&VARIANT::from("false")).is_err());
+        assert!(explicit_cached_password_state(&VARIANT::from("synthetic unsupported")).is_err());
+    }
+
+    #[test]
     fn keyboard_privacy_requires_explicit_non_password_state() {
         let privacy = KeyboardPrivacy::default();
         let focus = Some(test_keyboard_focus());
@@ -2082,17 +2162,23 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_privacy_ages_from_probe_completion_not_probe_start() {
-        let started = Instant::now();
-        let (is_password, checked_at) = complete_keyboard_privacy_probe(|| {
-            std::thread::sleep(KEYBOARD_PRIVACY_MAX_AGE + Duration::from_millis(10));
-            Some(false)
-        });
-        assert!(started.elapsed() > KEYBOARD_PRIVACY_MAX_AGE);
+    fn slow_focus_verification_cannot_renew_cached_password_evidence() {
+        let completed_at = Instant::now();
+        let expired_at = completed_at - KEYBOARD_PRIVACY_MAX_AGE - Duration::from_millis(1);
+        let failure = validated_password_evidence(false, expired_at, completed_at).unwrap_err();
+        assert_eq!(failure.reason, CaptureReason::InputCheckStale);
+
+        let evidence_at = completed_at - Duration::from_millis(25);
+        let (is_password, checked_at) =
+            validated_password_evidence(false, evidence_at, completed_at).unwrap();
+        assert_eq!(checked_at, evidence_at);
         let privacy = KeyboardPrivacy::default();
         let focus = Some(test_keyboard_focus());
-        privacy.update(0, focus, is_password, checked_at);
+        privacy.update(0, focus, Some(is_password), checked_at);
         assert_eq!(privacy.permit(focus), Some(0));
+
+        privacy.update(0, focus, Some(false), expired_at);
+        assert_eq!(privacy.permit(focus), None);
     }
 
     #[test]

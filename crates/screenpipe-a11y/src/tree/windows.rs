@@ -555,6 +555,11 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         kind: RuleKind::NativeWindowPolicy,
                     });
                 }
+            } else if let Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(
+                failure,
+            ))) = &mut result
+            {
+                failure.verified_target = Some(target);
             }
         }
         // These candidates may be withheld from ordinary frame/status metadata.

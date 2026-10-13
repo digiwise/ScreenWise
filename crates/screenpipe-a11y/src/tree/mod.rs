@@ -525,6 +525,10 @@ pub struct AccessibilityFailure {
     /// Native metadata sampled from the same verified window, never generic notices.
     pub app_name: String,
     pub window_name: String,
+    /// Exact inspected window, retained only after native policy/identity rechecks.
+    /// This is not a capture permit and must never be serialized as HWND/PID.
+    #[cfg(target_os = "windows")]
+    pub verified_target: Option<WindowsTreeTarget>,
 }
 impl AccessibilityFailure {
     /// Preserve unexpected provider errors privately and never treat missing identity as admission.
@@ -591,6 +595,8 @@ impl AccessibilityFailure {
             unresolved_rules,
             app_name,
             window_name,
+            #[cfg(target_os = "windows")]
+            verified_target: None,
         }
     }
     pub fn blocks_images(&self) -> bool {

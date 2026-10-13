@@ -1,7 +1,7 @@
 # ScreenWise Windows build notes
 
-The current candidate separates [accessibility retrieval from privacy verification](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13).
-The last owner-deployed build is the [UIA reporting and private diagnostics repair](docs/CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13).
+The current source candidate repairs [UIA probe and traversal budgets and failed-target attribution](docs/UIA_CAPTURE_REGRESSION_20261013.md).
+The latest confirmed owner deployment is the [accessibility/privacy candidate](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), verified against installed GUI and recorder hashes. The [subsequent budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records the supplied failure report and remaining limits.
 Earlier builds include the [bounded UIA and clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
 The preceding candidate includes the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
 The previous deployed candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md),
@@ -21,6 +21,28 @@ release workflow without installing dependencies or starting the bridge. Pi's
 `screenwise_recordings` extension uses the authenticated recorder HTTP API directly
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
+
+## UIA capture regression repair (2026-10-13)
+
+The [investigation and repair note](docs/UIA_CAPTURE_REGRESSION_20261013.md)
+records matching owner-deployed hashes, the supplied failure counts and a
+freshly authorized numeric/fixed-stage diagnostic projection. The repair gives
+keyboard privacy probes their own work budget while retaining 75 ms permission
+freshness; traversal uses the actual deadline for request/reply/completion checks.
+Failed accessibility metadata gains a freshly verified sampled executable
+basename without claiming exclusion-rule or blocker attribution. Per-frame
+walker/cache construction and discarded backoff state remain separately deferred.
+
+RootFmt, 227 accessibility tests (23 live ignored), one inspected-target test and
+89 engine capture regressions passed, with zero external artifact rebuilds.
+Sequential single-job release-local builds passed: recorder 4m11s
+(785 external reused/zero rebuilt), desktop 8m55s (1,080 external reused/zero
+rebuilt). Inert recorder version/help checks and metadata-only runtime, native,
+frontend and graceful-quit-marker inventory passed. Candidate hashes and the
+separate owner-run deployment command are recorded in the note. No new capture,
+interactive UIA/input inspection, deployment/restart or firewall change is included.
+Synthetic checks and authorized diagnostic counts do not establish restored live
+capture coverage.
 
 ## Accessibility retrieval and privacy admission (2026-10-13)
 
@@ -55,8 +77,9 @@ invalid sub-50-ms timeout settings. The [source follow-up](docs/CAPTURE_PRIVACY.
 corrects native timeout classification and refuses another request when its
 minimum native wait exceeds remaining budget. Root formatting and 33 focused
 UIA tests passed (23 live tests ignored). At that checkpoint the source fix had no
-new linked GUI/recorder candidate. The current candidate includes it; no deployment
-is included in this change. Capture coverage and the brief startup
+new linked GUI/recorder candidate. The accessibility/privacy candidate includes
+it and was subsequently owner-deployed; the original build run included no
+deployment. Capture coverage and the brief startup
 disconnected-status report remain unresolved.
 
 ## UIA reporting follow-up (2026-10-13)

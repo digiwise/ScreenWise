@@ -3937,6 +3937,27 @@ fn apply_windows_accessibility_failure(
     failure: &screenpipe_a11y::tree::AccessibilityFailure,
     requires_drm_url: bool,
 ) -> bool {
+    let sampled_target_app = failure.verified_target.and_then(|target| {
+        screenpipe_screen::capture_screenshot_by_window::sample_inspected_target_executable(
+            target.hwnd,
+            target.process_id,
+        )
+    });
+    apply_windows_accessibility_failure_with_target_app(
+        privacy,
+        failure,
+        requires_drm_url,
+        sampled_target_app,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_accessibility_failure_with_target_app(
+    privacy: &mut WindowsCapturePrivacy,
+    failure: &screenpipe_a11y::tree::AccessibilityFailure,
+    requires_drm_url: bool,
+    sampled_target_app: Option<String>,
+) -> bool {
     use screenpipe_config::capture_diagnostics::{RuleKind, RuleOrigin, RuleReference};
     use screenpipe_screen::capture_screenshot_by_window::WindowsAccessibilityDecision;
     let mut unresolved_rules = failure.unresolved_rules.clone();
@@ -3953,6 +3974,7 @@ fn apply_windows_accessibility_failure(
         processing: if blocked { "withheld" } else { "proceeding" },
         unresolved_rules: unresolved_rules.iter().take(32).copied().collect(),
         rules_truncated: unresolved_rules.len() > 32,
+        sampled_target_app,
     });
     screenpipe_config::sensitive_debug::record("uia_image_admission", || {
         serde_json::json!({"cause":failure.cause.code(), "image_and_ocr":if blocked {"withheld"} else {"proceeding"},
@@ -4368,6 +4390,59 @@ fn capture_diagnostic_retrieval_failure_separates_image_admission_and_unresolved
                 assert!(!row.message().contains("ordinary title"));
                 assert!(!row.reasons.contains(&CaptureReason::NoSafeWindow));
             }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_inspected_app_is_separate_from_matched_exclusions() {
+    use screenpipe_a11y::tree::{AccessibilityFailure, TreeWalkerConfig};
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
+    let mut config = TreeWalkerConfig::default();
+    config.ignored_windows = vec!["private".into()];
+    let failure = AccessibilityFailure::after_native_policy(
+        AccessibilityStopReason::Timeout,
+        &config,
+        "untrusted logical app label".into(),
+        "private window title".into(),
+    );
+    assert!(failure.verified_target.is_none());
+    for sampled_app in [None, Some("notepad.exe".to_string())] {
+        let mut privacy = WindowsCapturePrivacy::default();
+        assert!(apply_windows_accessibility_failure_with_target_app(
+            &mut privacy,
+            &failure,
+            false,
+            sampled_app.clone(),
+        ));
+        let privacy = privacy.with_outcome(WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::AccessibilityInspection,
+        ));
+        let json = serde_json::to_value(&privacy).unwrap();
+        assert_eq!(
+            json["accessibility"]["sampled_target_app"],
+            serde_json::json!(sampled_app)
+        );
+        assert_eq!(json["accessibility"]["cause"], "uia_walk_timeout");
+        assert_eq!(json["accessibility"]["processing"], "withheld");
+        assert_eq!(
+            json["accessibility"]["unresolved_rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(privacy.blockers.is_empty());
+        assert!(privacy.rule_matches.is_empty());
+        let serialized = json.to_string();
+        for forbidden in [
+            "untrusted logical app label",
+            "private window title",
+            "hwnd",
+            "process_id",
+        ] {
+            assert!(!serialized.contains(forbidden));
         }
     }
 }

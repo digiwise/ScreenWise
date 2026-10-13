@@ -10,9 +10,33 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Current candidate: [accessibility retrieval versus privacy verification](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including the [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13). No deployment is included in this change. The last owner-deployed build is the [UIA reporting and private diagnostics fix](docs/CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13), verified against deployment metadata. Useful live capture coverage and the reported brief startup disconnection remain unresolved. Earlier hashes below belong to their historical candidates.
+Latest confirmed owner deployment: [accessibility retrieval versus privacy verification](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including the [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13). The owner subsequently deployed this accessibility/privacy candidate; installed GUI and recorder hashes match its public artifact pins. The original build run included no deployment. The [subsequent budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records the supplied failure report and scoped source defects. Useful live capture coverage and the reported brief startup disconnection remain unresolved. Earlier hashes below belong to their historical candidates.
+
+Current source candidate: [UIA budget and failed-target attribution repair](docs/UIA_CAPTURE_REGRESSION_20261013.md), with focused synthetic checks and both release-local builds passed. Repaired candidate hashes and the separate owner-run deployment step are recorded in that note; the repair has not been deployed by this investigation. Useful live Screen/OCR and keyboard coverage remain unverified.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## UIA capture regression repair (2026-10-13)
+
+**SW-R18 follow-up — Deterministic budget defects repaired; live coverage unresolved.**
+The [investigation note](docs/UIA_CAPTURE_REGRESSION_20261013.md) records the
+confirmed owner deployment and supplied API report. An authorized interval
+projection found most recorded tree timeout stops near the former 50 ms reserve
+cutoff, alongside genuine native provider timeouts; diagnostic deduplication/caps
+and missing successful-completion counts prevent a capture-restoration inference.
+
+Keyboard probe budgets, acquisition-stamped permission freshness, full-deadline
+traversal checks and separate freshly verified sampled-target executable metadata
+are covered by 227 accessibility tests (23 live ignored), one inspected-target
+attribution test and 89 engine capture regressions, all passed. RootFmt passed.
+Sequential single-job release-local builds passed: recorder 4m11s
+(785 external reused/zero rebuilt), desktop 8m55s (1,080 external reused/zero
+rebuilt). Inert CLI version/help checks and metadata-only runtime/frontend/native
+inventory and graceful-quit marker checks passed. Candidate artifact hashes are
+recorded in the note; deployment remains a separate owner-run step. No fresh capture,
+interactive desktop/UIA/input inspection, deployment or firewall change is included.
+Per-frame walker/cache construction and discarded backoff state remain a separate
+performance limitation requiring COM/thread-affinity design.
 
 ## Accessibility retrieval versus privacy verification (2026-10-13)
 
@@ -106,7 +130,9 @@ for large, deep or slow windows; client waits do not guarantee provider cancella
 CLI smoke and both sequential single-job release-local builds passed. Fourteen
 new tests use fake providers and synthetic text. All external artifacts were
 reused; hashes/evidence are recorded in the investigation. The live Firefox/Excel
-comparison and incident attribution remain outstanding; the candidate is not deployed.
+comparison and incident attribution remain outstanding. That initial bounded-UIA
+candidate was subsequently superseded by the owner-deployed accessibility/privacy
+candidate.
 
 ## Outstanding stale monitor status (2026-10-12)
 
