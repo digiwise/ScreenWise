@@ -203,3 +203,218 @@ Synthetic regression coverage is provided for reason presentation, fail-closed
 input stages, missing/recorder/unlisted foreground classification, storage bounds,
 deduplication and the Windows directory DACL. Native/live-provider and installed
 GUI validation remain separate; no new interactive capture was authorized here.
+
+## UIA failure reporting and retry transitions (2026-10-13)
+
+The deployed bounded-UIA candidate produced frequent `accessibility_incomplete`
+placeholders. This is inspection failure, not evidence that Windows failed to
+look up an executable for every frame: the old skipped result supplied no verified
+executable identity, so the engine deliberately used a null blocker app. A selected
+bitmap window can also belong to a different monitor from global foreground focus.
+Do not infer an app from an earlier focus sample.
+
+The old engine mapped the unknown blocker code to `no_safe_window` and reused
+`post_capture_privacy_evaluation` as the stage. It also published preliminary
+bitmap permission into the same WindowPolicy interval before UIA finished. Each
+failed retry therefore reopened that interval and generated another failure;
+screen and OCR each received a notice. The reported 270 combined-reason notices
+were 135 paired screen/OCR reports, not 270 distinct capture attempts. The reported
+40 failures were a subset of the 47 withheld frames. The 50/47/3 active-window
+counts matched a lower bound ten seconds earlier than the displayed five-minute
+window; metadata projection does not establish how the external CLI selected it.
+
+The reporting-only candidate rejected every tree stop as a capture failure. The
+current source separates retrieval from rule verification, as described below.
+These specific causes remain available in frame/status diagnostics:
+
+| Blocker / diagnostic reason | Meaning |
+|---|---|
+| `uia_walk_timeout` | Walk deadline cannot admit another native request, or Windows returned `UIA_E_TIMEOUT`; includes admission work before traversal. |
+| `uia_node_limit` | Another element would exceed the node budget. |
+| `uia_depth_limit` | Another navigation step would exceed the depth budget. |
+| `uia_property_text_limit` | One decoded property would exceed its byte limit. |
+| `uia_aggregate_text_limit` | Decoded text would exceed the remaining tree/context byte budget. |
+| `uia_provider_failure` | A non-timeout native provider/timeout-configuration/navigation request failed. |
+| `uia_backoff` | This UIA context's provider retry cooldown is active. |
+| `uia_initialization_failed` | UI Automation initialization failed after native window checks. |
+
+The typed cause survives tree-walk results, per-frame JSON stored atomically in
+SQLite, current status and persisted notice diagnostics returned by the API.
+The legacy `accessibility_incomplete` code is explicitly recognized as incomplete
+inspection rather than no safe window. Existing historical rows are unchanged;
+specific historical causes cannot be reconstructed from the collapsed code.
+
+Only the final inspected window-policy decision is published. Repeated identical
+failures refresh the live check while keeping their original onset and producing
+no new history rows. A changed cause, genuine recovery or later failure is still
+reported immediately. Screen/OCR/accessibility remain independent channels;
+notice counts must not be treated as a count of distinct captures. Throttled
+attempts do not fabricate recovery. Verified content-dedup observations are
+published after the final checks even if no new frame is written.
+
+Incomplete trees still withhold screenshots and OCR. No limit was relaxed,
+provider work added or identity inferred to make capture succeed. These reporting
+changes do not establish that bounded traversal meets useful capture coverage
+for real large applications. That regression remains an investigation priority.
+
+A metadata-only projection found selected-window app candidates in the older
+private policy records. Candidate identity was therefore available at selection
+time even though the skipped tree result supplied none to the failed frame.
+These samples do not establish final frame attribution or the missing stop cause.
+
+The previous tree-stop debug message was absent from the ordinary UTC-day log.
+The enabled sensitive sink recorded window policy, input probes and browser
+policy in the reported interval, but did not have a tree-stop category. New
+`uia_tree_stop` records retain the HWND, fixed cause, elapsed time and actual capped
+limits, including the native provider timeout. `uia_walk_progress` retains visited
+node count, decoded byte count and deepest attempted level without retaining node text. `uia_provider_request_failure`
+retains a fixed request stage, HRESULT and full exception representation exclusively
+in the opt-in private sink; timeout configuration is shared with other UIA probes.
+`uia_inspection_refusal` covers initialization errors, target/monitor verification,
+window and subtree policy rejection, pre-walk expiry and bounded-walk failure. It
+retains the already sampled HWND/PID/app/window-title candidate, selected target,
+monitor bounds, configured budgets and configured include/ignore policy even when
+that candidate is withheld from ordinary frame/status metadata. Candidates are
+diagnostic evidence, not verified app attribution. URL-policy refusal records retain
+the already extracted URL and window candidate; target-check failures retain expected
+and current selection, and native selection errors retain their exception stage.
+Policy pattern samples are capped at 64 per list, with full counts and truncation flags. No additional UIA text, password
+value, keystroke or clipboard read is performed to enrich this record. New ordinary
+stop notices retain fixed codes rather than exception strings or window titles.
+Sink opt-in, queue/storage bounds and repeat deduplication still apply; an absent
+record is not proof that no failure happened. The generic status-history parser
+removes executable identities; authenticated decision details retain their
+existing permitted basename metadata.
+
+Validation: RootFmt, 214 accessibility tests (23 live tests ignored), 48 scoped
+engine capture tests, 14 notice-storage/API tests, 58 focused status/notice UI
+tests, no-emit TypeScript and the 16-page frontend export passed. Tests use
+synthetic providers/strings and temporary databases; no recording was started.
+The release-local RootBuild passed in 9m08s: 785 external artifacts reused, zero
+rebuilt, and 11 workspace artifacts reused/eight rebuilt. Recorder `--version`,
+`--help` and `record --help` exited zero without recording. The release-local
+DesktopBuild passed in 15m24s: 1,080 external artifacts reused, zero rebuilt,
+and ten workspace artifacts reused/eight rebuilt. Builds ran sequentially with
+one job; this task's compiler processes ran at reduced priority after resource
+monitoring. No other application was stopped or reprioritized.
+
+| Initial reporting artifact (release-local, subsequently owner-deployed) | SHA256 |
+|---|---|
+| `target/release-local/screenpipe.exe` | `1284D911A9B794F99158F20C4CE4B0E5E8131572C7ADC9C5827672FAA6086260` |
+| `apps/screenpipe-app-tauri/src-tauri/target/release-local/screenpipe-app.exe` | `B76A2D8A75BB98663BB0CCAC5B89A6D39011335D09A03627AD3E5D78A5C5377D` |
+
+Private canonical evidence: `20261012T230604671Z-Root-Fmt-c6995c00`,
+`20261012T230303828Z-Root-Test-53ade810` (accessibility),
+`20261012T225157994Z-Root-Test-454ae080` (capture),
+`20261012T230047743Z-Root-Test-3628940e` (notice storage),
+`20261012T230643248Z-Root-Build-f82b6870`,
+`20261012T231639118Z-Desktop-Build-28ab08cb`. Both Rust lockfiles are unchanged;
+no new dependency variants, unexpected external rebuilds or dependency acquisition
+occurred. Frontend export retains the existing `unpdf` import-meta warning.
+
+Validation is synthetic; no fresh desktop/UIA inspection, capture, restart,
+deployment, historical cleanup or firewall change is authorized by this fix.
+
+
+### Accessibility retrieval versus privacy verification (2026-10-13)
+
+Native app/title, include-list, private-window and monitor/target checks run before
+UIA initialization. Retrieval failure preserves its specific cause and discards
+all incomplete accessibility text. It does not by itself reject screenshot
+storage or OCR. Remaining applicable rules determine image admission:
+
+- Ignored-window rules with an applicable app scope and nonempty title also check
+  nested Window/Document nodes and extension popups. Unscoped rules apply to any
+  app; a scoped rule for a different app does not require its tree.
+- Configured ignored URL entries check accessibility Document URLs, including in
+  embedded/non-browser apps. Passing a native address-bar check does not prove
+  these additional document checks passed.
+- Enabled protected-content URL checks require document URL data unless the exact
+  selected bitmap owner has independently acquired URL metadata.
+- Unknown/truncated native metadata or changed target/focus identity cannot grant
+  admission from an earlier native-policy sample.
+
+An unresolved check withholds the real bitmap and all OCR; only the existing
+generated disclosure placeholder can be persisted. Otherwise the admitted bitmap
+follows normal storage and OCR fallback, subject to the remaining final privacy
+and user gates. Native include/title/private checks already passed without UIA do
+not become unresolved merely because retrieval failed. No partial tree text or
+password-node data is retained as accessibility content.
+
+The per-frame capture_privacy.accessibility object contains cause, processing
+(withheld, proceeding, or withheld_by_other_check), up to 32 unresolved_rules
+references and a rules_truncated flag. This is separate from actual rule_matches:
+an unresolved check is not a matched exclusion. References retain the original
+configuration index, including empty entries. Fixed kinds explain nested
+window/document exclusions, document URL exclusions, native window identity/title
+verification or protected-content URL policy. Truncation never opens admission.
+
+Accessibility status remains failed with its actual cause even when Screen/OCR
+admission passes. Screen/OCR notices and Recording status explicitly say whether
+storage/processing proceeds despite retrieval failure or is blocked by identified
+unresolved checks. Generic notices contain no titles, URLs or pattern values. The
+opt-in sensitive sink records uia_image_admission with the complete unresolved
+reference list and already-sampled native context. Initialization and unclassified
+retrieval errors retain detailed exceptions and stages there; existing private
+provider/tree/policy diagnostics remain.
+
+Identical cause, disposition and rule sets remain deduplicated. For 135 attempts
+with one unchanged blocked decision on one monitor, the window-policy Screen/OCR
+pair produces two notices total, plus one accessibility failure transition. A
+permitted image disposition produces no failed Screen/OCR notices; accessibility
+still emits its failure transition. Actual cause/rule/disposition changes produce
+new transitions. Other channels/gates can independently produce notices, so this
+is not a universal notice total for a five-minute period.
+
+RootFmt, 219 accessibility tests (23 live tests ignored), 12 shared diagnostic
+tests, 88 engine capture tests, 14 notice tests, 72 frontend tests, TypeScript
+checking, the 16-page static export and inert recorder --version smoke passed.
+Serial single-job release-local builds passed: recorder 7m14s (785 external
+reused/zero rebuilt), desktop 15m42s (1,080 external reused/zero rebuilt). Both
+lockfiles are unchanged. The existing unpdf import.meta warning remains.
+
+Artifact SHA-256:
+
+- Recorder: D483130FA4F5520CB3EFCE2491A483254165F6268C7F7E988C4BD678343FA48E
+- Desktop: FE823E90D88083FADC10290A3FD4FBC3A724FF6DDC3C3980ECC658F002CCC181
+
+Private build evidence IDs: 20261013T014425218Z-Root-Build-8e276132 and
+20261013T015726849Z-Desktop-Build-68e055b0. No new capture, desktop UIA/input
+inspection or deployment is part of this change; useful live capture coverage
+and the brief startup disconnected-status report remain unresolved.
+
+### Deployed timeout diagnosis (2026-10-13)
+
+Owner deployment metadata matched the GUI hash recorded in the reporting
+follow-up; the current accessibility/privacy candidate has not been deployed.
+Read-only diagnostic projections exposed two separate timeout defects: Windows
+returned `UIA_E_TIMEOUT` (`0x80131505`) during root and navigation calls, but the
+reporting helper classified it as a generic provider failure; remaining walk time
+also produced timeout-setting values below the native minimum. An isolated COM
+setter-only probe, with no element requests or desktop inspection, reproduced
+`E_INVALIDARG` for 1–49 ms samples and success for 50, 51 and 100 ms. Microsoft
+[documents the native timeout error](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-error-codes);
+the 50 ms setter boundary here is local experimental evidence.
+
+The follow-up source stops before another provider request when less than 50 ms
+remain, and preserves native timeout classification while retaining the exact
+HRESULT and call stage in sensitive diagnostics. Existing time/node/depth/text
+limits and incomplete-tree text rejection remain in force. This corrects manufactured
+provider errors and misleading reason changes; it does not establish useful live
+capture coverage or eliminate genuine provider timeouts.
+
+Canonical focused `screenpipe-a11y` tests (`windows_uia`, `Jobs=1`, locked/offline)
+passed 33 tests, with 23 live tests ignored and 182 unrelated tests filtered.
+Root formatting passed; 264 external dependencies were reused, none rebuilt.
+Private evidence IDs: `20261013T000836840Z-Root-Fmt-d67488af` and
+`20261013T000849257Z-Root-Test-f93656f9`. At that checkpoint the source correction had
+not been rebuilt into the GUI or deployed. The current accessibility/privacy
+candidate includes it, with validation recorded above; deployment remains separate.
+No new capture, input, desktop UIA inspection, restart or firewall change occurred.
+
+The reported startup disconnection remains unconfirmed: recording producers
+started for the enumerated monitors, and the inspected persisted notices contain
+no monitor-disconnected transition. Cold focus-policy capture is reported as
+`monitor_inactive`, which does not establish hardware disconnection. Existing
+logs do not preserve the exact initial topology/status response, so that brief
+UI report cannot be reconstructed from this evidence.

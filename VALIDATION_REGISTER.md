@@ -10,9 +10,65 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
-Latest build: [bounded UIA and clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md), not deployed. Preceding monitor repair: [disconnected-monitor recording/status](docs/DISCONNECTED_MONITORS.md), not deployed. Previous deployed candidate: [capture status, event-flap and maximised-window fixes](docs/CAPTURE_FIX_HANDOFF.md). Earlier hashes below belong to their historical candidates.
+Current candidate: [accessibility retrieval versus privacy verification](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including the [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13). No deployment is included in this change. The last owner-deployed build is the [UIA reporting and private diagnostics fix](docs/CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13), verified against deployment metadata. Useful live capture coverage and the reported brief startup disconnection remain unresolved. Earlier hashes below belong to their historical candidates.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Accessibility retrieval versus privacy verification (2026-10-13)
+
+The current candidate separates missing accessibility data from unresolved privacy
+verification. Native window checks precede UIA initialization and are rechecked
+when retrieval fails. Screen/OCR admission proceeds when no applicable check
+needs the missing tree; nested window/document exclusions, document URL rules,
+protected-content URL dependencies and unverified native metadata remain
+fail-closed. Exact causes and bounded unresolved rule references survive in
+frame JSON, status and stored notices; private diagnostics preserve detailed
+provider stages/errors and native decision context. See
+[the rule applicability and reporting contract](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13).
+
+RootFmt, 219 accessibility tests (23 live tests ignored), 12 shared diagnostic
+tests, 88 engine capture tests, 14 notice persistence/API tests and 72 focused
+frontend tests passed. TypeScript no-emit checking and the 16-page static frontend
+export passed; the existing unpdf import.meta build warning remains.
+Sequential single-job, reduced-priority release-local builds passed: recorder
+7m14s (785 external reused/zero rebuilt), desktop 15m42s (1,080 external
+reused/zero rebuilt). The inert recorder --version smoke passed. Both Rust
+lockfiles are unchanged. Earlier records below are historical checkpoints,
+including the owner-interrupted build.
+No new capture, desktop UIA/input inspection, deployment or firewall change is
+included. The brief startup disconnected-monitor report and live provider behavior
+remain outside synthetic validation.
+
+## UIA capture failures and diagnostic flood (2026-10-13)
+
+**SW-R18 — Reporting repair implemented; real-application capture coverage unresolved.**
+Read-only production metadata confirmed incomplete accessibility inspection on
+multiple monitor workers shortly after the bounded-UIA deployment. The failed
+result withheld pixels/text and deliberately had no verified executable identity.
+The engine incorrectly mapped that cause to no-safe-window and post-check failure;
+preliminary bitmap permission reopened the same interval on each retry. The
+reported 270 combined-reason notices represented 135 screen/OCR pairs.
+
+The [reporting repair](docs/CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13)
+keeps seven specific stop causes through frame JSON and persisted notice/API
+diagnostics, preserves filtered window/URL candidates and private provider-stage/HRESULT/error
+details in the opt-in sensitive sink, and only publishes
+final inspected window-policy decisions. Existing historical rows are preserved.
+The old debug-only tree stop cause was absent from ordinary logs and was not
+written to the sensitive sink, so the exact historical cause remains unknown.
+That reporting-only candidate retained the original limits and unconditional
+incomplete-inspection rejection. The current rule-dependent admission contract
+is recorded above. A real-application regression from the recent traversal change
+remains a priority; synthetic tests do not establish useful real-window capture
+coverage.
+
+214 accessibility tests passed (23 live tests ignored), 48 scoped capture tests and
+14 notice-storage/API tests passed. All 58 focused status/notice UI tests, no-emit
+TypeScript and the 16-page frontend export passed. Sequential single-job
+release-local root and desktop builds passed, with zero external rebuilds.
+Artifact hashes and exact build results are recorded in the implementation note. No new
+capture, UIA provider inspection, deployment, restart, cleanup or firewall change
+was performed by this repair.
 
 ## Large clipboard input lag (2026-10-12)
 

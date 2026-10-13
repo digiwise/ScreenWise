@@ -8,8 +8,8 @@
 //! the focused window's tree and extract all visible text — matching macOS behavior.
 
 use super::{
-    AccessibilityTreeNode, NodeBounds, SkipReason, TreeSnapshot, TreeWalkResult, TreeWalkerConfig,
-    TreeWalkerPlatform,
+    AccessibilityFailure, AccessibilityTreeNode, NodeBounds, SkipReason, TreeSnapshot,
+    TreeWalkResult, TreeWalkerConfig, TreeWalkerPlatform,
 };
 use crate::events::AccessibilityNode;
 use crate::platform::windows_uia::{UiaContext, UiaLimits};
@@ -29,6 +29,23 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
 };
+
+fn native_window_title(hwnd: HWND) -> String {
+    unsafe {
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+fn native_policy_metadata_matches(
+    expected_app: Option<&str>,
+    expected_title: Option<&str>,
+    app: &str,
+    title: &str,
+) -> bool {
+    expected_app == Some(app) && expected_title == Some(title)
+}
 
 fn selected_tree_identity_matches(
     target: super::WindowsTreeTarget,
@@ -213,223 +230,366 @@ impl Drop for WindowsTreeWalker {
 impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
-
-        // Paired maximised-window capture supplies the exact bitmap owner.
-        // An invalid explicit target fails closed; it never follows new focus.
-        if self
-            .config
-            .windows_target
-            .is_some_and(|target| !selected_tree_identity_is_current(target))
-        {
-            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
-        }
-        let hwnd = match self.config.windows_target {
-            Some(target) => HWND(target.hwnd as *mut std::ffi::c_void),
-            None => unsafe { GetForegroundWindow() },
-        };
-        if hwnd == HWND::default() {
-            if self.config.monitor_width != 0.0 || self.config.monitor_height != 0.0 {
+        let mut stage = "target_identity";
+        let mut candidate_hwnd = None;
+        let mut candidate_pid = None;
+        let mut candidate_app = None;
+        let mut candidate_title = None;
+        let mut result = (|| -> Result<TreeWalkResult> {
+            // Paired maximised-window capture supplies the exact bitmap owner.
+            // An invalid explicit target fails closed; it never follows new focus.
+            if self
+                .config
+                .windows_target
+                .is_some_and(|target| !selected_tree_identity_is_current(target))
+            {
                 return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
             }
-            return Ok(TreeWalkResult::NotFound);
-        }
-
-        // Each capture worker owns one monitor. Never walk the global foreground
-        // window for another worker, or normalize its nodes against that window's
-        // monitor and then attach them to a different screenshot.
-        let monitor_rect = match scoped_monitor(&self.config, get_monitor_rect(hwnd)) {
-            Ok(rect) => rect,
-            Err(reason) => return Ok(TreeWalkResult::Skipped(reason)),
-        };
-
-        // Safety: single-threaded access guaranteed by walker thread design.
-        // Other-monitor workers avoid initializing UIA at all.
-        let uia = unsafe { self.ensure_init()? };
-
-        // Skip transient shell-internal windows (MSCTFIME UI, Shell_TrayWnd, CiceroUIWndFrame).
-        // On Windows 11 24H2+ a TSF/IME regression causes these explorer.exe-owned windows to
-        // steal foreground focus for ~10-50ms on every mouse click, producing spurious frames.
-        if crate::platform::windows::is_transient_shell_window(hwnd) {
-            debug!("a11y: skipped transient shell window class");
-            return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
-        }
-
-        // Get process info
-        let mut pid: u32 = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        if self.config.windows_target.is_some_and(|target| {
-            !selected_tree_identity_matches(target, hwnd.0 as isize, pid, true)
-        }) {
-            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
-        }
-        // Resolve logical app name — handles WebView2 and shell-hosted Edge.
-        let app_name = crate::platform::windows::get_effective_app_name(hwnd, pid);
-
-        // Skip excluded apps
-        let app_lower = app_name.to_lowercase();
-        if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
-            debug!(app = %app_name, pid, "a11y: skipped — hardcoded excluded app");
-            return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
-        }
-
-        // Get window title
-        let window_name = unsafe {
-            let mut buf = [0u16; 512];
-            let len = GetWindowTextW(hwnd, &mut buf);
-            String::from_utf16_lossy(&buf[..len as usize])
-        };
-
-        debug!(
-            app = %app_name,
-            pid,
-            "a11y: walk_focused_window — evaluating window"
-        );
-
-        // Skip incognito / private browsing windows (localized title check)
-        if self.config.ignore_incognito_windows && crate::incognito::is_title_private(&window_name)
-        {
-            debug!(app = %app_name, "a11y: skipped — incognito/private window");
-            return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
-        }
-
-        // Apply user-configured ignored windows. Supports both legacy
-        // unscoped patterns ("Slack") and scoped `App::Title` patterns.
-        let window_lower = window_name.to_lowercase();
-        let ignored_patterns = WindowPattern::parse_list(&self.config.ignored_windows);
-        let included_patterns = WindowPattern::parse_list(&self.config.included_windows);
-        if window_pattern::matches_any(&ignored_patterns, &app_lower, &window_lower) {
-            debug!(
-                app = %app_name,
-                "a11y: skipped — matched user ignored pattern"
-            );
-            return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
-        }
-
-        // Scoped includes act as per-app whitelists; other apps fall back to
-        // global semantics — see `window_pattern::passes_includes`.
-        if !window_pattern::passes_includes(&included_patterns, &app_lower, &window_lower) {
-            debug!(
-                app = %app_name,
-                "a11y: skipped — not in include list"
-            );
-            return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
-        }
-
-        debug!(app = %app_name, pid, "a11y: capturing window tree");
-
-        // Use adaptive budget overrides when set
-        let effective_timeout = self.config.effective_walk_timeout();
-        let effective_max_nodes = self.config.effective_max_nodes();
-
-        // Check timeout budget
-        if start.elapsed() >= effective_timeout {
-            return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete));
-        }
-
-        // Apply adaptive budgets before provider work, not after a subtree cache.
-        let root = match uia.capture_window_tree_bounded(
-            hwnd,
-            UiaLimits {
-                timeout: effective_timeout.saturating_sub(start.elapsed()),
-                nodes: effective_max_nodes,
-                depth: self.config.max_depth,
-                text_bytes: self.config.max_text_length.saturating_mul(4),
-            },
-        ) {
-            Ok(tree) => tree,
-            Err(_) => return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete)),
-        };
-
-        // Use the admitted capture monitor for normalizing element bounds.
-        // Window rect for the on-screen visibility check (issue #2436).
-        // Stored once per walk — GetWindowRect is cheap and the focused
-        // window doesn't move during the sub-second walk in practice.
-        let window_rect = get_window_rect(hwnd);
-
-        // Extract text from the tree (matching macOS text extraction behavior)
-        let mut text_buffer = String::with_capacity(4096);
-        let mut nodes = Vec::with_capacity(256);
-        let mut browser_url: Option<String> = None;
-        let mut hit_ignored_subtree = false;
-        extract_text_from_tree(
-            &root,
-            0,
-            self.config.max_depth,
-            &mut text_buffer,
-            &mut nodes,
-            &mut browser_url,
-            &monitor_rect,
-            &window_rect,
-            &ignored_patterns,
-            &app_lower,
-            &mut hit_ignored_subtree,
-        );
-
-        if hit_ignored_subtree {
-            debug!(
-                "skipping capture: accessibility subtree matched ignored window in app={}",
-                app_name
-            );
-            return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
-        }
-
-        // Don't bail on empty text — we still need the app_name and window_name
-        // for frame metadata. Electron apps (Discord, Slack, etc.) often return
-        // sparse accessibility text but the app/window detection already succeeded.
-
-        // Truncate if needed
-        if text_buffer.len() > self.config.max_text_length {
-            let mut end = self.config.max_text_length;
-            while end > 0 && !text_buffer.is_char_boundary(end) {
-                end -= 1;
+            let hwnd = match self.config.windows_target {
+                Some(target) => HWND(target.hwnd as *mut std::ffi::c_void),
+                None => unsafe { GetForegroundWindow() },
+            };
+            candidate_hwnd = Some(hwnd.0 as isize);
+            if hwnd == HWND::default() {
+                if self.config.monitor_width != 0.0 || self.config.monitor_height != 0.0 {
+                    return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+                }
+                return Ok(TreeWalkResult::NotFound);
             }
-            text_buffer.truncate(end);
-        }
 
-        let node_count = root.node_count();
-        // Focus or monitor ownership can change while a provider is being read.
-        // Discard the acquired tree instead of attaching stale text to a frame.
-        let identity_changed = match self.config.windows_target {
-            Some(target) => !selected_tree_identity_is_current(target),
-            None => (unsafe { GetForegroundWindow() }) != hwnd,
+            // Each capture worker owns one monitor. Never walk the global foreground
+            // window for another worker, or normalize its nodes against that window's
+            // monitor and then attach them to a different screenshot.
+            stage = "monitor_ownership";
+            let monitor_rect = match scoped_monitor(&self.config, get_monitor_rect(hwnd)) {
+                Ok(rect) => rect,
+                Err(reason) => return Ok(TreeWalkResult::Skipped(reason)),
+            };
+
+            stage = "window_policy";
+
+            // Skip transient shell-internal windows (MSCTFIME UI, Shell_TrayWnd, CiceroUIWndFrame).
+            // On Windows 11 24H2+ a TSF/IME regression causes these explorer.exe-owned windows to
+            // steal foreground focus for ~10-50ms on every mouse click, producing spurious frames.
+            if crate::platform::windows::is_transient_shell_window(hwnd) {
+                debug!("a11y: skipped transient shell window class");
+                return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
+            }
+
+            // Get process info
+            let mut pid: u32 = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            candidate_pid = Some(pid);
+            if self.config.windows_target.is_some_and(|target| {
+                !selected_tree_identity_matches(target, hwnd.0 as isize, pid, true)
+            }) {
+                return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+            }
+            // Resolve logical app name — handles WebView2 and shell-hosted Edge.
+            let app_name = crate::platform::windows::get_effective_app_name(hwnd, pid);
+            candidate_app = Some(app_name.clone());
+
+            // Skip excluded apps
+            let app_lower = app_name.to_lowercase();
+            if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
+                debug!(app = %app_name, pid, "a11y: skipped — hardcoded excluded app");
+                return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
+            }
+
+            // Get window title
+            let window_name = native_window_title(hwnd);
+
+            candidate_title = Some(window_name.clone());
+            debug!(
+                app = %app_name,
+                pid,
+                "a11y: walk_focused_window — evaluating window"
+            );
+
+            // Skip incognito / private browsing windows (localized title check)
+            if self.config.ignore_incognito_windows
+                && crate::incognito::is_title_private(&window_name)
+            {
+                debug!(app = %app_name, "a11y: skipped — incognito/private window");
+                return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
+            }
+
+            // Apply user-configured ignored windows. Supports both legacy
+            // unscoped patterns ("Slack") and scoped `App::Title` patterns.
+            let window_lower = window_name.to_lowercase();
+            let ignored_patterns = WindowPattern::parse_list(&self.config.ignored_windows);
+            let included_patterns = WindowPattern::parse_list(&self.config.included_windows);
+            if window_pattern::matches_any(&ignored_patterns, &app_lower, &window_lower) {
+                debug!(
+                    app = %app_name,
+                    "a11y: skipped — matched user ignored pattern"
+                );
+                return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
+            }
+
+            // Scoped includes act as per-app whitelists; other apps fall back to
+            // global semantics — see `window_pattern::passes_includes`.
+            if !window_pattern::passes_includes(&included_patterns, &app_lower, &window_lower) {
+                debug!(
+                    app = %app_name,
+                    "a11y: skipped — not in include list"
+                );
+                return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
+            }
+
+            // Native privacy checks do not depend on UIA initialization or text retrieval.
+            stage = "uia_initialization";
+            let uia = match unsafe { self.ensure_init() } {
+                Ok(uia) => uia,
+                Err(error) => {
+                    screenpipe_config::sensitive_debug::record(
+                        "uia_initialization_failure",
+                        || {
+                            serde_json::json!({"stage":stage, "error":format!("{error:#}"),
+                            "hwnd":candidate_hwnd, "pid":pid, "app":app_name,
+                            "window_title":window_name})
+                        },
+                    );
+                    return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(
+                        AccessibilityFailure::after_native_policy(
+                            screenpipe_config::capture_diagnostics::AccessibilityStopReason::Initialization,
+                            &self.config, app_name, window_name,
+                        ),
+                    )));
+                }
+            };
+            debug!(app = %app_name, pid, "a11y: capturing window tree");
+
+            // Use adaptive budget overrides when set
+            let effective_timeout = self.config.effective_walk_timeout();
+            let effective_max_nodes = self.config.effective_max_nodes();
+
+            stage = "pre_walk_budget";
+            // Check timeout budget
+            if start.elapsed() >= effective_timeout {
+                return Ok(TreeWalkResult::Skipped(
+                    SkipReason::AccessibilityRetrievalFailed(AccessibilityFailure::after_native_policy(
+                        screenpipe_config::capture_diagnostics::AccessibilityStopReason::Timeout,
+                        &self.config, app_name, window_name,
+                    )),
+                ));
+            }
+
+            // Apply adaptive budgets before provider work, not after a subtree cache.
+            stage = "bounded_tree_walk";
+            let root = match uia.capture_window_tree_bounded(
+                hwnd,
+                UiaLimits {
+                    timeout: effective_timeout.saturating_sub(start.elapsed()),
+                    nodes: effective_max_nodes,
+                    depth: self.config.max_depth,
+                    text_bytes: self.config.max_text_length.saturating_mul(4),
+                },
+            ) {
+                Ok(tree) => tree,
+                Err(reason) => {
+                    return Ok(TreeWalkResult::Skipped(
+                        SkipReason::AccessibilityRetrievalFailed(
+                            AccessibilityFailure::after_native_policy(
+                                reason,
+                                &self.config,
+                                app_name,
+                                window_name,
+                            ),
+                        ),
+                    ))
+                }
+            };
+
+            // Use the admitted capture monitor for normalizing element bounds.
+            // Window rect for the on-screen visibility check (issue #2436).
+            // Stored once per walk — GetWindowRect is cheap and the focused
+            // window doesn't move during the sub-second walk in practice.
+            let window_rect = get_window_rect(hwnd);
+
+            // Extract text from the tree (matching macOS text extraction behavior)
+            let mut text_buffer = String::with_capacity(4096);
+            let mut nodes = Vec::with_capacity(256);
+            let mut browser_url: Option<String> = None;
+            let mut hit_ignored_subtree = false;
+            stage = "subtree_policy";
+            extract_text_from_tree(
+                &root,
+                0,
+                self.config.max_depth,
+                &mut text_buffer,
+                &mut nodes,
+                &mut browser_url,
+                &monitor_rect,
+                &window_rect,
+                &ignored_patterns,
+                &app_lower,
+                &mut hit_ignored_subtree,
+            );
+
+            if hit_ignored_subtree {
+                debug!(
+                    "skipping capture: accessibility subtree matched ignored window in app={}",
+                    app_name
+                );
+                return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
+            }
+
+            // Don't bail on empty text — we still need the app_name and window_name
+            // for frame metadata. Electron apps (Discord, Slack, etc.) often return
+            // sparse accessibility text but the app/window detection already succeeded.
+
+            // Truncate if needed
+            if text_buffer.len() > self.config.max_text_length {
+                let mut end = self.config.max_text_length;
+                while end > 0 && !text_buffer.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text_buffer.truncate(end);
+            }
+
+            let node_count = root.node_count();
+            // Focus or monitor ownership can change while a provider is being read.
+            // Discard the acquired tree instead of attaching stale text to a frame.
+            stage = "post_walk_identity";
+            let identity_changed = match self.config.windows_target {
+                Some(target) => !selected_tree_identity_is_current(target),
+                None => (unsafe { GetForegroundWindow() }) != hwnd,
+            };
+            if identity_changed || get_monitor_rect(hwnd) != monitor_rect {
+                return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+            }
+            let content_hash = TreeSnapshot::compute_hash(&text_buffer);
+            let simhash = TreeSnapshot::compute_simhash(&text_buffer);
+            let walk_duration = start.elapsed();
+
+            debug!(
+                "tree walk: app={}, nodes={}, text_len={}, duration={:?}",
+                app_name,
+                node_count,
+                text_buffer.len(),
+                walk_duration
+            );
+
+            // Only complete, bounded UIA trees reach this point.
+            // Per-app document_path resolution from on-disk state files
+            // (Obsidian config + VS Code-fork state.vscdb). Returns None
+            // for any unknown app or any failure — never panics.
+            let document_path =
+                super::electron_docs::resolve_electron_doc_path(&app_name.to_lowercase());
+            Ok(TreeWalkResult::Found(TreeSnapshot {
+                app_name,
+                window_name,
+                text_content: text_buffer,
+                nodes,
+                browser_url,
+                document_path,
+                timestamp: Utc::now(),
+                node_count,
+                walk_duration,
+                content_hash,
+                simhash,
+                truncated: false,
+                truncation_reason: super::TruncationReason::None,
+                max_depth_reached: 0,
+            }))
+        })();
+        // A failed retrieval cannot grant admission using stale native policy evidence.
+        if matches!(
+            &result,
+            Ok(TreeWalkResult::Skipped(
+                SkipReason::AccessibilityRetrievalFailed(_)
+            ))
+        ) {
+            let target = super::WindowsTreeTarget {
+                hwnd: candidate_hwnd.unwrap_or_default(),
+                process_id: candidate_pid.unwrap_or_default(),
+            };
+            let identity_current = selected_tree_identity_is_current(target);
+            let fresh_app = if identity_current {
+                Some(crate::platform::windows::get_effective_app_name(
+                    HWND(target.hwnd as *mut _),
+                    target.process_id,
+                ))
+            } else {
+                None
+            };
+            let fresh_title = if identity_current {
+                Some(native_window_title(HWND(target.hwnd as *mut _)))
+            } else {
+                None
+            };
+            let metadata_current = match (&fresh_app, &fresh_title) {
+                (Some(app), Some(title)) => native_policy_metadata_matches(
+                    candidate_app.as_deref(),
+                    candidate_title.as_deref(),
+                    app,
+                    title,
+                ),
+                _ => false,
+            };
+            let focus_changed = self.config.windows_target.is_none()
+                && (unsafe { GetForegroundWindow() }).0 as isize != target.hwnd;
+            let identity_current = identity_current && selected_tree_identity_is_current(target);
+            screenpipe_config::sensitive_debug::record("uia_native_policy_recheck", || {
+                serde_json::json!({"hwnd":target.hwnd,"pid":target.process_id,
+                    "focus_changed":focus_changed,"identity_current":identity_current,
+                    "metadata_current":metadata_current,"fresh_app":fresh_app,"fresh_title":fresh_title})
+            });
+            if focus_changed
+                || !identity_current
+                || !metadata_current
+                || scoped_monitor(&self.config, get_monitor_rect(HWND(target.hwnd as *mut _)))
+                    .is_err()
+            {
+                if let Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(
+                    failure,
+                ))) = &mut result
+                {
+                    use screenpipe_config::capture_diagnostics::{
+                        RuleKind, RuleOrigin, RuleReference,
+                    };
+                    failure.unresolved_rules.push(RuleReference {
+                        origin: RuleOrigin::Builtin,
+                        index: 0,
+                        kind: RuleKind::NativeWindowPolicy,
+                    });
+                }
+            }
+        }
+        // These candidates may be withheld from ordinary frame/status metadata.
+        // Preserve already-sampled identity and policy context only in the opt-in sink.
+        let refusal = match &result {
+            Ok(TreeWalkResult::Skipped(reason)) => Some((reason.to_string(), None)),
+            Err(error) => Some((
+                "uia_inspection_error".to_owned(),
+                Some(format!("{error:#}")),
+            )),
+            _ => None,
         };
-        if identity_changed || get_monitor_rect(hwnd) != monitor_rect {
-            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+        if let Some((reason, error)) = refusal {
+            screenpipe_config::sensitive_debug::record("uia_inspection_refusal", || {
+                serde_json::json!({
+                    "reason":reason, "stage":stage, "error":error,
+                    "elapsed_ms":start.elapsed().as_millis(),
+                    "candidate":{"hwnd":candidate_hwnd,"pid":candidate_pid,
+                        "app":candidate_app,"window_title":candidate_title},
+                    "selected_target":self.config.windows_target.map(|target| serde_json::json!({
+                        "hwnd":target.hwnd,"pid":target.process_id})),
+                    "monitor":{"x":self.config.monitor_x,"y":self.config.monitor_y,
+                        "width":self.config.monitor_width,"height":self.config.monitor_height},
+                    "configured_limits":{"timeout_ms":self.config.effective_walk_timeout().as_millis(),
+                        "nodes":self.config.effective_max_nodes(),"depth":self.config.max_depth,
+                        "text_bytes":self.config.max_text_length.saturating_mul(4)},
+                    "policy":{"ignore_incognito":self.config.ignore_incognito_windows,
+                        "ignored_windows":self.config.ignored_windows.iter().take(64).collect::<Vec<_>>(),
+                            "included_windows":self.config.included_windows.iter().take(64).collect::<Vec<_>>(),
+                            "ignored_count":self.config.ignored_windows.len(),"included_count":self.config.included_windows.len(),
+                            "patterns_truncated":self.config.ignored_windows.len()>64 || self.config.included_windows.len()>64}
+                })
+            });
         }
-        let content_hash = TreeSnapshot::compute_hash(&text_buffer);
-        let simhash = TreeSnapshot::compute_simhash(&text_buffer);
-        let walk_duration = start.elapsed();
-
-        debug!(
-            "tree walk: app={}, nodes={}, text_len={}, duration={:?}",
-            app_name,
-            node_count,
-            text_buffer.len(),
-            walk_duration
-        );
-
-        // Only complete, bounded UIA trees reach this point.
-        // Per-app document_path resolution from on-disk state files
-        // (Obsidian config + VS Code-fork state.vscdb). Returns None
-        // for any unknown app or any failure — never panics.
-        let document_path =
-            super::electron_docs::resolve_electron_doc_path(&app_name.to_lowercase());
-        Ok(TreeWalkResult::Found(TreeSnapshot {
-            app_name,
-            window_name,
-            text_content: text_buffer,
-            nodes,
-            browser_url,
-            document_path,
-            timestamp: Utc::now(),
-            node_count,
-            walk_duration,
-            content_hash,
-            simhash,
-            truncated: false,
-            truncation_reason: super::TruncationReason::None,
-            max_depth_reached: 0,
-        }))
+        result
     }
 }
 
@@ -1436,4 +1596,39 @@ mod tests {
         assert!(is_title_private("New Tab - Google Chrome (Incognito)"));
         assert!(!is_title_private("Calculator"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_retrieval_cannot_reuse_changed_native_policy_metadata() {
+    assert!(native_policy_metadata_matches(
+        Some("notepad.exe"),
+        Some("ordinary"),
+        "notepad.exe",
+        "ordinary"
+    ));
+    assert!(!native_policy_metadata_matches(
+        Some("notepad.exe"),
+        Some("ordinary"),
+        "chrome.exe",
+        "ordinary"
+    ));
+    assert!(!native_policy_metadata_matches(
+        Some("chrome.exe"),
+        Some("ordinary"),
+        "chrome.exe",
+        "InPrivate"
+    ));
+    assert!(!native_policy_metadata_matches(
+        None,
+        Some("ordinary"),
+        "notepad.exe",
+        "ordinary"
+    ));
+    assert!(!native_policy_metadata_matches(
+        Some("notepad.exe"),
+        None,
+        "notepad.exe",
+        "ordinary"
+    ));
 }

@@ -6,6 +6,39 @@ import { parseRecordingStatus, parseLiveStatus, evidenceAge, recordingDeviceScop
 const observation = { channel: "microphone", source: "audio_device", scope: { device: 3 }, condition: "silent", reasons: ["silent_input"], rules: [], since_ms: 100, observed_at_ms: 200 };
 const response = (row = observation) => ({ active_intervals: [row], persistence_degraded: false });
 describe("recording status", () => {
+  it.each(["uia_walk_timeout", "uia_node_limit", "uia_depth_limit", "uia_property_text_limit", "uia_aggregate_text_limit", "uia_provider_failure", "uia_backoff", "uia_initialization_failed"])("reports processing despite %s when independent privacy checks passed", (reason) => {
+    const row = parseRecordingStatus({ active_intervals: [{ ...observation, channel: "screen", source: "window_policy", condition: "admitted", reasons: [reason, "accessibility_processing_continues"] }], persistence_degraded: false }).rows[0];
+    expect(recordingObservationLabel(row)).toContain("Screenshot storage and OCR proceeding despite accessibility retrieval failure");
+    expect(recordingPolicyExplanation(row)).toContain("privacy checks passed");
+    expect(recordingObservationLabel(row)).not.toContain("withheld");
+    expect(row.reasons).toContain(reason.replaceAll("_", " "));
+  });
+  it.each([["ignored_windows", 3, "uia_subtree_exclusion", "Nested window/document exclusion"], ["ignored_urls", 2, "uia_document_url", "Accessibility document URL exclusion"], ["builtin", 0, "native_window_policy", "Current window identity/title"], ["builtin", 0, "drm_url", "Protected-content document URL"]])("identifies unresolved %s rules blocking storage and OCR", (origin, index, kind, detail) => {
+    const row = parseRecordingStatus({ active_intervals: [{ ...observation, channel: "ocr", source: "window_policy", condition: "failed", reasons: ["uia_provider_failure", "accessibility_privacy_unverified"], rules: [{ origin, index, kind, text: "private pattern" }] }], persistence_degraded: false }).rows[0];
+    expect(recordingObservationLabel(row)).toContain("Screenshot storage and OCR withheld");
+    expect(recordingPolicyExplanation(row)).toContain(String(detail));
+    expect(recordingPolicyExplanation(row)).toContain(origin + "[" + index + "]");
+    expect(JSON.stringify(row)).not.toContain("private pattern");
+  });
+  it("describes the screen focus-policy pause without implying hardware inactivity", () => {
+    const row = parseRecordingStatus({ active_intervals: [{ ...observation, channel: "screen", source: "user_preference", condition: "suppressed", reasons: ["monitor_inactive"] }], persistence_degraded: false }).rows[0];
+    expect(recordingObservationLabel(row)).toBe("Paused — waiting for focus");
+    expect(row.reasons).toEqual(["monitor inactive"]);
+  });
+  it("describes accessibility monitor ownership without asserting a screen capture pause", () => {
+    const row = parseRecordingStatus({ active_intervals: [{ ...observation, channel: "accessibility", source: "window_policy", condition: "suppressed", reasons: ["monitor_inactive"] }], persistence_degraded: false }).rows[0];
+    expect(recordingObservationLabel(row)).toBe("Foreground window is on another display");
+    expect(row.reasons).toEqual(["monitor inactive"]);
+  });
+  it.each([["uia_walk_timeout","deadline exceeded"],["uia_node_limit","node limit reached"],["uia_depth_limit","depth limit reached"],["uia_property_text_limit","property text limit reached"],["uia_aggregate_text_limit","aggregate text limit reached"],["uia_provider_failure","provider request failed"],["uia_backoff","provider retry cooldown"]])("explains %s without calling it an exclusion", (reason, detail) => {
+    const row = parseRecordingStatus({ active_intervals: [{ ...observation, channel: "screen", source: "window_policy", condition: "failed", reasons: [reason] }], persistence_degraded: false }).rows[0];
+    expect(recordingObservationLabel(row)).toBe(`Failed — Accessibility inspection: ${detail}`);
+    expect(row.reasons).not.toContain("no safe window");
+  });
+  it("surfaces the inspection failure before background policy context", () => {
+    const row = parseRecordingStatus({ active_intervals: [{ ...observation, channel: "screen", source: "window_policy", condition: "failed", reasons: ["excluded_background", "window_metadata_unavailable", "uia_walk_timeout"] }], persistence_degraded: false }).rows[0];
+    expect(recordingObservationLabel(row)).toBe("Failed — Accessibility inspection: deadline exceeded");
+  });
   it("distinguishes deliberate maximised-window scoping from an exclusion", () => {
     const row = parseRecordingStatus({ ...response(), active_intervals: [{ ...observation, channel: "screen", source: "window_policy", condition: "active_window_only", reasons: ["maximised_window_only"] }] }).rows[0];
     expect(recordingObservationLabel(row)).toBe("Maximised window only");

@@ -17,6 +17,8 @@ const FRAME_CAPTURE_NOTICES: Readonly<Record<string, string>> = {
 		"Frame unavailable because monitor image acquisition failed.",
 	"CAPTURE FAILED — ACTIVE-WINDOW ACQUISITION":
 		"Frame unavailable because active-window image acquisition failed.",
+	"CAPTURE FAILED — ACCESSIBILITY INSPECTION":
+		"Screenshot storage and OCR withheld after accessibility retrieval failed. Recording status identifies the failure cause and unresolved privacy checks.",
 	"CAPTURE FAILED — POST-CAPTURE PRIVACY EVALUATION":
 		"Frame withheld because the follow-up privacy check failed.",
 };

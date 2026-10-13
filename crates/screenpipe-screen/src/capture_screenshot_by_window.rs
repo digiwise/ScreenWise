@@ -1024,6 +1024,7 @@ pub enum WindowsCaptureFailureStage {
     MonitorAcquisition,
     ActiveWindowAcquisition,
     PostCapturePrivacyEvaluation,
+    AccessibilityInspection,
 }
 
 #[cfg(target_os = "windows")]
@@ -1034,6 +1035,7 @@ impl fmt::Display for WindowsCaptureFailureStage {
             Self::MonitorAcquisition => "monitor acquisition",
             Self::ActiveWindowAcquisition => "active-window acquisition",
             Self::PostCapturePrivacyEvaluation => "post-capture privacy evaluation",
+            Self::AccessibilityInspection => "accessibility inspection",
         })
     }
 }
@@ -1087,6 +1089,9 @@ impl WindowsCaptureOutcome {
                 WindowsCaptureFailureStage::PostCapturePrivacyEvaluation => {
                     "CAPTURE FAILED — POST-CAPTURE PRIVACY EVALUATION"
                 }
+                WindowsCaptureFailureStage::AccessibilityInspection => {
+                    "CAPTURE FAILED — ACCESSIBILITY INSPECTION"
+                }
             }),
         }
     }
@@ -1117,6 +1122,8 @@ pub struct WindowsCapturePrivacy {
     pub blockers: Vec<WindowsCaptureBlocker>,
     pub rule_matches: Vec<WindowsCaptureRule>,
     pub blockers_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accessibility: Option<WindowsAccessibilityDecision>,
     pub foreground_monitor: Option<String>,
     pub is_active_monitor: Option<bool>,
     pub foreground_monitor_changed: bool,
@@ -1124,6 +1131,15 @@ pub struct WindowsCapturePrivacy {
     /// HWND/PID and geometry are not added to persisted diagnostics.
     #[serde(skip)]
     pub selected_window: Option<WindowsCaptureTarget>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WindowsAccessibilityDecision {
+    pub cause: &'static str,
+    pub processing: &'static str,
+    pub unresolved_rules: Vec<screenpipe_config::capture_diagnostics::RuleReference>,
+    pub rules_truncated: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1154,6 +1170,7 @@ impl Default for WindowsCapturePrivacy {
             blockers: Vec::new(),
             rule_matches: Vec::new(),
             blockers_truncated: false,
+            accessibility: None,
             foreground_monitor: None,
             is_active_monitor: None,
             foreground_monitor_changed: false,
@@ -1178,6 +1195,13 @@ impl WindowsCapturePrivacy {
     }
 
     pub fn with_outcome(mut self, outcome: WindowsCaptureOutcome) -> Self {
+        if outcome.is_placeholder() {
+            if let Some(failure) = &mut self.accessibility {
+                if failure.processing == "proceeding" {
+                    failure.processing = "withheld_by_other_check";
+                }
+            }
+        }
         (self.outcome, self.reason) = match outcome {
             WindowsCaptureOutcome::FullMonitor => ("full_monitor", None),
             WindowsCaptureOutcome::BackgroundRedacted => (
@@ -1208,6 +1232,9 @@ impl WindowsCapturePrivacy {
                     }
                     WindowsCaptureFailureStage::PostCapturePrivacyEvaluation => {
                         "post_capture_privacy_evaluation"
+                    }
+                    WindowsCaptureFailureStage::AccessibilityInspection => {
+                        "accessibility_inspection"
                     }
                 }),
             ),
@@ -1898,6 +1925,25 @@ pub fn verify_windows_capture_target(
     if !selected_capture_matches(Some(target), evaluated.privacy.selected_window)
         || !matches!(evaluated.plan, WindowsMonitorCapturePlan::ActiveWindow(_))
     {
+        screenpipe_config::sensitive_debug::record("capture_target_check_failed", || {
+            let target_metadata = |target: WindowsCaptureTarget| {
+                serde_json::json!({
+                "hwnd":target.hwnd,"pid":target.process_id,"monitor":target.monitor_id,
+                "bounds":{"x":target.bounds.x,"y":target.bounds.y,
+                    "width":target.bounds.width,"height":target.bounds.height}})
+            };
+            let plan = match &evaluated.plan {
+                WindowsMonitorCapturePlan::FullMonitor => "full_monitor",
+                WindowsMonitorCapturePlan::ActiveWindow(_) => "active_window",
+                WindowsMonitorCapturePlan::Redacted(_) => "redacted",
+            };
+            serde_json::json!({"reason":if !selected_capture_matches(Some(target), evaluated.privacy.selected_window) { "selected_target_changed" } else { "target_admission_changed" },
+                "selection_changed":!selected_capture_matches(Some(target),evaluated.privacy.selected_window),
+                "admission_changed":!matches!(evaluated.plan,WindowsMonitorCapturePlan::ActiveWindow(_)),
+                "stage":"verify_windows_capture_target",
+                "monitor":monitor.id(),"expected_target":target_metadata(target),"current_privacy":evaluated.privacy,
+                "current_target":evaluated.privacy.selected_window.map(target_metadata),"current_plan":plan})
+        });
         return Err(std::io::Error::other("selected window or its admission changed").into());
     }
     Ok(evaluated.privacy)
@@ -1940,7 +1986,9 @@ pub fn evaluate_windows_monitor_capture(
         height: monitor.height(),
     };
     let mut runtime_windows = Vec::new();
-    let selected_window = sample_maximised_target(monitor)?;
+    let selected_window = sample_maximised_target(monitor).inspect_err(|error| {
+        sensitive_capture_error("window_selection", "sample_maximised_target", None, error)
+    })?;
     let foreground = sample_windows_foreground();
     let mut privacy = WindowsCapturePrivacy::default()
         .with_foreground_monitor(foreground.and_then(|sample| sample.monitor), monitor.id());

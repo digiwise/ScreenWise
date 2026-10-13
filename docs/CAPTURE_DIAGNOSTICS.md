@@ -69,6 +69,14 @@ Hardware labels, private paths, titles, URLs and captured content are absent fro
 generic logs and notice messages. Verified excluded executable basenames appear
 only in structured local activity metadata requiring authenticated access.
 
+Windows paired capture now publishes the final inspected WindowPolicy decision.
+Preliminary bitmap admission cannot reopen an unchanged failed UIA interval.
+Retrieval failure is distinct from unresolved privacy rules: independently admitted
+images continue storage/OCR; applicable unresolved tree checks withhold images.
+Cause, disposition and bounded unresolved rule references survive in per-frame
+metadata and typed notices. Specific UIA stop causes survive in persisted diagnostics; see
+[UIA failure reporting](CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13).
+
 Each changed condition/reason/rule records `observed_at_ms`, `since_ms` and
 `previous_since_ms`, in UTC epoch milliseconds. The next record for the same key
 closes the previous observed segment at its observation time. Subtraction gives

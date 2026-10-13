@@ -1,6 +1,8 @@
 # ScreenWise Windows build notes
 
-The latest build work is the [bounded UIA and clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
+The current candidate separates [accessibility retrieval from privacy verification](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13).
+The last owner-deployed build is the [UIA reporting and private diagnostics repair](docs/CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13).
+Earlier builds include the [bounded UIA and clipboard input lag repair](docs/LARGE_PASTE_INPUT_LAG.md).
 The preceding candidate includes the [disconnected-monitor repair](docs/DISCONNECTED_MONITORS.md).
 The previous deployed candidate is [capture fixes](docs/CAPTURE_FIX_HANDOFF.md),
 based on the existing graceful deployment implementation. Earlier release entries
@@ -20,15 +22,70 @@ release workflow without installing dependencies or starting the bridge. Pi's
 and remains in scope. Codex/Claude Code must explain a concrete reason and ask the
 owner before revisiting this policy; see [AGENTS.md](AGENTS.md#external-client-mcp-server--parked-2026-10-09).
 
+## Accessibility retrieval and privacy admission (2026-10-13)
+
+The current candidate separates missing accessibility data from unresolved privacy
+verification. Native window checks precede UIA initialization and are rechecked
+when retrieval fails. Screen/OCR admission proceeds when no applicable check
+needs the missing tree; nested window/document exclusions, document URL rules,
+protected-content URL dependencies and unverified native metadata remain
+fail-closed. Exact causes and bounded unresolved rule references survive in
+frame JSON, status and stored notices; private diagnostics preserve detailed
+provider stages/errors and native decision context. See
+[the rule applicability and reporting contract](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13).
+
+RootFmt, 219 accessibility tests (23 live tests ignored), 12 shared diagnostic
+tests, 88 engine capture tests, 14 notice persistence/API tests and 72 focused
+frontend tests passed. TypeScript no-emit checking and the 16-page static frontend
+export passed; the existing unpdf import.meta build warning remains.
+Sequential single-job, reduced-priority release-local builds passed: recorder
+7m14s (785 external reused/zero rebuilt), desktop 15m42s (1,080 external
+reused/zero rebuilt). The inert recorder --version smoke passed. Both Rust
+lockfiles are unchanged. Earlier records below are historical checkpoints,
+including the owner-interrupted build.
+No new capture, desktop UIA/input inspection, deployment or firewall change is
+included. The brief startup disconnected-monitor report and live provider behavior
+remain outside synthetic validation.
+
+## Deployed UIA timeout diagnosis (2026-10-13)
+
+The owner deployed the reporting candidate; read-only deployment metadata matched
+its recorded GUI hash. Fresh diagnostics exposed native provider timeouts and
+invalid sub-50-ms timeout settings. The [source follow-up](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13)
+corrects native timeout classification and refuses another request when its
+minimum native wait exceeds remaining budget. Root formatting and 33 focused
+UIA tests passed (23 live tests ignored). At that checkpoint the source fix had no
+new linked GUI/recorder candidate. The current candidate includes it; no deployment
+is included in this change. Capture coverage and the brief startup
+disconnected-status report remain unresolved.
+
+## UIA reporting follow-up (2026-10-13)
+
+The [diagnostic follow-up](docs/CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13)
+preserves specific UIA traversal stop causes and prevents preliminary bitmap
+permission from repeatedly reopening failed window-policy intervals. The original
+bounded candidate's deployed copy was verified by metadata and matching GUI hash.
+The owner subsequently deployed the reporting candidate; real-application
+capture coverage and the precise historical traversal failure remain unresolved.
+
+RootFmt, 214 accessibility tests (23 live ignored), 48 scoped capture tests,
+14 notice-storage/API tests, 58 focused UI tests, no-emit TypeScript, frontend
+export and inert CLI smoke passed. Sequential single-job release-local builds
+passed: root 9m08s (785 external reused/zero rebuilt), desktop 15m24s (1,080
+external reused/zero rebuilt). Artifact hashes and private evidence identifiers
+are recorded in the follow-up. Both lockfiles are unchanged. No recording,
+live UIA inspection, deployment, restart, cleanup or firewall change occurred.
+
 ## Bounded UIA work (2026-10-13)
 
 UIA trees and focused/click elements use single-element cache requests, with
 native connection/transaction waits capped at 50 ms, a 250 ms walk deadline,
 node/depth/decoded-text limits and a one-second failure cooldown. Incomplete
-inspection withholds the frame before persistence/OCR; oversized or slow windows
-may therefore lose captures. Password checks remain fail closed. Windows timeouts
-limit client waits, without promising provider cancellation or a hard total
-wall-clock limit. The [follow-up](docs/LARGE_PASTE_INPUT_LAG.md#bounded-uia-follow-up-2026-10-13)
+inspection in that original candidate withheld the frame before persistence/OCR.
+The current candidate instead evaluates the unresolved privacy rules described
+above; oversized or slow windows may still lose captures when a rule needs UIA.
+Password checks remain fail closed. Windows timeouts limit client waits, without
+promising provider cancellation or a hard total wall-clock limit. The [follow-up](docs/LARGE_PASTE_INPUT_LAG.md#bounded-uia-follow-up-2026-10-13)
 records the exact behavior and remaining Firefox/Excel attribution limits.
 
 RootFmt, 213 accessibility tests (23 live ignored), 45 scoped engine capture tests

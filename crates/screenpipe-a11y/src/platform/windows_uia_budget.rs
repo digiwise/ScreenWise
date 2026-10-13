@@ -23,6 +23,14 @@ pub(crate) struct UiaLimits {
 }
 
 impl UiaLimits {
+    pub fn clamped(self) -> Self {
+        Self {
+            timeout: self.timeout.min(MAX_WALK_TIME),
+            nodes: self.nodes.min(MAX_NODES),
+            depth: self.depth.min(MAX_DEPTH),
+            text_bytes: self.text_bytes.min(MAX_TEXT_BYTES),
+        }
+    }
     pub fn tree(nodes: usize) -> Self {
         Self {
             timeout: MAX_WALK_TIME,
@@ -33,15 +41,7 @@ impl UiaLimits {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UiaStop {
-    Timeout,
-    Nodes,
-    Depth,
-    Text,
-    Provider,
-    Backoff,
-}
+pub(crate) use screenpipe_config::capture_diagnostics::AccessibilityStopReason as UiaStop;
 
 #[derive(Default)]
 pub(crate) struct ProviderBackoff(Cell<Option<Instant>>);
@@ -64,21 +64,18 @@ pub(crate) struct WalkBudget {
     nodes: usize,
     text_bytes: usize,
     stop: Option<UiaStop>,
+    deepest_attempted: Cell<usize>,
 }
 
 impl WalkBudget {
     pub fn new(limits: UiaLimits) -> Self {
         Self {
             start: Instant::now(),
-            limits: UiaLimits {
-                timeout: limits.timeout.min(MAX_WALK_TIME),
-                nodes: limits.nodes.min(MAX_NODES),
-                depth: limits.depth.min(MAX_DEPTH),
-                text_bytes: limits.text_bytes.min(MAX_TEXT_BYTES),
-            },
+            limits: limits.clamped(),
             nodes: 0,
             text_bytes: 0,
             stop: None,
+            deepest_attempted: Cell::new(0),
         }
     }
 
@@ -93,13 +90,17 @@ impl WalkBudget {
             .timeout
             .checked_sub(self.start.elapsed())
             .ok_or(UiaStop::Timeout)?;
-        if remaining.is_zero() {
+        // Windows rejects both UIA timeout setters below 50 ms. Do not
+        // start another request when its minimum wait exceeds our deadline.
+        if remaining < Duration::from_millis(PROVIDER_TIMEOUT_MS as u64) {
             return Err(UiaStop::Timeout);
         }
-        Ok(remaining.as_millis().clamp(1, PROVIDER_TIMEOUT_MS as u128) as u32)
+        Ok(PROVIDER_TIMEOUT_MS)
     }
 
     fn admit_node(&self, depth: usize) -> Result<(), UiaStop> {
+        self.deepest_attempted
+            .set(self.deepest_attempted.get().max(depth));
         self.request_timeout()?;
         if self.nodes >= self.limits.nodes {
             return Err(UiaStop::Nodes);
@@ -116,16 +117,17 @@ impl WalkBudget {
         if utf16.is_empty() || self.stop.is_some() {
             return None;
         }
-        let available = self
-            .limits
-            .text_bytes
-            .saturating_sub(self.text_bytes)
-            .min(MAX_PROPERTY_BYTES);
+        let remaining = self.limits.text_bytes.saturating_sub(self.text_bytes);
+        let available = remaining.min(MAX_PROPERTY_BYTES);
         let mut text = String::with_capacity(available.min(utf16.len()));
         for decoded in char::decode_utf16(utf16.iter().copied()) {
             let ch = decoded.unwrap_or(char::REPLACEMENT_CHARACTER);
             if text.len() + ch.len_utf8() > available {
-                self.stop = Some(UiaStop::Text);
+                self.stop = Some(if remaining < MAX_PROPERTY_BYTES {
+                    UiaStop::AggregateText
+                } else {
+                    UiaStop::PropertyText
+                });
                 break;
             }
             text.push(ch);
@@ -161,9 +163,19 @@ pub(crate) fn walk(
     limits: UiaLimits,
 ) -> Result<AccessibilityNode, UiaStop> {
     let mut budget = WalkBudget::new(limits);
-    budget.admit_node(0)?;
-    let root = provider.root(budget.request_timeout()?)?;
-    visit(provider, &root, 0, &mut budget)
+    let result = (|| {
+        budget.admit_node(0)?;
+        let root = provider.root(budget.request_timeout()?)?;
+        visit(provider, &root, 0, &mut budget)
+    })();
+    if let Err(reason) = result {
+        screenpipe_config::sensitive_debug::record("uia_walk_progress", || {
+            serde_json::json!({"reason":reason.code(),"visited_nodes":budget.nodes,
+                "decoded_text_bytes":budget.text_bytes,"deepest_attempted":budget.deepest_attempted.get(),
+                "elapsed_ms":budget.start.elapsed().as_millis()})
+        });
+    }
+    result
 }
 
 fn visit<P: TreeProvider>(
@@ -337,7 +349,7 @@ mod tests {
         };
         assert_eq!(
             walk(&provider, UiaLimits::tree(100)).unwrap_err(),
-            UiaStop::Text
+            UiaStop::PropertyText
         );
         assert_eq!(provider.calls.borrow().len(), 1);
     }
@@ -360,15 +372,23 @@ mod tests {
             "é"
         );
         assert_eq!(budget.text_bytes, 8);
-        assert_eq!(budget.request_timeout(), Err(UiaStop::Text));
+        assert_eq!(budget.request_timeout(), Err(UiaStop::AggregateText));
     }
     #[test]
-    fn remaining_timeout_never_rounds_to_zero_or_exceeds_provider_cap() {
-        let budget = WalkBudget::new(UiaLimits {
-            timeout: Duration::from_millis(5),
-            ..UiaLimits::tree(10)
-        });
-        assert!((1..=5).contains(&budget.request_timeout().unwrap()));
+    fn subminimum_remaining_time_stops_before_contacting_provider() {
+        for millis in [1, 5, 25, 49] {
+            let provider = Fake::new();
+            let limits = UiaLimits {
+                timeout: Duration::from_millis(millis),
+                ..UiaLimits::tree(10)
+            };
+            assert_eq!(walk(&provider, limits).unwrap_err(), UiaStop::Timeout);
+            assert!(provider.calls.borrow().is_empty());
+        }
+        assert_eq!(
+            WalkBudget::new(UiaLimits::tree(10)).request_timeout(),
+            Ok(50)
+        );
     }
     #[test]
     fn failed_provider_is_deferred_without_waiting_or_spawning_work() {

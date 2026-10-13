@@ -107,6 +107,17 @@ pub enum CaptureReason {
     MonitorAcquisitionFailed,
     ActiveWindowAcquisitionFailed,
     PostCaptureCheckFailed,
+    AccessibilityIncomplete,
+    UiaWalkTimeout,
+    UiaNodeLimit,
+    UiaDepthLimit,
+    UiaPropertyTextLimit,
+    UiaAggregateTextLimit,
+    UiaProviderFailure,
+    UiaBackoff,
+    UiaInitializationFailed,
+    AccessibilityPrivacyUnverified,
+    AccessibilityProcessingContinues,
     PasswordField,
     InputCheckUnavailable,
     InputCheckStale,
@@ -174,6 +185,17 @@ impl CaptureReason {
             Self::MonitorAcquisitionFailed => "capture_monitor_acquisition_failed",
             Self::ActiveWindowAcquisitionFailed => "capture_active_window_acquisition_failed",
             Self::PostCaptureCheckFailed => "capture_post_check_failed",
+            Self::AccessibilityIncomplete => "capture_accessibility_incomplete",
+            Self::UiaWalkTimeout => "capture_uia_walk_timeout",
+            Self::UiaNodeLimit => "capture_uia_node_limit",
+            Self::UiaDepthLimit => "capture_uia_depth_limit",
+            Self::UiaPropertyTextLimit => "capture_uia_property_text_limit",
+            Self::UiaAggregateTextLimit => "capture_uia_aggregate_text_limit",
+            Self::UiaProviderFailure => "capture_uia_provider_failure",
+            Self::UiaBackoff => "capture_uia_backoff",
+            Self::UiaInitializationFailed => "capture_uia_initialization_failed",
+            Self::AccessibilityPrivacyUnverified => "capture_accessibility_privacy_unverified",
+            Self::AccessibilityProcessingContinues => "capture_accessibility_processing_continues",
             Self::PasswordField => "capture_password_field",
             Self::InputCheckUnavailable => "capture_input_check_unavailable",
             Self::InputCheckStale => "capture_input_check_stale",
@@ -201,6 +223,58 @@ impl CaptureReason {
         }
     }
 }
+/// Fixed, content-free causes carried from UIA traversal to persisted frame decisions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessibilityStopReason {
+    Timeout,
+    Nodes,
+    Depth,
+    PropertyText,
+    AggregateText,
+    Provider,
+    Backoff,
+    Initialization,
+}
+impl AccessibilityStopReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Timeout => "uia_walk_timeout",
+            Self::Nodes => "uia_node_limit",
+            Self::Depth => "uia_depth_limit",
+            Self::PropertyText => "uia_property_text_limit",
+            Self::AggregateText => "uia_aggregate_text_limit",
+            Self::Provider => "uia_provider_failure",
+            Self::Backoff => "uia_backoff",
+            Self::Initialization => "uia_initialization_failed",
+        }
+    }
+    pub fn from_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "uia_walk_timeout" => Self::Timeout,
+            "uia_node_limit" => Self::Nodes,
+            "uia_depth_limit" => Self::Depth,
+            "uia_property_text_limit" => Self::PropertyText,
+            "uia_aggregate_text_limit" => Self::AggregateText,
+            "uia_provider_failure" => Self::Provider,
+            "uia_backoff" => Self::Backoff,
+            "uia_initialization_failed" => Self::Initialization,
+            _ => return None,
+        })
+    }
+    pub fn capture_reason(self) -> CaptureReason {
+        match self {
+            Self::Timeout => CaptureReason::UiaWalkTimeout,
+            Self::Nodes => CaptureReason::UiaNodeLimit,
+            Self::Depth => CaptureReason::UiaDepthLimit,
+            Self::PropertyText => CaptureReason::UiaPropertyTextLimit,
+            Self::AggregateText => CaptureReason::UiaAggregateTextLimit,
+            Self::Provider => CaptureReason::UiaProviderFailure,
+            Self::Backoff => CaptureReason::UiaBackoff,
+            Self::Initialization => CaptureReason::UiaInitializationFailed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleOrigin {
@@ -219,6 +293,10 @@ pub enum RuleKind {
     UrlTitleHeuristic,
     BuiltinApp,
     IncludeAdmission,
+    UiaSubtreeExclusion,
+    UiaDocumentUrl,
+    NativeWindowPolicy,
+    DrmUrl,
 }
 /// Index refers to the unchanged source configuration list, including empty entries.
 /// Resolve sensitive matching text locally; never copy it into an event or log.
@@ -287,12 +365,36 @@ impl CaptureDiagnostic {
             .collect::<Vec<_>>()
             .join(", ");
         let mut message = format!("{channel}{scope}: {condition} ({reasons}).");
+        if self
+            .reasons
+            .contains(&CaptureReason::AccessibilityPrivacyUnverified)
+        {
+            message.push_str(" Accessibility retrieval failure blocks screenshot storage and OCR: required privacy checks are unresolved.");
+        } else if self
+            .reasons
+            .contains(&CaptureReason::AccessibilityProcessingContinues)
+        {
+            message.push_str(" Screenshot storage and OCR proceed despite accessibility retrieval failure; applicable privacy checks passed independently.");
+        }
         if !self.rules.is_empty() {
             message.push_str(&format!(
                 " Rules: {}.",
                 self.rules
                     .iter()
-                    .map(|rule| format!("{:?}[{}] {:?}", rule.origin, rule.index, rule.kind))
+                    .map(|rule| {
+                        let check = match rule.kind {
+                            RuleKind::UiaSubtreeExclusion => "nested window/document exclusion",
+                            RuleKind::UiaDocumentUrl => "accessibility document URL exclusion",
+                            RuleKind::NativeWindowPolicy => {
+                                "current window identity/title privacy verification"
+                            }
+                            RuleKind::DrmUrl => "protected-content document URL policy",
+                            _ => {
+                                return format!("{:?}[{}] {:?}", rule.origin, rule.index, rule.kind)
+                            }
+                        };
+                        format!("{:?}[{}] {check} unresolved", rule.origin, rule.index)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

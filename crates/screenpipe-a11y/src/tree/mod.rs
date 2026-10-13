@@ -517,6 +517,87 @@ pub enum TreeWalkResult {
     NotFound,
 }
 
+/// Retrieval status is independent of image admission. Only unresolved rules block it.
+#[derive(Debug, Clone)]
+pub struct AccessibilityFailure {
+    pub cause: screenpipe_config::capture_diagnostics::AccessibilityStopReason,
+    pub unresolved_rules: Vec<screenpipe_config::capture_diagnostics::RuleReference>,
+    /// Native metadata sampled from the same verified window, never generic notices.
+    pub app_name: String,
+    pub window_name: String,
+}
+impl AccessibilityFailure {
+    /// Preserve unexpected provider errors privately and never treat missing identity as admission.
+    pub fn unverified_provider(config: &TreeWalkerConfig, error: &anyhow::Error) -> Self {
+        screenpipe_config::sensitive_debug::record(
+            "accessibility_retrieval_error",
+            || serde_json::json!({"stage":"walk_accessibility_tree", "error":format!("{error:#}")}),
+        );
+        Self::after_native_policy(
+            screenpipe_config::capture_diagnostics::AccessibilityStopReason::Provider,
+            config,
+            String::new(),
+            String::new(),
+        )
+    }
+    pub fn after_native_policy(
+        cause: screenpipe_config::capture_diagnostics::AccessibilityStopReason,
+        config: &TreeWalkerConfig,
+        app_name: String,
+        window_name: String,
+    ) -> Self {
+        use screenpipe_config::capture_diagnostics::{RuleKind, RuleOrigin, RuleReference};
+        use screenpipe_core::window_pattern::WindowPattern;
+        let app = app_name.to_lowercase();
+        let mut unresolved_rules = Vec::new();
+        // Native title/include/private checks have already passed. These exclusions
+        // additionally inspect nested Window/Document nodes and extension popups.
+        for (index, raw) in config.ignored_windows.iter().enumerate() {
+            if let Some(pattern) = WindowPattern::parse(raw) {
+                if !pattern.title.is_empty()
+                    && pattern
+                        .app
+                        .as_ref()
+                        .is_none_or(|constraint| app.contains(constraint))
+                {
+                    unresolved_rules.push(RuleReference {
+                        origin: RuleOrigin::IgnoredWindows,
+                        index: index as u32,
+                        kind: RuleKind::UiaSubtreeExclusion,
+                    });
+                }
+            }
+        }
+        // The URL decorator checks Document URLs even in embedded/non-browser apps.
+        // A native address-bar check does not verify all these tree document URLs.
+        // Preserve the URL filter's existing fallback semantics even for empty
+        // entries (they can match an invalid URL or a trailing-dot hostname).
+        for index in 0..config.ignored_urls.len() {
+            unresolved_rules.push(RuleReference {
+                origin: RuleOrigin::IgnoredUrls,
+                index: index as u32,
+                kind: RuleKind::UiaDocumentUrl,
+            });
+        }
+        if app.is_empty() || app == "unknown" || window_name.encode_utf16().count() >= 511 {
+            unresolved_rules.push(RuleReference {
+                origin: RuleOrigin::Builtin,
+                index: 0,
+                kind: RuleKind::NativeWindowPolicy,
+            });
+        }
+        Self {
+            cause,
+            unresolved_rules,
+            app_name,
+            window_name,
+        }
+    }
+    pub fn blocks_images(&self) -> bool {
+        !self.unresolved_rules.is_empty()
+    }
+}
+
 /// Reason a window was skipped during tree walk.
 #[derive(Debug, Clone)]
 pub enum SkipReason {
@@ -535,7 +616,9 @@ pub enum SkipReason {
     /// Monitor/focus association could not be established safely.
     MonitorUnverified,
     /// UIA did not inspect the complete tree within its work/provider budgets.
-    AccessibilityIncomplete,
+    AccessibilityIncomplete(screenpipe_config::capture_diagnostics::AccessibilityStopReason),
+    /// Retrieval failed after native window checks; admission depends on unresolved rules.
+    AccessibilityRetrievalFailed(AccessibilityFailure),
 }
 
 impl std::fmt::Display for SkipReason {
@@ -549,7 +632,16 @@ impl std::fmt::Display for SkipReason {
             SkipReason::DifferentMonitor => {
                 write!(f, "foreground window belongs to another monitor")
             }
-            SkipReason::AccessibilityIncomplete => write!(f, "accessibility inspection incomplete"),
+            SkipReason::AccessibilityIncomplete(reason) => {
+                write!(f, "accessibility inspection incomplete ({})", reason.code())
+            }
+            SkipReason::AccessibilityRetrievalFailed(failure) => {
+                write!(
+                    f,
+                    "accessibility retrieval failed ({})",
+                    failure.cause.code()
+                )
+            }
             SkipReason::MonitorUnverified => {
                 write!(f, "foreground monitor association unavailable")
             }
@@ -608,6 +700,12 @@ impl TreeWalkerPlatform for UrlFilteredWalker {
         if let TreeWalkResult::Found(ref snapshot) = result {
             if let Some(ref url) = snapshot.browser_url {
                 if crate::url_filter::is_url_blocked(url, &self.ignored_urls) {
+                    screenpipe_config::sensitive_debug::record("uia_url_policy_refusal", || {
+                        serde_json::json!({"reason":"blocked_url", "stage":"snapshot_url_policy",
+                            "app":snapshot.app_name,"window_title":snapshot.window_name,"browser_url":url,
+                            "ignored_urls":self.ignored_urls.iter().take(64).collect::<Vec<_>>(),
+                            "ignored_url_count":self.ignored_urls.len(), "patterns_truncated":self.ignored_urls.len()>64})
+                    });
                     return Ok(TreeWalkResult::Skipped(SkipReason::BlockedUrl));
                 }
             }
@@ -1058,4 +1156,113 @@ mod tests {
         let json = serde_json::to_string(&node).expect("serialize");
         assert!(!json.contains("\"lines\""));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn incomplete_inspection_keeps_the_exact_stop_code() {
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
+    for reason in [
+        AccessibilityStopReason::Timeout,
+        AccessibilityStopReason::Nodes,
+        AccessibilityStopReason::Depth,
+        AccessibilityStopReason::PropertyText,
+        AccessibilityStopReason::AggregateText,
+        AccessibilityStopReason::Provider,
+        AccessibilityStopReason::Backoff,
+    ] {
+        let skipped = SkipReason::AccessibilityIncomplete(reason);
+        assert!(skipped.to_string().contains(reason.code()));
+        match TreeWalkResult::Skipped(skipped) {
+            TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(actual)) => {
+                assert_eq!(actual, reason)
+            }
+            _ => panic!("inspection stop must remain a skipped, fail-closed result"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn retrieval_failure_only_blocks_applicable_tree_dependent_rules() {
+    use screenpipe_config::capture_diagnostics::{
+        AccessibilityStopReason as Cause, RuleKind, RuleOrigin,
+    };
+    let failure = |config: TreeWalkerConfig| {
+        AccessibilityFailure::after_native_policy(
+            Cause::Timeout,
+            &config,
+            "notepad.exe".into(),
+            "ordinary native title".into(),
+        )
+    };
+    let mut config = TreeWalkerConfig::default();
+    config.included_windows = vec!["notepad::ordinary".into()];
+    // Native includes/private-browser/built-in checks already passed.
+    assert!(!failure(config.clone()).blocks_images());
+    config.ignored_windows = vec!["".into(), "chrome::secret".into(), "chrome::".into()];
+    assert!(!failure(config.clone()).blocks_images());
+    config.ignored_windows.push("notepad::confidential".into());
+    let result = failure(config.clone());
+    assert!(result.blocks_images());
+    assert_eq!(result.unresolved_rules.len(), 1);
+    assert_eq!(result.unresolved_rules[0].index, 3);
+    assert_eq!(
+        result.unresolved_rules[0].kind,
+        RuleKind::UiaSubtreeExclusion
+    );
+    // Unscoped patterns can match nested documents in any app.
+    config.ignored_windows = vec!["::confidential".into(), "secret".into()];
+    assert_eq!(failure(config.clone()).unresolved_rules.len(), 2);
+    config.ignored_windows.clear();
+    config.ignored_urls = vec!["".into(), "private.example".into()];
+    let result = failure(config);
+    assert_eq!(result.unresolved_rules[0].origin, RuleOrigin::IgnoredUrls);
+    assert_eq!(result.unresolved_rules.len(), 2);
+    assert_eq!(result.unresolved_rules[0].index, 0);
+    assert_eq!(result.unresolved_rules[1].index, 1);
+    assert_eq!(result.unresolved_rules[0].kind, RuleKind::UiaDocumentUrl);
+}
+
+#[cfg(test)]
+#[test]
+fn retrieval_failure_cannot_admit_unknown_or_truncated_native_policy() {
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason as Cause;
+    for (app, title) in [
+        ("", "ordinary".to_owned()),
+        ("unknown", "ordinary".to_owned()),
+        ("notepad.exe", "a".repeat(511)),
+    ] {
+        assert!(AccessibilityFailure::after_native_policy(
+            Cause::Initialization,
+            &TreeWalkerConfig::default(),
+            app.into(),
+            title
+        )
+        .blocks_images());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_retrieval_keeps_empty_url_entry_fallback_policy() {
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
+    let mut config = TreeWalkerConfig::default();
+    config.ignored_urls = vec![String::new()];
+    assert!(crate::url_filter::is_url_blocked(
+        "https://example.com./",
+        &config.ignored_urls
+    ));
+    assert!(crate::url_filter::is_url_blocked(
+        "http:// invalid",
+        &config.ignored_urls
+    ));
+    let failure = AccessibilityFailure::after_native_policy(
+        AccessibilityStopReason::Timeout,
+        &config,
+        "notepad.exe".into(),
+        "ordinary".into(),
+    );
+    assert!(failure.blocks_images());
+    assert_eq!(failure.unresolved_rules[0].index, 0);
 }

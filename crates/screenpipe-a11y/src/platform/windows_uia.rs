@@ -38,7 +38,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId,
     UIA_HelpTextPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
     UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
-    UIA_ValueValuePropertyId, UIA_PROPERTY_ID,
+    UIA_ValueValuePropertyId, UIA_E_TIMEOUT, UIA_PROPERTY_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -824,10 +824,10 @@ impl UiaContext {
         unsafe {
             self.timeouts
                 .SetConnectionTimeout(millis)
-                .map_err(|_| UiaStop::Provider)?;
+                .map_err(|error| tree_provider_failure("set_connection_timeout", error))?;
             self.timeouts
                 .SetTransactionTimeout(millis)
-                .map_err(|_| UiaStop::Provider)
+                .map_err(|error| tree_provider_failure("set_transaction_timeout", error))
         }
     }
 
@@ -847,13 +847,23 @@ impl UiaContext {
         hwnd: HWND,
         limits: UiaLimits,
     ) -> Result<AccessibilityNode, UiaStop> {
-        if !self.provider_ready() {
-            return Err(UiaStop::Backoff);
-        }
+        let limits = limits.clamped();
         let started = Instant::now();
-        let result = budget::walk(&WindowProvider { uia: self, hwnd }, limits);
+        let result = if self.provider_ready() {
+            budget::walk(&WindowProvider { uia: self, hwnd }, limits)
+        } else {
+            Err(UiaStop::Backoff)
+        };
         if let Err(reason) = result {
-            self.backoff.failed();
+            if reason != UiaStop::Backoff {
+                self.backoff.failed();
+            }
+            screenpipe_config::sensitive_debug::record("uia_tree_stop", || {
+                serde_json::json!({"reason":reason.code(), "hwnd":hwnd.0 as isize,
+                    "provider_timeout_ms":budget::PROVIDER_TIMEOUT_MS, "elapsed_ms":started.elapsed().as_millis(),
+                    "timeout_ms":limits.timeout.as_millis(), "max_nodes":limits.nodes,
+                    "max_depth":limits.depth, "max_text_bytes":limits.text_bytes})
+            });
             // Fixed reason and numeric duration only; never provider text.
             debug!(
                 ?reason,
@@ -1134,7 +1144,7 @@ impl TreeProvider for WindowProvider<'_> {
             self.uia
                 .automation
                 .ElementFromHandleBuildCache(self.hwnd, &self.uia.walker_cache_request)
-                .map_err(|_| UiaStop::Provider)
+                .map_err(|error| tree_provider_failure("element_from_handle", error))
         }
     }
     fn node(&self, element: &Self::Element, budget: &mut WalkBudget) -> AccessibilityNode {
@@ -1146,7 +1156,7 @@ impl TreeProvider for WindowProvider<'_> {
         ms: u32,
     ) -> Result<Option<Self::Element>, UiaStop> {
         self.uia.set_request_timeout(ms)?;
-        navigation_result(|output| unsafe {
+        navigation_result_at("first_child", |output| unsafe {
             (Interface::vtable(&self.uia.tree_walker).GetFirstChildElementBuildCache)(
                 Interface::as_raw(&self.uia.tree_walker),
                 Interface::as_raw(element),
@@ -1161,7 +1171,7 @@ impl TreeProvider for WindowProvider<'_> {
         ms: u32,
     ) -> Result<Option<Self::Element>, UiaStop> {
         self.uia.set_request_timeout(ms)?;
-        navigation_result(|output| unsafe {
+        navigation_result_at("next_sibling", |output| unsafe {
             (Interface::vtable(&self.uia.tree_walker).GetNextSiblingElementBuildCache)(
                 Interface::as_raw(&self.uia.tree_walker),
                 Interface::as_raw(element),
@@ -1172,7 +1182,28 @@ impl TreeProvider for WindowProvider<'_> {
     }
 }
 
+fn tree_provider_failure(stage: &'static str, error: windows::core::Error) -> UiaStop {
+    let reason = if error.code().0 as u32 == UIA_E_TIMEOUT {
+        UiaStop::Timeout
+    } else {
+        UiaStop::Provider
+    };
+    screenpipe_config::sensitive_debug::record("uia_provider_request_failure", || {
+        serde_json::json!({"reason":reason.code(), "stage":stage,
+            "hresult":error.code().0, "error":format!("{error:?}")})
+    });
+    reason
+}
+
+#[cfg(test)]
 fn navigation_result(
+    call: impl FnOnce(*mut *mut std::ffi::c_void) -> windows::core::HRESULT,
+) -> Result<Option<IUIAutomationElement>, UiaStop> {
+    navigation_result_at("synthetic_navigation", call)
+}
+
+fn navigation_result_at(
+    stage: &'static str,
     call: impl FnOnce(*mut *mut std::ffi::c_void) -> windows::core::HRESULT,
 ) -> Result<Option<IUIAutomationElement>, UiaStop> {
     // windows-rs maps a successful null interface (end of children/siblings) to
@@ -1185,7 +1216,9 @@ fn navigation_result(
     } else {
         Some(unsafe { IUIAutomationElement::from_raw(raw) })
     };
-    result.ok().map_err(|_| UiaStop::Provider)?;
+    result
+        .ok()
+        .map_err(|error| tree_provider_failure(stage, error))?;
     Ok(element)
 }
 
@@ -1963,13 +1996,28 @@ mod tests {
     }
 
     #[test]
+    fn native_provider_timeout_retains_timeout_reason() {
+        assert_eq!(
+            navigation_result(|_| windows::core::HRESULT(UIA_E_TIMEOUT as i32)).unwrap_err(),
+            UiaStop::Timeout
+        );
+        assert_eq!(
+            tree_provider_failure(
+                "element_from_handle",
+                windows::core::Error::from_hresult(windows::core::HRESULT(UIA_E_TIMEOUT as i32))
+            ),
+            UiaStop::Timeout
+        );
+    }
+
+    #[test]
     fn cached_bstr_decode_is_bounded_and_does_not_take_variant_ownership() {
         let text = "synthetic\n".repeat(30_000);
         let variant = VARIANT::from(text.as_str());
         let mut budget = WalkBudget::new(UiaLimits::tree(10));
         let result = cached_variant_string(&variant, &mut budget).unwrap();
         assert_eq!(result.len(), 16 * 1024);
-        assert_eq!(budget.request_timeout(), Err(UiaStop::Text));
+        assert_eq!(budget.request_timeout(), Err(UiaStop::PropertyText));
         // The borrowed BSTR must still belong to the VARIANT and be reusable.
         assert_eq!(BSTR::try_from(&variant).unwrap().len(), text.len());
         assert!(cached_variant_string(

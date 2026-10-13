@@ -2199,8 +2199,6 @@ async fn do_capture(
         windows_capture.duration,
         windows_capture.privacy,
     );
-    #[cfg(target_os = "windows")]
-    report_windows_privacy(params.monitor_id, &windows_privacy);
 
     #[cfg(not(target_os = "windows"))]
     // Resolve ignored windows to SCK window IDs so ScreenCaptureKit
@@ -2280,7 +2278,6 @@ async fn do_capture(
             Ok(evaluation) => {
                 let scope_changed = evaluation.privacy.selected_window.is_some();
                 windows_privacy.merge(evaluation.privacy);
-                report_windows_privacy(params.monitor_id, &windows_privacy);
                 // New background exclusions invalidate an acquired full-monitor
                 // bitmap. Only a fresh safe acquisition can admit it again.
                 let latest = match evaluation.plan {
@@ -2430,6 +2427,28 @@ async fn do_capture(
     })
     .await?;
 
+    // Retain retrieval diagnostics before any later target/privacy check can return.
+    #[cfg(target_os = "windows")]
+    if let TreeWalkResult::Skipped(
+        screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure),
+    ) = &tree_walk_result
+    {
+        let requires_drm_url = params.pause_on_drm_content
+            && selected_metadata
+                .as_ref()
+                .and_then(|window| window.browser_url.as_ref())
+                .is_none();
+        apply_windows_accessibility_failure(&mut windows_privacy, failure, requires_drm_url);
+        use screenpipe_config::capture_diagnostics::*;
+        observe(
+            CaptureChannel::Accessibility,
+            DiagnosticSource::WindowPolicy,
+            CaptureScope::Monitor(params.monitor_id),
+            CaptureCondition::Failed,
+            vec![failure.cause.capture_reason()],
+            Vec::new(),
+        );
+    }
     #[cfg(target_os = "windows")]
     windows_privacy.refresh_foreground_monitor(params.monitor_id);
     #[cfg(target_os = "windows")]
@@ -2481,6 +2500,8 @@ async fn do_capture(
         }
     }
 
+    #[cfg(target_os = "windows")]
+    let mut retrieval_metadata = None;
     let foreground_on_monitor = !matches!(
         tree_walk_result,
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor)
@@ -2494,12 +2515,19 @@ async fn do_capture(
                 (CaptureCondition::Failed, CaptureReason::CaptureCheckFailed)
             }
             TreeWalkResult::Skipped(reason) => (
-                CaptureCondition::Suppressed,
+                if matches!(
+                    reason,
+                    S::AccessibilityIncomplete(_) | S::AccessibilityRetrievalFailed(_)
+                ) {
+                    CaptureCondition::Failed
+                } else {
+                    CaptureCondition::Suppressed
+                },
                 match reason {
                     S::DifferentMonitor => CaptureReason::MonitorInactive,
-                    S::MonitorUnverified | S::AccessibilityIncomplete => {
-                        CaptureReason::CaptureCheckFailed
-                    }
+                    S::MonitorUnverified => CaptureReason::CaptureCheckFailed,
+                    S::AccessibilityIncomplete(reason) => reason.capture_reason(),
+                    S::AccessibilityRetrievalFailed(failure) => failure.cause.capture_reason(),
                     S::Incognito => CaptureReason::PrivateBrowsing,
                     S::NotInIncludeList => CaptureReason::OutsideIncludeFilter,
                     S::UserIgnored | S::ExcludedApp | S::BlockedUrl => {
@@ -2521,14 +2549,42 @@ async fn do_capture(
         TreeWalkResult::Found(snap) => Some(snap),
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::DifferentMonitor) => None,
         #[cfg(target_os = "windows")]
-        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::AccessibilityIncomplete) => {
-            windows_privacy.foreground_blocked("accessibility_incomplete");
+        TreeWalkResult::Skipped(
+            screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure),
+        ) => {
+            // Earlier retrieval assessment survives subsequent target-check failures.
+            if windows_privacy
+                .accessibility
+                .as_ref()
+                .is_some_and(|decision| decision.processing == "withheld")
+            {
+                return persist_windows_placeholder(
+                    params,
+                    trigger,
+                    captured_at,
+                    WindowsCaptureOutcome::CaptureFailed(
+                        WindowsCaptureFailureStage::AccessibilityInspection,
+                    ),
+                    screenshot_disabled,
+                    &windows_privacy,
+                )
+                .await;
+            }
+            retrieval_metadata = Some((failure.app_name, failure.window_name));
+            // Discard incomplete tree text. The normal admitted bitmap path uses OCR.
+            None
+        }
+        #[cfg(target_os = "windows")]
+        TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::AccessibilityIncomplete(
+            reason,
+        )) => {
+            windows_privacy.foreground_blocked(reason.code());
             return persist_windows_placeholder(
                 params,
                 trigger,
                 captured_at,
                 WindowsCaptureOutcome::CaptureFailed(
-                    WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                    WindowsCaptureFailureStage::AccessibilityInspection,
                 ),
                 screenshot_disabled,
                 &windows_privacy,
@@ -2554,8 +2610,11 @@ async fn do_capture(
                     screenpipe_a11y::tree::SkipReason::NotInIncludeList => "not_in_include_list",
                     screenpipe_a11y::tree::SkipReason::BlockedUrl => "blocked_url",
                     screenpipe_a11y::tree::SkipReason::MonitorUnverified => "monitor_unverified",
-                    screenpipe_a11y::tree::SkipReason::AccessibilityIncomplete => {
-                        "accessibility_incomplete"
+                    screenpipe_a11y::tree::SkipReason::AccessibilityIncomplete(reason) => {
+                        reason.code()
+                    }
+                    screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure) => {
+                        failure.cause.code()
                     }
                     screenpipe_a11y::tree::SkipReason::DifferentMonitor => "different_monitor",
                 });
@@ -2640,35 +2699,6 @@ async fn do_capture(
         }
     }
 
-    // Content dedup: skip capture if accessibility text hasn't changed.
-    // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
-    // force a write every 30s even if the hash matches — see `dedup_applies`.
-    let dedup_eligible = dedup_applies(trigger, hd_active, last_db_write.elapsed());
-    if dedup_eligible {
-        if let Some(ref snap) = tree_snapshot {
-            if !snap.text_content.is_empty() {
-                let new_hash = snap.content_hash as i64;
-                if let Some(prev) = previous_content_hash {
-                    if prev == new_hash && new_hash != 0 {
-                        debug!(
-                            "content dedup: skipping capture for monitor {} (hash={}, trigger={})",
-                            params.monitor_id,
-                            new_hash,
-                            trigger.as_str()
-                        );
-                        return Ok(CaptureOutput {
-                            result: None,
-                            image,
-                            elements_deduped: false,
-                            #[cfg(target_os = "windows")]
-                            windows_outcome,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
     // Use tree metadata by default, but for focus-change triggers prefer the
     // event payload when the tree lags or reports the wrong frontmost target.
     #[cfg(not(target_os = "windows"))]
@@ -2688,6 +2718,12 @@ async fn do_capture(
             foreground_on_monitor,
             selected_metadata.as_ref(),
         );
+
+    #[cfg(target_os = "windows")]
+    let (app_name_owned, window_name_owned) = match retrieval_metadata {
+        Some((app, title)) if selected_metadata.is_none() => (Some(app), Some(title)),
+        _ => (app_name_owned, window_name_owned),
+    };
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
@@ -2830,6 +2866,40 @@ async fn do_capture(
                     &windows_privacy,
                 )
                 .await
+            }
+        }
+    }
+
+    // Publish after every privacy/UIA check, including for a verified dedup
+    // observation which does not write another frame.
+    #[cfg(target_os = "windows")]
+    report_windows_privacy(params.monitor_id, &windows_privacy);
+
+    // Content dedup: skip capture if accessibility text hasn't changed.
+    // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
+    // force a write every 30s even if the hash matches — see `dedup_applies`.
+    let dedup_eligible = dedup_applies(trigger, hd_active, last_db_write.elapsed());
+    if dedup_eligible {
+        if let Some(ref snap) = tree_snapshot {
+            if !snap.text_content.is_empty() {
+                let new_hash = snap.content_hash as i64;
+                if let Some(prev) = previous_content_hash {
+                    if prev == new_hash && new_hash != 0 {
+                        debug!(
+                            "content dedup: skipping capture for monitor {} (hash={}, trigger={})",
+                            params.monitor_id,
+                            new_hash,
+                            trigger.as_str()
+                        );
+                        return Ok(CaptureOutput {
+                            result: None,
+                            image,
+                            elements_deduped: false,
+                            #[cfg(target_os = "windows")]
+                            windows_outcome,
+                        });
+                    }
+                }
             }
         }
     }
@@ -3862,6 +3932,36 @@ fn report_monitor_operation(monitor_id: u32, success: bool) {
 }
 
 #[cfg(target_os = "windows")]
+fn apply_windows_accessibility_failure(
+    privacy: &mut WindowsCapturePrivacy,
+    failure: &screenpipe_a11y::tree::AccessibilityFailure,
+    requires_drm_url: bool,
+) -> bool {
+    use screenpipe_config::capture_diagnostics::{RuleKind, RuleOrigin, RuleReference};
+    use screenpipe_screen::capture_screenshot_by_window::WindowsAccessibilityDecision;
+    let mut unresolved_rules = failure.unresolved_rules.clone();
+    if requires_drm_url {
+        unresolved_rules.push(RuleReference {
+            origin: RuleOrigin::Builtin,
+            index: 0,
+            kind: RuleKind::DrmUrl,
+        });
+    }
+    let blocked = !unresolved_rules.is_empty();
+    privacy.accessibility = Some(WindowsAccessibilityDecision {
+        cause: failure.cause.code(),
+        processing: if blocked { "withheld" } else { "proceeding" },
+        unresolved_rules: unresolved_rules.iter().take(32).copied().collect(),
+        rules_truncated: unresolved_rules.len() > 32,
+    });
+    screenpipe_config::sensitive_debug::record("uia_image_admission", || {
+        serde_json::json!({"cause":failure.cause.code(), "image_and_ocr":if blocked {"withheld"} else {"proceeding"},
+            "unresolved_rules":unresolved_rules, "app":failure.app_name, "window_title":failure.window_name})
+    });
+    blocked
+}
+
+#[cfg(target_os = "windows")]
 fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
     use screenpipe_config::capture_diagnostics::*;
     let condition = match privacy.outcome {
@@ -3897,15 +3997,28 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
                 "ignored_window" | "blocked_url" => CaptureReason::ExcludedForeground,
                 "not_in_include_list" => CaptureReason::OutsideIncludeFilter,
                 "different_monitor" => CaptureReason::MonitorInactive,
+                "accessibility_incomplete" => CaptureReason::AccessibilityIncomplete,
+                "uia_walk_timeout" => CaptureReason::UiaWalkTimeout,
+                "uia_node_limit" => CaptureReason::UiaNodeLimit,
+                "uia_depth_limit" => CaptureReason::UiaDepthLimit,
+                "uia_property_text_limit" => CaptureReason::UiaPropertyTextLimit,
+                "uia_aggregate_text_limit" => CaptureReason::UiaAggregateTextLimit,
+                "uia_provider_failure" => CaptureReason::UiaProviderFailure,
+                "uia_backoff" => CaptureReason::UiaBackoff,
                 _ => CaptureReason::NoSafeWindow,
             });
         }
     }
-    if let Some(reason) = privacy.reason {
+    // Specific traversal reasons supersede the generic inspection-stage code.
+    if let Some(reason) = privacy.reason.filter(|reason| {
+        *reason != "accessibility_inspection"
+            || (reasons.is_empty() && privacy.accessibility.is_none())
+    }) {
         reasons.push(match reason {
             "monitor_acquisition" => CaptureReason::MonitorAcquisitionFailed,
             "active_window_acquisition" => CaptureReason::ActiveWindowAcquisitionFailed,
             "post_capture_privacy_evaluation" => CaptureReason::PostCaptureCheckFailed,
+            "accessibility_inspection" => CaptureReason::AccessibilityIncomplete,
             "initial_privacy_evaluation" => CaptureReason::CaptureCheckFailed,
             "inconsistent_focus" => CaptureReason::InconsistentFocus,
             "excluded_background" => CaptureReason::ExcludedBackground,
@@ -3913,13 +4026,13 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
             _ => CaptureReason::NoSafeWindow,
         });
     }
-    if reasons.is_empty() {
+    if reasons.is_empty() && privacy.accessibility.is_none() {
         reasons.push(CaptureReason::GateOpen);
     }
     if privacy.blockers_truncated {
         reasons.push(CaptureReason::DiagnosticsTruncated);
     }
-    let rules = privacy
+    let mut rules = privacy
         .rule_matches
         .iter()
         .map(|rule| RuleReference {
@@ -3941,6 +4054,24 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
             },
         })
         .collect::<Vec<_>>();
+    if let Some(failure) = &privacy.accessibility {
+        if let Some(cause) = AccessibilityStopReason::from_code(failure.cause) {
+            reasons.push(cause.capture_reason());
+        }
+        match failure.processing {
+            "withheld" => reasons.push(CaptureReason::AccessibilityPrivacyUnverified),
+            "proceeding" => reasons.push(CaptureReason::AccessibilityProcessingContinues),
+            _ => {}
+        }
+        rules.splice(0..0, failure.unresolved_rules.iter().copied());
+        if failure.rules_truncated {
+            reasons.push(CaptureReason::DiagnosticsTruncated);
+        }
+    }
+    if rules.len() > 32 {
+        rules.truncate(32);
+        reasons.push(CaptureReason::DiagnosticsTruncated);
+    }
     let apps = privacy
         .blockers
         .iter()
@@ -3996,4 +4127,306 @@ fn capture_diagnostic_window_policy_preserves_safe_rule_and_app_provenance() {
     assert_eq!(event.rules[0].kind, RuleKind::AppAndTitleSubstring);
     assert_eq!(event.excluded_apps, ["excel.exe"]);
     assert!(!event.message().contains("excel.exe"));
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_uia_stop_reasons_survive_frame_json_and_status() {
+    use screenpipe_config::capture_diagnostics::*;
+    for (index, reason) in [
+        AccessibilityStopReason::Timeout,
+        AccessibilityStopReason::Nodes,
+        AccessibilityStopReason::Depth,
+        AccessibilityStopReason::PropertyText,
+        AccessibilityStopReason::AggregateText,
+        AccessibilityStopReason::Provider,
+        AccessibilityStopReason::Backoff,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut privacy = WindowsCapturePrivacy::default();
+        privacy.foreground_blocked(reason.code());
+        let outcome = WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::AccessibilityInspection,
+        );
+        let privacy = privacy.with_outcome(outcome);
+        let json = serde_json::to_value(&privacy).unwrap();
+        assert_eq!(json["outcome"], "capture_failed");
+        assert_eq!(json["reason"], "accessibility_inspection");
+        assert_eq!(json["blockers"][0]["reasons"][0], reason.code());
+        assert!(json["blockers"][0]["app"].is_null());
+        assert_eq!(
+            outcome.marker_text(),
+            Some("CAPTURE FAILED — ACCESSIBILITY INSPECTION")
+        );
+        let monitor = 9980 + index as u32;
+        report_windows_privacy(monitor, &privacy);
+        let event = current()
+            .into_iter()
+            .find(|event| {
+                event.channel == CaptureChannel::Screen
+                    && event.source == DiagnosticSource::WindowPolicy
+                    && event.scope == CaptureScope::Monitor(monitor)
+            })
+            .unwrap();
+        assert_eq!(event.condition, CaptureCondition::Failed);
+        assert_eq!(event.reasons, [reason.capture_reason()]);
+        assert!(event.rules.is_empty());
+        assert!(event.excluded_apps.is_empty());
+        // The same typed payload is stored in notices and decoded by the API.
+        let restored: CaptureDiagnostic =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        assert_eq!(restored.reasons, event.reasons);
+        assert_ne!(event.reasons[0], CaptureReason::NoSafeWindow);
+        assert_ne!(event.reasons[0], CaptureReason::PostCaptureCheckFailed);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_repeated_uia_failure_only_recovers_after_final_success() {
+    use screenpipe_config::capture_diagnostics::*;
+    let monitor = 9989;
+    let scope = CaptureScope::Monitor(monitor);
+    let mut config = screenpipe_a11y::tree::TreeWalkerConfig::default();
+    config.ignored_windows = vec!["notepad::private".into()];
+    let retrieval = screenpipe_a11y::tree::AccessibilityFailure::after_native_policy(
+        AccessibilityStopReason::Timeout,
+        &config,
+        "notepad.exe".into(),
+        "ordinary".into(),
+    );
+    let mut failure = WindowsCapturePrivacy::default();
+    assert!(apply_windows_accessibility_failure(
+        &mut failure,
+        &retrieval,
+        false
+    ));
+    let failure = failure.with_outcome(WindowsCaptureOutcome::CaptureFailed(
+        WindowsCaptureFailureStage::AccessibilityInspection,
+    ));
+    drain();
+    for _ in 0..135 {
+        report_windows_privacy(monitor, &failure);
+    }
+    let notices = drain()
+        .into_iter()
+        .filter(|event| event.scope == scope)
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2); // screen and OCR, one initial failure each
+    assert!(notices
+        .iter()
+        .all(|event| event.condition == CaptureCondition::Failed));
+    for initial in &notices {
+        let latest = current()
+            .into_iter()
+            .find(|event| event.scope == scope && event.channel == initial.channel)
+            .unwrap();
+        assert_eq!(latest.since_ms, initial.since_ms);
+    }
+    // A changed cause is visible immediately, without a fabricated recovery.
+    let mut changed = WindowsCapturePrivacy::default();
+    let mut retrieval = retrieval;
+    retrieval.cause = AccessibilityStopReason::Provider;
+    assert!(apply_windows_accessibility_failure(
+        &mut changed,
+        &retrieval,
+        false
+    ));
+    let changed = changed.with_outcome(WindowsCaptureOutcome::CaptureFailed(
+        WindowsCaptureFailureStage::AccessibilityInspection,
+    ));
+    report_windows_privacy(monitor, &changed);
+    let notices = drain()
+        .into_iter()
+        .filter(|event| event.scope == scope)
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.iter().all(
+        |event| event.reasons.contains(&CaptureReason::UiaProviderFailure)
+            && event
+                .reasons
+                .contains(&CaptureReason::AccessibilityPrivacyUnverified)
+    ));
+    report_windows_privacy(monitor, &WindowsCapturePrivacy::default());
+    let notices = drain()
+        .into_iter()
+        .filter(|event| event.scope == scope)
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert!(notices
+        .iter()
+        .all(|event| event.condition == CaptureCondition::Admitted));
+    report_windows_privacy(monitor, &failure);
+    assert_eq!(
+        drain()
+            .into_iter()
+            .filter(|event| event.scope == scope)
+            .count(),
+        2
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_legacy_incomplete_is_not_no_safe_window() {
+    use screenpipe_config::capture_diagnostics::*;
+    let mut privacy = WindowsCapturePrivacy::default();
+    privacy.foreground_blocked("accessibility_incomplete");
+    let privacy = privacy.with_outcome(WindowsCaptureOutcome::CaptureFailed(
+        WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+    ));
+    report_windows_privacy(9990, &privacy);
+    let event = current()
+        .into_iter()
+        .find(|event| {
+            event.channel == CaptureChannel::Screen && event.scope == CaptureScope::Monitor(9990)
+        })
+        .unwrap();
+    assert!(event
+        .reasons
+        .contains(&CaptureReason::AccessibilityIncomplete));
+    assert!(!event.reasons.contains(&CaptureReason::NoSafeWindow));
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_retrieval_failure_separates_image_admission_and_unresolved_rules() {
+    use screenpipe_a11y::tree::{AccessibilityFailure, TreeWalkerConfig};
+    use screenpipe_config::capture_diagnostics::*;
+    for (offset, cause) in [
+        AccessibilityStopReason::Timeout,
+        AccessibilityStopReason::Nodes,
+        AccessibilityStopReason::Depth,
+        AccessibilityStopReason::PropertyText,
+        AccessibilityStopReason::AggregateText,
+        AccessibilityStopReason::Provider,
+        AccessibilityStopReason::Backoff,
+        AccessibilityStopReason::Initialization,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for blocked in [false, true] {
+            let mut config = TreeWalkerConfig::default();
+            if blocked {
+                config.ignored_windows = vec!["".into(), "notepad::secret".into()];
+            }
+            let failure = AccessibilityFailure::after_native_policy(
+                cause,
+                &config,
+                "notepad.exe".into(),
+                "ordinary title".into(),
+            );
+            let mut privacy = WindowsCapturePrivacy::default();
+            assert_eq!(
+                apply_windows_accessibility_failure(&mut privacy, &failure, false),
+                blocked
+            );
+            let privacy = privacy.with_outcome(if blocked {
+                WindowsCaptureOutcome::CaptureFailed(
+                    WindowsCaptureFailureStage::AccessibilityInspection,
+                )
+            } else {
+                WindowsCaptureOutcome::FullMonitor
+            });
+            let json = serde_json::to_value(&privacy).unwrap();
+            assert_eq!(json["accessibility"]["cause"], cause.code());
+            assert_eq!(
+                json["accessibility"]["processing"],
+                if blocked { "withheld" } else { "proceeding" }
+            );
+            assert!(!json.to_string().contains("ordinary title"));
+            let monitor = 992000 + offset as u32 * 2 + u32::from(blocked);
+            report_windows_privacy(monitor, &privacy);
+            let diagnostics = current();
+            for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+                let row = diagnostics
+                    .iter()
+                    .find(|row| {
+                        row.channel == channel
+                            && row.source == DiagnosticSource::WindowPolicy
+                            && row.scope == CaptureScope::Monitor(monitor)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    row.condition,
+                    if blocked {
+                        CaptureCondition::Failed
+                    } else {
+                        CaptureCondition::Admitted
+                    }
+                );
+                assert!(row.reasons.contains(&cause.capture_reason()));
+                assert!(row.reasons.contains(&if blocked {
+                    CaptureReason::AccessibilityPrivacyUnverified
+                } else {
+                    CaptureReason::AccessibilityProcessingContinues
+                }));
+                assert_eq!(row.rules, failure.unresolved_rules);
+                assert!(!row.message().contains("ordinary title"));
+                assert!(!row.reasons.contains(&CaptureReason::NoSafeWindow));
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_unresolved_rules_are_bounded_without_opening_admission() {
+    use screenpipe_a11y::tree::{AccessibilityFailure, TreeWalkerConfig};
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
+    let mut config = TreeWalkerConfig::default();
+    config.ignored_windows = (0..40).map(|i| format!("nested-secret-{i}")).collect();
+    let failure = AccessibilityFailure::after_native_policy(
+        AccessibilityStopReason::Provider,
+        &config,
+        "notepad.exe".into(),
+        "ordinary".into(),
+    );
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(apply_windows_accessibility_failure(
+        &mut privacy,
+        &failure,
+        false
+    ));
+    let decision = privacy.accessibility.as_ref().unwrap();
+    assert_eq!(decision.unresolved_rules.len(), 32);
+    assert!(decision.rules_truncated);
+    assert_eq!(failure.unresolved_rules.len(), 40);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_protected_content_url_requires_independent_evidence() {
+    use screenpipe_a11y::tree::{AccessibilityFailure, TreeWalkerConfig};
+    use screenpipe_config::capture_diagnostics::{AccessibilityStopReason, RuleKind};
+    let failure = AccessibilityFailure::after_native_policy(
+        AccessibilityStopReason::Initialization,
+        &TreeWalkerConfig::default(),
+        "chrome.exe".into(),
+        "ordinary".into(),
+    );
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(apply_windows_accessibility_failure(
+        &mut privacy,
+        &failure,
+        true
+    ));
+    assert_eq!(
+        privacy.accessibility.as_ref().unwrap().unresolved_rules[0].kind,
+        RuleKind::DrmUrl
+    );
+    assert!(!apply_windows_accessibility_failure(
+        &mut privacy,
+        &failure,
+        false
+    ));
+    let privacy = privacy.with_outcome(WindowsCaptureOutcome::CaptureRedacted(
+        screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::InconsistentFocus));
+    assert_eq!(
+        privacy.accessibility.as_ref().unwrap().processing,
+        "withheld_by_other_check"
+    );
 }

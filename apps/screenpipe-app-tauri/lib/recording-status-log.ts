@@ -35,6 +35,9 @@ export function parseStatusLog(body: unknown): StatusLogPage {
     seen.add(row.id);
     // Reuse the closed diagnostic parser. Server message/app/title fields never render.
     const observation = row.diagnostic == null ? null : parseRecordingStatus({ active_intervals: [row.diagnostic], persistence_degraded: false }).rows[0];
+    // The generic history log contains fixed codes and numeric scope only.
+    // App identities belong to the separate authenticated decision details.
+    if (observation) delete observation.blockerApps;
     const reason = observation ? observation.reasons.join("; ") : typeof row.reason_code === "string" && LEGACY_CODES.has(row.reason_code) ? row.reason_code.replaceAll("_", " ") : "Historical notice — reason unavailable";
     return { id: row.id, timestamp: new Date(row.timestamp).toISOString(), state: row.state.replaceAll("_", " "), observation, reason };
   });

@@ -125,8 +125,9 @@ returns before screenshot persistence/OCR fallback. This prevents a partial tree
 from authorizing a frame after missing an ignored subtree or blocked URL. Large,
 deep or slow windows may therefore have capture withheld. Context enrichment is
 also withheld on its limits; password-probe failure continues to deny content.
-Tree limit diagnostics contain only a fixed reason and numeric elapsed time at
-debug level; capture status reports inspection failure without provider text.
+The original candidate kept tree-limit causes only in a debug message and
+collapsed persisted causes. The [reporting follow-up](CAPTURE_PRIVACY.md#uia-failure-reporting-and-retry-transitions-2026-10-13)
+preserves specific causes in frames/notices and adds bounded private diagnostics.
 
 The canonical serial accessibility tests passed 213 tests, with 23 live tests
 ignored and all 264 external artifacts reused. Fourteen new regressions exercise

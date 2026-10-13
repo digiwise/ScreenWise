@@ -439,8 +439,20 @@ pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tr
             TreeWalkResult::NotFound
         }
         Err(e) => {
-            warn!("tree walk failed: {}", e);
-            TreeWalkResult::NotFound
+            let failure =
+                screenpipe_a11y::tree::AccessibilityFailure::unverified_provider(config, &e);
+            warn!("accessibility retrieval failed; details retained in sensitive diagnostics when enabled");
+            #[cfg(target_os = "windows")]
+            {
+                TreeWalkResult::Skipped(
+                    screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure),
+                )
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = failure;
+                TreeWalkResult::NotFound
+            }
         }
     }
 }

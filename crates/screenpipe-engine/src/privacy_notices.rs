@@ -131,7 +131,13 @@ impl SafeNoticeEvent {
         match self {
             Self::Capture(event) => event
                 .reasons
-                .first()
+                .iter()
+                .find(|reason| {
+                    event.condition
+                        == screenpipe_config::capture_diagnostics::CaptureCondition::Failed
+                        && reason.code().starts_with("capture_uia_")
+                })
+                .or_else(|| event.reasons.first())
                 .copied()
                 .unwrap_or(screenpipe_config::capture_diagnostics::CaptureReason::GateOpen)
                 .code(),
@@ -726,6 +732,81 @@ pub async fn capture_events(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn exact_uia_stop_survives_notice_storage_and_query_with_policy_context() {
+        use screenpipe_config::capture_diagnostics::{
+            AccessibilityStopReason as A, CaptureChannel as C, CaptureCondition as K,
+            CaptureDiagnostic, CaptureReason as R, CaptureScope as S, DiagnosticSource as D,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let db = DatabaseManager::new(
+            temp.path().join("db.sqlite").to_str().unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        let stops = [
+            A::Timeout,
+            A::Nodes,
+            A::Depth,
+            A::PropertyText,
+            A::AggregateText,
+            A::Provider,
+            A::Backoff,
+            A::Initialization,
+        ];
+        for stop in stops {
+            let diagnostic = CaptureDiagnostic {
+                channel: C::Screen,
+                scope: S::Monitor(1),
+                source: D::WindowPolicy,
+                condition: K::Failed,
+                reasons: vec![
+                    R::ExcludedBackground,
+                    stop.capture_reason(),
+                    R::AccessibilityPrivacyUnverified,
+                ],
+                rules: vec![screenpipe_config::capture_diagnostics::RuleReference {
+                    origin: screenpipe_config::capture_diagnostics::RuleOrigin::IgnoredWindows,
+                    index: 3,
+                    kind: screenpipe_config::capture_diagnostics::RuleKind::UiaSubtreeExclusion,
+                }],
+                excluded_apps: vec![],
+                observed_at_ms: now.timestamp_millis() as u64,
+                since_ms: now.timestamp_millis() as u64,
+                previous_since_ms: None,
+            };
+            db.insert_ui_event(&notice_row(SafeNoticeEvent::Capture(diagnostic), now))
+                .await
+                .unwrap();
+        }
+        let range = NoticeRange {
+            start_time: now - chrono::Duration::seconds(1),
+            end_time: now + chrono::Duration::seconds(1),
+            limit: Some(100),
+            ..Default::default()
+        };
+        let page = query_notices(&db, &range).await.unwrap();
+        assert_eq!(page.data.len(), stops.len());
+        for stop in stops {
+            let row = page
+                .data
+                .iter()
+                .find(|row| row.reason_code == stop.capture_reason().code())
+                .unwrap();
+            assert_eq!(row.state, "recording_degraded");
+            assert!(row.message.contains("blocks screenshot storage and OCR"));
+            assert!(row.message.contains("nested window/document exclusion"));
+            assert_eq!(row.diagnostic.as_ref().unwrap().rules[0].index, 3);
+            assert!(row
+                .diagnostic
+                .as_ref()
+                .unwrap()
+                .reasons
+                .contains(&stop.capture_reason()));
+        }
+    }
     #[test]
     fn protection_notice_versions_preserve_history_without_claiming_microphone_suppression_now() {
         let legacy = ContentProtectionNotice {
