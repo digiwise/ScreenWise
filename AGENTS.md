@@ -100,10 +100,15 @@ classification requires inspection and monitoring, not owner approval.
   privacy admission, first use `screenpipe-a11y` unit tests and use or add a
   narrowly scoped Windows-only live integration test. Use the incremental
   `release-local` profile by default for rapid local development, validation,
-  interactive/manual trial iterations and local deployment: run
-  `scripts/windows/build/Invoke-ScreenWiseBuild.ps1 -Task RootBuild` or
-  `-Task DesktopBuild` for the affected workspace. These presets default to
-  `release-local` and include `--locked --offline`. A `release-local` run may support
+  interactive/manual trial iterations and local deployment. For normal GUI-run
+  capture changes, use `scripts/windows/build/Invoke-ScreenWiseBuild.ps1`
+  (no task argument) or `-Task DesktopBuild`: the desktop executable embeds the
+  shared recorder/UIA code. Build the standalone CLI separately with
+  `-Task RootBuild` only when its behavior or artifact needs updating or
+  validation. The deployment wrapper's `-Build` follows the same desktop-only
+  default; `-Build -BuildScope DesktopAndCli` explicitly builds both. These
+  builds default to `release-local` and include `--locked --offline`. A
+  `release-local` run may support
   a clearly labelled, scoped
   full-application behavior claim, but it does not validate the production
   release artifact or measured release-profile performance. Adequate `release-local`
@@ -320,8 +325,9 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
 1. Run the canonical launcher's `-Task RootFmt` for Rust changes and
    `-Task DesktopFmt` when desktop Rust changes, plus appropriate targeted tests.
 2. Before committing meaningful runtime changes, run an appropriately scoped
-   smoke test and the canonical launcher's `-Task RootBuild` or
-   `-Task DesktopBuild` for the affected workspace (default `release-local`).
+   smoke test and the canonical launcher's desktop build for normal GUI-run
+   changes (default `release-local`). Use `-Task RootBuild` as well when the
+   standalone CLI behavior or artifact is part of the change.
    The launcher initializes the configured Developer PowerShell environment.
    Apply the explicit-request/performance triggers above to full release builds;
    ordinary commits, local deployments and build-system changes do not by themselves

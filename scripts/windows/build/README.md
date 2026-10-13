@@ -59,6 +59,9 @@ $metadata = .\scripts\windows\build\Invoke-ScreenWiseBuild.ps1 -Task RootMetadat
 
 Both `Root` and `Desktop` support `Check`, `Test`, `Build`, `Clippy`, `Fmt`, `Tree`
 and `Metadata` presets. Add a package/filter for focused test execution.
+Invoking `Invoke-ScreenWiseBuild.ps1` with no arguments selects `DesktopBuild`
+in `release-local`, the normal GUI-run build. Use `-Task RootBuild` explicitly
+when the standalone CLI/recorder artifact also needs a build.
 `-Workspace` plus `-Mode` remains available as an alternative to `-Task`.
 An explicit `-ConfigPath` can select another reviewed local configuration;
 without a configuration, the explicit workspace/mode form requires an already

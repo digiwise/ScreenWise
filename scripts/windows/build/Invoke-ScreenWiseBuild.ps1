@@ -5,9 +5,9 @@
 #Requires -Version 5.1
 [CmdletBinding(DefaultParameterSetName = 'Preset')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Preset', Position = 0)]
+    [Parameter(ParameterSetName = 'Preset', Position = 0)]
     [ValidateSet('DesktopCheck', 'DesktopTest', 'DesktopBuild', 'DesktopClippy', 'DesktopFmt', 'DesktopTree', 'DesktopMetadata',
-        'RootCheck', 'RootTest', 'RootBuild', 'RootClippy', 'RootFmt', 'RootTree', 'RootMetadata')] [string]$Task,
+        'RootCheck', 'RootTest', 'RootBuild', 'RootClippy', 'RootFmt', 'RootTree', 'RootMetadata')] [string]$Task = 'DesktopBuild',
     [Parameter(Mandatory, ParameterSetName = 'Explicit')] [ValidateSet('Root', 'Desktop')] [string]$Workspace,
     [Parameter(Mandatory, ParameterSetName = 'Explicit')] [ValidateSet('Check', 'Test', 'Build', 'Clippy', 'Fmt', 'Tree', 'Metadata')] [string]$Mode,
     [string]$ConfigPath,
@@ -30,7 +30,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
-if ($Task) {
+if ($PSCmdlet.ParameterSetName -eq 'Preset') {
     if ($Task.StartsWith('Desktop', [StringComparison]::OrdinalIgnoreCase)) { $Workspace = 'Desktop'; $Mode = $Task.Substring(7) }
     else { $Workspace = 'Root'; $Mode = $Task.Substring(4) }
 }

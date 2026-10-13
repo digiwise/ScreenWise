@@ -38,11 +38,14 @@ try {
     $desktopCheck = & $launcher -Workspace Desktop -Mode Check -PlanOnly
     $desktopTest = & $launcher -Workspace Desktop -Mode Test -TestFilter 'some::test' -TestArguments @('--exact') -PlanOnly
     $desktopBuild = & $launcher -Workspace Desktop -Mode Build -PlanOnly
+    $normalBuild = & $launcher -PlanOnly
     $rootTest = & $launcher -Workspace Root -Mode Test -Package screenpipe-engine -Lib -PlanOnly
     Assert-Build ($desktopCheck.target_directory -eq (Join-Path $repoRoot 'target\desktop-tests')) 'Desktop check cache remains canonical.'
     Assert-Build ($desktopTest.target_directory -eq $desktopCheck.target_directory) 'Desktop checks/tests share their persistent cache.'
     Assert-Build ($desktopBuild.target_directory -eq (Join-Path $repoRoot 'apps\screenpipe-app-tauri\src-tauri\target')) 'Desktop build preserves executable/runtime paths.'
     Assert-Build ($desktopBuild.profile -eq 'release-local' -and ($desktopBuild.cargo_arguments -join '|').Contains('--profile|release-local')) 'Desktop functional builds default to release-local.'
+    Assert-Build ($normalBuild.workspace -eq 'Desktop' -and $normalBuild.mode -eq 'Build' -and
+        $normalBuild.profile -eq 'release-local' -and $normalBuild.target_directory -eq $desktopBuild.target_directory) 'No-argument normal build selects desktop release-local only.'
     $rootBuild = & $launcher -Task RootBuild -PlanOnly
     $concurrentRoot = & $launcher -Task RootBuild -Concurrent -PlanOnly
     $concurrentDesktop = & $launcher -Task DesktopBuild -Concurrent -PlanOnly
