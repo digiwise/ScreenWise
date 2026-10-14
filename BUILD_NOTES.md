@@ -1,5 +1,10 @@
 # ScreenWise Windows build notes
 
+The [fresh single-hierarchy UIA candidate](docs/UIA_SINGLE_CACHE_HANDOFF.md)
+removes RuntimeId joins while preserving fail-closed policy coverage. Its scope
+exceptions, validation, source review and desktop-only build are recorded in
+the handoff; deployment and live admission validation are separate owner steps.
+
 The Windows [admission/text split candidate](docs/UIA_ADMISSION_TEXT_SPLIT.md)
 separates mandatory privacy evidence from optional UIA recording text and extends
 bounded privacy/provider budgets. Its desktop-only build and validation handoff

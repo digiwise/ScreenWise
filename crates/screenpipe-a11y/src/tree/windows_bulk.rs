@@ -8,7 +8,6 @@ use crate::events::AccessibilityNode;
 use crate::platform::windows_uia::UiaContext;
 pub(super) use screenpipe_config::capture_diagnostics::AccessibilityStopReason as Stop;
 use screenpipe_config::capture_diagnostics::RuleReference;
-use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, MutexGuard,
@@ -25,6 +24,7 @@ fn provider_stage(stage: &'static str) {
 // Fixed diagnostic identifiers only: never retain rejected property values or IDs.
 #[derive(Clone, Copy)]
 #[repr(usize)]
+#[allow(dead_code)] // Versioned diagnostic slots from the former cross-cache joins remain zero.
 enum EvidenceRejection {
     RegistrationPoisoned,
     RequiredStringType,
@@ -45,8 +45,10 @@ enum EvidenceRejection {
     MissingEntryValue,
     MissingExtensionValue,
     NegativeChildCount,
+    ControlElementVariant,
+    RawOnlyPolicyElement,
 }
-const EVIDENCE_REJECTION_CODES: [&str; 19] = [
+const EVIDENCE_REJECTION_CODES: [&str; 21] = [
     "registration_poisoned",
     "required_string_type",
     "control_type_variant",
@@ -66,8 +68,10 @@ const EVIDENCE_REJECTION_CODES: [&str; 19] = [
     "missing_entry_value",
     "missing_extension_value",
     "negative_child_count",
+    "control_element_variant",
+    "raw_only_policy_element",
 ];
-static EVIDENCE_REJECTIONS: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
+static EVIDENCE_REJECTIONS: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
 fn evidence_rejected(reason: EvidenceRejection) -> Stop {
     let index = reason as usize;
     let code = EVIDENCE_REJECTION_CODES[index];
@@ -102,6 +106,7 @@ struct Metrics {
     cleanup_calls: AtomicU64,
     cleanup_failures: AtomicU64,
     nodes: AtomicU64,
+    raw_nodes: AtomicU64,
     duration_us: AtomicU64,
     max_us: AtomicU64,
     privacy_acquisitions: AtomicU64,
@@ -121,6 +126,7 @@ static METRICS: Metrics = Metrics {
     cleanup_calls: AtomicU64::new(0),
     cleanup_failures: AtomicU64::new(0),
     nodes: AtomicU64::new(0),
+    raw_nodes: AtomicU64::new(0),
     duration_us: AtomicU64::new(0),
     max_us: AtomicU64::new(0),
     privacy_acquisitions: AtomicU64::new(0),
@@ -255,27 +261,137 @@ fn cached_password(value: &VARIANT) -> Result<Option<bool>, Stop> {
         _ => Err(evidence_rejected(EvidenceRejection::PasswordVariant)),
     }
 }
-fn consistent_insert<T: PartialEq>(
-    map: &mut HashMap<Vec<i32>, T>,
-    key: Vec<i32>,
-    value: T,
-) -> Result<(), Stop> {
-    if map.get(&key).is_some_and(|previous| previous != &value) {
-        return Err(evidence_rejected(EvidenceRejection::ConflictingProjection));
+fn cached_control_element(value: &VARIANT) -> Result<bool, Stop> {
+    if unsafe { value.as_raw().Anonymous.Anonymous.vt } != 11 {
+        return Err(evidence_rejected(EvidenceRejection::ControlElementVariant));
     }
-    map.insert(key, value);
-    Ok(())
+    bool::try_from(value).map_err(provider)
 }
-fn projected_keys_complete<T>(
-    map: &HashMap<Vec<i32>, T>,
-    seen: &HashSet<Vec<i32>>,
-) -> Result<(), Stop> {
-    if map.keys().any(|key| !seen.contains(key)) {
-        Err(evidence_rejected(
-            EvidenceRejection::ProjectionOutsideHierarchy,
-        ))
+/// A cache request has one property set for its whole subtree. The provider
+/// therefore fetches Name/Value broadly when rules need them; decoding below
+/// still materializes strings only for controls those rules inspect.
+fn cache_properties(full_text: bool, subtree_rules: bool, need_url: bool) -> Vec<UIA_PROPERTY_ID> {
+    let mut properties = vec![
+        UIA_ControlTypePropertyId,
+        UIA_IsPasswordPropertyId,
+        UIA_IsControlElementPropertyId,
+    ];
+    if subtree_rules {
+        properties.push(UIA_NamePropertyId);
+    }
+    if subtree_rules || need_url {
+        properties.push(UIA_ValueValuePropertyId);
+    }
+    if full_text {
+        if !subtree_rules {
+            properties.push(UIA_NamePropertyId);
+        }
+        if !subtree_rules && !need_url {
+            properties.push(UIA_ValueValuePropertyId);
+        }
+        properties.extend_from_slice(&[
+            UIA_AutomationIdPropertyId,
+            UIA_ClassNamePropertyId,
+            UIA_BoundingRectanglePropertyId,
+            UIA_IsEnabledPropertyId,
+            UIA_HasKeyboardFocusPropertyId,
+            UIA_IsKeyboardFocusablePropertyId,
+            UIA_HelpTextPropertyId,
+            UIA_AcceleratorKeyPropertyId,
+            UIA_AccessKeyPropertyId,
+            UIA_LocalizedControlTypePropertyId,
+        ]);
+    }
+    properties
+}
+fn invalidation_properties() -> [UIA_PROPERTY_ID; 5] {
+    [
+        UIA_NamePropertyId,
+        UIA_ValueValuePropertyId,
+        UIA_ControlTypePropertyId,
+        UIA_IsPasswordPropertyId,
+        UIA_IsControlElementPropertyId,
+    ]
+}
+
+/// The former raw FindAll queries would find these elements but their IDs
+/// would be absent from the ControlView hierarchy. They must still refuse the
+/// attempt when absent from the projected tree.
+fn raw_only_policy_element(
+    control: i32,
+    subtree_rules: bool,
+    need_url: bool,
+    extension_levels: usize,
+) -> bool {
+    (subtree_rules && extension_levels > 0)
+        || (subtree_rules
+            && (control == UIA_WindowControlTypeId.0 || control == UIA_DocumentControlTypeId.0))
+        || ((subtree_rules || need_url)
+            && (control == UIA_DocumentControlTypeId.0
+                || control == UIA_EditControlTypeId.0
+                || control == UIA_ComboBoxControlTypeId.0))
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawNodeAction {
+    Keep,
+    Flatten,
+    Reject,
+}
+fn raw_node_action(
+    root: bool,
+    is_control: bool,
+    control: i32,
+    subtree_rules: bool,
+    need_url: bool,
+    extension_levels: usize,
+) -> RawNodeAction {
+    if root || is_control {
+        RawNodeAction::Keep
+    } else if raw_only_policy_element(control, subtree_rules, need_url, extension_levels) {
+        RawNodeAction::Reject
     } else {
-        Ok(())
+        RawNodeAction::Flatten
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RulePropertyScope {
+    name: bool,
+    required_name: bool,
+    value: bool,
+    required_value: bool,
+}
+fn rule_property_scope(
+    control: i32,
+    subtree_rules: bool,
+    need_url: bool,
+    extension_levels: usize,
+) -> RulePropertyScope {
+    let document = control == UIA_DocumentControlTypeId.0;
+    let entry = control == UIA_EditControlTypeId.0 || control == UIA_ComboBoxControlTypeId.0;
+    let title =
+        subtree_rules && (control == UIA_WindowControlTypeId.0 || document || extension_levels > 0);
+    RulePropertyScope {
+        name: title,
+        required_name: title,
+        value: ((subtree_rules || need_url) && (document || entry))
+            || (subtree_rules && extension_levels > 0),
+        required_value: (subtree_rules || need_url) && document,
+    }
+}
+fn next_extension_levels(
+    control: i32,
+    subtree_rules: bool,
+    value: Option<&str>,
+    extension_levels: usize,
+) -> usize {
+    if subtree_rules
+        && control == UIA_DocumentControlTypeId.0
+        && value.is_some_and(super::is_extension_url)
+    {
+        2
+    } else {
+        extension_levels.saturating_sub(1)
     }
 }
 fn node_budget(
@@ -366,7 +482,7 @@ pub(super) fn record_attempt(
 }
 pub(super) fn metrics_snapshot() -> serde_json::Value {
     let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
-    serde_json::json!({"schema_version":1,"attempts":load(&METRICS.attempts),
+    serde_json::json!({"schema_version":3,"attempts":load(&METRICS.attempts),
         "completed":load(&METRICS.completed),"failed":load(&METRICS.failed),"denied":load(&METRICS.denied),
         "retries":load(&METRICS.retries),"stale":load(&METRICS.retries),
         "provider_calls":load(&METRICS.calls),"bulk_acquisition_calls":load(&METRICS.calls),
@@ -374,6 +490,7 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "event_registration_calls":load(&METRICS.registration_calls),
         "event_cleanup_calls":load(&METRICS.cleanup_calls),
         "event_cleanup_failures":load(&METRICS.cleanup_failures),"nodes":load(&METRICS.nodes),
+        "raw_nodes":load(&METRICS.raw_nodes),"projected_nodes":load(&METRICS.nodes),
         "total_duration_us":load(&METRICS.duration_us),"max_duration_us":load(&METRICS.max_us),
         "histogram_upper_us":[25000,50000,100000,150000,250000,500000,null],
         "histogram_counts":METRICS.histogram.iter().map(load).collect::<Vec<_>>(),
@@ -383,7 +500,11 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "evidence_rejection_codes":EVIDENCE_REJECTION_CODES,
         "evidence_rejection_counts":EVIDENCE_REJECTIONS.iter().map(load).collect::<Vec<_>>(),
         "hierarchy_structure_acquisitions":load(&METRICS.privacy_acquisitions),
-        "accessibility_recording_acquisitions":load(&METRICS.recording_acquisitions)})
+        "accessibility_recording_acquisitions":load(&METRICS.recording_acquisitions),
+        "acquisition_mode":"single_raw_cache_control_projection",
+        "single_cache_acquisitions":load(&METRICS.privacy_acquisitions)+load(&METRICS.recording_acquisitions),
+        "single_cache_privacy_acquisitions":load(&METRICS.privacy_acquisitions),
+        "single_cache_recording_acquisitions":load(&METRICS.recording_acquisitions)})
 }
 
 #[implement(IUIAutomationStructureChangedEventHandler)]
@@ -427,6 +548,7 @@ pub(super) struct Attempt<'a> {
     text_bytes: usize,
     pub calls: usize,
     pub nodes: usize,
+    projected_nodes: usize,
     registered: bool,
     scope_rules: Vec<RuleReference>,
 }
@@ -489,12 +611,7 @@ impl<'a> Attempt<'a> {
                     &structure,
                 )
                 .map_err(provider)?;
-            let properties = [
-                UIA_NamePropertyId,
-                UIA_ValueValuePropertyId,
-                UIA_ControlTypePropertyId,
-                UIA_IsPasswordPropertyId,
-            ];
+            let properties = invalidation_properties();
             provider_stage("bulk_property_subscribe");
             timing::enter(Stage::PropertySubscribe);
             METRICS.registration_calls.fetch_add(1, Ordering::Relaxed);
@@ -533,6 +650,7 @@ impl<'a> Attempt<'a> {
                 text_bytes: 0,
                 calls: 3,
                 nodes: 0,
+                projected_nodes: 0,
                 registered: true,
                 scope_rules: Vec::new(),
             };
@@ -607,12 +725,7 @@ impl<'a> Attempt<'a> {
                         TreeScope_Subtree,
                         None::<&IUIAutomationCacheRequest>,
                         &self.property,
-                        &[
-                            UIA_NamePropertyId,
-                            UIA_ValueValuePropertyId,
-                            UIA_ControlTypePropertyId,
-                            UIA_IsPasswordPropertyId,
-                        ],
+                        &invalidation_properties(),
                     )
                     .map_err(provider)?;
             }
@@ -647,7 +760,7 @@ impl<'a> Attempt<'a> {
         let cache = self.automation.CreateCacheRequest().map_err(provider)?;
         cache.SetTreeScope(scope).map_err(provider)?;
         cache
-            .SetTreeFilter(&self.automation.ControlViewCondition().map_err(provider)?)
+            .SetTreeFilter(&self.automation.RawViewCondition().map_err(provider)?)
             .map_err(provider)?;
         cache
             .SetAutomationElementMode(AutomationElementMode_Full)
@@ -684,67 +797,8 @@ impl<'a> Attempt<'a> {
             Ok((!result.is_empty()).then_some(result))
         }
     }
-    fn key(&self, element: &IUIAutomationElement) -> Result<Vec<i32>, Stop> {
-        self.check()?;
-        let variant = unsafe { element.GetCachedPropertyValueEx(UIA_RuntimeIdPropertyId, true) }
-            .map_err(provider)?;
-        unsafe {
-            let raw = variant.as_raw();
-            if raw.Anonymous.Anonymous.vt != 0x2003 {
-                return Err(evidence_rejected(EvidenceRejection::RuntimeIdVariant));
-            }
-            let array = raw.Anonymous.Anonymous.Anonymous.parray;
-            if array.is_null()
-                || (*array).cDims != 1
-                || (*array).cbElements != 4
-                || (*array).pvData.is_null()
-            {
-                return Err(evidence_rejected(EvidenceRejection::RuntimeIdArrayLayout));
-            }
-            let length = (*array).rgsabound[0].cElements as usize;
-            if length == 0 || length > 128 {
-                return Err(evidence_rejected(EvidenceRejection::RuntimeIdLength));
-            }
-            Ok(std::slice::from_raw_parts((*array).pvData.cast::<i32>(), length).to_vec())
-        }
-    }
-    unsafe fn query(
-        &mut self,
-        root: &IUIAutomationElement,
-        scope: TreeScope,
-        condition: &IUIAutomationCondition,
-        properties: &[UIA_PROPERTY_ID],
-        query_stage: Stage,
-    ) -> Result<Vec<IUIAutomationElement>, Stop> {
-        let cache = self.cache(properties, TreeScope_Element)?;
-        self.request()?;
-        provider_stage("bulk_find_all_build_cache");
-        timing::enter(query_stage);
-        let array = root
-            .FindAllBuildCache(scope, condition, &cache)
-            .map_err(provider)?;
-        self.check()?;
-        let length = array.Length().map_err(provider)?;
-        if length < 0 || length as usize > self.max_nodes {
-            return Err(Stop::Nodes);
-        }
-        let mut elements = Vec::with_capacity(length as usize);
-        let mut keys = HashSet::new();
-        for index in 0..length {
-            self.check()?;
-            let element = array.GetElement(index).map_err(provider)?;
-            if !keys.insert(self.key(&element)?) {
-                return Err(evidence_rejected(
-                    EvidenceRejection::DuplicateQueryRuntimeId,
-                ));
-            }
-            elements.push(element);
-        }
-        Ok(elements)
-    }
-    /// Hierarchy is required to preserve terminal/password/decorative ancestor
-    /// semantics and completion limits. Only these three structural properties
-    /// are acquired across all types; names are queried only in rule scopes.
+    /// One hierarchy and its cached properties provide all mandatory evidence.
+    /// The broad provider acquisition is logged without logging property values.
     pub fn acquire(
         &mut self,
         full_text: bool,
@@ -758,6 +812,9 @@ impl<'a> Attempt<'a> {
             .fetch_add((self.calls - calls_before) as u64, Ordering::Relaxed);
         METRICS
             .nodes
+            .fetch_add(self.projected_nodes as u64, Ordering::Relaxed);
+        METRICS
+            .raw_nodes
             .fetch_add(self.nodes as u64, Ordering::Relaxed);
         result
     }
@@ -768,38 +825,15 @@ impl<'a> Attempt<'a> {
         need_url: bool,
     ) -> Result<AccessibilityNode, Stop> {
         self.nodes = 0;
+        self.projected_nodes = 0;
         self.text_bytes = 0;
         if !full_text && !subtree_rules && !need_url {
             self.check()?;
             return Ok(AccessibilityNode::default());
         }
-        let structural = [
-            UIA_RuntimeIdPropertyId,
-            UIA_ControlTypePropertyId,
-            UIA_IsPasswordPropertyId,
-        ];
-        let full = [
-            UIA_RuntimeIdPropertyId,
-            UIA_ControlTypePropertyId,
-            UIA_IsPasswordPropertyId,
-            UIA_ValueValuePropertyId,
-            UIA_NamePropertyId,
-            UIA_AutomationIdPropertyId,
-            UIA_ClassNamePropertyId,
-            UIA_BoundingRectanglePropertyId,
-            UIA_IsEnabledPropertyId,
-            UIA_HasKeyboardFocusPropertyId,
-            UIA_IsKeyboardFocusablePropertyId,
-            UIA_HelpTextPropertyId,
-            UIA_AcceleratorKeyPropertyId,
-            UIA_AccessKeyPropertyId,
-            UIA_LocalizedControlTypePropertyId,
-        ];
+        let properties = cache_properties(full_text, subtree_rules, need_url);
         unsafe {
-            let cache = self.cache(
-                if full_text { &full } else { &structural },
-                TreeScope_Subtree,
-            )?;
+            let cache = self.cache(&properties, TreeScope_Subtree)?;
             self.request()?;
             provider_stage("bulk_build_updated_cache");
             timing::enter(if full_text {
@@ -816,171 +850,24 @@ impl<'a> Attempt<'a> {
             }
             let root = self.root.BuildUpdatedCache(&cache).map_err(provider)?;
             self.check()?;
-            let mut names = HashMap::new();
-            let mut values = HashMap::new();
-            if !full_text && (subtree_rules || need_url) {
-                let document = self
-                    .automation
-                    .CreatePropertyCondition(
-                        UIA_ControlTypePropertyId,
-                        &VARIANT::from(UIA_DocumentControlTypeId.0),
-                    )
-                    .map_err(provider)?;
-                let edit = self
-                    .automation
-                    .CreatePropertyCondition(
-                        UIA_ControlTypePropertyId,
-                        &VARIANT::from(UIA_EditControlTypeId.0),
-                    )
-                    .map_err(provider)?;
-                let combo = self
-                    .automation
-                    .CreatePropertyCondition(
-                        UIA_ControlTypePropertyId,
-                        &VARIANT::from(UIA_ComboBoxControlTypeId.0),
-                    )
-                    .map_err(provider)?;
-                let entry = self
-                    .automation
-                    .CreateOrCondition(&edit, &combo)
-                    .map_err(provider)?;
-                let value_condition = self
-                    .automation
-                    .CreateOrCondition(&entry, &document)
-                    .map_err(provider)?;
-                let value_properties = [UIA_RuntimeIdPropertyId, UIA_ValueValuePropertyId];
-                let value_elements = self.query(
-                    &self.root.clone(),
-                    TreeScope_Subtree,
-                    &value_condition,
-                    &value_properties,
-                    Stage::DocumentValueQuery,
-                )?;
-                for element in value_elements {
-                    let key = self.key(&element)?;
-                    let supported = self.is_string(&element, UIA_ValueValuePropertyId)?;
-                    let value = self.string(&element, UIA_ValueValuePropertyId)?;
-                    if values.insert(key, (value, supported)).is_some() {
-                        return Err(evidence_rejected(
-                            EvidenceRejection::DuplicateValueRuntimeId,
-                        ));
-                    }
-                }
-                if subtree_rules {
-                    let window = self
-                        .automation
-                        .CreatePropertyCondition(
-                            UIA_ControlTypePropertyId,
-                            &VARIANT::from(UIA_WindowControlTypeId.0),
-                        )
-                        .map_err(provider)?;
-                    let condition = self
-                        .automation
-                        .CreateOrCondition(&document, &window)
-                        .map_err(provider)?;
-                    let name_properties = [UIA_RuntimeIdPropertyId, UIA_NamePropertyId];
-                    let extension_properties = [
-                        UIA_RuntimeIdPropertyId,
-                        UIA_NamePropertyId,
-                        UIA_ValueValuePropertyId,
-                    ];
-                    let elements = self.query(
-                        &self.root.clone(),
-                        TreeScope_Subtree,
-                        &condition,
-                        &name_properties,
-                        Stage::WindowDocumentNameQuery,
-                    )?;
-                    for element in elements {
-                        let key = self.key(&element)?;
-                        self.require_string(&element, UIA_NamePropertyId)?;
-                        let name = self.string(&element, UIA_NamePropertyId)?;
-                        let extension = values
-                            .get(&key)
-                            .and_then(|(value, _)| value.as_deref())
-                            .is_some_and(super::is_extension_url);
-                        if subtree_rules && extension {
-                            let all = self.automation.CreateTrueCondition().map_err(provider)?;
-                            let children = self.query(
-                                &element,
-                                TreeScope_Children,
-                                &all,
-                                &extension_properties,
-                                Stage::ExtensionChildQuery,
-                            )?;
-                            log_scope(
-                                "extension_shallow_children",
-                                3,
-                                &self.scope_rules,
-                                children.len(),
-                            );
-                            for child in children {
-                                let key = self.key(&child)?;
-                                self.require_string(&child, UIA_NamePropertyId)?;
-                                consistent_insert(
-                                    &mut names,
-                                    key.clone(),
-                                    self.string(&child, UIA_NamePropertyId)?,
-                                )?;
-                                consistent_insert(
-                                    &mut values,
-                                    key,
-                                    (
-                                        self.string(&child, UIA_ValueValuePropertyId)?,
-                                        self.is_string(&child, UIA_ValueValuePropertyId)?,
-                                    ),
-                                )?;
-                                let grandchildren = self.query(
-                                    &child,
-                                    TreeScope_Children,
-                                    &all,
-                                    &extension_properties,
-                                    Stage::ExtensionChildQuery,
-                                )?;
-                                log_scope(
-                                    "extension_shallow_grandchildren",
-                                    3,
-                                    &self.scope_rules,
-                                    grandchildren.len(),
-                                );
-                                for grandchild in grandchildren {
-                                    let key = self.key(&grandchild)?;
-                                    self.require_string(&grandchild, UIA_NamePropertyId)?;
-                                    consistent_insert(
-                                        &mut names,
-                                        key.clone(),
-                                        self.string(&grandchild, UIA_NamePropertyId)?,
-                                    )?;
-                                    consistent_insert(
-                                        &mut values,
-                                        key,
-                                        (
-                                            self.string(&grandchild, UIA_ValueValuePropertyId)?,
-                                            self.is_string(&grandchild, UIA_ValueValuePropertyId)?,
-                                        ),
-                                    )?;
-                                }
-                            }
-                        }
-                        consistent_insert(&mut names, key, name)?;
-                    }
-                }
-            }
             timing::enter(Stage::CacheDecode);
-            let mut seen = HashSet::new();
-            let result = self.decode(
-                &root,
-                0,
-                full_text,
-                subtree_rules,
-                need_url,
-                0,
-                &names,
-                &values,
-                &mut seen,
-            )?;
-            projected_keys_complete(&names, &seen)?;
-            projected_keys_complete(&values, &seen)?;
+            let result = self.decode(&root, full_text, subtree_rules, need_url);
+            if !full_text {
+                // A single subtree request must ask the provider for these
+                // strings across every control, though decode scopes them.
+                let broad = if subtree_rules { 2 } else { 1 };
+                log_scope(
+                    if subtree_rules {
+                        "single_cache_broad_name_value"
+                    } else {
+                        "single_cache_broad_value"
+                    },
+                    broad,
+                    &self.scope_rules,
+                    self.nodes,
+                );
+            }
+            let result = result?;
             self.check()?;
             Ok(result)
         }
@@ -995,92 +882,119 @@ impl<'a> Attempt<'a> {
             .map_err(provider)?;
         required_string_type(variant.as_raw().Anonymous.Anonymous.vt)
     }
-    unsafe fn is_string(
-        &self,
-        element: &IUIAutomationElement,
-        property: UIA_PROPERTY_ID,
-    ) -> Result<bool, Stop> {
-        let variant = element
-            .GetCachedPropertyValueEx(property, true)
-            .map_err(provider)?;
-        Ok(variant.as_raw().Anonymous.Anonymous.vt == 8)
-    }
     unsafe fn decode(
         &mut self,
         element: &IUIAutomationElement,
-        depth: usize,
+        full: bool,
+        subtree_rules: bool,
+        need_url: bool,
+    ) -> Result<AccessibilityNode, Stop> {
+        let mut projected = Vec::with_capacity(1);
+        // The old decoder retained the requested root in ControlView. Keep
+        // that behavior even if its IsControlElement value is false.
+        self.decode_into(
+            element,
+            0,
+            full,
+            subtree_rules,
+            need_url,
+            0,
+            true,
+            &mut projected,
+        )?;
+        if projected.len() != 1 {
+            return Err(Stop::Provider);
+        }
+        Ok(projected.remove(0))
+    }
+    unsafe fn decode_into(
+        &mut self,
+        element: &IUIAutomationElement,
+        raw_depth: usize,
         full: bool,
         subtree_rules: bool,
         need_url: bool,
         extension_levels: usize,
-        names: &HashMap<Vec<i32>, Option<String>>,
-        values: &HashMap<Vec<i32>, (Option<String>, bool)>,
-        seen: &mut HashSet<Vec<i32>>,
-    ) -> Result<AccessibilityNode, Stop> {
+        root: bool,
+        out: &mut Vec<AccessibilityNode>,
+    ) -> Result<(), Stop> {
+        // RawView can have more nodes and deeper paths than ControlView. Apply
+        // both bounds to raw traversal, conservatively refusing incomplete work.
         node_budget(
             Instant::now(),
             self.deadline,
             self.nodes,
             self.max_nodes,
-            depth,
+            raw_depth,
             self.max_depth,
         )?;
         self.nodes += 1;
-        let key = self.key(element)?;
-        if !seen.insert(key.clone()) {
-            return Err(evidence_rejected(
-                EvidenceRejection::DuplicateHierarchyRuntimeId,
-            ));
-        }
         let control = cached_control_type(
             &element
                 .GetCachedPropertyValueEx(UIA_ControlTypePropertyId, true)
                 .map_err(provider)?,
         )?;
-        let title_required = (subtree_rules && control == UIA_WindowControlTypeId.0)
-            || (subtree_rules && control == UIA_DocumentControlTypeId.0)
-            || extension_levels > 0;
-        if title_required {
-            if full {
-                self.require_string(element, UIA_NamePropertyId)?;
-            } else if !names.contains_key(&key) {
-                return Err(evidence_rejected(EvidenceRejection::MissingTitleProjection));
+        // FALSE applies UIA's default TRUE if the provider omits the property,
+        // matching ControlViewCondition's effective membership.
+        let is_control = cached_control_element(
+            &element
+                .GetCachedPropertyValueEx(UIA_IsControlElementPropertyId, false)
+                .map_err(provider)?,
+        )?;
+        let password = cached_password(
+            &element
+                .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
+                .map_err(provider)?,
+        )?;
+        match raw_node_action(
+            root,
+            is_control,
+            control,
+            subtree_rules,
+            need_url,
+            extension_levels,
+        ) {
+            RawNodeAction::Reject => {
+                return Err(evidence_rejected(EvidenceRejection::RawOnlyPolicyElement));
             }
-        }
-        if (subtree_rules || need_url) && control == UIA_DocumentControlTypeId.0 {
-            if full {
-                self.require_string(element, UIA_ValueValuePropertyId)?;
-            } else if !values.get(&key).is_some_and(|(_, supported)| *supported) {
-                return Err(evidence_rejected(EvidenceRejection::MissingDocumentValue));
+            RawNodeAction::Flatten => {
+                // A non-control ancestor is transparent in ControlView. Its
+                // Edit, password, or decorative role cannot prune descendants.
+                self.decode_children(
+                    element,
+                    raw_depth,
+                    full,
+                    subtree_rules,
+                    need_url,
+                    extension_levels,
+                    out,
+                )?;
+                return Ok(());
             }
+            RawNodeAction::Keep => {}
         }
-        if !full
-            && (subtree_rules || need_url)
-            && (control == UIA_EditControlTypeId.0 || control == UIA_ComboBoxControlTypeId.0)
-            && !values.contains_key(&key)
-        {
-            return Err(evidence_rejected(EvidenceRejection::MissingEntryValue));
+        let scope = rule_property_scope(control, subtree_rules, need_url, extension_levels);
+        self.projected_nodes += 1;
+        if scope.required_name {
+            self.require_string(element, UIA_NamePropertyId)?;
         }
-        if !full && extension_levels > 0 && !values.contains_key(&key) {
-            return Err(evidence_rejected(EvidenceRejection::MissingExtensionValue));
+        if scope.required_value {
+            self.require_string(element, UIA_ValueValuePropertyId)?;
         }
-        let password = element
-            .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
-            .map_err(provider)?;
         let mut node = AccessibilityNode {
             control_type: crate::platform::windows_uia::control_type_id_to_name(control)
                 .to_string(),
-            name: if full {
+            name: if full || scope.name {
                 self.string(element, UIA_NamePropertyId)?
             } else {
-                names.get(&key).cloned().flatten()
+                None
             },
-            value: if full {
+            value: if full || scope.value {
                 self.string(element, UIA_ValueValuePropertyId)?
             } else {
-                values.get(&key).and_then(|(value, _)| value.clone())
+                None
             },
-            is_password: cached_password(&password)?,
+            is_password: password,
             ..Default::default()
         };
         if full {
@@ -1111,14 +1025,34 @@ impl<'a> Attempt<'a> {
             .ok();
             node.bounds = bulk_cached_bounds(element);
         }
-        let child_extension_levels = if subtree_rules
-            && control == UIA_DocumentControlTypeId.0
-            && node.value.as_deref().is_some_and(super::is_extension_url)
-        {
-            2
-        } else {
-            extension_levels.saturating_sub(1)
-        };
+        let child_extension_levels = next_extension_levels(
+            control,
+            subtree_rules,
+            node.value.as_deref(),
+            extension_levels,
+        );
+        self.decode_children(
+            element,
+            raw_depth,
+            full,
+            subtree_rules,
+            need_url,
+            child_extension_levels,
+            &mut node.children,
+        )?;
+        out.push(node);
+        Ok(())
+    }
+    unsafe fn decode_children(
+        &mut self,
+        element: &IUIAutomationElement,
+        raw_depth: usize,
+        full: bool,
+        subtree_rules: bool,
+        need_url: bool,
+        extension_levels: usize,
+        out: &mut Vec<AccessibilityNode>,
+    ) -> Result<(), Stop> {
         // GetCachedChildren is a local cache read. Null means a complete leaf;
         // HRESULT failure remains unknown, never a partial successful tree.
         let mut raw = std::ptr::null_mut();
@@ -1134,20 +1068,19 @@ impl<'a> Attempt<'a> {
             for index in 0..length {
                 self.check()?;
                 let child = children.GetElement(index).map_err(provider)?;
-                node.children.push(self.decode(
+                self.decode_into(
                     &child,
-                    depth + 1,
+                    raw_depth + 1,
                     full,
                     subtree_rules,
                     need_url,
-                    child_extension_levels,
-                    names,
-                    values,
-                    seen,
-                )?);
+                    extension_levels,
+                    false,
+                    out,
+                )?;
             }
         }
-        Ok(node)
+        Ok(())
     }
 }
 
@@ -1155,20 +1088,21 @@ impl<'a> Attempt<'a> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     #[test]
     fn evidence_rejection_is_counted_and_remains_fail_closed() {
-        let index = EvidenceRejection::RuntimeIdArrayLayout as usize;
+        let index = EvidenceRejection::RequiredStringType as usize;
         let before = EVIDENCE_REJECTIONS[index].load(Ordering::Relaxed);
         assert_eq!(
-            evidence_rejected(EvidenceRejection::RuntimeIdArrayLayout),
+            evidence_rejected(EvidenceRejection::RequiredStringType),
             Stop::Provider
         );
         let snapshot = metrics_snapshot();
         assert_eq!(
             snapshot["evidence_rejection_codes"][index],
-            "runtime_id_array_layout"
+            "required_string_type"
         );
         assert!(
             snapshot["evidence_rejection_counts"][index]
@@ -1184,6 +1118,37 @@ mod tests {
                 .len(),
             EVIDENCE_REJECTION_CODES.len()
         );
+        for obsolete in [
+            EvidenceRejection::ConflictingProjection,
+            EvidenceRejection::ProjectionOutsideHierarchy,
+            EvidenceRejection::RuntimeIdVariant,
+            EvidenceRejection::RuntimeIdArrayLayout,
+            EvidenceRejection::RuntimeIdLength,
+            EvidenceRejection::DuplicateQueryRuntimeId,
+            EvidenceRejection::DuplicateValueRuntimeId,
+            EvidenceRejection::DuplicateHierarchyRuntimeId,
+            EvidenceRejection::MissingTitleProjection,
+            EvidenceRejection::MissingDocumentValue,
+            EvidenceRejection::MissingEntryValue,
+            EvidenceRejection::MissingExtensionValue,
+        ] {
+            assert_eq!(snapshot["evidence_rejection_counts"][obsolete as usize], 0);
+        }
+        assert_eq!(
+            snapshot["evidence_rejection_codes"][19],
+            "control_element_variant"
+        );
+        assert_eq!(
+            snapshot["evidence_rejection_codes"][20],
+            "raw_only_policy_element"
+        );
+        assert_eq!(
+            snapshot["acquisition_mode"],
+            "single_raw_cache_control_projection"
+        );
+        assert_eq!(snapshot["schema_version"], 3);
+        assert!(snapshot["raw_nodes"].is_u64());
+        assert!(snapshot["projected_nodes"].is_u64());
     }
 
     #[test]
@@ -1338,6 +1303,15 @@ mod tests {
         ] {
             assert_eq!(cached_password(&value), Err(Stop::Provider));
         }
+        assert_eq!(cached_control_element(&VARIANT::from(true)), Ok(true));
+        assert_eq!(cached_control_element(&VARIANT::from(false)), Ok(false));
+        for value in [
+            VARIANT::default(),
+            VARIANT::from("true"),
+            VARIANT::from(1i32),
+        ] {
+            assert_eq!(cached_control_element(&value), Err(Stop::Provider));
+        }
     }
     #[test]
     fn fresh_bulk_node_depth_boundaries_are_complete_or_failed() {
@@ -1354,20 +1328,239 @@ mod tests {
         );
     }
     #[test]
-    fn fresh_bulk_scoped_keys_must_join_and_conflicts_fail_closed() {
-        let mut map = HashMap::new();
-        consistent_insert(&mut map, vec![1, 2], Some("ordinary".to_string())).unwrap();
-        consistent_insert(&mut map, vec![1, 2], Some("ordinary".to_string())).unwrap();
+    fn fresh_bulk_single_cache_property_union_never_requires_runtime_id() {
+        let ids = |full, subtree, url| {
+            cache_properties(full, subtree, url)
+                .iter()
+                .map(|property| property.0)
+                .collect::<Vec<_>>()
+        };
+        let control = UIA_ControlTypePropertyId.0;
+        let password = UIA_IsPasswordPropertyId.0;
+        let membership = UIA_IsControlElementPropertyId.0;
+        let name = UIA_NamePropertyId.0;
+        let value = UIA_ValueValuePropertyId.0;
+        assert_eq!(ids(false, false, false), [control, password, membership]);
         assert_eq!(
-            consistent_insert(&mut map, vec![1, 2], Some("changed".to_string())),
-            Err(Stop::Provider)
+            ids(false, false, true),
+            [control, password, membership, value]
         );
-        let other = HashSet::from([vec![1, 3]]);
-        assert_eq!(projected_keys_complete(&map, &other), Err(Stop::Provider));
         assert_eq!(
-            projected_keys_complete(&map, &HashSet::from([vec![1, 2]])),
-            Ok(())
+            ids(false, true, false),
+            [control, password, membership, name, value]
         );
+        assert_eq!(
+            ids(false, true, true),
+            [control, password, membership, name, value]
+        );
+        for (full, subtree, url) in [
+            (false, false, true),
+            (false, true, false),
+            (true, false, false),
+        ] {
+            let requested = ids(full, subtree, url);
+            assert!(!requested.contains(&UIA_RuntimeIdPropertyId.0));
+            assert_eq!(
+                requested.iter().copied().collect::<HashSet<_>>().len(),
+                requested.len()
+            );
+        }
+        let full = ids(true, false, false);
+        assert_eq!(full.len(), 15);
+        for property in [
+            name,
+            value,
+            UIA_AutomationIdPropertyId.0,
+            UIA_ClassNamePropertyId.0,
+            UIA_BoundingRectanglePropertyId.0,
+            UIA_IsEnabledPropertyId.0,
+            UIA_HasKeyboardFocusPropertyId.0,
+            UIA_IsKeyboardFocusablePropertyId.0,
+            UIA_HelpTextPropertyId.0,
+            UIA_AcceleratorKeyPropertyId.0,
+            UIA_AccessKeyPropertyId.0,
+            UIA_LocalizedControlTypePropertyId.0,
+        ] {
+            assert!(full.contains(&property));
+        }
+    }
+    #[test]
+    fn fresh_bulk_mandatory_cache_properties_all_invalidate_revision() {
+        let subscribed: HashSet<_> = invalidation_properties()
+            .iter()
+            .map(|property| property.0)
+            .collect();
+        assert_eq!(subscribed.len(), 5);
+        for (subtree_rules, need_url) in [(true, false), (false, true), (true, true)] {
+            for property in cache_properties(false, subtree_rules, need_url) {
+                assert!(
+                    subscribed.contains(&property.0),
+                    "mandatory cache property {} lacks invalidation",
+                    property.0
+                );
+            }
+        }
+        let revision = Arc::new(AtomicU64::new(0));
+        let handler: IUIAutomationPropertyChangedEventHandler = Property(revision.clone()).into();
+        unsafe {
+            handler
+                .HandlePropertyChangedEvent(
+                    None::<&IUIAutomationElement>,
+                    UIA_IsControlElementPropertyId,
+                    &VARIANT::from(false),
+                )
+                .unwrap();
+        }
+        assert_eq!(revision.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn fresh_bulk_raw_only_policy_nodes_reject_and_other_ancestors_flatten() {
+        let window = UIA_WindowControlTypeId.0;
+        let document = UIA_DocumentControlTypeId.0;
+        let edit = UIA_EditControlTypeId.0;
+        let combo = UIA_ComboBoxControlTypeId.0;
+        let pane = UIA_PaneControlTypeId.0;
+        let image = UIA_ImageControlTypeId.0;
+        let action = |root, control_member, kind, subtree, url, extension| {
+            raw_node_action(root, control_member, kind, subtree, url, extension)
+        };
+        // The raw root was also the root of the old ControlView cache. Even
+        // when membership is false, it retains the required rule properties.
+        assert_eq!(
+            action(true, false, window, true, false, 0),
+            RawNodeAction::Keep
+        );
+        assert!(rule_property_scope(window, true, false, 0).required_name);
+        assert_eq!(
+            action(true, false, document, false, true, 0),
+            RawNodeAction::Keep
+        );
+        assert!(rule_property_scope(document, false, true, 0).required_value);
+        for kind in [window, document, edit, combo] {
+            assert_eq!(
+                action(false, false, kind, true, false, 0),
+                RawNodeAction::Reject
+            );
+        }
+        for kind in [document, edit, combo] {
+            assert_eq!(
+                action(false, false, kind, false, true, 0),
+                RawNodeAction::Reject
+            );
+        }
+        assert_eq!(
+            action(false, false, window, false, true, 0),
+            RawNodeAction::Flatten
+        );
+        // A raw-only Image or Pane may carry a password/decorative role; it
+        // must not prune a retained descendant in the ControlView projection.
+        for kind in [image, pane] {
+            assert_eq!(
+                action(false, false, kind, true, false, 0),
+                RawNodeAction::Flatten
+            );
+            assert_eq!(
+                action(false, true, window, true, false, 0),
+                RawNodeAction::Keep
+            );
+        }
+        // Old raw extension child/grandchild queries would include generic
+        // non-controls; rejecting them also prevents projected-depth widening.
+        for level in [1, 2] {
+            assert_eq!(
+                action(false, false, pane, true, false, level),
+                RawNodeAction::Reject
+            );
+            assert_eq!(
+                action(false, true, pane, true, false, level),
+                RawNodeAction::Keep
+            );
+        }
+    }
+    #[test]
+    fn fresh_bulk_rule_scope_covers_nested_titles_urls_and_extension_depth() {
+        let window = UIA_WindowControlTypeId.0;
+        let document = UIA_DocumentControlTypeId.0;
+        let edit = UIA_EditControlTypeId.0;
+        let combo = UIA_ComboBoxControlTypeId.0;
+        let text = UIA_TextControlTypeId.0;
+        let button = UIA_ButtonControlTypeId.0;
+        let scope =
+            |control, subtree, url, level| rule_property_scope(control, subtree, url, level);
+        let title = RulePropertyScope {
+            name: true,
+            required_name: true,
+            value: false,
+            required_value: false,
+        };
+        let document_scope = RulePropertyScope {
+            value: true,
+            required_value: true,
+            ..title
+        };
+        let entry_scope = RulePropertyScope {
+            name: false,
+            required_name: false,
+            value: true,
+            required_value: false,
+        };
+        let blank = RulePropertyScope {
+            name: false,
+            required_name: false,
+            value: false,
+            required_value: false,
+        };
+        assert_eq!(scope(window, true, false, 0), title);
+        assert_eq!(scope(document, true, false, 0), document_scope);
+        for control in [edit, combo] {
+            assert_eq!(scope(control, true, false, 0), entry_scope);
+            assert_eq!(scope(control, false, true, 0), entry_scope);
+        }
+        assert_eq!(
+            scope(document, false, true, 0),
+            RulePropertyScope {
+                name: false,
+                required_name: false,
+                value: true,
+                required_value: true
+            }
+        );
+        assert_eq!(scope(window, false, true, 0), blank);
+        assert_eq!(scope(text, true, false, 0), blank);
+        assert_eq!(scope(button, true, false, 0), blank);
+        for level in [1, 2] {
+            assert_eq!(
+                scope(text, true, false, level),
+                RulePropertyScope {
+                    name: true,
+                    required_name: true,
+                    value: true,
+                    required_value: false
+                }
+            );
+            assert_eq!(
+                scope(button, true, false, level),
+                RulePropertyScope {
+                    name: true,
+                    required_name: true,
+                    value: true,
+                    required_value: false
+                }
+            );
+        }
+        assert_eq!(scope(text, false, true, 2), blank);
+        let extension = Some("chrome-extension://fixed-test-id/page");
+        let child_level = next_extension_levels(document, true, extension, 0);
+        assert_eq!(child_level, 2);
+        let grandchild_level = next_extension_levels(text, true, None, child_level);
+        assert_eq!(grandchild_level, 1);
+        assert_eq!(next_extension_levels(text, true, None, grandchild_level), 0);
+        assert_eq!(scope(text, true, false, 0), blank);
+        assert_eq!(
+            next_extension_levels(document, true, extension, grandchild_level),
+            2
+        );
+        assert_eq!(next_extension_levels(document, false, extension, 0), 0);
     }
     #[test]
     fn fresh_bulk_unicode_limits_never_publish_truncated_rule_strings() {

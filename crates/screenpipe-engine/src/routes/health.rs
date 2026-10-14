@@ -1213,6 +1213,38 @@ mod tests {
                         .is_some()
                     );
                 }
+            } else if key == "evidence_rejection_codes" {
+                // Fixed, versioned reasons are diagnostic labels, not captured data.
+                let expected = [
+                    "registration_poisoned",
+                    "required_string_type",
+                    "control_type_variant",
+                    "control_type_range",
+                    "password_variant",
+                    "conflicting_projection",
+                    "projection_outside_hierarchy",
+                    "string_variant",
+                    "runtime_id_variant",
+                    "runtime_id_array_layout",
+                    "runtime_id_length",
+                    "duplicate_query_runtime_id",
+                    "duplicate_value_runtime_id",
+                    "duplicate_hierarchy_runtime_id",
+                    "missing_title_projection",
+                    "missing_document_value",
+                    "missing_entry_value",
+                    "missing_extension_value",
+                    "negative_child_count",
+                    "control_element_variant",
+                    "raw_only_policy_element",
+                ];
+                let codes = value.as_array().expect("fixed evidence reason list");
+                assert_eq!(codes.len(), expected.len());
+                for (code, expected) in codes.iter().zip(expected) {
+                    assert_eq!(code.as_str(), Some(expected));
+                }
+            } else if key == "acquisition_mode" {
+                assert_eq!(value.as_str(), Some("single_raw_cache_control_projection"));
             } else if key == "timing" {
                 let timing = value.as_object().expect("fixed timing schema");
                 let stage_names = timing

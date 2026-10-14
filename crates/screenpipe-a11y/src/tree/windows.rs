@@ -578,7 +578,14 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             }
             attempt.set_scope_rules(rule_refs.clone());
             if applicable_subtree_rules || need_url {
-                bulk::log_scope("hierarchy_structure", 3, &rule_refs, 0);
+                // A single hierarchy cache acquires the applicable property union
+                // across roles; decoding keeps the existing policy scopes.
+                bulk::log_scope(
+                    "single_raw_hierarchy_policy_properties",
+                    if applicable_subtree_rules { 5 } else { 4 },
+                    &rule_refs,
+                    0,
+                );
             }
             if !self.config.windows_privacy_only {
                 bulk::log_scope("accessibility_recording", 15, &[], 0);
@@ -2140,6 +2147,221 @@ mod tests {
             !buf.contains("hunter2"),
             "password content must not be extracted, got: {buf}"
         );
+    }
+
+    #[test]
+    fn extension_generic_children_and_grandchildren_block_without_runtime_ids() {
+        // AccessibilityNode is an attempt-local hierarchy with no RuntimeId
+        // requirement. Every control role in the shallow extension scope counts.
+        for scheme in [
+            "chrome-extension://",
+            "moz-extension://",
+            "ms-browser-extension://",
+        ] {
+            for levels in [1, 2] {
+                for use_value in [false, true] {
+                    let mut brand = AccessibilityNode {
+                        control_type: "Custom".into(),
+                        name: (!use_value).then(|| "Synthetic Protected Brand".into()),
+                        value: use_value.then(|| "Synthetic Protected Brand".into()),
+                        children: vec![AccessibilityNode {
+                            control_type: "Text".into(),
+                            name: Some("forbidden extension descendant".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    if levels == 2 {
+                        brand = AccessibilityNode {
+                            control_type: "Pane".into(),
+                            children: vec![brand],
+                            ..Default::default()
+                        };
+                    }
+                    let tree = AccessibilityNode {
+                        control_type: "Document".into(),
+                        name: Some("Ordinary route".into()),
+                        value: Some(format!("{scheme}synthetic/popup")),
+                        children: vec![brand],
+                        ..Default::default()
+                    };
+                    let (text, nodes, url, blocked) = project_synthetic_policy_tree(&tree);
+                    assert!(
+                        blocked,
+                        "scheme={scheme}, levels={levels}, value={use_value}"
+                    );
+                    assert!(!text.contains("forbidden"));
+                    assert!(nodes.iter().all(|node| !node.text.contains("forbidden")));
+                    assert!(url.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extension_third_level_text_does_not_expand_the_shallow_rule_scope() {
+        let tree = AccessibilityNode {
+            control_type: "Document".into(),
+            name: Some("Ordinary route".into()),
+            value: Some("chrome-extension://synthetic/popup".into()),
+            children: vec![AccessibilityNode {
+                control_type: "Pane".into(),
+                children: vec![AccessibilityNode {
+                    control_type: "Pane".into(),
+                    children: vec![AccessibilityNode {
+                        control_type: "Text".into(),
+                        name: Some("Synthetic Protected Brand".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (text, nodes, _, blocked) = project_synthetic_policy_tree(&tree);
+        assert!(!blocked);
+        // Recording can include deeper ordinary text; its presence alone must
+        // not broaden the existing two-level extension exclusion rule.
+        assert!(text.contains("Synthetic Protected Brand"));
+        assert!(nodes
+            .iter()
+            .any(|node| node.text == "Synthetic Protected Brand"));
+    }
+
+    #[test]
+    fn nested_extension_document_starts_its_own_shallow_rule_scope() {
+        let nested = AccessibilityNode {
+            control_type: "Document".into(),
+            name: Some("Nested ordinary route".into()),
+            value: Some("moz-extension://synthetic/nested".into()),
+            children: vec![AccessibilityNode {
+                control_type: "Pane".into(),
+                children: vec![AccessibilityNode {
+                    control_type: "Custom".into(),
+                    value: Some("Synthetic Protected Brand".into()),
+                    children: vec![AccessibilityNode {
+                        control_type: "Text".into(),
+                        name: Some("forbidden nested extension descendant".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tree = AccessibilityNode {
+            control_type: "Document".into(),
+            name: Some("Outer ordinary route".into()),
+            value: Some("chrome-extension://synthetic/outer".into()),
+            children: vec![AccessibilityNode {
+                control_type: "Pane".into(),
+                children: vec![AccessibilityNode {
+                    control_type: "Pane".into(),
+                    children: vec![nested],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (text, nodes, _, blocked) = project_synthetic_policy_tree(&tree);
+        assert!(blocked);
+        assert!(!text.contains("forbidden"));
+        assert!(nodes.iter().all(|node| !node.text.contains("forbidden")));
+    }
+
+    #[test]
+    fn transient_hierarchy_evaluates_protected_nested_windows_and_documents() {
+        // External provider IDs are not represented in this cached node model.
+        // The local hierarchy path still carries every nested title obligation.
+        for role in ["Window", "Document"] {
+            let tree = AccessibilityNode {
+                control_type: "Pane".into(),
+                children: vec![AccessibilityNode {
+                    control_type: role.into(),
+                    name: Some("Synthetic Protected Brand".into()),
+                    value: Some("https://example.test/ordinary".into()),
+                    children: vec![AccessibilityNode {
+                        control_type: "Text".into(),
+                        name: Some("forbidden protected descendant".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let (text, nodes, url, blocked) = project_synthetic_policy_tree(&tree);
+            assert!(blocked, "nested {role} must evaluate its title");
+            assert!(!text.contains("forbidden"));
+            assert!(nodes.iter().all(|node| !node.text.contains("forbidden")));
+            assert!(url.is_none());
+        }
+    }
+
+    #[test]
+    fn entry_and_password_ancestors_preserve_document_url_pruning() {
+        for (role, password) in [
+            ("Edit", Some(false)),
+            ("ComboBox", Some(false)),
+            ("Edit", None),
+            ("ComboBox", None),
+            ("Pane", Some(true)),
+            ("Document", Some(true)),
+        ] {
+            let tree = AccessibilityNode {
+                control_type: role.into(),
+                name: Some("Ordinary ancestor".into()),
+                value: Some("ordinary entry value".into()),
+                is_password: password,
+                children: vec![AccessibilityNode {
+                    control_type: "Document".into(),
+                    name: Some("Synthetic Protected Brand".into()),
+                    value: Some("https://example.test/hidden".into()),
+                    children: vec![AccessibilityNode {
+                        control_type: "Text".into(),
+                        name: Some("forbidden pruned descendant".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let (text, nodes, url, blocked) = project_synthetic_policy_tree(&tree);
+            assert!(!blocked, "{role} with password={password:?}");
+            assert!(url.is_none());
+            assert!(!text.contains("forbidden"));
+            assert!(nodes.iter().all(|node| !node.text.contains("forbidden")));
+            assert_eq!(nodes.len(), 1);
+            if password != Some(false) {
+                assert!(text.contains("[REDACTED:"));
+            }
+        }
+    }
+
+    fn project_synthetic_policy_tree(
+        tree: &AccessibilityNode,
+    ) -> (String, Vec<AccessibilityTreeNode>, Option<String>, bool) {
+        let ignored = WindowPattern::parse_list(&["Synthetic Protected Brand".into()]);
+        let mut text = String::new();
+        let mut nodes = Vec::new();
+        let mut url = None;
+        let mut blocked = false;
+        extract_text_from_tree(
+            tree,
+            0,
+            20,
+            &mut text,
+            &mut nodes,
+            &mut url,
+            &None,
+            &None,
+            &ignored,
+            "synthetic",
+            &mut blocked,
+        );
+        (text, nodes, url, blocked)
     }
 
     #[test]

@@ -12,7 +12,12 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 
 Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
-Current candidate: [Windows admission/text split](docs/UIA_ADMISSION_TEXT_SPLIT.md), following the [fresh bulk UIA handoff](docs/FRESH_BULK_UIA_HANDOFF.md) and stage-timing investigation. The earlier installed GUI/CLI hashes were verified for the owner-authorized numeric baseline after Windows restart. The new desktop candidate is not deployed; its live comparison awaits owner confirmation. Historical hashes do not identify this artifact.
+Current candidate: [fresh single-hierarchy UIA](docs/UIA_SINGLE_CACHE_HANDOFF.md),
+following the [Windows admission/text split](docs/UIA_ADMISSION_TEXT_SPLIT.md)
+and evidence-rejection diagnostics. Owner-run Access probes support investigating
+the acquisition change, not a production privacy/performance conclusion. The
+current implementation is not deployed; live admission comparison awaits owner
+confirmation. Historical hashes do not identify this artifact.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
 

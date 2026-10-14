@@ -24,8 +24,12 @@ pub(super) enum Stage {
     PropertySubscribe,
     CacheConfiguration,
     HierarchyCache,
+    // Retained zero-valued slots keep the historical timing vectors comparable.
+    #[allow(dead_code)]
     DocumentValueQuery,
+    #[allow(dead_code)]
     WindowDocumentNameQuery,
+    #[allow(dead_code)]
     ExtensionChildQuery,
     CacheDecode,
     PolicyProjection,
