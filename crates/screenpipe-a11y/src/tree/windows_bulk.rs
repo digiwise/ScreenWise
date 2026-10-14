@@ -6,7 +6,7 @@
 use super::timing::{self, Stage};
 use crate::events::AccessibilityNode;
 use crate::platform::windows_uia::UiaContext;
-use screenpipe_config::capture_diagnostics::AccessibilityStopReason as Stop;
+pub(super) use screenpipe_config::capture_diagnostics::AccessibilityStopReason as Stop;
 use screenpipe_config::capture_diagnostics::RuleReference;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
@@ -111,6 +111,29 @@ fn initial_deadline(deadline: Instant) -> Result<(), Stop> {
     } else {
         Ok(())
     }
+}
+/// UIA requires a 50 ms minimum timeout. Start a new provider call only
+/// when at least 50 ms remains, and never configure past the phase deadline.
+fn provider_timeout_at(now: Instant, deadline: Instant) -> Result<u32, Stop> {
+    if now >= deadline {
+        return Err(Stop::Timeout);
+    }
+    let remaining = deadline.duration_since(now);
+    if remaining < std::time::Duration::from_millis(50) {
+        return Err(Stop::Timeout);
+    }
+    Ok(remaining.as_millis().min(u32::MAX as u128) as u32)
+}
+fn configure_provider_timeouts(timeouts: &IUIAutomation2, deadline: Instant) -> Result<(), Stop> {
+    let timeout = provider_timeout_at(Instant::now(), deadline).map_err(|reason| {
+        timing::timeout();
+        reason
+    })?;
+    unsafe {
+        timeouts.SetConnectionTimeout(timeout).map_err(provider)?;
+        timeouts.SetTransactionTimeout(timeout).map_err(provider)?;
+    }
+    initial_deadline(deadline)
 }
 pub(super) fn retry() {
     METRICS.retries.fetch_add(1, Ordering::Relaxed);
@@ -230,6 +253,7 @@ pub(super) fn record_attempt(
         }
         Err(_)
         | Ok(super::TreeWalkResult::Skipped(super::SkipReason::AccessibilityRetrievalFailed(_)))
+        | Ok(super::TreeWalkResult::Skipped(super::SkipReason::AccessibilityIncomplete(_)))
         | Ok(super::TreeWalkResult::Skipped(super::SkipReason::MonitorUnverified)) => {
             METRICS.failed.fetch_add(1, Ordering::Relaxed);
         }
@@ -245,11 +269,17 @@ pub(super) fn record_attempt(
         .position(|bound| us <= *bound)
         .unwrap_or(6);
     METRICS.histogram[bucket].fetch_add(1, Ordering::Relaxed);
-    if let Ok(super::TreeWalkResult::Skipped(super::SkipReason::AccessibilityRetrievalFailed(
-        failure,
-    ))) = result
-    {
-        let index = match failure.cause {
+    let cause = match result {
+        Ok(super::TreeWalkResult::Skipped(super::SkipReason::AccessibilityRetrievalFailed(
+            failure,
+        ))) => Some(failure.cause),
+        Ok(super::TreeWalkResult::Skipped(super::SkipReason::AccessibilityIncomplete(reason))) => {
+            Some(*reason)
+        }
+        _ => None,
+    };
+    if let Some(cause) = cause {
+        let index = match cause {
             Stop::Timeout => 0,
             Stop::Nodes => 1,
             Stop::Depth => 2,
@@ -362,8 +392,7 @@ impl<'a> Attempt<'a> {
         let automation = uia.bulk_automation();
         let timeouts = uia.bulk_timeouts();
         unsafe {
-            timeouts.SetConnectionTimeout(50).map_err(provider)?;
-            timeouts.SetTransactionTimeout(50).map_err(provider)?;
+            configure_provider_timeouts(timeouts, deadline)?;
             provider_stage("bulk_element_from_handle");
             timing::enter(Stage::RootLookup);
             METRICS.root_calls.fetch_add(1, Ordering::Relaxed);
@@ -377,6 +406,7 @@ impl<'a> Attempt<'a> {
             provider_stage("bulk_structure_subscribe");
             timing::enter(Stage::StructureSubscribe);
             METRICS.registration_calls.fetch_add(1, Ordering::Relaxed);
+            configure_provider_timeouts(timeouts, deadline)?;
             automation
                 .AddStructureChangedEventHandler(
                     &root,
@@ -394,14 +424,19 @@ impl<'a> Attempt<'a> {
             provider_stage("bulk_property_subscribe");
             timing::enter(Stage::PropertySubscribe);
             METRICS.registration_calls.fetch_add(1, Ordering::Relaxed);
-            if let Err(error) = automation.AddPropertyChangedEventHandlerNativeArray(
-                &root,
-                TreeScope_Subtree,
-                None::<&IUIAutomationCacheRequest>,
-                &property,
-                &properties,
-            ) {
-                let reason = provider(error);
+            let property_registration = (|| -> Result<(), Stop> {
+                configure_provider_timeouts(timeouts, deadline)?;
+                automation
+                    .AddPropertyChangedEventHandlerNativeArray(
+                        &root,
+                        TreeScope_Subtree,
+                        None::<&IUIAutomationCacheRequest>,
+                        &property,
+                        &properties,
+                    )
+                    .map_err(provider)
+            })();
+            if let Err(reason) = property_registration {
                 provider_stage("bulk_failed_setup_structure_remove");
                 timing::enter(Stage::EventCleanup);
                 let _ = cleanup_result(
@@ -434,6 +469,9 @@ impl<'a> Attempt<'a> {
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::SeqCst)
     }
+    pub fn set_deadline(&mut self, deadline: Instant) {
+        self.deadline = deadline;
+    }
     pub fn set_scope_rules(&mut self, rules: Vec<RuleReference>) {
         self.scope_rules = rules;
     }
@@ -451,11 +489,13 @@ impl<'a> Attempt<'a> {
             unsafe {
                 provider_stage("bulk_property_remove");
                 timing::enter(Stage::EventCleanup);
+                self.set_request_timeout()?;
                 cleanup_result(
                     self.automation
                         .RemovePropertyChangedEventHandler(&self.root, &self.property),
                 )?;
                 provider_stage("bulk_structure_remove");
+                self.set_request_timeout()?;
                 cleanup_result(
                     self.automation
                         .RemoveStructureChangedEventHandler(&self.root, &self.structure),
@@ -473,6 +513,7 @@ impl<'a> Attempt<'a> {
                 provider_stage("bulk_structure_subscribe");
                 timing::enter(Stage::StructureSubscribe);
                 METRICS.registration_calls.fetch_add(1, Ordering::Relaxed);
+                self.set_request_timeout()?;
                 self.automation
                     .AddStructureChangedEventHandler(
                         &self.root,
@@ -485,6 +526,7 @@ impl<'a> Attempt<'a> {
                 provider_stage("bulk_property_subscribe");
                 timing::enter(Stage::PropertySubscribe);
                 METRICS.registration_calls.fetch_add(1, Ordering::Relaxed);
+                self.set_request_timeout()?;
                 self.automation
                     .AddPropertyChangedEventHandlerNativeArray(
                         &self.root,
@@ -514,12 +556,12 @@ impl<'a> Attempt<'a> {
     }
     fn request(&mut self) -> Result<(), Stop> {
         self.check()?;
-        unsafe {
-            self.timeouts.SetConnectionTimeout(50).map_err(provider)?;
-            self.timeouts.SetTransactionTimeout(50).map_err(provider)?;
-        }
+        self.set_request_timeout()?;
         self.calls += 1;
         Ok(())
+    }
+    fn set_request_timeout(&self) -> Result<(), Stop> {
+        configure_provider_timeouts(self.timeouts, self.deadline)
     }
     unsafe fn cache(
         &self,
@@ -1034,6 +1076,38 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::time::Duration;
+
+    #[test]
+    fn provider_timeout_uses_remaining_phase_time_without_overrun() {
+        let now = Instant::now();
+        assert_eq!(
+            provider_timeout_at(now, now + Duration::from_millis(750)),
+            Ok(750)
+        );
+        assert_eq!(
+            provider_timeout_at(now, now + Duration::from_millis(125)),
+            Ok(125)
+        );
+        assert_eq!(
+            provider_timeout_at(now, now + Duration::from_millis(50)),
+            Ok(50)
+        );
+        assert_eq!(
+            provider_timeout_at(
+                now,
+                now + Duration::from_millis(50) - Duration::from_micros(1)
+            ),
+            Err(Stop::Timeout)
+        );
+        assert_eq!(
+            provider_timeout_at(
+                now,
+                now + Duration::from_millis(750) - Duration::from_micros(100)
+            ),
+            Ok(749)
+        );
+        assert_eq!(provider_timeout_at(now, now), Err(Stop::Timeout));
+    }
 
     #[test]
     fn fresh_bulk_zero_or_expired_budget_never_acquires() {

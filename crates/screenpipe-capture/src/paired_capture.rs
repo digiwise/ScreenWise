@@ -123,6 +123,9 @@ pub async fn paired_capture(
     tree_snapshot: Option<&TreeSnapshot>,
 ) -> Result<PairedCaptureResult> {
     let start = Instant::now();
+    // Optional recording failures must never publish a partial tree, even if a
+    // future provider accidentally leaves content in its failed snapshot.
+    let tree_snapshot = tree_snapshot.and_then(usable_accessibility_snapshot);
 
     // Write JPEG snapshot to disk — skipped when screenshot_disabled (AudioPaused / FullPause).
     // The accessibility tree walk still runs so metadata rows keep timestamp,
@@ -409,6 +412,27 @@ pub async fn paired_capture(
         browser_url: sanitized_browser_url,
         content_hash,
     })
+}
+
+/// Select only a fully acquired recording tree. Admission remains the caller's
+/// responsibility; a missing optional tree selects the admitted bitmap's OCR.
+pub fn usable_accessibility_snapshot(snapshot: &TreeSnapshot) -> Option<&TreeSnapshot> {
+    #[cfg(target_os = "windows")]
+    {
+        use screenpipe_a11y::tree::{
+            WindowsCaptureVerification, WindowsPrivacyVerification, WindowsTextAcquisition,
+        };
+        if !matches!(
+            snapshot.windows_capture_verification,
+            Some(WindowsCaptureVerification {
+                privacy: WindowsPrivacyVerification::Verified,
+                text: WindowsTextAcquisition::Complete,
+            })
+        ) {
+            return None;
+        }
+    }
+    Some(snapshot)
 }
 
 /// Walk the accessibility tree for the currently focused window.
@@ -800,6 +824,11 @@ mod tests {
             capture_privacy: Some(&privacy_json),
         };
         let snap = TreeSnapshot {
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: Some(screenpipe_a11y::tree::WindowsCaptureVerification {
+                privacy: screenpipe_a11y::tree::WindowsPrivacyVerification::Verified,
+                text: screenpipe_a11y::tree::WindowsTextAcquisition::Complete,
+            }),
             app_name: "ExcludedApp".to_string(),
             window_name: "Sensitive window".to_string(),
             text_content: "must not be retained".to_string(),
@@ -875,6 +904,11 @@ mod tests {
         };
 
         let snap = TreeSnapshot {
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: Some(screenpipe_a11y::tree::WindowsCaptureVerification {
+                privacy: screenpipe_a11y::tree::WindowsPrivacyVerification::Verified,
+                text: screenpipe_a11y::tree::WindowsTextAcquisition::Complete,
+            }),
             app_name: "Safari".to_string(),
             window_name: "Example Page".to_string(),
             text_content: "Hello World - Example Page".to_string(),
@@ -942,6 +976,11 @@ mod tests {
         };
 
         let snap = TreeSnapshot {
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: Some(screenpipe_a11y::tree::WindowsCaptureVerification {
+                privacy: screenpipe_a11y::tree::WindowsPrivacyVerification::Verified,
+                text: screenpipe_a11y::tree::WindowsTextAcquisition::Complete,
+            }),
             app_name: "TestApp".to_string(),
             window_name: "Account settings".to_string(),
             text_content: raw_text.clone(),
@@ -1052,6 +1091,11 @@ mod tests {
 
         // Empty accessibility text should be treated as no text
         let snap = TreeSnapshot {
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: Some(screenpipe_a11y::tree::WindowsCaptureVerification {
+                privacy: screenpipe_a11y::tree::WindowsPrivacyVerification::Verified,
+                text: screenpipe_a11y::tree::WindowsTextAcquisition::Complete,
+            }),
             app_name: "TestApp".to_string(),
             window_name: String::new(),
             text_content: String::new(),
@@ -1193,6 +1237,44 @@ mod tests {
 
     // --- a11y_content_is_thin tests ---
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_optional_text_failure_discards_partial_recording_content() {
+        use screenpipe_a11y::tree::AccessibilityStopReason;
+        use screenpipe_a11y::tree::{
+            WindowsCaptureVerification, WindowsPrivacyVerification, WindowsTextAcquisition,
+        };
+        let mut snapshot = make_snap(vec![AccessibilityTreeNode {
+            role: "AXStaticText".into(),
+            text: "synthetic partial secret".into(),
+            ..Default::default()
+        }]);
+        snapshot.browser_url = Some("https://policy.invalid".into());
+        snapshot.content_hash = 42;
+        snapshot.simhash = 43;
+        assert!(usable_accessibility_snapshot(&snapshot).is_some());
+        for status in [
+            WindowsTextAcquisition::Unavailable(AccessibilityStopReason::Timeout),
+            WindowsTextAcquisition::Unavailable(AccessibilityStopReason::Provider),
+            WindowsTextAcquisition::Unavailable(AccessibilityStopReason::PropertyText),
+            WindowsTextAcquisition::SkippedByConfig,
+        ] {
+            snapshot.windows_capture_verification = Some(WindowsCaptureVerification {
+                privacy: WindowsPrivacyVerification::Verified,
+                text: status,
+            });
+            // The same selector drives OCR, persistence, PII inspection and engine
+            // dedup: none can consume residual optional content/hashes/nodes.
+            assert!(usable_accessibility_snapshot(&snapshot).is_none());
+            assert_eq!(
+                snapshot.browser_url.as_deref(),
+                Some("https://policy.invalid")
+            );
+        }
+        snapshot.windows_capture_verification = None;
+        assert!(usable_accessibility_snapshot(&snapshot).is_none());
+    }
+
     fn make_snap(nodes: Vec<AccessibilityTreeNode>) -> TreeSnapshot {
         let text = nodes
             .iter()
@@ -1200,6 +1282,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         TreeSnapshot {
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: Some(screenpipe_a11y::tree::WindowsCaptureVerification {
+                privacy: screenpipe_a11y::tree::WindowsPrivacyVerification::Verified,
+                text: screenpipe_a11y::tree::WindowsTextAcquisition::Complete,
+            }),
             app_name: "Test".to_string(),
             window_name: "Test Window".to_string(),
             text_content: text,

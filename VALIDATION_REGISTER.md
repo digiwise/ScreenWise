@@ -12,9 +12,20 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 
 Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
-Current candidate: [fresh bulk UIA handoff](docs/FRESH_BULK_UIA_HANDOFF.md), including [failed-foreground attribution and compact notices](docs/CONSUMER_REPORT_20261013.md). The old installed GUI/CLI hashes were verified for the owner-authorized numeric baseline after Windows restart. Candidate deployment and a new live comparison await owner confirmation; old hashes do not identify the new artifacts.
+Current candidate: [Windows admission/text split](docs/UIA_ADMISSION_TEXT_SPLIT.md), following the [fresh bulk UIA handoff](docs/FRESH_BULK_UIA_HANDOFF.md) and stage-timing investigation. The earlier installed GUI/CLI hashes were verified for the owner-authorized numeric baseline after Windows restart. The new desktop candidate is not deployed; its live comparison awaits owner confirmation. Historical hashes do not identify this artifact.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Windows UIA admission/text split (2026-10-14)
+
+The [candidate handoff](docs/UIA_ADMISSION_TEXT_SPLIT.md) separates mandatory
+privacy evidence from optional recording text. Required rules remain fail closed;
+only verified privacy with unavailable optional text can use image/OCR fallback.
+The candidate retains fresh per-attempt acquisition and original-deadline
+invalidation retries, with distinct bounded phase budgets. SW-R18 remains open:
+synthetic validation and a desktop build cannot establish live recovery or the
+owner's 70%-within-half-budget target. No deployment or fresh capture session is
+authorized by this source work.
 
 ## Fresh bulk UIA candidate (2026-10-14)
 

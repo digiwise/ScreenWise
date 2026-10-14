@@ -9,7 +9,8 @@
 
 use super::{
     AccessibilityFailure, AccessibilityTreeNode, NodeBounds, SkipReason, TreeSnapshot,
-    TreeWalkResult, TreeWalkerConfig, TreeWalkerPlatform,
+    TreeWalkResult, TreeWalkerConfig, TreeWalkerPlatform, WindowsCaptureVerification,
+    WindowsPrivacyVerification, WindowsTextAcquisition,
 };
 use crate::events::AccessibilityNode;
 use crate::platform::windows_uia::UiaContext;
@@ -39,7 +40,7 @@ use anyhow::Result;
 use chrono::Utc;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use windows::Win32::Foundation::{HWND, RECT};
@@ -100,6 +101,29 @@ fn selected_tree_identity_is_current(target: super::WindowsTreeTarget) -> bool {
     )
 }
 
+fn identity_is_current(
+    config: &TreeWalkerConfig,
+    hwnd: HWND,
+    pid: u32,
+    app_name: &str,
+    window_name: &str,
+    monitor_rect: &Option<MonitorRect>,
+) -> bool {
+    let selected = match config.windows_target {
+        Some(target) => selected_tree_identity_is_current(target),
+        None => (unsafe { GetForegroundWindow() }) == hwnd,
+    };
+    let mut fresh_pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut fresh_pid));
+    }
+    selected
+        && fresh_pid == pid
+        && get_monitor_rect(hwnd).as_ref() == monitor_rect.as_ref()
+        && native_window_title(hwnd) == window_name
+        && crate::platform::windows::get_effective_app_name(hwnd, fresh_pid) == app_name
+}
+
 /// Excluded apps — password managers and security tools (matches macOS list).
 const EXCLUDED_APPS: &[&str] = &[
     "1password",
@@ -128,6 +152,109 @@ const SKIP_TYPES: &[&str] = &[
 ];
 
 const RPC_E_CHANGED_MODE_CODE: i32 = 0x80010106u32 as i32;
+const PRIVACY_DEADLINE: Duration = Duration::from_millis(750);
+const TEXT_DEADLINE: Duration = Duration::from_millis(125);
+const FINALIZATION_DEADLINE: Duration = Duration::from_millis(150);
+const TOTAL_DEADLINE: Duration = Duration::from_millis(1025);
+
+fn bounded_finalization_deadline(now: Instant, overall_deadline: Instant) -> Instant {
+    (now + FINALIZATION_DEADLINE).min(overall_deadline)
+}
+
+fn privacy_attempt_open(now: Instant, original_deadline: Instant) -> bool {
+    now < original_deadline
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextPhaseOutcome {
+    RetryPrivacy,
+    Denied,
+    Complete,
+    Unavailable(bulk::Stop),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizationOutcome {
+    RetryPrivacy,
+    Unknown(bulk::Stop),
+    MonitorUnverified,
+    Admit,
+}
+
+fn classify_finalization(
+    cleanup: Result<bool, bulk::Stop>,
+    before_deadline: bool,
+    revision_current: bool,
+    identity_current: bool,
+) -> FinalizationOutcome {
+    match cleanup {
+        Err(reason) => return FinalizationOutcome::Unknown(reason),
+        Ok(false) => return FinalizationOutcome::RetryPrivacy,
+        Ok(true) => {}
+    }
+    if !before_deadline {
+        return FinalizationOutcome::Unknown(bulk::Stop::Timeout);
+    }
+    if !revision_current {
+        return FinalizationOutcome::Unknown(bulk::Stop::Provider);
+    }
+    if !identity_current {
+        return FinalizationOutcome::MonitorUnverified;
+    }
+    FinalizationOutcome::Admit
+}
+
+fn classify_text_phase(
+    revision_current: bool,
+    denied: bool,
+    recording_acquired: bool,
+    need_url: bool,
+    policy_url: Option<&str>,
+    recording_url: Option<&str>,
+    completion: Result<(), bulk::Stop>,
+) -> TextPhaseOutcome {
+    if denied {
+        return TextPhaseOutcome::Denied;
+    }
+    if !revision_current {
+        return TextPhaseOutcome::RetryPrivacy;
+    }
+    // A completed recording acquisition can expose a changed mandatory URL
+    // even if projection subsequently crosses the optional text deadline.
+    // A failed acquisition has no URL evidence to compare.
+    if recording_acquired && need_url && recording_url != policy_url {
+        return TextPhaseOutcome::RetryPrivacy;
+    }
+    if let Err(reason) = completion {
+        return TextPhaseOutcome::Unavailable(reason);
+    }
+    if !recording_acquired {
+        return TextPhaseOutcome::Unavailable(bulk::Stop::Provider);
+    }
+    TextPhaseOutcome::Complete
+}
+
+fn settle_optional_payload(
+    status: WindowsTextAcquisition,
+    need_url: bool,
+    policy_url: Option<String>,
+    recording_url: Option<String>,
+    text: &mut String,
+    nodes: &mut Vec<AccessibilityTreeNode>,
+    node_count: &mut usize,
+) -> Option<String> {
+    if matches!(status, WindowsTextAcquisition::Complete) {
+        return if need_url {
+            policy_url
+        } else {
+            recording_url.or(policy_url)
+        };
+    }
+    text.clear();
+    nodes.clear();
+    *node_count = 0;
+    policy_url
+}
 
 /// UIA control types that carry user-visible text in name or value.
 const TEXT_TYPES: &[&str] = &[
@@ -234,6 +361,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let mut candidate_pid = None;
         let mut candidate_app = None;
         let mut candidate_title = None;
+        let mut published_privacy_elapsed = None;
         let mut result = (|| -> Result<TreeWalkResult> {
             // Paired maximised-window capture supplies the exact bitmap owner.
             // An invalid explicit target fails closed; it never follows new focus.
@@ -375,8 +503,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             };
             debug!("a11y: capturing fresh bulk window evidence");
 
-            // Use adaptive budget overrides when set
-            let effective_timeout = self.config.effective_walk_timeout();
+            // Windows privacy evidence has a dedicated admission deadline.
+            // Optional recording and finalization use separate bounded phases.
+            let effective_timeout = PRIVACY_DEADLINE;
             let effective_max_nodes = self.config.effective_max_nodes();
 
             stage = "pre_walk_budget";
@@ -400,7 +529,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
 
             stage = "fresh_bulk_admission";
             timing::enter(timing::Stage::BulkSetup);
-            let deadline = start + effective_timeout.min(std::time::Duration::from_millis(250));
+            let deadline = start + effective_timeout;
             let mut attempt = match bulk::Attempt::new(
                 uia,
                 hwnd,
@@ -454,148 +583,320 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             if !self.config.windows_privacy_only {
                 bulk::log_scope("accessibility_recording", 15, &[], 0);
             }
-            // Each retry reacquires all evidence from the provider. The original
-            // deadline is retained; cached trees and permission never survive
-            // this call or an invalidated revision.
-            let acquisition = bulk::fresh_until_current(deadline, Instant::now, || {
-                attempt.check()?;
-                let revision = attempt.revision();
-                let policy_root = match attempt.acquire(false, applicable_subtree_rules, need_url) {
-                    Ok(root) => root,
-                    Err(_) if !attempt.current(revision) => return Ok(None),
-                    Err(reason) => return Err(reason),
-                };
-                let mut scratch = String::new();
-                let mut scratch_nodes = Vec::new();
-                let mut url = None;
-                let mut blocked = false;
-                timing::enter(timing::Stage::PolicyProjection);
-                extract_text_from_tree(
-                    &policy_root,
-                    0,
-                    self.config.max_depth,
-                    &mut scratch,
-                    &mut scratch_nodes,
-                    &mut url,
-                    &monitor_rect,
-                    &window_rect,
-                    &ignored_patterns,
-                    &app_lower,
-                    &mut blocked,
-                );
-                attempt.check()?;
-                if !attempt.current(revision) {
-                    return Ok(None);
-                }
-                if blocked {
-                    if !attempt.finish(revision)? {
-                        return Ok(None);
+            // A revision invalidation discards every node, URL and text value.
+            // A fresh privacy query must finish before the original deadline.
+            let acquisition = (|| -> Result<TreeWalkResult, bulk::Stop> {
+                loop {
+                    attempt.set_deadline(deadline);
+                    if !privacy_attempt_open(Instant::now(), deadline) {
+                        timing::timeout();
+                        return Err(bulk::Stop::Timeout);
                     }
-                    return Ok(Some(TreeWalkResult::Skipped(SkipReason::UserIgnored)));
-                }
-                // Retain optional accessibility recording with a separate
-                // full-property bulk acquisition, not provider navigation.
-                let root = if self.config.windows_privacy_only {
-                    scratch.clear();
-                    scratch_nodes.clear();
-                    policy_root
-                } else {
-                    let root = match attempt.acquire(true, applicable_subtree_rules, need_url) {
-                        Ok(root) => root,
-                        Err(_) if !attempt.current(revision) => return Ok(None),
-                        Err(reason) => return Err(reason),
-                    };
-                    scratch.clear();
-                    scratch_nodes.clear();
-                    url = None;
-                    blocked = false;
-                    timing::enter(timing::Stage::RecordingProjection);
+                    attempt.check()?;
+                    let revision = attempt.revision();
+                    let policy_root =
+                        match attempt.acquire(false, applicable_subtree_rules, need_url) {
+                            Ok(root) => root,
+                            Err(_) if !attempt.current(revision) => {
+                                bulk::retry();
+                                continue;
+                            }
+                            Err(reason) => return Err(reason),
+                        };
+                    let mut policy_text = String::new();
+                    let mut policy_nodes = Vec::new();
+                    let mut policy_url = None;
+                    let mut blocked = false;
+                    timing::enter(timing::Stage::PolicyProjection);
                     extract_text_from_tree(
-                        &root,
+                        &policy_root,
                         0,
                         self.config.max_depth,
-                        &mut scratch,
-                        &mut scratch_nodes,
-                        &mut url,
+                        &mut policy_text,
+                        &mut policy_nodes,
+                        &mut policy_url,
                         &monitor_rect,
                         &window_rect,
                         &ignored_patterns,
                         &app_lower,
                         &mut blocked,
                     );
-                    root
-                };
-                attempt.check()?;
-                if !attempt.current(revision) {
-                    return Ok(None);
-                }
-                if blocked {
-                    if !attempt.finish(revision)? {
-                        return Ok(None);
+                    if !attempt.current(revision) {
+                        bulk::retry();
+                        continue;
                     }
-                    return Ok(Some(TreeWalkResult::Skipped(SkipReason::UserIgnored)));
-                }
-                if scratch.len() > self.config.max_text_length {
-                    let mut end = self.config.max_text_length;
-                    while end > 0 && !scratch.is_char_boundary(end) {
-                        end -= 1;
+                    if blocked {
+                        if matches!(attempt.finish(revision), Ok(false)) {
+                            bulk::retry();
+                            continue;
+                        }
+                        return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
                     }
-                    scratch.truncate(end);
-                }
-                // Focus or monitor ownership can change while a provider is being read.
-                // Discard the acquired tree instead of attaching stale text to a frame.
-                stage = "post_walk_identity";
-                timing::enter(timing::Stage::FocusVerification);
-                let identity_changed = match self.config.windows_target {
-                    Some(target) => !selected_tree_identity_is_current(target),
-                    None => (unsafe { GetForegroundWindow() }) != hwnd,
-                };
-                let mut fresh_pid = 0;
-                unsafe {
-                    GetWindowThreadProcessId(hwnd, Some(&mut fresh_pid));
-                }
-                if identity_changed
-                    || fresh_pid != pid
-                    || get_monitor_rect(hwnd) != monitor_rect
-                    || native_window_title(hwnd) != window_name
-                    || crate::platform::windows::get_effective_app_name(hwnd, fresh_pid) != app_name
-                {
-                    return Ok(Some(TreeWalkResult::Skipped(SkipReason::MonitorUnverified)));
-                }
+                    if policy_url.as_deref().is_some_and(|url| {
+                        timed_ignored_url_check(|| {
+                            crate::url_filter::is_url_blocked(url, &self.config.ignored_urls)
+                        })
+                    }) {
+                        if matches!(attempt.finish(revision), Ok(false)) {
+                            bulk::retry();
+                            continue;
+                        }
+                        return Ok(TreeWalkResult::Skipped(SkipReason::BlockedUrl));
+                    }
+                    attempt.check()?;
+                    let privacy_elapsed = start.elapsed();
+                    timing::privacy_complete(privacy_elapsed);
 
-                // Only complete, bounded UIA trees reach this point.
-                // Per-app document_path resolution from on-disk state files
-                // (Obsidian config + VS Code-fork state.vscdb). Returns None
-                // for any unknown app or any failure — never panics.
-                let document_path =
-                    super::electron_docs::resolve_electron_doc_path(&app_name.to_lowercase());
-                timing::enter(timing::Stage::Finalization);
-                let content_hash = TreeSnapshot::compute_hash(&scratch);
-                let simhash = TreeSnapshot::compute_simhash(&scratch);
-                attempt.check()?;
-                if !attempt.current(revision) {
-                    return Ok(None);
+                    let mut text = String::new();
+                    let mut nodes = Vec::new();
+                    let mut node_count = 0;
+                    let mut recording_url_for_snapshot = None;
+                    let mut text_status = WindowsTextAcquisition::SkippedByConfig;
+                    if !self.config.windows_privacy_only {
+                        timing::text_attempted();
+                        let text_deadline = Instant::now() + TEXT_DEADLINE;
+                        attempt.set_deadline(text_deadline);
+                        let text_root = attempt.acquire(true, applicable_subtree_rules, need_url);
+                        match text_root {
+                            Ok(root) => {
+                                let mut recording_url = None;
+                                let mut recording_blocked = false;
+                                timing::enter(timing::Stage::RecordingProjection);
+                                extract_text_from_tree(
+                                    &root,
+                                    0,
+                                    self.config.max_depth,
+                                    &mut text,
+                                    &mut nodes,
+                                    &mut recording_url,
+                                    &monitor_rect,
+                                    &window_rect,
+                                    &ignored_patterns,
+                                    &app_lower,
+                                    &mut recording_blocked,
+                                );
+                                let url_blocked = recording_url.as_deref().is_some_and(|url| {
+                                    timed_ignored_url_check(|| {
+                                        crate::url_filter::is_url_blocked(
+                                            url,
+                                            &self.config.ignored_urls,
+                                        )
+                                    })
+                                });
+                                let outcome = classify_text_phase(
+                                    attempt.current(revision),
+                                    recording_blocked || url_blocked,
+                                    true,
+                                    need_url,
+                                    policy_url.as_deref(),
+                                    recording_url.as_deref(),
+                                    attempt.check(),
+                                );
+                                match outcome {
+                                    TextPhaseOutcome::Denied => {
+                                        attempt.set_deadline(bounded_finalization_deadline(
+                                            Instant::now(),
+                                            start + TOTAL_DEADLINE,
+                                        ));
+                                        let denied = if recording_blocked {
+                                            SkipReason::UserIgnored
+                                        } else {
+                                            SkipReason::BlockedUrl
+                                        };
+                                        if matches!(attempt.finish(revision), Ok(false)) {
+                                            bulk::retry();
+                                            continue;
+                                        }
+                                        return Ok(TreeWalkResult::Skipped(denied));
+                                    }
+                                    TextPhaseOutcome::RetryPrivacy => {
+                                        bulk::retry();
+                                        continue;
+                                    }
+                                    TextPhaseOutcome::Complete => {
+                                        if text.len() > self.config.max_text_length {
+                                            let mut end = self.config.max_text_length;
+                                            while end > 0 && !text.is_char_boundary(end) {
+                                                end -= 1;
+                                            }
+                                            text.truncate(end);
+                                        }
+                                        node_count = root.node_count();
+                                        recording_url_for_snapshot = recording_url;
+                                        text_status = WindowsTextAcquisition::Complete;
+                                    }
+                                    TextPhaseOutcome::Unavailable(reason) => {
+                                        text_status = WindowsTextAcquisition::Unavailable(reason)
+                                    }
+                                }
+                            }
+                            Err(reason) => match classify_text_phase(
+                                attempt.current(revision),
+                                false,
+                                false,
+                                need_url,
+                                policy_url.as_deref(),
+                                None,
+                                Err(reason),
+                            ) {
+                                TextPhaseOutcome::RetryPrivacy => {
+                                    bulk::retry();
+                                    continue;
+                                }
+                                TextPhaseOutcome::Unavailable(reason) => {
+                                    text_status = WindowsTextAcquisition::Unavailable(reason)
+                                }
+                                _ => unreachable!(),
+                            },
+                        }
+                        if !attempt.current(revision) {
+                            bulk::retry();
+                            continue;
+                        }
+                        timing::text_result(text_status);
+                    }
+                    let snapshot_url = settle_optional_payload(
+                        text_status,
+                        need_url,
+                        policy_url,
+                        recording_url_for_snapshot,
+                        &mut text,
+                        &mut nodes,
+                        &mut node_count,
+                    );
+
+                    let final_deadline =
+                        bounded_finalization_deadline(Instant::now(), start + TOTAL_DEADLINE);
+                    attempt.set_deadline(final_deadline);
+                    stage = "post_walk_identity";
+                    timing::enter(timing::Stage::FocusVerification);
+                    if let Err(reason) = attempt.check() {
+                        return Ok(TreeWalkResult::Skipped(
+                            SkipReason::AccessibilityIncomplete(reason),
+                        ));
+                    }
+                    if !identity_is_current(
+                        &self.config,
+                        hwnd,
+                        pid,
+                        &app_name,
+                        &window_name,
+                        &monitor_rect,
+                    ) {
+                        return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+                    }
+                    // Cleanup and final identity have their own bounded phase. A changed
+                    // revision still requires fresh privacy inside the original deadline.
+                    timing::enter(timing::Stage::Finalization);
+                    // Complete metadata/hash work while change subscriptions remain
+                    // active; otherwise a rule change during this work is invisible.
+                    let document_path =
+                        super::electron_docs::resolve_electron_doc_path(&app_name.to_lowercase());
+                    let content_hash = TreeSnapshot::compute_hash(&text);
+                    let simhash = TreeSnapshot::compute_simhash(&text);
+                    if let Err(reason) = attempt.check() {
+                        return Ok(TreeWalkResult::Skipped(
+                            SkipReason::AccessibilityIncomplete(reason),
+                        ));
+                    }
+                    if !attempt.current(revision) {
+                        bulk::retry();
+                        continue;
+                    }
+                    if !identity_is_current(
+                        &self.config,
+                        hwnd,
+                        pid,
+                        &app_name,
+                        &window_name,
+                        &monitor_rect,
+                    ) {
+                        return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified));
+                    }
+                    let cleanup = attempt.finish(revision);
+                    let identity_current = cleanup == Ok(true)
+                        && identity_is_current(
+                            &self.config,
+                            hwnd,
+                            pid,
+                            &app_name,
+                            &window_name,
+                            &monitor_rect,
+                        );
+                    match classify_finalization(
+                        cleanup,
+                        Instant::now() < final_deadline,
+                        attempt.current(revision),
+                        identity_current,
+                    ) {
+                        FinalizationOutcome::RetryPrivacy => {
+                            bulk::retry();
+                            continue;
+                        }
+                        FinalizationOutcome::Unknown(reason) => {
+                            if reason == bulk::Stop::Timeout {
+                                timing::timeout();
+                            }
+                            return Ok(TreeWalkResult::Skipped(
+                                SkipReason::AccessibilityIncomplete(reason),
+                            ));
+                        }
+                        FinalizationOutcome::MonitorUnverified => {
+                            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified))
+                        }
+                        FinalizationOutcome::Admit => {}
+                    }
+                    let final_identity_current = identity_is_current(
+                        &self.config,
+                        hwnd,
+                        pid,
+                        &app_name,
+                        &window_name,
+                        &monitor_rect,
+                    );
+                    match classify_finalization(
+                        Ok(true),
+                        Instant::now() < final_deadline,
+                        attempt.current(revision),
+                        final_identity_current,
+                    ) {
+                        FinalizationOutcome::Unknown(reason) => {
+                            if reason == bulk::Stop::Timeout {
+                                timing::timeout();
+                            }
+                            return Ok(TreeWalkResult::Skipped(
+                                SkipReason::AccessibilityIncomplete(reason),
+                            ));
+                        }
+                        FinalizationOutcome::MonitorUnverified => {
+                            return Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified))
+                        }
+                        FinalizationOutcome::Admit => {}
+                        FinalizationOutcome::RetryPrivacy => unreachable!(),
+                    }
+                    published_privacy_elapsed = Some(privacy_elapsed);
+                    return Ok(TreeWalkResult::Found(TreeSnapshot {
+                        app_name: app_name.clone(),
+                        window_name: window_name.clone(),
+                        text_content: text,
+                        nodes,
+                        browser_url: snapshot_url,
+                        document_path,
+                        timestamp: Utc::now(),
+                        node_count,
+                        walk_duration: start.elapsed(),
+                        content_hash,
+                        simhash,
+                        truncated: false,
+                        truncation_reason: super::TruncationReason::None,
+                        max_depth_reached: 0,
+                        windows_capture_verification: Some(WindowsCaptureVerification {
+                            privacy: WindowsPrivacyVerification::Verified,
+                            text: text_status,
+                        }),
+                    }));
                 }
-                if !attempt.finish(revision)? {
-                    return Ok(None);
-                }
-                Ok(Some(TreeWalkResult::Found(TreeSnapshot {
-                    app_name: app_name.clone(),
-                    window_name: window_name.clone(),
-                    text_content: scratch,
-                    nodes: scratch_nodes,
-                    browser_url: url,
-                    document_path,
-                    timestamp: Utc::now(),
-                    node_count: root.node_count(),
-                    walk_duration: start.elapsed(),
-                    content_hash,
-                    simhash,
-                    truncated: false,
-                    truncation_reason: super::TruncationReason::None,
-                    max_depth_reached: 0,
-                })))
-            });
+            })();
             match acquisition {
                 Ok(result) => Ok(result),
                 Err(reason) => Ok(TreeWalkResult::Skipped(
@@ -610,25 +911,13 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 )),
             }
         })();
-        // Handler removal is necessary cleanup, but cannot extend a capture's
-        // deadline. A late result remains unknown after all cleanup finishes.
-        if matches!(&result, Ok(TreeWalkResult::Found(_)))
-            && start.elapsed()
-                >= self
-                    .config
-                    .effective_walk_timeout()
-                    .min(std::time::Duration::from_millis(250))
-        {
+        // COM reference destruction can run provider code after the inner
+        // checks. A late returned snapshot is not permission and must not be
+        // counted as a published admission.
+        if matches!(&result, Ok(TreeWalkResult::Found(_))) && start.elapsed() >= TOTAL_DEADLINE {
             timing::timeout();
             result = Ok(TreeWalkResult::Skipped(
-                SkipReason::AccessibilityRetrievalFailed(
-                    AccessibilityFailure::after_native_policy(
-                        screenpipe_config::capture_diagnostics::AccessibilityStopReason::Timeout,
-                        &self.config,
-                        candidate_app.clone().unwrap_or_default(),
-                        candidate_title.clone().unwrap_or_default(),
-                    ),
-                ),
+                SkipReason::AccessibilityIncomplete(bulk::Stop::Timeout),
             ));
         }
         // A failed retrieval cannot grant admission using stale native policy evidence.
@@ -703,6 +992,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => {
                 Some((failure.cause.code(), failure.unresolved_rules.clone()))
             }
+            Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => {
+                Some((reason.code(), Vec::new()))
+            }
             Ok(TreeWalkResult::Skipped(_)) => Some(("native_policy_suppressed", Vec::new())),
             Err(_) => Some(("uia_inspection_error", Vec::new())),
             _ => None,
@@ -712,7 +1004,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 serde_json::json!({
                     "reason":reason, "stage":stage, "rules":rules,
                     "elapsed_ms":start.elapsed().as_millis(),
-                    "configured_limits":{"timeout_ms":self.config.effective_walk_timeout().as_millis(),
+                    "configured_limits":{"privacy_timeout_ms":PRIVACY_DEADLINE.as_millis(),
+                        "text_timeout_ms":TEXT_DEADLINE.as_millis(),
+                        "finalization_timeout_ms":FINALIZATION_DEADLINE.as_millis(),
                         "nodes":self.config.effective_max_nodes(),"depth":self.config.max_depth,
                         "text_bytes":self.config.max_text_length.saturating_mul(4)},
                     "policy":{"ignore_incognito":self.config.ignore_incognito_windows,
@@ -721,19 +1015,25 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             });
         }
         let elapsed = start.elapsed();
+        if matches!(&result, Ok(TreeWalkResult::Found(_))) {
+            if let Some(privacy_elapsed) = published_privacy_elapsed {
+                timing::published_privacy(privacy_elapsed, elapsed);
+            }
+        }
         let (reason, rules) = match &result {
             Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => (
                 Some(failure.cause.code()),
                 failure.unresolved_rules.as_slice(),
             ),
+            Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => {
+                (Some(reason.code()), &[][..])
+            }
             _ => (None, &[][..]),
         };
         timing::finish(
             Instant::now(),
             elapsed,
-            self.config
-                .effective_walk_timeout()
-                .min(std::time::Duration::from_millis(250)),
+            PRIVACY_DEADLINE + TEXT_DEADLINE + FINALIZATION_DEADLINE,
             reason,
             rules,
         );
@@ -1227,6 +1527,154 @@ fn append_text(buffer: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_text_failure_discards_partial_payload_and_preserves_policy_url() {
+        let outcome = classify_text_phase(
+            true,
+            false,
+            false,
+            true,
+            Some("https://example.test/a"),
+            None,
+            Err(bulk::Stop::Timeout),
+        );
+        assert_eq!(outcome, TextPhaseOutcome::Unavailable(bulk::Stop::Timeout));
+        let mut text = "partial provider text".to_string();
+        let mut nodes = vec![AccessibilityTreeNode::new(
+            "Text".into(),
+            "partial".into(),
+            0,
+            None,
+        )];
+        let mut count = 2;
+        let url = settle_optional_payload(
+            WindowsTextAcquisition::Unavailable(bulk::Stop::Timeout),
+            true,
+            Some("https://example.test/a".into()),
+            Some("https://other.test".into()),
+            &mut text,
+            &mut nodes,
+            &mut count,
+        );
+        assert_eq!(url.as_deref(), Some("https://example.test/a"));
+        assert!(text.is_empty());
+        assert!(nodes.is_empty());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn optional_text_new_blocker_and_url_conflict_cannot_admit() {
+        assert_eq!(
+            classify_text_phase(true, true, true, true, Some("a"), Some("b"), Ok(())),
+            TextPhaseOutcome::Denied
+        );
+        assert_eq!(
+            classify_text_phase(true, false, true, true, Some("a"), Some("b"), Ok(())),
+            TextPhaseOutcome::RetryPrivacy
+        );
+        assert_eq!(
+            classify_text_phase(true, false, true, false, None, Some("b"), Ok(())),
+            TextPhaseOutcome::Complete
+        );
+        assert_eq!(
+            classify_text_phase(
+                false,
+                false,
+                false,
+                true,
+                Some("a"),
+                Some("a"),
+                Err(bulk::Stop::Timeout)
+            ),
+            TextPhaseOutcome::RetryPrivacy
+        );
+        assert_eq!(
+            classify_text_phase(
+                true,
+                false,
+                true,
+                true,
+                Some("a"),
+                Some("b"),
+                Err(bulk::Stop::Timeout)
+            ),
+            TextPhaseOutcome::RetryPrivacy
+        );
+        assert_eq!(
+            classify_text_phase(
+                true,
+                false,
+                false,
+                true,
+                Some("a"),
+                None,
+                Err(bulk::Stop::Timeout)
+            ),
+            TextPhaseOutcome::Unavailable(bulk::Stop::Timeout)
+        );
+        assert_eq!(
+            classify_text_phase(
+                true,
+                false,
+                true,
+                true,
+                Some("a"),
+                None,
+                Err(bulk::Stop::Timeout)
+            ),
+            TextPhaseOutcome::RetryPrivacy
+        );
+    }
+
+    #[test]
+    fn invalidation_retry_keeps_original_privacy_deadline() {
+        let start = Instant::now();
+        let original = start + PRIVACY_DEADLINE;
+        assert!(privacy_attempt_open(
+            start + Duration::from_millis(749),
+            original
+        ));
+        assert!(!privacy_attempt_open(original, original));
+        assert!(!privacy_attempt_open(
+            start + Duration::from_millis(800),
+            original
+        ));
+    }
+
+    #[test]
+    fn finalization_cleanup_failure_or_late_text_never_admits() {
+        let start = Instant::now();
+        let overall = start + TOTAL_DEADLINE;
+        assert_eq!(
+            bounded_finalization_deadline(start + Duration::from_millis(875), overall),
+            overall
+        );
+        assert_eq!(
+            bounded_finalization_deadline(start + Duration::from_millis(1100), overall),
+            overall
+        );
+        assert_eq!(
+            classify_finalization(Err(bulk::Stop::Provider), true, true, true),
+            FinalizationOutcome::Unknown(bulk::Stop::Provider)
+        );
+        assert_eq!(
+            classify_finalization(Ok(false), true, false, true),
+            FinalizationOutcome::RetryPrivacy
+        );
+        assert_eq!(
+            classify_finalization(Ok(true), false, true, true),
+            FinalizationOutcome::Unknown(bulk::Stop::Timeout)
+        );
+        assert_eq!(
+            classify_finalization(Ok(true), true, false, true),
+            FinalizationOutcome::Unknown(bulk::Stop::Provider)
+        );
+        assert_eq!(
+            classify_finalization(Ok(true), true, true, true),
+            FinalizationOutcome::Admit
+        );
+    }
     #[test]
     fn incomplete_native_policy_metadata_never_admits() {
         assert!(native_policy_metadata_complete("fixture.exe", "ordinary"));

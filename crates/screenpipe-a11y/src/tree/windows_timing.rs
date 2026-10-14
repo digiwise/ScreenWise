@@ -5,6 +5,7 @@
 //! Temporary, content-free timing diagnostics for fresh Windows UIA attempts.
 //! The stage active at a timeout is retained before handler cleanup changes it.
 
+use crate::tree::WindowsTextAcquisition;
 use screenpipe_config::capture_diagnostics::RuleReference;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -121,6 +122,23 @@ static STAGES: Counters<STAGE_COUNT> = Counters::new();
 static RULES: Counters<RULE_COUNT> = Counters::new();
 static RULE_MATCHES: [AtomicU64; RULE_COUNT] = [const { AtomicU64::new(0) }; RULE_COUNT];
 static TIMEOUT_STAGES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
+static PRIVACY_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static PRIVACY_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static PRIVACY_MAX_US: AtomicU64 = AtomicU64::new(0);
+// Includes half of the former 250 ms deadline (125) and half of the current
+// 750 ms deadline (375), so the 70% target can be assessed numerically.
+const PRIVACY_BUCKET_UPPER_US: [u64; 6] = [100_000, 125_000, 250_000, 375_000, 500_000, 750_000];
+static PRIVACY_BUCKETS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static PUBLISHED_PRIVACY: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED_PRIVACY_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED_PRIVACY_MAX_US: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED_PRIVACY_BUCKETS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static PUBLISHED_WALL_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED_WALL_MAX_US: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED_WALL_BUCKETS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static TEXT_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
+static TEXT_COMPLETE: AtomicU64 = AtomicU64::new(0);
+static TEXT_UNAVAILABLE: AtomicU64 = AtomicU64::new(0);
 
 struct Trace {
     stage: Stage,
@@ -175,6 +193,46 @@ fn micros(duration: Duration) -> u64 {
 
 pub(super) fn begin(now: Instant) {
     TRACE.with(|slot| *slot.borrow_mut() = Some(Trace::new(now)));
+}
+pub(super) fn privacy_complete(elapsed: Duration) {
+    let us = micros(elapsed);
+    PRIVACY_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    PRIVACY_TOTAL_US.fetch_add(us, Ordering::Relaxed);
+    PRIVACY_MAX_US.fetch_max(us, Ordering::Relaxed);
+    let bucket = privacy_bucket(us);
+    PRIVACY_BUCKETS[bucket].fetch_add(1, Ordering::Relaxed);
+}
+fn privacy_bucket(us: u64) -> usize {
+    PRIVACY_BUCKET_UPPER_US
+        .iter()
+        .position(|limit| us <= *limit)
+        .unwrap_or(PRIVACY_BUCKET_UPPER_US.len())
+}
+pub(super) fn published_privacy(mandatory_elapsed: Duration, wall_elapsed: Duration) {
+    let us = micros(mandatory_elapsed);
+    PUBLISHED_PRIVACY.fetch_add(1, Ordering::Relaxed);
+    PUBLISHED_PRIVACY_TOTAL_US.fetch_add(us, Ordering::Relaxed);
+    PUBLISHED_PRIVACY_MAX_US.fetch_max(us, Ordering::Relaxed);
+    let bucket = privacy_bucket(us);
+    PUBLISHED_PRIVACY_BUCKETS[bucket].fetch_add(1, Ordering::Relaxed);
+    let wall_us = micros(wall_elapsed);
+    PUBLISHED_WALL_TOTAL_US.fetch_add(wall_us, Ordering::Relaxed);
+    PUBLISHED_WALL_MAX_US.fetch_max(wall_us, Ordering::Relaxed);
+    PUBLISHED_WALL_BUCKETS[privacy_bucket(wall_us)].fetch_add(1, Ordering::Relaxed);
+}
+pub(super) fn text_attempted() {
+    TEXT_ATTEMPTED.fetch_add(1, Ordering::Relaxed);
+}
+pub(super) fn text_result(status: WindowsTextAcquisition) {
+    match status {
+        WindowsTextAcquisition::Complete => {
+            TEXT_COMPLETE.fetch_add(1, Ordering::Relaxed);
+        }
+        WindowsTextAcquisition::Unavailable(_) => {
+            TEXT_UNAVAILABLE.fetch_add(1, Ordering::Relaxed);
+        }
+        WindowsTextAcquisition::SkippedByConfig => {}
+    }
 }
 pub(super) fn enter(stage: Stage) {
     TRACE.with(|slot| {
@@ -274,12 +332,43 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "rule_type_names": RULE_NAMES,
         "rule_types": RULES.snapshot(),
         "rule_match_counts": RULE_MATCHES.iter().map(|v| v.load(Ordering::Relaxed)).collect::<Vec<_>>(),
+        "privacy_phase": {
+            "acquisition_samples": PRIVACY_COMPLETED.load(Ordering::Relaxed),
+            "acquisition_total_us": PRIVACY_TOTAL_US.load(Ordering::Relaxed),
+            "acquisition_max_us": PRIVACY_MAX_US.load(Ordering::Relaxed),
+            "bucket_upper_us": PRIVACY_BUCKET_UPPER_US,
+            "acquisition_bucket_counts": PRIVACY_BUCKETS.iter().map(|v| v.load(Ordering::Relaxed)).collect::<Vec<_>>(),
+            "published_admissions": PUBLISHED_PRIVACY.load(Ordering::Relaxed),
+            "published_mandatory_complete_total_us": PUBLISHED_PRIVACY_TOTAL_US.load(Ordering::Relaxed),
+            "published_mandatory_complete_max_us": PUBLISHED_PRIVACY_MAX_US.load(Ordering::Relaxed),
+            "published_mandatory_complete_bucket_counts": PUBLISHED_PRIVACY_BUCKETS.iter().map(|v| v.load(Ordering::Relaxed)).collect::<Vec<_>>(),
+            "published_admission_wall_total_us": PUBLISHED_WALL_TOTAL_US.load(Ordering::Relaxed),
+            "published_admission_wall_max_us": PUBLISHED_WALL_MAX_US.load(Ordering::Relaxed),
+            "published_admission_wall_bucket_counts": PUBLISHED_WALL_BUCKETS.iter().map(|v| v.load(Ordering::Relaxed)).collect::<Vec<_>>(),
+        },
+        "text_phase": {
+            "attempted": TEXT_ATTEMPTED.load(Ordering::Relaxed),
+            "complete": TEXT_COMPLETE.load(Ordering::Relaxed),
+            "unavailable": TEXT_UNAVAILABLE.load(Ordering::Relaxed),
+        },
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_histogram_has_half_deadline_boundaries_and_overflow() {
+        assert_eq!(privacy_bucket(125_000), 1);
+        assert_eq!(privacy_bucket(125_001), 2);
+        assert_eq!(privacy_bucket(375_000), 3);
+        assert_eq!(privacy_bucket(375_001), 4);
+        assert_eq!(privacy_bucket(750_000), 5);
+        assert_eq!(privacy_bucket(750_001), 6);
+        assert_eq!(PRIVACY_BUCKET_UPPER_US.len() + 1, PRIVACY_BUCKETS.len());
+        assert_eq!(PRIVACY_BUCKETS.len(), PUBLISHED_WALL_BUCKETS.len());
+    }
 
     #[test]
     fn trace_accumulates_repeated_stages_and_keeps_first_timeout() {

@@ -1,5 +1,10 @@
 # ScreenWise Windows build notes
 
+The Windows [admission/text split candidate](docs/UIA_ADMISSION_TEXT_SPLIT.md)
+separates mandatory privacy evidence from optional UIA recording text and extends
+bounded privacy/provider budgets. Its desktop-only build and validation handoff
+do not authorize deployment or establish restored live capture.
+
 The current candidate adds [fresh bulk UIA privacy acquisition](docs/FRESH_BULK_UIA_HANDOFF.md), together with [fresh foreground attribution to failed placeholders and compact rule messages](docs/CONSUMER_REPORT_20261013.md). The handoff identifies validation, exact artifacts and the deployment confirmation boundary.
 The preceding built candidate repairs [UIA probe and traversal budgets and failed-target attribution](docs/UIA_CAPTURE_REGRESSION_20261013.md).
 The latest owner-reported deployment is the [14:46 checkpoint](docs/CONSUMER_REPORT_20261013.md), with keyboard recovery but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13) was independently verified against installed GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier failure report and remaining limits.

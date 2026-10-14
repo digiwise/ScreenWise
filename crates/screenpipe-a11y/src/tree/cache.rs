@@ -111,6 +111,8 @@ mod tests {
             truncated: false,
             truncation_reason: TruncationReason::None,
             max_depth_reached: 0,
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: None,
         }
     }
 

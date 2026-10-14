@@ -1136,6 +1136,9 @@ pub struct WindowsCapturePrivacy {
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WindowsAccessibilityDecision {
+    /// Fixed phase code distinguishes mandatory privacy failure from optional
+    /// text retrieval after a complete privacy assessment.
+    pub phase: &'static str,
     pub cause: &'static str,
     pub processing: &'static str,
     pub unresolved_rules: Vec<screenpipe_config::capture_diagnostics::RuleReference>,

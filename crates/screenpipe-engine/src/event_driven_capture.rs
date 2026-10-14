@@ -14,7 +14,9 @@ use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
-use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
+use screenpipe_capture::paired_capture::{
+    paired_capture, usable_accessibility_snapshot, CaptureContext, PairedCaptureResult,
+};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
 #[cfg(not(target_os = "windows"))]
@@ -2009,12 +2011,32 @@ fn windows_tree_config_for_bitmap(
     // than falling back to another window.
     config.windows_target = bitmap_owner
         .map(|(hwnd, process_id)| screenpipe_a11y::tree::WindowsTreeTarget { hwnd, process_id });
+    // Windows admission and optional recording have independent fixed budgets.
+    // A legacy adaptive override must not shorten mandatory privacy evidence.
+    config.max_nodes_override = None;
+    config.walk_timeout_override = None;
     config
 }
 
 #[cfg(target_os = "windows")]
-fn windows_requires_fresh_drm_url(enabled: bool, selected_url: Option<&str>) -> bool {
-    enabled && selected_url.is_none()
+fn windows_requires_fresh_drm_url(enabled: bool, _selected_url: Option<&str>) -> bool {
+    // The bitmap's earlier URL cannot discharge the later UIA policy phase.
+    // Optional text may be unavailable, so acquire DRM URL evidence as mandatory
+    // policy even when native bitmap metadata carried a URL.
+    enabled
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drm_url_for_acquired_bitmap<'a>(
+    resolved_url: Option<&'a str>,
+    bitmap_url: Option<&'a str>,
+) -> Option<&'a str> {
+    // Positive protected-content evidence from the acquired bitmap remains a
+    // blocker even if the later UIA tree has no URL or names a different page.
+    // A safe earlier URL cannot replace positive evidence from the UIA policy.
+    bitmap_url
+        .filter(|url| crate::drm_detector::is_drm_url(url))
+        .or(resolved_url)
 }
 
 #[cfg(target_os = "windows")]
@@ -2184,6 +2206,8 @@ async fn do_capture(
     hd_active: bool,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
+    #[cfg(target_os = "windows")]
+    let _ = walk_budget;
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
 
     let window_filters = WindowFilters::new(
@@ -2396,6 +2420,7 @@ async fn do_capture(
     }
 
     use screenpipe_a11y::tree::TreeWalkResult;
+    #[cfg(not(target_os = "windows"))]
     if let Some(ref app) = trigger_app {
         let decision = walk_budget.should_walk(app);
         if !decision.walk && !bypass_capture_throttles {
@@ -2447,6 +2472,29 @@ async fn do_capture(
     .await?;
 
     // Retain retrieval diagnostics before any later target/privacy check can return.
+    #[cfg(target_os = "windows")]
+    if let TreeWalkResult::Found(snapshot) = &tree_walk_result {
+        report_windows_text_outcome(
+            params.monitor_id,
+            snapshot.windows_capture_verification.as_ref(),
+        );
+        if apply_windows_text_outcome(
+            &mut windows_privacy,
+            snapshot.windows_capture_verification.as_ref(),
+        ) {
+            return persist_windows_placeholder(
+                params,
+                trigger,
+                captured_at,
+                WindowsCaptureOutcome::CaptureFailed(
+                    WindowsCaptureFailureStage::AccessibilityInspection,
+                ),
+                screenshot_disabled,
+                &windows_privacy,
+            )
+            .await;
+        }
+    }
     #[cfg(target_os = "windows")]
     if let TreeWalkResult::Skipped(
         screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure),
@@ -2506,6 +2554,7 @@ async fn do_capture(
     // bail out entirely — don't OCR the screenshot.
 
     // Record walk cost for adaptive budget before consuming the result
+    #[cfg(not(target_os = "windows"))]
     if let TreeWalkResult::Found(ref snap) = tree_walk_result {
         walk_budget.record_walk(&snap.app_name, snap.walk_duration, snap.truncated);
         if snap.walk_duration > std::time::Duration::from_millis(100) {
@@ -2531,7 +2580,22 @@ async fn do_capture(
         use screenpipe_a11y::tree::SkipReason as S;
         use screenpipe_config::capture_diagnostics::*;
         let (condition, reason) = match &tree_walk_result {
-            TreeWalkResult::Found(_) => (CaptureCondition::Admitted, CaptureReason::GateOpen),
+            TreeWalkResult::Found(snapshot) => {
+                #[cfg(target_os = "windows")]
+                {
+                    match windows_text_outcome(snapshot.windows_capture_verification.as_ref()) {
+                        Ok(Some(reason)) | Err(reason) => {
+                            (CaptureCondition::Failed, reason.capture_reason())
+                        }
+                        Ok(None) => (CaptureCondition::Admitted, CaptureReason::GateOpen),
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = snapshot;
+                    (CaptureCondition::Admitted, CaptureReason::GateOpen)
+                }
+            }
             TreeWalkResult::NotFound => {
                 (CaptureCondition::Failed, CaptureReason::CaptureCheckFailed)
             }
@@ -2844,10 +2908,19 @@ async fn do_capture(
     // DRM content detection: check if the focused app/URL is a streaming service.
     // When detected, set the global pause flag so ALL monitors stop capture
     // and the monitor watcher releases all SCK handles.
+    #[cfg(target_os = "windows")]
+    let drm_url = windows_drm_url_for_acquired_bitmap(
+        browser_url_owned.as_deref(),
+        selected_metadata
+            .as_ref()
+            .and_then(|window| window.browser_url.as_deref()),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let drm_url = browser_url_owned.as_deref();
     if crate::drm_detector::check_and_update_drm_state(
         params.pause_on_drm_content,
         app_name_owned.as_deref(),
-        browser_url_owned.as_deref(),
+        drm_url,
     ) {
         return Ok(CaptureOutput {
             result: None,
@@ -2902,7 +2975,7 @@ async fn do_capture(
     let dedup_eligible = dedup_applies(trigger, hd_active, last_db_write.elapsed());
     if dedup_eligible {
         if let Some(ref snap) = tree_snapshot {
-            if !snap.text_content.is_empty() {
+            if usable_accessibility_snapshot(snap).is_some() && !snap.text_content.is_empty() {
                 let new_hash = snap.content_hash as i64;
                 if let Some(prev) = previous_content_hash {
                     if prev == new_hash && new_hash != 0 {
@@ -2928,7 +3001,10 @@ async fn do_capture(
     // The caller's candidate was derived from the previous capture. Recheck
     // against this acquired tree, especially after focus moves to another monitor.
     let elements_ref_frame_id = matching_elements_reference(
-        tree_snapshot.as_ref().map(|snap| snap.content_hash as i64),
+        tree_snapshot
+            .as_ref()
+            .and_then(usable_accessibility_snapshot)
+            .map(|snap| snap.content_hash as i64),
         previous_content_hash,
         elements_ref_frame_id,
     );
@@ -3129,10 +3205,142 @@ mod tests {
         // URL obligation; app identity cannot substitute for URL evidence.
         assert!(windows_requires_fresh_drm_url(true, None));
         assert!(!windows_requires_fresh_drm_url(false, None));
-        assert!(!windows_requires_fresh_drm_url(
+        assert!(windows_requires_fresh_drm_url(
             true,
             Some("https://fixture.invalid")
         ));
+        assert!(!windows_requires_fresh_drm_url(
+            false,
+            Some("https://fixture.invalid")
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_optional_text_failure_retains_mandatory_drm_url_with_known_bitmap_url() {
+        use screenpipe_a11y::tree::{
+            TreeSnapshot, TruncationReason, WindowsCaptureVerification, WindowsPrivacyVerification,
+            WindowsTextAcquisition,
+        };
+        use screenpipe_config::capture_diagnostics::{AccessibilityStopReason, RuleKind};
+        use screenpipe_screen::capture_screenshot_by_window::CapturedWindow;
+        let drm_url = "https://netflix.com/watch/synthetic";
+        let selected = CapturedWindow {
+            image: image::DynamicImage::new_rgba8(1, 1),
+            app_name: "chrome.exe".into(),
+            window_name: "synthetic page".into(),
+            process_id: 7,
+            is_focused: true,
+            browser_url: Some(drm_url.into()),
+            window_x: 0,
+            window_y: 0,
+            window_width: 100,
+            window_height: 100,
+        };
+        // Both the policy query and failed-query gate use this same obligation;
+        // a known bitmap URL must not downgrade the query to optional recording.
+        let requires_url = windows_requires_fresh_drm_url(true, selected.browser_url.as_deref());
+        assert!(requires_url);
+        let snapshot = TreeSnapshot {
+            app_name: selected.app_name.clone(),
+            window_name: selected.window_name.clone(),
+            text_content: String::new(),
+            nodes: Vec::new(),
+            browser_url: Some(drm_url.into()),
+            document_path: None,
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(126),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: TruncationReason::None,
+            max_depth_reached: 0,
+            windows_capture_verification: Some(WindowsCaptureVerification {
+                privacy: WindowsPrivacyVerification::Verified,
+                text: WindowsTextAcquisition::Unavailable(AccessibilityStopReason::Timeout),
+            }),
+        };
+        let mut privacy = WindowsCapturePrivacy::default();
+        assert!(!apply_windows_text_outcome(
+            &mut privacy,
+            snapshot.windows_capture_verification.as_ref()
+        ));
+        assert!(usable_accessibility_snapshot(&snapshot).is_none());
+        let (_, _, resolved_url, _) = resolve_windows_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::Manual,
+            None,
+            true,
+            Some(&selected),
+        );
+        assert_eq!(resolved_url.as_deref(), Some(drm_url));
+        assert!(crate::drm_detector::is_drm_url(
+            resolved_url.as_deref().unwrap()
+        ));
+        // Mandatory acquisition may complete without a Document URL. Later
+        // metadata must not erase a positive blocker for the acquired pixels.
+        for (bitmap_url, policy_url) in [
+            (drm_url, None),
+            (drm_url, Some("https://safe.invalid")),
+            ("https://safe.invalid", Some(drm_url)),
+        ] {
+            let bitmap = CapturedWindow {
+                image: image::DynamicImage::new_rgba8(1, 1),
+                app_name: selected.app_name.clone(),
+                window_name: selected.window_name.clone(),
+                process_id: selected.process_id,
+                is_focused: true,
+                browser_url: Some(bitmap_url.into()),
+                window_x: 0,
+                window_y: 0,
+                window_width: 100,
+                window_height: 100,
+            };
+            let mut no_text = snapshot.clone();
+            no_text.browser_url = policy_url.map(str::to_string);
+            assert!(usable_accessibility_snapshot(&no_text).is_none());
+            let (_, _, resolved, _) = resolve_windows_capture_metadata(
+                Some(&no_text),
+                &CaptureTrigger::Manual,
+                None,
+                true,
+                Some(&bitmap),
+            );
+            let candidate = windows_drm_url_for_acquired_bitmap(
+                resolved.as_deref(),
+                bitmap.browser_url.as_deref(),
+            );
+            assert_eq!(candidate, Some(drm_url));
+            assert!(crate::drm_detector::is_drm_url(candidate.unwrap()));
+        }
+        // Ordinary earlier metadata must not override the fresh policy URL.
+        assert_eq!(
+            windows_drm_url_for_acquired_bitmap(
+                Some("https://ordinary.invalid"),
+                Some("https://safe.invalid")
+            ),
+            Some("https://ordinary.invalid")
+        );
+        let failure = screenpipe_a11y::tree::AccessibilityFailure::after_native_policy(
+            AccessibilityStopReason::Timeout,
+            &TreeWalkerConfig::default(),
+            selected.app_name.clone(),
+            selected.window_name.clone(),
+        );
+        assert!(apply_windows_accessibility_failure_with_target_app(
+            &mut privacy,
+            &failure,
+            requires_url,
+            None
+        ));
+        assert!(privacy
+            .accessibility
+            .as_ref()
+            .unwrap()
+            .unresolved_rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::DrmUrl));
     }
     #[cfg(target_os = "windows")]
     #[test]
@@ -3147,6 +3355,7 @@ mod tests {
             windows_target: Some(foreign_focus),
             ignored_windows: vec!["synthetic ignored app".into()],
             max_nodes_override: Some(123),
+            walk_timeout_override: Some(Duration::from_millis(250)),
             ..Default::default()
         };
         let paired = windows_tree_config_for_bitmap(config.clone(), Some(bitmap_owner));
@@ -3159,7 +3368,8 @@ mod tests {
         );
         assert_ne!(paired.windows_target, Some(foreign_focus));
         assert_eq!(paired.ignored_windows, config.ignored_windows);
-        assert_eq!(paired.max_nodes_override, Some(123));
+        assert_eq!(paired.max_nodes_override, None);
+        assert_eq!(paired.walk_timeout_override, None);
 
         // The next bitmap pins its own identity, rather than the earlier frame
         // or a global focus target. Missing/invalid acquisition never retains
@@ -3965,6 +4175,83 @@ fn report_monitor_operation(monitor_id: u32, success: bool) {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_text_outcome(
+    verification: Option<&screenpipe_a11y::tree::WindowsCaptureVerification>,
+) -> std::result::Result<
+    Option<screenpipe_config::capture_diagnostics::AccessibilityStopReason>,
+    screenpipe_config::capture_diagnostics::AccessibilityStopReason,
+> {
+    use screenpipe_a11y::tree::{
+        WindowsCaptureVerification, WindowsPrivacyVerification, WindowsTextAcquisition,
+    };
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
+    match verification {
+        Some(WindowsCaptureVerification {
+            privacy: WindowsPrivacyVerification::Verified,
+            text: WindowsTextAcquisition::Unavailable(cause),
+        }) => Ok(Some(*cause)),
+        Some(WindowsCaptureVerification {
+            privacy: WindowsPrivacyVerification::Verified,
+            text: WindowsTextAcquisition::Complete | WindowsTextAcquisition::SkippedByConfig,
+        }) => Ok(None),
+        None => Err(AccessibilityStopReason::Provider),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn report_windows_text_outcome(
+    monitor_id: u32,
+    verification: Option<&screenpipe_a11y::tree::WindowsCaptureVerification>,
+) {
+    use screenpipe_config::capture_diagnostics::*;
+    if let Ok(Some(cause)) | Err(cause) = windows_text_outcome(verification) {
+        observe(
+            CaptureChannel::Accessibility,
+            DiagnosticSource::WindowPolicy,
+            CaptureScope::Monitor(monitor_id),
+            CaptureCondition::Failed,
+            vec![cause.capture_reason()],
+            Vec::new(),
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_text_outcome(
+    privacy: &mut WindowsCapturePrivacy,
+    verification: Option<&screenpipe_a11y::tree::WindowsCaptureVerification>,
+) -> bool {
+    use screenpipe_config::capture_diagnostics::{RuleKind, RuleOrigin, RuleReference};
+    use screenpipe_screen::capture_screenshot_by_window::WindowsAccessibilityDecision;
+    let (cause, blocked) = match windows_text_outcome(verification) {
+        Ok(None) => return false,
+        Ok(Some(cause)) => (cause, false),
+        Err(cause) => (cause, true),
+    };
+    privacy.accessibility = Some(WindowsAccessibilityDecision {
+        phase: if blocked {
+            "privacy_admission"
+        } else {
+            "optional_text"
+        },
+        cause: cause.code(),
+        processing: if blocked { "withheld" } else { "proceeding" },
+        unresolved_rules: if blocked {
+            vec![RuleReference {
+                origin: RuleOrigin::Builtin,
+                index: 0,
+                kind: RuleKind::NativeWindowPolicy,
+            }]
+        } else {
+            Vec::new()
+        },
+        rules_truncated: false,
+        sampled_target_app: None,
+    });
+    blocked
+}
+
+#[cfg(target_os = "windows")]
 fn apply_windows_accessibility_failure(
     privacy: &mut WindowsCapturePrivacy,
     failure: &screenpipe_a11y::tree::AccessibilityFailure,
@@ -4003,6 +4290,7 @@ fn apply_windows_accessibility_failure_with_target_app(
     }
     let blocked = !unresolved_rules.is_empty();
     privacy.accessibility = Some(WindowsAccessibilityDecision {
+        phase: "privacy_admission",
         cause: failure.cause.code(),
         processing: if blocked { "withheld" } else { "proceeding" },
         unresolved_rules: unresolved_rules.iter().take(32).copied().collect(),
@@ -4150,6 +4438,166 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
             rules.clone(),
             apps.clone(),
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_optional_text_failures_preserve_verified_bitmap_admission() {
+    use screenpipe_a11y::tree::{
+        WindowsCaptureVerification, WindowsPrivacyVerification, WindowsTextAcquisition,
+    };
+    use screenpipe_config::capture_diagnostics::*;
+    for (offset, cause) in [
+        AccessibilityStopReason::Timeout,
+        AccessibilityStopReason::Provider,
+        AccessibilityStopReason::Nodes,
+        AccessibilityStopReason::PropertyText,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let verification = WindowsCaptureVerification {
+            privacy: WindowsPrivacyVerification::Verified,
+            text: WindowsTextAcquisition::Unavailable(cause),
+        };
+        let mut privacy = WindowsCapturePrivacy::default();
+        assert!(!apply_windows_text_outcome(
+            &mut privacy,
+            Some(&verification)
+        ));
+        let privacy = privacy.with_outcome(WindowsCaptureOutcome::FullMonitor);
+        let value = serde_json::to_value(&privacy).unwrap();
+        assert_eq!(value["accessibility"]["phase"], "optional_text");
+        assert_eq!(value["accessibility"]["processing"], "proceeding");
+        assert_eq!(value["accessibility"]["cause"], cause.code());
+        assert_eq!(
+            value["accessibility"]["unresolved_rules"],
+            serde_json::json!([])
+        );
+        assert!(value["accessibility"]["sampled_target_app"].is_null());
+        report_windows_text_outcome(993100 + offset as u32, Some(&verification));
+        report_windows_privacy(993100 + offset as u32, &privacy);
+        for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+            let row = current()
+                .into_iter()
+                .find(|row| {
+                    row.channel == channel
+                        && row.source == DiagnosticSource::WindowPolicy
+                        && row.scope == CaptureScope::Monitor(993100 + offset as u32)
+                })
+                .unwrap();
+            assert_eq!(row.condition, CaptureCondition::Admitted);
+            assert!(row.reasons.contains(&cause.capture_reason()));
+            assert!(row
+                .reasons
+                .contains(&CaptureReason::AccessibilityProcessingContinues));
+            assert!(!row
+                .reasons
+                .contains(&CaptureReason::AccessibilityPrivacyUnverified));
+            assert!(row.rules.is_empty());
+        }
+        let accessibility = current()
+            .into_iter()
+            .find(|row| {
+                row.channel == CaptureChannel::Accessibility
+                    && row.source == DiagnosticSource::WindowPolicy
+                    && row.scope == CaptureScope::Monitor(993100 + offset as u32)
+            })
+            .unwrap();
+        assert_eq!(accessibility.condition, CaptureCondition::Failed);
+        assert_eq!(accessibility.reasons, [cause.capture_reason()]);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_untyped_snapshot_cannot_admit_bitmap_or_ocr() {
+    use screenpipe_config::capture_diagnostics::*;
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(apply_windows_text_outcome(&mut privacy, None));
+    let privacy = privacy.with_outcome(WindowsCaptureOutcome::CaptureFailed(
+        WindowsCaptureFailureStage::AccessibilityInspection,
+    ));
+    let decision = privacy.accessibility.as_ref().unwrap();
+    assert_eq!(decision.phase, "privacy_admission");
+    assert_eq!(decision.processing, "withheld");
+    assert_eq!(
+        decision.unresolved_rules[0].kind,
+        RuleKind::NativeWindowPolicy
+    );
+    report_windows_text_outcome(993110, None);
+    report_windows_privacy(993110, &privacy);
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        let row = current()
+            .into_iter()
+            .find(|row| {
+                row.channel == channel
+                    && row.source == DiagnosticSource::WindowPolicy
+                    && row.scope == CaptureScope::Monitor(993110)
+            })
+            .unwrap();
+        assert_eq!(row.condition, CaptureCondition::Failed);
+        assert!(row
+            .reasons
+            .contains(&CaptureReason::AccessibilityPrivacyUnverified));
+    }
+    let accessibility = current()
+        .into_iter()
+        .find(|row| {
+            row.channel == CaptureChannel::Accessibility
+                && row.source == DiagnosticSource::WindowPolicy
+                && row.scope == CaptureScope::Monitor(993110)
+        })
+        .unwrap();
+    assert_eq!(accessibility.condition, CaptureCondition::Failed);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn capture_diagnostic_final_focus_mismatch_withholds_optional_text_fallback() {
+    use screenpipe_a11y::tree::{
+        WindowsCaptureVerification, WindowsPrivacyVerification, WindowsTextAcquisition,
+    };
+    use screenpipe_config::capture_diagnostics::*;
+    use screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason;
+    let verification = WindowsCaptureVerification {
+        privacy: WindowsPrivacyVerification::Verified,
+        text: WindowsTextAcquisition::Unavailable(AccessibilityStopReason::Timeout),
+    };
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(!apply_windows_text_outcome(
+        &mut privacy,
+        Some(&verification)
+    ));
+    let outcome =
+        WindowsCaptureOutcome::CaptureRedacted(WindowsCaptureRedactionReason::InconsistentFocus);
+    assert!(outcome.is_placeholder());
+    let privacy = privacy.with_outcome(outcome);
+    assert_eq!(
+        privacy.accessibility.as_ref().unwrap().processing,
+        "withheld_by_other_check"
+    );
+    assert_eq!(
+        privacy.accessibility.as_ref().unwrap().phase,
+        "optional_text"
+    );
+    report_windows_privacy(993111, &privacy);
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        let row = current()
+            .into_iter()
+            .find(|row| {
+                row.channel == channel
+                    && row.source == DiagnosticSource::WindowPolicy
+                    && row.scope == CaptureScope::Monitor(993111)
+            })
+            .unwrap();
+        assert_eq!(row.condition, CaptureCondition::Redacted);
+        assert!(row.reasons.contains(&CaptureReason::InconsistentFocus));
+        assert!(row.reasons.contains(&CaptureReason::UiaWalkTimeout));
+        assert!(!row
+            .reasons
+            .contains(&CaptureReason::AccessibilityProcessingContinues));
     }
 }
 

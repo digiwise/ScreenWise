@@ -353,7 +353,34 @@ pub struct TreeSnapshot {
     pub truncation_reason: TruncationReason,
     /// Deepest depth reached during the walk.
     pub max_depth_reached: usize,
+    /// Windows records independently verified privacy and optional text state.
+    #[cfg(target_os = "windows")]
+    pub windows_capture_verification: Option<WindowsCaptureVerification>,
 }
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsCaptureVerification {
+    pub privacy: WindowsPrivacyVerification,
+    pub text: WindowsTextAcquisition,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsPrivacyVerification {
+    Verified,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsTextAcquisition {
+    Complete,
+    Unavailable(screenpipe_config::capture_diagnostics::AccessibilityStopReason),
+    SkippedByConfig,
+}
+
+#[cfg(target_os = "windows")]
+pub use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
 
 impl TreeSnapshot {
     /// Compute a content hash for dedup.
@@ -782,6 +809,8 @@ mod tests {
             truncated: false,
             truncation_reason: TruncationReason::None,
             max_depth_reached: 1,
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: None,
         }
     }
 
