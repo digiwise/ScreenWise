@@ -1270,7 +1270,7 @@ mod tests {
                 let reasons = metrics["reason_codes"]
                     .as_array()
                     .expect("fixed process reasons");
-                assert_eq!(reasons.len(), 9);
+                assert_eq!(reasons.len(), 10);
                 for code in &reasons[..8] {
                     assert!(
                         screenpipe_config::capture_diagnostics::AccessibilityStopReason::from_code(
@@ -1279,8 +1279,32 @@ mod tests {
                         .is_some()
                     );
                 }
-                assert_eq!(reasons[8], "unknown");
+                assert_eq!(reasons[8], "uia_monitor_unverified");
+                assert_eq!(reasons[9], "unknown");
                 assert_eq!(Some(&metrics["stage_names"]), expected_stage_names.as_ref());
+                assert_eq!(metrics["schema_version"], 2);
+                assert_eq!(
+                    metrics["mode_names"],
+                    json!(["privacy_and_text", "privacy_only"])
+                );
+                assert_eq!(
+                    metrics["retry_cause_names"],
+                    json!([
+                        "privacy_invalidation",
+                        "text_invalidation",
+                        "url_reconciliation",
+                        "cleanup_invalidation"
+                    ])
+                );
+                assert_eq!(
+                    metrics["failure_phase_names"],
+                    json!(["privacy", "text", "finalization"])
+                );
+                let native_codes = metrics["native_timeout_hresult_codes"]
+                    .as_array()
+                    .expect("fixed native timeout codes");
+                assert_eq!(native_codes.len(), 1);
+                assert!(native_codes.iter().all(serde_json::Value::is_number));
                 for bucket in ["total", "unknown", "overflow"]
                     .iter()
                     .map(|key| &metrics[*key])
@@ -1293,11 +1317,42 @@ mod tests {
                                 assert!(name.len() <= 128 && name.ends_with(".exe"));
                                 assert!(!name.contains(['/', '\\', ':']));
                             }
-                            "reason_counts" | "stage_calls" | "stage_total_us" | "stage_max_us" => {
+                            "reason_counts"
+                            | "stage_calls"
+                            | "stage_total_us"
+                            | "stage_max_us"
+                            | "failed_stage_calls"
+                            | "failed_stage_total_us"
+                            | "failed_stage_max_us"
+                            | "completed_stage_calls"
+                            | "completed_stage_total_us"
+                            | "completed_stage_max_us"
+                            | "mode_attempt_counts"
+                            | "retry_cause_counts"
+                            | "failed_retry_cause_counts"
+                            | "failure_phase_counts"
+                            | "failure_phase_remaining_total_us"
+                            | "failure_phase_remaining_min_us"
+                            | "failure_phase_remaining_max_us"
+                            | "failure_phase_expired_counts"
+                            | "native_timeout_hresult_counts"
+                            | "failed_native_timeout_hresult_counts" => {
                                 let counts = value.as_array().expect("numeric counters");
                                 assert_eq!(
                                     counts.len(),
-                                    if field == "reason_counts" { 9 } else { 21 }
+                                    match field.as_str() {
+                                        "reason_counts" => 10,
+                                        "mode_attempt_counts" => 2,
+                                        "retry_cause_counts" | "failed_retry_cause_counts" => 4,
+                                        "failure_phase_counts"
+                                        | "failure_phase_remaining_total_us"
+                                        | "failure_phase_remaining_min_us"
+                                        | "failure_phase_remaining_max_us"
+                                        | "failure_phase_expired_counts" => 3,
+                                        "native_timeout_hresult_counts"
+                                        | "failed_native_timeout_hresult_counts" => 1,
+                                        _ => 21,
+                                    }
                                 );
                                 assert!(counts.iter().all(serde_json::Value::is_number));
                             }
@@ -1308,6 +1363,13 @@ mod tests {
                             | "total_duration_us"
                             | "max_duration_us"
                             | "attempts_with_timing"
+                            | "other_hresult_count"
+                            | "failed_other_hresult_count"
+                            | "failures_with_budget"
+                            | "failure_overall_remaining_total_us"
+                            | "failure_overall_remaining_min_us"
+                            | "failure_overall_remaining_max_us"
+                            | "failure_overall_expired_count"
                             | "bucket" => assert!(value.is_number()),
                             _ => panic!("unexpected process metric field {field}"),
                         }

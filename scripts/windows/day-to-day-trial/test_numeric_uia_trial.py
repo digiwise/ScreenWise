@@ -93,6 +93,60 @@ class NumericTrialTests(unittest.TestCase):
         self.assertEqual(result["failure_to_admitted_transitions"], 1)
         self.assertAlmostEqual(result["last_failure_to_admitted_avg_ms"], 2000, delta=1)
 
+    def test_process_projection_bounds_rows_and_discards_identity_and_content(self):
+        row = {"basename": "code.exe", "attempts": 3, "failed": 1,
+               "window_name": "PRIVATE_CANARY", "stage_calls": [2] * 21,
+               "failed_stage_total_us": [9] * 21, "mode_attempt_counts": [0, 3],
+               "retry_cause_counts": [1, 0, 0, 0], "failure_phase_counts": [1, 0, 0],
+               "native_timeout_hresult_counts": [1], "failed_native_timeout_hresult_counts": [1],
+               "failed_retry_cause_counts": [1, 0, 0, 0], "failures_with_budget": 1,
+               "failed_other_hresult_count": 0, "reason_counts": [0] * 10,
+               "content": "PRIVATE_CANARY"}
+        result = trial.process_projection({"processes": [row] * 40, "total": row,
+                                           "unknown": {"basename": "PRIVATE_CANARY"}})
+        self.assertEqual(len(result["processes"]), 32)
+        self.assertEqual(result["processes"][0]["selector"], 1)
+        self.assertEqual(result["processes"][0]["mode_attempt_counts"], [0, 3])
+        self.assertEqual(result["processes"][0]["failed_stage_total_us"], [9] * 21)
+        self.assertEqual(result["processes"][0]["failed_native_timeout_hresult_counts"], [1])
+        self.assertEqual(result["processes"][0]["failures_with_budget"], 1)
+        self.assertEqual(result["processes"][0]["reason_counts"], [0] * 10)
+        self.assertEqual(result["unknown"]["selector"], 0)
+        serialized = json.dumps(result)
+        for content in ("PRIVATE_CANARY", "code.exe", "basename", "window_name"):
+            self.assertNotIn(content, serialized)
+        self.assertIsNone(trial.process_projection({"total": {"retry_cause_counts": [1]}})
+                          ["total"]["retry_cause_counts"])
+
+    def test_legacy_process_reasons_remain_distinguishable_from_new_schema(self):
+        old = trial.process_projection({"schema_version": 1, "total": {"reason_counts": [2] * 9}})
+        new = trial.process_projection({"schema_version": 2, "total": {"reason_counts": [3] * 10}})
+        self.assertEqual(old["total"]["reason_counts"], [2] * 9)
+        self.assertEqual(new["total"]["reason_counts"], [3] * 10)
+        self.assertIsNone(trial.process_projection({"schema_version": 2,
+                          "total": {"reason_counts": [2] * 9}})["total"]["reason_counts"])
+
+    def test_admission_latency_uses_published_privacy_not_optional_text_wall_time(self):
+        def fetch(_base, endpoint, _token):
+            if endpoint == "/vision/uia-metrics":
+                return {"attempts": 4, "total_duration_us": 2400000,
+                        "timing": {"privacy_phase": {"published_admissions": 2,
+                                  "published_mandatory_complete_total_us": 200000,
+                                  "published_mandatory_complete_bucket_counts": [0, 2, 0, 0, 0, 0, 0]}}}, 200, 1
+            return {}, 200, 1
+        with patch.object(trial, "fetch", fetch):
+            result = trial.sample({"port": 31579}, "PRIVATE_CANARY", self.db, "2026-10-13T09:00:00.000Z")
+        self.assertEqual(result["admission_latency_ms"], 100)
+        self.assertEqual(result["inspection_wall_latency_ms"], 600)
+        self.assertEqual(result["timing"]["privacy_phase"]
+                         ["published_mandatory_complete_bucket_counts"], [0, 2, 0, 0, 0, 0, 0])
+
+    def test_current_redacted_outcome_is_not_counted_as_capture(self):
+        self.add(json.dumps({"outcome": "redacted"}))
+        result = trial.aggregate(self.db, "2026-10-13T09:00:00.000Z")
+        self.assertEqual(result["redacted"], 1)
+        self.assertEqual(result["other_outcomes"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

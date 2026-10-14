@@ -47,6 +47,10 @@ the distinction between shared acquisition and individual rule cost, and an
 external watchdog for COM calls that never return. Validate the timing data on
 an owner-run live trial before treating it as a performance conclusion. This
 checkpoint does not authorize deployment, capture, or reduced privacy checks.
+The opt-in privacy-only comparison and targeted failure-budget/retry diagnostics
+in [the comparison handoff](docs/UIA_PRIVACY_ONLY_COMPARISON.md) are covered by
+this same harden-or-remove checkpoint. Normal launch remains privacy-and-text;
+comparison configuration is startup-scoped and never reuses admission state.
 
 Inspect branch, status and recent history before changing files; do not assume a
 documented historical HEAD is current. Development currently uses `screenwise`.

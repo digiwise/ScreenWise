@@ -385,10 +385,12 @@ impl WindowsTreeWalker {
                 state.com_initialized_by_us = true;
                 state.com_ready = true;
             } else if hr.0 == RPC_E_CHANGED_MODE_CODE {
+                timing::native_hresult(hr.0 as u32);
                 return Err(anyhow::anyhow!(
                     "UIA event invalidation requires an MTA apartment"
                 ));
             } else {
+                timing::native_hresult(hr.0 as u32);
                 return Err(anyhow::anyhow!("COM init failed: {:?}", hr));
             }
         }
@@ -417,7 +419,7 @@ impl Drop for WindowsTreeWalker {
 impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
-        timing::begin(start);
+        timing::begin(start, start + PRIVACY_DEADLINE, start + TOTAL_DEADLINE);
         let mut stage = "target_identity";
         let mut candidate_hwnd = None;
         let mut candidate_pid = None;
@@ -663,6 +665,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             let acquisition = (|| -> Result<TreeWalkResult, bulk::Stop> {
                 loop {
                     attempt.set_deadline(deadline);
+                    timing::phase_deadline(timing::Phase::Privacy, deadline);
                     if !privacy_attempt_open(Instant::now(), deadline) {
                         timing::timeout();
                         return Err(bulk::Stop::Timeout);
@@ -673,7 +676,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         match attempt.acquire(false, applicable_subtree_rules, need_url) {
                             Ok(root) => root,
                             Err(_) if !attempt.current(revision) => {
-                                bulk::retry();
+                                bulk::retry(timing::RetryCause::PrivacyInvalidation);
                                 continue;
                             }
                             Err(reason) => return Err(reason),
@@ -706,19 +709,19 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     ) {
                         Ok(result) => result,
                         Err(_) if !attempt.current(revision) => {
-                            bulk::retry();
+                            bulk::retry(timing::RetryCause::PrivacyInvalidation);
                             continue;
                         }
                         Err(reason) => return Err(reason),
                     };
                     blocked |= raw_policy.ignored_subtree;
                     if !attempt.current(revision) {
-                        bulk::retry();
+                        bulk::retry(timing::RetryCause::PrivacyInvalidation);
                         continue;
                     }
                     if blocked {
                         if matches!(attempt.finish(revision), Ok(false)) {
-                            bulk::retry();
+                            bulk::retry(timing::RetryCause::CleanupInvalidation);
                             continue;
                         }
                         return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
@@ -731,7 +734,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         })
                     {
                         if matches!(attempt.finish(revision), Ok(false)) {
-                            bulk::retry();
+                            bulk::retry(timing::RetryCause::CleanupInvalidation);
                             continue;
                         }
                         return Ok(TreeWalkResult::Skipped(SkipReason::BlockedUrl));
@@ -751,6 +754,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         timing::text_attempted();
                         let text_deadline = Instant::now() + TEXT_DEADLINE;
                         attempt.set_deadline(text_deadline);
+                        timing::phase_deadline(timing::Phase::Text, text_deadline);
                         let text_root = attempt.acquire(true, applicable_subtree_rules, need_url);
                         match text_root {
                             Ok(root) => {
@@ -780,7 +784,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                                 ) {
                                     Ok(result) => result,
                                     Err(_) if !attempt.current(revision) => {
-                                        bulk::retry();
+                                        bulk::retry(timing::RetryCause::TextInvalidation);
                                         continue;
                                     }
                                     Err(reason) => return Err(reason),
@@ -813,23 +817,32 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                                 );
                                 match outcome {
                                     TextPhaseOutcome::Denied => {
-                                        attempt.set_deadline(bounded_finalization_deadline(
+                                        let denied_deadline = bounded_finalization_deadline(
                                             Instant::now(),
                                             start + TOTAL_DEADLINE,
-                                        ));
+                                        );
+                                        attempt.set_deadline(denied_deadline);
+                                        timing::phase_deadline(
+                                            timing::Phase::Finalization,
+                                            denied_deadline,
+                                        );
                                         let denied = if recording_blocked {
                                             SkipReason::UserIgnored
                                         } else {
                                             SkipReason::BlockedUrl
                                         };
                                         if matches!(attempt.finish(revision), Ok(false)) {
-                                            bulk::retry();
+                                            bulk::retry(timing::RetryCause::CleanupInvalidation);
                                             continue;
                                         }
                                         return Ok(TreeWalkResult::Skipped(denied));
                                     }
                                     TextPhaseOutcome::RetryPrivacy => {
-                                        bulk::retry();
+                                        bulk::retry(if attempt.current(revision) {
+                                            timing::RetryCause::UrlReconciliation
+                                        } else {
+                                            timing::RetryCause::TextInvalidation
+                                        });
                                         continue;
                                     }
                                     TextPhaseOutcome::Complete => {
@@ -859,7 +872,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                                 Err(reason),
                             ) {
                                 TextPhaseOutcome::RetryPrivacy => {
-                                    bulk::retry();
+                                    bulk::retry(timing::RetryCause::TextInvalidation);
                                     continue;
                                 }
                                 TextPhaseOutcome::Unavailable(reason) => {
@@ -869,7 +882,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                             },
                         }
                         if !attempt.current(revision) {
-                            bulk::retry();
+                            bulk::retry(timing::RetryCause::TextInvalidation);
                             continue;
                         }
                         timing::text_result(text_status);
@@ -887,6 +900,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     let final_deadline =
                         bounded_finalization_deadline(Instant::now(), start + TOTAL_DEADLINE);
                     attempt.set_deadline(final_deadline);
+                    timing::phase_deadline(timing::Phase::Finalization, final_deadline);
                     stage = "post_walk_identity";
                     timing::enter(timing::Stage::FocusVerification);
                     // Attribute while invalidation handlers remain active and
@@ -928,7 +942,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         ));
                     }
                     if !attempt.current(revision) {
-                        bulk::retry();
+                        bulk::retry(timing::RetryCause::PrivacyInvalidation);
                         continue;
                     }
                     if !identity_is_current(
@@ -958,7 +972,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         identity_current,
                     ) {
                         FinalizationOutcome::RetryPrivacy => {
-                            bulk::retry();
+                            bulk::retry(timing::RetryCause::CleanupInvalidation);
                             continue;
                         }
                         FinalizationOutcome::Unknown(reason) => {
@@ -1025,6 +1039,11 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     }));
                 }
             })();
+            // The attempt still owns its event subscriptions here. Preserve
+            // the decisive exit budget before Drop can run fallback removal.
+            if !matches!(&acquisition, Ok(TreeWalkResult::Found(_))) {
+                timing::failure_budget(Instant::now());
+            }
             match acquisition {
                 Ok(result) => Ok(result),
                 Err(reason) => Ok(TreeWalkResult::Skipped(
@@ -1049,6 +1068,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             ));
         }
         if !matches!(&result, Ok(TreeWalkResult::Found(_))) {
+            // Capture the decisive exit budget before the diagnostic native
+            // recheck adds work unrelated to the failed acquisition.
+            timing::failure_budget(Instant::now());
             timing::enter(timing::Stage::FailureRecheck);
             metrics_basename = verified_metrics_basename(
                 &self.config,
@@ -1166,6 +1188,9 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => {
                 (Some(reason.code()), &[][..])
             }
+            Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified)) => {
+                (Some("uia_monitor_unverified"), &[][..])
+            }
             _ => (None, &[][..]),
         };
         let attempt_timing = timing::finish(
@@ -1180,13 +1205,15 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             Err(_)
             | Ok(TreeWalkResult::Skipped(
                 SkipReason::AccessibilityRetrievalFailed(_)
-                | SkipReason::AccessibilityIncomplete(_),
+                | SkipReason::AccessibilityIncomplete(_)
+                | SkipReason::MonitorUnverified,
             )) => process_metrics::AttemptOutcome::Failed,
             _ => process_metrics::AttemptOutcome::Denied,
         };
         process_metrics::record_attempt(
             metrics_basename.as_deref(),
             elapsed,
+            self.config.windows_privacy_only,
             metrics_outcome,
             reason,
             attempt_timing,

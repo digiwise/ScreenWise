@@ -23,6 +23,23 @@ foreach ($file in @(Get-ChildItem -LiteralPath $PSScriptRoot -File | Where-Objec
     $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
     Check (!$errors) "parse $($file.Name)"
 }
+$savedUiaMode = [Environment]::GetEnvironmentVariable('SCREENWISE_UIA_PRIVACY_ONLY', 'Process')
+try {
+    [Environment]::SetEnvironmentVariable('SCREENWISE_UIA_PRIVACY_ONLY', '1', 'Process')
+    $uiaPsi = [Diagnostics.ProcessStartInfo]::new()
+    Set-DeploymentUiaComparisonMode -StartInfo $uiaPsi -Mode PrivacyAndText
+    Check (!$uiaPsi.EnvironmentVariables.ContainsKey('SCREENWISE_UIA_PRIVACY_ONLY')) 'normal launch removes inherited privacy-only opt-in from child'
+    Set-DeploymentUiaComparisonMode -StartInfo $uiaPsi -Mode PrivacyOnly
+    Check ($uiaPsi.EnvironmentVariables['SCREENWISE_UIA_PRIVACY_ONLY'] -ceq '1') 'privacy-only launch sets child opt-in'
+    Set-DeploymentUiaComparisonMode -StartInfo $uiaPsi -Mode privacyonly
+    Check ($uiaPsi.EnvironmentVariables['SCREENWISE_UIA_PRIVACY_ONLY'] -ceq '1') 'accepted case variant keeps child opt-in'
+    Set-DeploymentUiaComparisonMode -StartInfo $uiaPsi -Mode PrivacyAndText
+    Check (!$uiaPsi.EnvironmentVariables.ContainsKey('SCREENWISE_UIA_PRIVACY_ONLY')) 'next normal launch reverts child mode'
+    Check ([Environment]::GetEnvironmentVariable('SCREENWISE_UIA_PRIVACY_ONLY', 'Process') -ceq '1') 'launch selection leaves parent environment intact'
+    Reject { Set-DeploymentUiaComparisonMode -StartInfo $uiaPsi -Mode invalid } 'unsupported UIA comparison mode rejected'
+} finally {
+    [Environment]::SetEnvironmentVariable('SCREENWISE_UIA_PRIVACY_ONLY', $savedUiaMode, 'Process')
+}
 Reject { Assert-DeploymentPath (Join-Path $repo 'README.md') $private } 'outside private root'
 Reject { Assert-DeploymentPath (Join-Path $private '..\README.md') $private } 'parent traversal'
 Check ((Assert-DeploymentPath (Join-Path $root 'release') $private) -eq (Join-Path $root 'release')) 'local path'

@@ -1,5 +1,18 @@
 # ScreenWise Windows build notes
 
+The [privacy-only UIA comparison](docs/UIA_PRIVACY_ONLY_COMPARISON.md) adds an
+opt-in desktop startup mode and separates per-process failed/completed stage
+costs, retry causes, remaining budgets and native timeout counts. Normal launch
+keeps UIA text; privacy-only skips its optional acquisition while retaining
+fresh policy and final identity checks. Validation and the desktop-only
+release-local artifact are recorded in that handoff. Deployment and attended
+comparison remain owner actions.
+Final Astra review preceded the desktop-only release-local build: 4m52s,
+1,080 external artifacts reused and zero external rebuilds. Accessibility 280,
+capture 45, mode two, endpoint one and collector 11 tests passed; deployment
+scripts passed 125 synthetic checks. Twenty-three live accessibility tests
+remained ignored. The handoff records exact artifact/evidence and live gaps.
+
 The [raw-only rule and process-metrics follow-up](docs/UIA_SINGLE_CACHE_HANDOFF.md#raw-only-rule-evaluation-follow-up)
 evaluates policy evidence without the blanket raw-node rejection, implements
 the owner's nonblocking unknown-Value policy, separates raw wrapper depth from

@@ -66,12 +66,55 @@ pub(super) const STAGE_NAMES: [&str; 21] = [
 ];
 pub(super) const STAGE_COUNT: usize = STAGE_NAMES.len();
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(super) enum Phase {
+    Privacy,
+    Text,
+    Finalization,
+}
+pub(super) const PHASE_NAMES: [&str; 3] = ["privacy", "text", "finalization"];
+pub(super) const PHASE_COUNT: usize = PHASE_NAMES.len();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(super) enum RetryCause {
+    PrivacyInvalidation,
+    TextInvalidation,
+    UrlReconciliation,
+    CleanupInvalidation,
+}
+pub(super) const RETRY_CAUSE_NAMES: [&str; 4] = [
+    "privacy_invalidation",
+    "text_invalidation",
+    "url_reconciliation",
+    "cleanup_invalidation",
+];
+pub(super) const RETRY_CAUSE_COUNT: usize = RETRY_CAUSE_NAMES.len();
+// The native UIA timeout code has fixed cardinality. Other HRESULTs are counted
+// without retaining an unbounded set of provider-specific values.
+pub(super) const NATIVE_TIMEOUT_HRESULT_CODES: [u32; 1] =
+    [windows::Win32::UI::Accessibility::UIA_E_TIMEOUT as u32];
+
 /// One closed attempt's stage accounting. These fixed numeric vectors contain
 /// no window, rule, path, URL, or process identity.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct AttemptTiming {
     pub stage_calls: [u64; STAGE_COUNT],
     pub stage_us: [u64; STAGE_COUNT],
+    pub retry_causes: [u64; RETRY_CAUSE_COUNT],
+    pub native_timeout_hresults: [u64; NATIVE_TIMEOUT_HRESULT_CODES.len()],
+    pub other_hresults: u64,
+    pub failure_budget: Option<FailureBudget>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FailureBudget {
+    pub phase: Phase,
+    pub phase_remaining_us: u64,
+    pub phase_expired: bool,
+    pub overall_remaining_us: u64,
+    pub overall_expired: bool,
 }
 
 /// Only a fixed stage name leaves the attempt-local timing trace.
@@ -143,6 +186,7 @@ static STAGES: Counters<STAGE_COUNT> = Counters::new();
 static RULES: Counters<RULE_COUNT> = Counters::new();
 static RULE_MATCHES: [AtomicU64; RULE_COUNT] = [const { AtomicU64::new(0) }; RULE_COUNT];
 static TIMEOUT_STAGES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
+static TIMEOUT_DIAGNOSTICS: AtomicU64 = AtomicU64::new(0);
 static PRIVACY_COMPLETED: AtomicU64 = AtomicU64::new(0);
 static PRIVACY_TOTAL_US: AtomicU64 = AtomicU64::new(0);
 static PRIVACY_MAX_US: AtomicU64 = AtomicU64::new(0);
@@ -170,9 +214,16 @@ struct Trace {
     rule_calls: [u64; RULE_COUNT],
     rule_matches: [u64; RULE_COUNT],
     first_timeout: Option<Stage>,
+    phase: Phase,
+    phase_deadline: Instant,
+    overall_deadline: Instant,
+    retry_causes: [u64; RETRY_CAUSE_COUNT],
+    native_timeout_hresults: [u64; NATIVE_TIMEOUT_HRESULT_CODES.len()],
+    other_hresults: u64,
+    failure_budget: Option<FailureBudget>,
 }
 impl Trace {
-    fn new(now: Instant) -> Self {
+    fn new(now: Instant, privacy_deadline: Instant, overall_deadline: Instant) -> Self {
         let mut stage_calls = [0; STAGE_COUNT];
         stage_calls[Stage::TargetIdentity as usize] = 1;
         Self {
@@ -184,6 +235,13 @@ impl Trace {
             rule_calls: [0; RULE_COUNT],
             rule_matches: [0; RULE_COUNT],
             first_timeout: None,
+            phase: Phase::Privacy,
+            phase_deadline: privacy_deadline,
+            overall_deadline,
+            retry_causes: [0; RETRY_CAUSE_COUNT],
+            native_timeout_hresults: [0; NATIVE_TIMEOUT_HRESULT_CODES.len()],
+            other_hresults: 0,
+            failure_budget: None,
         }
     }
     fn enter_at(&mut self, next: Stage, now: Instant) {
@@ -205,6 +263,17 @@ impl Trace {
         self.rule_calls[index] += 1;
         self.rule_matches[index] += u64::from(matched);
     }
+    fn record_failure_budget(&mut self, now: Instant) {
+        if self.failure_budget.is_none() {
+            self.failure_budget = Some(FailureBudget {
+                phase: self.phase,
+                phase_remaining_us: micros(self.phase_deadline.saturating_duration_since(now)),
+                phase_expired: now >= self.phase_deadline,
+                overall_remaining_us: micros(self.overall_deadline.saturating_duration_since(now)),
+                overall_expired: now >= self.overall_deadline,
+            });
+        }
+    }
 }
 thread_local! { static TRACE: RefCell<Option<Trace>> = const { RefCell::new(None) }; }
 
@@ -212,8 +281,48 @@ fn micros(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
 }
 
-pub(super) fn begin(now: Instant) {
-    TRACE.with(|slot| *slot.borrow_mut() = Some(Trace::new(now)));
+pub(super) fn begin(now: Instant, privacy_deadline: Instant, overall_deadline: Instant) {
+    TRACE.with(|slot| {
+        *slot.borrow_mut() = Some(Trace::new(now, privacy_deadline, overall_deadline))
+    });
+}
+pub(super) fn phase_deadline(phase: Phase, deadline: Instant) {
+    TRACE.with(|slot| {
+        if let Some(trace) = slot.borrow_mut().as_mut() {
+            trace.phase = phase;
+            trace.phase_deadline = deadline;
+        }
+    });
+}
+pub(super) fn retry(cause: RetryCause) {
+    TRACE.with(|slot| {
+        if let Some(trace) = slot.borrow_mut().as_mut() {
+            trace.retry_causes[cause as usize] =
+                trace.retry_causes[cause as usize].saturating_add(1);
+        }
+    });
+}
+pub(super) fn native_hresult(code: u32) {
+    TRACE.with(|slot| {
+        if let Some(trace) = slot.borrow_mut().as_mut() {
+            if let Some(index) = NATIVE_TIMEOUT_HRESULT_CODES
+                .iter()
+                .position(|value| *value == code)
+            {
+                trace.native_timeout_hresults[index] =
+                    trace.native_timeout_hresults[index].saturating_add(1);
+            } else {
+                trace.other_hresults = trace.other_hresults.saturating_add(1);
+            }
+        }
+    });
+}
+pub(super) fn failure_budget(now: Instant) {
+    TRACE.with(|slot| {
+        if let Some(trace) = slot.borrow_mut().as_mut() {
+            trace.record_failure_budget(now);
+        }
+    });
 }
 pub(super) fn privacy_complete(elapsed: Duration) {
     let us = micros(elapsed);
@@ -320,32 +429,42 @@ pub(super) fn finish(
         TIMEOUT_STAGES[stage as usize].fetch_add(1, Ordering::Relaxed);
     }
     if elapsed >= budget || reason == Some("uia_walk_timeout") {
-        let stage_times: Vec<_> = STAGE_NAMES.iter().enumerate()
+        let diagnostic_index = TIMEOUT_DIAGNOSTICS.fetch_add(1, Ordering::Relaxed) + 1;
+        // Exact totals remain in metrics; sampled logs avoid a line per failed
+        // frame when a provider is repeatedly timing out.
+        if diagnostic_index == 1 || diagnostic_index % 64 == 0 {
+            let stage_times: Vec<_> = STAGE_NAMES.iter().enumerate()
             .filter(|(index, _)| trace.stage_calls[*index] > 0)
             .map(|(index, name)| serde_json::json!({"stage":name,"calls":trace.stage_calls[index],"us":trace.stage_us[index]}))
             .collect();
-        let rule_times: Vec<_> = RULE_NAMES
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| trace.rule_calls[*index] > 0)
-            .map(|(index, name)| {
-                serde_json::json!({"type":name,"checks":trace.rule_calls[index],
+            let rule_times: Vec<_> = RULE_NAMES
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| trace.rule_calls[*index] > 0)
+                .map(|(index, name)| {
+                    serde_json::json!({"type":name,"checks":trace.rule_calls[index],
                 "matches":trace.rule_matches[index],"us":trace.rule_us[index]})
-            })
-            .collect();
-        let diagnostic = serde_json::json!({
-            "elapsed_us":micros(elapsed), "budget_us":micros(budget),
-            "reason":reason.unwrap_or("deadline_exceeded"),
-            "timeout_stage":trace.first_timeout.map(|stage| STAGE_NAMES[stage as usize]),
-            "stage_times":stage_times,"rule_times":rule_times,
-            "rule_ids":rules.iter().take(64).collect::<Vec<_>>(),
-            "rule_ids_truncated":rules.len()>64,
-        });
-        tracing::warn!(diagnostic=%diagnostic, "UIA timing diagnostic");
+                })
+                .collect();
+            let diagnostic = serde_json::json!({
+                "elapsed_us":micros(elapsed), "budget_us":micros(budget),
+                "reason":reason.unwrap_or("deadline_exceeded"),
+                "timeout_stage":trace.first_timeout.map(|stage| STAGE_NAMES[stage as usize]),
+                "stage_times":stage_times,"rule_times":rule_times,
+                "rule_ids":rules.iter().take(64).collect::<Vec<_>>(),
+                "rule_ids_truncated":rules.len()>64,
+                "diagnostic_index":diagnostic_index,
+            });
+            tracing::warn!(diagnostic=%diagnostic, "UIA timing diagnostic");
+        }
     }
     Some(AttemptTiming {
         stage_calls: trace.stage_calls,
         stage_us: trace.stage_us,
+        retry_causes: trace.retry_causes,
+        native_timeout_hresults: trace.native_timeout_hresults,
+        other_hresults: trace.other_hresults,
+        failure_budget: trace.failure_budget,
     })
 }
 
@@ -354,6 +473,7 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "stage_names": STAGE_NAMES,
         "stages": STAGES.snapshot(),
         "timeout_stage_counts": TIMEOUT_STAGES.iter().map(|v| v.load(Ordering::Relaxed)).collect::<Vec<_>>(),
+        "timeout_diagnostic_count": TIMEOUT_DIAGNOSTICS.load(Ordering::Relaxed),
         "rule_type_names": RULE_NAMES,
         "rule_types": RULES.snapshot(),
         "rule_match_counts": RULE_MATCHES.iter().map(|v| v.load(Ordering::Relaxed)).collect::<Vec<_>>(),
@@ -398,7 +518,11 @@ mod tests {
     #[test]
     fn trace_accumulates_repeated_stages_and_keeps_first_timeout() {
         let start = Instant::now();
-        let mut trace = Trace::new(start);
+        let mut trace = Trace::new(
+            start,
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(2),
+        );
         trace.enter_at(Stage::UiaInitialization, start + Duration::from_micros(10));
         trace.enter_at(Stage::HierarchyCache, start + Duration::from_micros(40));
         trace.timeout();
@@ -414,7 +538,11 @@ mod tests {
     #[test]
     fn finish_returns_closed_trace_once_without_extra_stage_call() {
         let start = Instant::now();
-        begin(start);
+        begin(
+            start,
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(2),
+        );
         let finished = finish(
             start + Duration::from_micros(12),
             Duration::from_micros(12),
@@ -426,6 +554,40 @@ mod tests {
         assert_eq!(finished.stage_calls[Stage::TargetIdentity as usize], 1);
         assert_eq!(finished.stage_us[Stage::TargetIdentity as usize], 12);
         assert!(finish(start, Duration::ZERO, Duration::from_secs(1), None, &[]).is_none());
+    }
+
+    #[test]
+    fn retries_hresult_and_decisive_failure_budget_are_attempt_local() {
+        let start = Instant::now();
+        let privacy_deadline = start + Duration::from_millis(750);
+        let text_deadline = start + Duration::from_millis(875);
+        let overall_deadline = start + Duration::from_millis(1025);
+        begin(start, privacy_deadline, overall_deadline);
+        retry(RetryCause::PrivacyInvalidation);
+        retry(RetryCause::UrlReconciliation);
+        phase_deadline(Phase::Text, text_deadline);
+        native_hresult(NATIVE_TIMEOUT_HRESULT_CODES[0]);
+        native_hresult(0x8000_4005);
+        failure_budget(start + Duration::from_millis(900));
+        // A later native-policy recheck must not replace the decisive budget.
+        failure_budget(start + Duration::from_millis(1100));
+        let closed = finish(
+            start + Duration::from_millis(1100),
+            Duration::from_millis(1100),
+            Duration::from_millis(1025),
+            Some("uia_walk_timeout"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(closed.retry_causes, [1, 0, 1, 0]);
+        assert_eq!(closed.native_timeout_hresults, [1]);
+        assert_eq!(closed.other_hresults, 1);
+        let budget = closed.failure_budget.unwrap();
+        assert_eq!(budget.phase, Phase::Text);
+        assert_eq!(budget.phase_remaining_us, 0);
+        assert!(budget.phase_expired);
+        assert_eq!(budget.overall_remaining_us, 125_000);
+        assert!(!budget.overall_expired);
     }
 
     #[test]

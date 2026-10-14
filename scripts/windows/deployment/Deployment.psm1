@@ -372,6 +372,17 @@ function Publish-DeploymentFiles {
     }
 }
 
+function Set-DeploymentUiaComparisonMode {
+    param(
+        [Parameter(Mandatory)][Diagnostics.ProcessStartInfo]$StartInfo,
+        [Parameter(Mandatory)][ValidateSet('PrivacyAndText', 'PrivacyOnly')][string]$Mode
+    )
+    $StartInfo.EnvironmentVariables.Remove('SCREENWISE_UIA_PRIVACY_ONLY')
+    if ($Mode -eq 'PrivacyOnly') {
+        $StartInfo.EnvironmentVariables['SCREENWISE_UIA_PRIVACY_ONLY'] = '1'
+    }
+}
+
 function Invoke-DeploymentStartup {
     param([Parameter(Mandatory)][string]$StartupScript, [Parameter(Mandatory)][string]$ManifestPath)
     # The startup launcher owns every preflight and only launches after all pass.
@@ -384,5 +395,5 @@ function Invoke-DeploymentStartup {
 
 Export-ModuleMember -Function Assert-DeploymentPath, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
-    Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, New-DeploymentStaging,
+    Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, Set-DeploymentUiaComparisonMode, New-DeploymentStaging,
     Test-DeploymentQuitCapability, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration

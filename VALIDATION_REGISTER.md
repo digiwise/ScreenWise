@@ -12,14 +12,29 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 
 Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
-Current candidate: [raw-only rule evaluation, partial Value evidence and local
+Current candidate: [privacy-only comparison and targeted failure diagnostics](docs/UIA_PRIVACY_ONLY_COMPARISON.md).
+It adds an opt-in startup selector without changing normal-mode admission.
+Failure stage costs, retry causes, budget checkpoints and native timeout counts
+are separated by verified process in authenticated local metrics. The preceding
+raw-only/Value candidate was owner-deployed; its initial numeric results motivate
+this comparison but are not a matched workload benchmark. No new deployment or
+capture session is included in source delivery. Validation is recorded in the
+comparison handoff; live recovery and SW-R18 remain unresolved.
+Combined source passed final Astra review before the desktop-only release-local
+build (4m52s; all 1,080 external artifacts reused). Accessibility 280, capture 45,
+mode two, endpoint one and collector 11 tests passed, plus 125 synthetic
+deployment-script checks. Twenty-three live accessibility tests stayed ignored.
+The temporary diagnostics checkpoint remains; live cached COM/provider events,
+capture recovery and the 70%-within-half-budget target remain unverified.
+
+Preceding candidate: [raw-only rule evaluation, partial Value evidence and local
 process metrics](docs/UIA_SINGLE_CACHE_HANDOFF.md#raw-only-rule-evaluation-follow-up),
 following [fresh single-hierarchy UIA](docs/UIA_SINGLE_CACHE_HANDOFF.md),
 following the [Windows admission/text split](docs/UIA_ADMISSION_TEXT_SPLIT.md)
 and evidence-rejection diagnostics. Owner-run Access probes support investigating
 the acquisition change, not a production privacy/performance conclusion. The
-current implementation is not deployed; live admission comparison awaits owner
-confirmation. Historical hashes do not identify this artifact.
+follow-up comparison has not been deployed by the agent. Historical hashes
+identify their historical artifacts.
 
 Final combined source passed Astra review before the desktop-only release-local
 build. Accessibility tests: 278 passed, 23 live ignored. Capture admission:

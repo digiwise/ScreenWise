@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use dashmap::DashMap;
+use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::monitor::{get_monitor_by_id, list_monitors};
 use screenpipe_screen::PipelineMetrics;
@@ -66,6 +67,18 @@ fn media_output_directory(output_path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(output_path)
 }
 
+#[cfg(target_os = "windows")]
+const UIA_PRIVACY_ONLY_ENV: &str = "SCREENWISE_UIA_PRIVACY_ONLY";
+
+#[cfg(target_os = "windows")]
+fn parse_uia_privacy_only(value: Option<&str>) -> std::result::Result<bool, ()> {
+    match value {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(()),
+    }
+}
+
 /// Status of the VisionManager
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisionManagerStatus {
@@ -113,6 +126,9 @@ pub struct VisionManager {
     /// with no detector / no AppState route surface). Each capture loop
     /// polls `snapshot()` once per tick.
     high_fps_controller: Option<Arc<HighFpsController>>,
+    /// Fixed when this recording manager is created, across monitor restarts.
+    #[cfg(target_os = "windows")]
+    windows_privacy_only: bool,
     /// Set when the user's monitor allowlist matched zero connected displays and
     /// we fell back to recording every monitor. Clears the filter for hot-plug too.
     stale_allowlist_fallback: Arc<AtomicBool>,
@@ -152,6 +168,23 @@ impl VisionManager {
             FocusAwareController::new(tracker)
         };
 
+        #[cfg(target_os = "windows")]
+        let windows_privacy_only = {
+            let value = std::env::var(UIA_PRIVACY_ONLY_ENV);
+            let resolved = match value {
+                Ok(value) => parse_uia_privacy_only(Some(&value)),
+                Err(std::env::VarError::NotPresent) => parse_uia_privacy_only(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(()),
+            };
+            match resolved {
+                Ok(enabled) => enabled,
+                Err(()) => {
+                    warn!("invalid SCREENWISE_UIA_PRIVACY_ONLY value; using normal UIA text mode");
+                    false
+                }
+            }
+        };
+
         Self {
             config,
             db,
@@ -166,6 +199,8 @@ impl VisionManager {
             power_profile_rx: None,
             focus_controller,
             high_fps_controller: None,
+            #[cfg(target_os = "windows")]
+            windows_privacy_only,
             stale_allowlist_fallback: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -398,6 +433,29 @@ impl VisionManager {
         Ok(())
     }
 
+    /// Keep the monitor's admission inputs identical across UIA comparison modes.
+    fn tree_walker_config_for_bounds(
+        &self,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> TreeWalkerConfig {
+        TreeWalkerConfig {
+            ignored_windows: self.config.ignored_windows.clone(),
+            included_windows: self.config.included_windows.clone(),
+            ignored_urls: self.config.ignored_urls.clone(),
+            monitor_x: x,
+            monitor_y: y,
+            monitor_width: width,
+            monitor_height: height,
+            ignore_incognito_windows: self.config.ignore_incognito_windows,
+            #[cfg(target_os = "windows")]
+            windows_privacy_only: self.windows_privacy_only,
+            ..TreeWalkerConfig::default()
+        }
+    }
+
     /// Start event-driven capture for a specific monitor.
     async fn start_event_driven_monitor(
         &self,
@@ -405,7 +463,6 @@ impl VisionManager {
         monitor: screenpipe_screen::monitor::SafeMonitor,
     ) -> Result<JoinHandle<()>> {
         use crate::event_driven_capture::{event_driven_capture_loop, EventDrivenCaptureConfig};
-        use screenpipe_a11y::tree::TreeWalkerConfig;
         use screenpipe_a11y::ActivityFeed;
         use screenpipe_screen::snapshot_writer::SnapshotWriter;
 
@@ -454,17 +511,12 @@ impl VisionManager {
         // Tree walker config — pass through user's ignored/included window filters
         // and monitor dimensions so accessibility bounds are normalized to the
         // monitor coordinate space (matching the full-screen capture image).
-        let tree_walker_config = TreeWalkerConfig {
-            ignored_windows: self.config.ignored_windows.clone(),
-            included_windows: self.config.included_windows.clone(),
-            ignored_urls: self.config.ignored_urls.clone(),
-            monitor_x: monitor.x() as f64,
-            monitor_y: monitor.y() as f64,
-            monitor_width: monitor.width() as f64,
-            monitor_height: monitor.height() as f64,
-            ignore_incognito_windows: self.config.ignore_incognito_windows,
-            ..TreeWalkerConfig::default()
-        };
+        let tree_walker_config = self.tree_walker_config_for_bounds(
+            monitor.x() as f64,
+            monitor.y() as f64,
+            monitor.width() as f64,
+            monitor.height() as f64,
+        );
 
         // Event-driven capture config — seed jpeg_quality from the user's
         // chosen videoQuality so power-profile updates can use it as the
@@ -687,6 +739,52 @@ mod tests {
     use screenpipe_core::Language;
     use screenpipe_db::DatabaseManager;
     use screenpipe_screen::PipelineMetrics;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn privacy_only_requires_explicit_startup_opt_in() {
+        assert_eq!(parse_uia_privacy_only(None), Ok(false));
+        assert_eq!(parse_uia_privacy_only(Some("0")), Ok(false));
+        assert_eq!(parse_uia_privacy_only(Some("1")), Ok(true));
+        for invalid in ["", "true", "false", "yes", "2", " 1"] {
+            assert_eq!(parse_uia_privacy_only(Some(invalid)), Err(()));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn privacy_only_preserves_monitor_and_privacy_filter_configuration() {
+        let mut manager = make_vm_with_monitor_ids(Vec::new()).await;
+        manager.config.ignored_windows = vec!["private synthetic app".into()];
+        manager.config.included_windows = vec!["allowed synthetic app".into()];
+        manager.config.ignored_urls = vec!["synthetic.example".into()];
+        manager.config.ignore_incognito_windows = true;
+
+        manager.windows_privacy_only = false;
+        let normal = manager.tree_walker_config_for_bounds(-100.0, 20.0, 1920.0, 1080.0);
+        manager.windows_privacy_only = true;
+        let privacy_only = manager.tree_walker_config_for_bounds(-100.0, 20.0, 1920.0, 1080.0);
+
+        assert!(!normal.windows_privacy_only);
+        assert!(privacy_only.windows_privacy_only);
+        assert_eq!(normal.ignored_windows, privacy_only.ignored_windows);
+        assert_eq!(normal.included_windows, privacy_only.included_windows);
+        assert_eq!(normal.ignored_urls, privacy_only.ignored_urls);
+        assert_eq!(
+            normal.ignore_incognito_windows,
+            privacy_only.ignore_incognito_windows
+        );
+        assert_eq!(
+            normal.windows_require_browser_url,
+            privacy_only.windows_require_browser_url
+        );
+        assert_eq!(normal.monitor_x, privacy_only.monitor_x);
+        assert_eq!(normal.monitor_y, privacy_only.monitor_y);
+        assert_eq!(normal.monitor_width, privacy_only.monitor_width);
+        assert_eq!(normal.monitor_height, privacy_only.monitor_height);
+        assert_eq!(normal.max_nodes, privacy_only.max_nodes);
+        assert_eq!(normal.walk_timeout, privacy_only.walk_timeout);
+    }
 
     #[test]
     fn configured_media_directory_is_not_nested_under_another_data_directory() {

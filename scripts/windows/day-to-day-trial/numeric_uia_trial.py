@@ -26,9 +26,62 @@ UIA_METRICS = ("schema_version", "attempts", "completed", "failed", "denied", "r
                "provider_calls", "nodes", "total_duration_us", "max_duration_us",
                "bulk_acquisition_calls", "root_acquisition_calls", "event_registration_calls",
                "event_cleanup_calls", "event_cleanup_failures",
-               "hierarchy_structure_acquisitions", "accessibility_recording_acquisitions")
+               "hierarchy_structure_acquisitions", "accessibility_recording_acquisitions",
+               "single_cache_acquisitions", "single_cache_privacy_acquisitions",
+               "single_cache_recording_acquisitions", "raw_nodes", "projected_nodes")
 TIMING_STAGE_COUNT = 21
 TIMING_RULE_COUNT = 8
+PROCESS_LIMIT = 32
+PROCESS_SCALARS = ("bucket", "attempts", "completed", "failed", "denied",
+                   "total_duration_us", "max_duration_us", "attempts_with_timing",
+                   "other_hresult_count", "failed_other_hresult_count", "failures_with_budget",
+                   "failure_overall_remaining_total_us",
+                   "failure_overall_remaining_min_us", "failure_overall_remaining_max_us",
+                   "failure_overall_expired_count")
+PROCESS_VECTORS = {"reason_counts": 10, "mode_attempt_counts": 2,
+                   "retry_cause_counts": 4, "failed_retry_cause_counts": 4,
+                   "failure_phase_counts": 3,
+                   "failure_phase_remaining_total_us": 3, "failure_phase_remaining_min_us": 3,
+                   "failure_phase_remaining_max_us": 3, "failure_phase_expired_counts": 3,
+                   "native_timeout_hresult_counts": 1, "failed_native_timeout_hresult_counts": 1}
+for prefix in ("", "failed_", "completed_"):
+    for field in ("calls", "total_us", "max_us"):
+        PROCESS_VECTORS[prefix + "stage_" + field] = TIMING_STAGE_COUNT
+
+
+def numeric_vector(value, length):
+    return ([numeric(item) for item in value] if isinstance(value, list)
+            and len(value) == length else None)
+
+
+def process_projection(source):
+    """Drop basenames and all free-form fields from bounded local process rows.
+
+    Fixed selector codes retain the requested applications across restarts:
+    0=other/unknown, 1=code.exe, 2=msaccess.exe, 3=chatgpt.exe.
+    These are metadata selectors only; they never determine admission.
+    """
+    source = source if isinstance(source, dict) else {}
+    selectors = {"code.exe": 1, "msaccess.exe": 2, "chatgpt.exe": 3}
+
+    def bucket(value):
+        value = value if isinstance(value, dict) else {}
+        result = {key: numeric(value.get(key)) for key in PROCESS_SCALARS}
+        result.update({key: numeric_vector(value.get(key), length)
+                       for key, length in PROCESS_VECTORS.items()})
+        if source.get("schema_version") == 1:
+            result["reason_counts"] = numeric_vector(value.get("reason_counts"), 9)
+        basename = value.get("basename")
+        result["selector"] = selectors.get(basename, 0) if isinstance(basename, str) else 0
+        return result
+
+    rows = source.get("processes")
+    return {"schema_version": numeric(source.get("schema_version")),
+            "process_limit": numeric(source.get("process_limit")),
+            "process_count": numeric(source.get("process_count")),
+            "total": bucket(source.get("total")), "unknown": bucket(source.get("unknown")),
+            "overflow": bucket(source.get("overflow")),
+            "processes": [bucket(row) for row in rows[:PROCESS_LIMIT]] if isinstance(rows, list) else []}
 
 
 def timing_projection(source):
@@ -43,10 +96,25 @@ def timing_projection(source):
                 for key in ("calls", "total_us", "max_us")}
 
     source = source if isinstance(source, dict) else {}
-    return {"stages": counters(source.get("stages"), TIMING_STAGE_COUNT),
+    result = {"stages": counters(source.get("stages"), TIMING_STAGE_COUNT),
+            "timeout_diagnostic_count": numeric(source.get("timeout_diagnostic_count")),
             "timeout_stage_counts": vector(source.get("timeout_stage_counts"), TIMING_STAGE_COUNT),
             "rule_types": counters(source.get("rule_types"), TIMING_RULE_COUNT),
             "rule_match_counts": vector(source.get("rule_match_counts"), TIMING_RULE_COUNT)}
+    privacy = source.get("privacy_phase")
+    privacy = privacy if isinstance(privacy, dict) else {}
+    result["privacy_phase"] = {key: numeric(privacy.get(key)) for key in (
+        "acquisition_samples", "acquisition_total_us", "acquisition_max_us", "published_admissions",
+        "published_mandatory_complete_total_us", "published_mandatory_complete_max_us",
+        "published_admission_wall_total_us", "published_admission_wall_max_us")}
+    for key, length in (("bucket_upper_us", 6), ("acquisition_bucket_counts", 7),
+                        ("published_mandatory_complete_bucket_counts", 7),
+                        ("published_admission_wall_bucket_counts", 7)):
+        result["privacy_phase"][key] = vector(privacy.get(key), length)
+    text = source.get("text_phase")
+    text = text if isinstance(text, dict) else {}
+    result["text_phase"] = {key: numeric(text.get(key)) for key in ("attempted", "complete", "unavailable")}
+    return result
 
 
 def uia_projection(source):
@@ -56,6 +124,9 @@ def uia_projection(source):
         value = source.get(key)
         result[key] = ([numeric(item) for item in value[:8]]
                        if isinstance(value, list) and len(value) <= 8 else None)
+    for key, length in (("value_evidence_counts", 5), ("evidence_rejection_counts", 21)):
+        result[key] = numeric_vector(source.get(key), length)
+    result["process_metrics"] = process_projection(source.get("process_metrics"))
     return result
 
 
@@ -88,7 +159,7 @@ def aggregate(connection, since):
       SUM(CASE WHEN json_valid(capture_privacy) THEN
         CASE WHEN json_extract(capture_privacy,'$.outcome')='capture_failed' THEN 1 ELSE 0 END ELSE 0 END),
       SUM(CASE WHEN json_valid(capture_privacy) THEN
-        CASE WHEN json_extract(capture_privacy,'$.outcome')='capture_redacted' THEN 1 ELSE 0 END ELSE 0 END),
+        CASE WHEN json_extract(capture_privacy,'$.outcome') IN ('capture_redacted','redacted') THEN 1 ELSE 0 END ELSE 0 END),
       SUM(CASE WHEN json_valid(capture_privacy) THEN
         CASE WHEN json_extract(capture_privacy,'$.accessibility.cause')='uia_walk_timeout' THEN 1 ELSE 0 END ELSE 0 END),
       SUM(CASE WHEN json_valid(capture_privacy) THEN
@@ -135,9 +206,14 @@ def sample(deployment, token, connection, since):
               "vision": {key: numeric(vision.get(key)) for key in METRICS},
               "health": {key: numeric(health.get(key)) for key in
                          ("vision_db_write_stalled", "drm_content_paused", "schedule_paused")},
-              "admission_latency_ms": None}
+              "admission_latency_ms": None, "inspection_wall_latency_ms": None}
     if uia_status == 200 and numeric(uia.get("attempts")) and numeric(uia.get("total_duration_us")) is not None:
-        result["admission_latency_ms"] = uia["total_duration_us"]/uia["attempts"]/1000
+        result["inspection_wall_latency_ms"] = uia["total_duration_us"]/uia["attempts"]/1000
+    phase = result["timing"]["privacy_phase"]
+    admissions = phase["published_admissions"]
+    total_us = phase["published_mandatory_complete_total_us"]
+    if uia_status == 200 and admissions and total_us is not None:
+        result["admission_latency_ms"] = total_us/admissions/1000
     try:
         result["frames"] = aggregate(connection, since)
     except sqlite3.Error:
