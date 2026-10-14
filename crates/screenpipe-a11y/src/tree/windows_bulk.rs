@@ -22,6 +22,74 @@ fn provider_stage(stage: &'static str) {
     PROVIDER_STAGE.with(|value| value.set(stage));
 }
 
+// Fixed diagnostic identifiers only: never retain rejected property values or IDs.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum EvidenceRejection {
+    RegistrationPoisoned,
+    RequiredStringType,
+    ControlTypeVariant,
+    ControlTypeRange,
+    PasswordVariant,
+    ConflictingProjection,
+    ProjectionOutsideHierarchy,
+    StringVariant,
+    RuntimeIdVariant,
+    RuntimeIdArrayLayout,
+    RuntimeIdLength,
+    DuplicateQueryRuntimeId,
+    DuplicateValueRuntimeId,
+    DuplicateHierarchyRuntimeId,
+    MissingTitleProjection,
+    MissingDocumentValue,
+    MissingEntryValue,
+    MissingExtensionValue,
+    NegativeChildCount,
+}
+const EVIDENCE_REJECTION_CODES: [&str; 19] = [
+    "registration_poisoned",
+    "required_string_type",
+    "control_type_variant",
+    "control_type_range",
+    "password_variant",
+    "conflicting_projection",
+    "projection_outside_hierarchy",
+    "string_variant",
+    "runtime_id_variant",
+    "runtime_id_array_layout",
+    "runtime_id_length",
+    "duplicate_query_runtime_id",
+    "duplicate_value_runtime_id",
+    "duplicate_hierarchy_runtime_id",
+    "missing_title_projection",
+    "missing_document_value",
+    "missing_entry_value",
+    "missing_extension_value",
+    "negative_child_count",
+];
+static EVIDENCE_REJECTIONS: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
+fn evidence_rejected(reason: EvidenceRejection) -> Stop {
+    let index = reason as usize;
+    let code = EVIDENCE_REJECTION_CODES[index];
+    let count = EVIDENCE_REJECTIONS[index].fetch_add(1, Ordering::Relaxed) + 1;
+    let stage = timing::current_stage_name().unwrap_or("bulk_setup");
+    // Exact cumulative counts remain available even when ordinary logs are sampled.
+    if count == 1 || count % 64 == 0 {
+        tracing::warn!(
+            reason = code,
+            reason_id = index,
+            stage,
+            count,
+            "UIA bulk evidence rejected"
+        );
+    }
+    screenpipe_config::sensitive_debug::record(
+        "uia_bulk_evidence_rejection",
+        || serde_json::json!({"reason":code,"reason_id":index,"stage":stage}),
+    );
+    Stop::Provider
+}
+
 struct Metrics {
     attempts: AtomicU64,
     completed: AtomicU64,
@@ -99,7 +167,9 @@ fn registration(deadline: Instant) -> Result<MutexGuard<'static, ()>, Stop> {
         }
         match REGISTRATION.try_lock() {
             Ok(guard) => return Ok(guard),
-            Err(std::sync::TryLockError::Poisoned(_)) => return Err(Stop::Provider),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(evidence_rejected(EvidenceRejection::RegistrationPoisoned));
+            }
             Err(std::sync::TryLockError::WouldBlock) => std::thread::yield_now(),
         }
     }
@@ -163,16 +233,16 @@ fn required_string_type(vt: u16) -> Result<(), Stop> {
     if vt == 8 {
         Ok(())
     } else {
-        Err(Stop::Provider)
+        Err(evidence_rejected(EvidenceRejection::RequiredStringType))
     }
 }
 fn cached_control_type(value: &VARIANT) -> Result<i32, Stop> {
     if unsafe { value.as_raw().Anonymous.Anonymous.vt } != 3 {
-        return Err(Stop::Provider);
+        return Err(evidence_rejected(EvidenceRejection::ControlTypeVariant));
     }
     let control = i32::try_from(value).map_err(provider)?;
     if !(50000..=50040).contains(&control) {
-        return Err(Stop::Provider);
+        return Err(evidence_rejected(EvidenceRejection::ControlTypeRange));
     }
     Ok(control)
 }
@@ -182,7 +252,7 @@ fn cached_password(value: &VARIANT) -> Result<Option<bool>, Stop> {
         // Unsupported password evidence remains unknown and is redacted for
         // entry controls by the existing extraction policy.
         0 | 13 => Ok(None),
-        _ => Err(Stop::Provider),
+        _ => Err(evidence_rejected(EvidenceRejection::PasswordVariant)),
     }
 }
 fn consistent_insert<T: PartialEq>(
@@ -191,7 +261,7 @@ fn consistent_insert<T: PartialEq>(
     value: T,
 ) -> Result<(), Stop> {
     if map.get(&key).is_some_and(|previous| previous != &value) {
-        return Err(Stop::Provider);
+        return Err(evidence_rejected(EvidenceRejection::ConflictingProjection));
     }
     map.insert(key, value);
     Ok(())
@@ -201,7 +271,9 @@ fn projected_keys_complete<T>(
     seen: &HashSet<Vec<i32>>,
 ) -> Result<(), Stop> {
     if map.keys().any(|key| !seen.contains(key)) {
-        Err(Stop::Provider)
+        Err(evidence_rejected(
+            EvidenceRejection::ProjectionOutsideHierarchy,
+        ))
     } else {
         Ok(())
     }
@@ -308,6 +380,8 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "reason_codes":["uia_walk_timeout","uia_node_limit","uia_depth_limit","uia_property_text_limit",
             "uia_aggregate_text_limit","uia_provider_failure","uia_backoff","uia_initialization_failed"],
         "reason_counts":METRICS.reasons.iter().map(load).collect::<Vec<_>>(),
+        "evidence_rejection_codes":EVIDENCE_REJECTION_CODES,
+        "evidence_rejection_counts":EVIDENCE_REJECTIONS.iter().map(load).collect::<Vec<_>>(),
         "hierarchy_structure_acquisitions":load(&METRICS.privacy_acquisitions),
         "accessibility_recording_acquisitions":load(&METRICS.recording_acquisitions)})
 }
@@ -597,7 +671,7 @@ impl<'a> Attempt<'a> {
                 return if matches!(raw.Anonymous.Anonymous.vt, 0 | 13) {
                     Ok(None)
                 } else {
-                    Err(Stop::Provider)
+                    Err(evidence_rejected(EvidenceRejection::StringVariant))
                 };
             }
             let bstr = std::mem::ManuallyDrop::new(windows::core::BSTR::from_raw(
@@ -617,7 +691,7 @@ impl<'a> Attempt<'a> {
         unsafe {
             let raw = variant.as_raw();
             if raw.Anonymous.Anonymous.vt != 0x2003 {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(EvidenceRejection::RuntimeIdVariant));
             }
             let array = raw.Anonymous.Anonymous.Anonymous.parray;
             if array.is_null()
@@ -625,11 +699,11 @@ impl<'a> Attempt<'a> {
                 || (*array).cbElements != 4
                 || (*array).pvData.is_null()
             {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(EvidenceRejection::RuntimeIdArrayLayout));
             }
             let length = (*array).rgsabound[0].cElements as usize;
             if length == 0 || length > 128 {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(EvidenceRejection::RuntimeIdLength));
             }
             Ok(std::slice::from_raw_parts((*array).pvData.cast::<i32>(), length).to_vec())
         }
@@ -660,7 +734,9 @@ impl<'a> Attempt<'a> {
             self.check()?;
             let element = array.GetElement(index).map_err(provider)?;
             if !keys.insert(self.key(&element)?) {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(
+                    EvidenceRejection::DuplicateQueryRuntimeId,
+                ));
             }
             elements.push(element);
         }
@@ -785,7 +861,9 @@ impl<'a> Attempt<'a> {
                     let supported = self.is_string(&element, UIA_ValueValuePropertyId)?;
                     let value = self.string(&element, UIA_ValueValuePropertyId)?;
                     if values.insert(key, (value, supported)).is_some() {
-                        return Err(Stop::Provider);
+                        return Err(evidence_rejected(
+                            EvidenceRejection::DuplicateValueRuntimeId,
+                        ));
                     }
                 }
                 if subtree_rules {
@@ -950,7 +1028,9 @@ impl<'a> Attempt<'a> {
         self.nodes += 1;
         let key = self.key(element)?;
         if !seen.insert(key.clone()) {
-            return Err(Stop::Provider);
+            return Err(evidence_rejected(
+                EvidenceRejection::DuplicateHierarchyRuntimeId,
+            ));
         }
         let control = cached_control_type(
             &element
@@ -964,14 +1044,14 @@ impl<'a> Attempt<'a> {
             if full {
                 self.require_string(element, UIA_NamePropertyId)?;
             } else if !names.contains_key(&key) {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(EvidenceRejection::MissingTitleProjection));
             }
         }
         if (subtree_rules || need_url) && control == UIA_DocumentControlTypeId.0 {
             if full {
                 self.require_string(element, UIA_ValueValuePropertyId)?;
             } else if !values.get(&key).is_some_and(|(_, supported)| *supported) {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(EvidenceRejection::MissingDocumentValue));
             }
         }
         if !full
@@ -979,10 +1059,10 @@ impl<'a> Attempt<'a> {
             && (control == UIA_EditControlTypeId.0 || control == UIA_ComboBoxControlTypeId.0)
             && !values.contains_key(&key)
         {
-            return Err(Stop::Provider);
+            return Err(evidence_rejected(EvidenceRejection::MissingEntryValue));
         }
         if !full && extension_levels > 0 && !values.contains_key(&key) {
-            return Err(Stop::Provider);
+            return Err(evidence_rejected(EvidenceRejection::MissingExtensionValue));
         }
         let password = element
             .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
@@ -1049,7 +1129,7 @@ impl<'a> Attempt<'a> {
             let children = IUIAutomationElementArray::from_raw(raw);
             let length = children.Length().map_err(provider)?;
             if length < 0 {
-                return Err(Stop::Provider);
+                return Err(evidence_rejected(EvidenceRejection::NegativeChildCount));
             }
             for index in 0..length {
                 self.check()?;
@@ -1076,6 +1156,35 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::time::Duration;
+
+    #[test]
+    fn evidence_rejection_is_counted_and_remains_fail_closed() {
+        let index = EvidenceRejection::RuntimeIdArrayLayout as usize;
+        let before = EVIDENCE_REJECTIONS[index].load(Ordering::Relaxed);
+        assert_eq!(
+            evidence_rejected(EvidenceRejection::RuntimeIdArrayLayout),
+            Stop::Provider
+        );
+        let snapshot = metrics_snapshot();
+        assert_eq!(
+            snapshot["evidence_rejection_codes"][index],
+            "runtime_id_array_layout"
+        );
+        assert!(
+            snapshot["evidence_rejection_counts"][index]
+                .as_u64()
+                .unwrap()
+                > before
+        );
+        assert_eq!(EVIDENCE_REJECTION_CODES.len(), EVIDENCE_REJECTIONS.len());
+        assert_eq!(
+            EVIDENCE_REJECTION_CODES
+                .iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            EVIDENCE_REJECTION_CODES.len()
+        );
+    }
 
     #[test]
     fn provider_timeout_uses_remaining_phase_time_without_overrun() {

@@ -62,6 +62,15 @@ const STAGE_NAMES: [&str; 21] = [
 ];
 const STAGE_COUNT: usize = STAGE_NAMES.len();
 
+/// Only a fixed stage name leaves the attempt-local timing trace.
+pub(super) fn current_stage_name() -> Option<&'static str> {
+    TRACE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|trace| STAGE_NAMES[trace.stage as usize])
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 #[repr(usize)]
 pub(super) enum RuleGroup {

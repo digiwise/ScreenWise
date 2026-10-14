@@ -117,3 +117,33 @@ permanent COM hangs and the 70%-within-half-budget performance target. Synthetic
 tests and a build do not establish those results. The next owner-run comparison
 must measure admitted capture recovery and mandatory privacy latency separately
 from optional text acquisition.
+
+### Evidence rejection diagnostics
+
+Bulk client-side evidence rejections emit `UIA bulk evidence rejected` with a
+fixed reason code, numeric reason ID, fixed timing stage and cumulative count.
+Ordinary logs sample the first rejection and every 64th occurrence per reason;
+the authenticated `/vision/uia-metrics` endpoint exposes exact cumulative
+`evidence_rejection_codes`/`evidence_rejection_counts` arrays. The existing
+opt-in private diagnostic sink also records `uia_bulk_evidence_rejection` using
+only the fixed reason ID/code and stage; its normal deduplication still applies.
+
+Codes distinguish malformed RuntimeId variants/arrays/lengths, duplicate IDs in
+query/value/hierarchy results, invalid control/password/string properties,
+conflicting or missing scoped projections, projections outside the hierarchy,
+negative child counts and a poisoned registration lock. Counts cover both
+mandatory and optional acquisition and count rejection occurrences, not unique
+attempts. Native COM HRESULT failures retain their separate diagnostic category.
+No property values, runtime IDs, titles, process names or captured content are
+logged by this change. Admission behavior and deadlines are unchanged. Existing
+historical failures cannot be retrospectively assigned these new codes; live
+verification requires an owner-deployed updated desktop artifact.
+
+Validation: canonical accessibility library tests passed (248 passed, 23 live
+tests ignored), RootFmt and `git diff --check` passed. Desktop-only locked/offline
+`release-local` build passed in 8m42s, reusing 1,080 external artifacts with zero
+external rebuilds. Evidence IDs: `20261014T022055207Z-Root-Test-2d88a02a`,
+`20261014T022135649Z-Root-Fmt-8a21ac32`,
+`20261014T022149598Z-Desktop-Build-1768747c`. Updated desktop SHA256:
+`10921D0B64888B5D0D12D86D523A86CEE59B89F8BA2DB3972D3B1181DB7F492D`.
+No deployment or new capture session was performed for this diagnostic update.
