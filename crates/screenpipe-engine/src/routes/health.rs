@@ -21,12 +21,12 @@ use crate::ui_recorder::{
     tree_walker_snapshot, ui_recorder_status_snapshot, TreeWalkerSnapshot, UiRecorderStatus,
 };
 
-/// Content-free aggregate attempt timings/counters, under normal bearer auth.
-/// No accessibility tree, window identity, permission, or captured text is held.
+/// Aggregate UIA counters with verified executable basenames under bearer auth.
+/// Local diagnostics only; no paths, titles, URLs, tree or captured text.
 pub(crate) async fn uia_metrics_handler() -> JsonResponse<serde_json::Value> {
     #[cfg(target_os = "windows")]
     {
-        JsonResponse(screenpipe_a11y::tree::windows_bulk_metrics_snapshot())
+        JsonResponse(screenpipe_a11y::tree::windows_local_uia_metrics_snapshot())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1203,6 +1203,10 @@ mod tests {
     #[tokio::test]
     async fn uia_metrics_exposes_only_numeric_aggregates_and_fixed_codes() {
         let axum::Json(value) = super::uia_metrics_handler().await;
+        let expected_stage_names = value
+            .get("timing")
+            .and_then(|timing| timing.get("stage_names"))
+            .cloned();
         for (key, value) in value.as_object().expect("metrics object") {
             if key == "reason_codes" {
                 for code in value.as_array().expect("fixed reason list") {
@@ -1243,8 +1247,72 @@ mod tests {
                 for (code, expected) in codes.iter().zip(expected) {
                     assert_eq!(code.as_str(), Some(expected));
                 }
+            } else if key == "value_evidence_codes" {
+                let expected = [
+                    "known_string",
+                    "known_unavailable",
+                    "unknown_variant",
+                    "unknown_getter",
+                    "unknown_sentinel_check",
+                ];
+                let codes = value.as_array().expect("fixed Value evidence reason list");
+                assert_eq!(codes.len(), expected.len());
+                for (code, expected) in codes.iter().zip(expected) {
+                    assert_eq!(code.as_str(), Some(expected));
+                }
             } else if key == "acquisition_mode" {
                 assert_eq!(value.as_str(), Some("single_raw_cache_control_projection"));
+            } else if key == "process_metrics" {
+                let metrics = value.as_object().expect("bounded process metrics");
+                assert_eq!(metrics["process_limit"], 32);
+                let processes = metrics["processes"].as_array().expect("process buckets");
+                assert!(processes.len() <= 32);
+                let reasons = metrics["reason_codes"]
+                    .as_array()
+                    .expect("fixed process reasons");
+                assert_eq!(reasons.len(), 9);
+                for code in &reasons[..8] {
+                    assert!(
+                        screenpipe_config::capture_diagnostics::AccessibilityStopReason::from_code(
+                            code.as_str().expect("reason code")
+                        )
+                        .is_some()
+                    );
+                }
+                assert_eq!(reasons[8], "unknown");
+                assert_eq!(Some(&metrics["stage_names"]), expected_stage_names.as_ref());
+                for bucket in ["total", "unknown", "overflow"]
+                    .iter()
+                    .map(|key| &metrics[*key])
+                    .chain(processes.iter())
+                {
+                    for (field, value) in bucket.as_object().expect("numeric process bucket") {
+                        match field.as_str() {
+                            "basename" => {
+                                let name = value.as_str().expect("verified basename");
+                                assert!(name.len() <= 128 && name.ends_with(".exe"));
+                                assert!(!name.contains(['/', '\\', ':']));
+                            }
+                            "reason_counts" | "stage_calls" | "stage_total_us" | "stage_max_us" => {
+                                let counts = value.as_array().expect("numeric counters");
+                                assert_eq!(
+                                    counts.len(),
+                                    if field == "reason_counts" { 9 } else { 21 }
+                                );
+                                assert!(counts.iter().all(serde_json::Value::is_number));
+                            }
+                            "attempts"
+                            | "completed"
+                            | "failed"
+                            | "denied"
+                            | "total_duration_us"
+                            | "max_duration_us"
+                            | "attempts_with_timing"
+                            | "bucket" => assert!(value.is_number()),
+                            _ => panic!("unexpected process metric field {field}"),
+                        }
+                    }
+                }
             } else if key == "timing" {
                 let timing = value.as_object().expect("fixed timing schema");
                 let stage_names = timing

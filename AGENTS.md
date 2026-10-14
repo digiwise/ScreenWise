@@ -239,6 +239,17 @@ token is independent of local model configuration. Bind the API to loopback.
 Privacy suppression and capture failures must be visible in the activity timeline
 and local logs. Report the initial state, transitions and changed failure reasons;
 deduplicate an unchanged condition. Unknown privacy state must fail closed.
+The owner's Windows UIA Value exception (2026-10-14) permits individual
+unavailable or unknown **Value** properties to remain nonblocking unknown
+evidence, never guessed empty strings. Evaluate all available applicable
+evidence; unknown Values cannot override known blockers or independent gates.
+Acquisition/traversal failures, incomplete trees, bounds, deadlines, required
+Name/structural evidence and focus/revision failures remain fail closed. Keep
+fixed Value reason/count diagnostics without property contents.
+Per-process UIA aggregates may expose freshly verified executable basenames
+only through authenticated local diagnostics. Default public/exported metrics
+omit names; generic notices must not gain them. Bound named cardinality to 32
+with unknown/overflow buckets and preserve aggregate totals.
 Use fixed, allowlisted messages and reason codes, with timestamps as needed.
 Never include captured screen/audio/input content, passwords, clipboard values,
 window titles, URLs, user identifiers or private paths in these notices. Never

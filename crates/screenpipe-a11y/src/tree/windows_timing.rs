@@ -41,7 +41,7 @@ pub(super) enum Stage {
     FailureRecheck,
 }
 
-const STAGE_NAMES: [&str; 21] = [
+pub(super) const STAGE_NAMES: [&str; 21] = [
     "target_identity",
     "native_policy",
     "uia_initialization",
@@ -64,7 +64,15 @@ const STAGE_NAMES: [&str; 21] = [
     "event_cleanup",
     "failure_recheck",
 ];
-const STAGE_COUNT: usize = STAGE_NAMES.len();
+pub(super) const STAGE_COUNT: usize = STAGE_NAMES.len();
+
+/// One closed attempt's stage accounting. These fixed numeric vectors contain
+/// no window, rule, path, URL, or process identity.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct AttemptTiming {
+    pub stage_calls: [u64; STAGE_COUNT],
+    pub stage_us: [u64; STAGE_COUNT],
+}
 
 /// Only a fixed stage name leaves the attempt-local timing trace.
 pub(super) fn current_stage_name() -> Option<&'static str> {
@@ -290,9 +298,9 @@ pub(super) fn finish(
     budget: Duration,
     reason: Option<&'static str>,
     rules: &[RuleReference],
-) {
+) -> Option<AttemptTiming> {
     let Some(mut trace) = TRACE.with(|slot| slot.borrow_mut().take()) else {
-        return;
+        return None;
     };
     trace.enter_at(trace.stage, now);
     // enter_at counts the new stage; the repeated current stage is not a new call.
@@ -335,6 +343,10 @@ pub(super) fn finish(
         });
         tracing::warn!(diagnostic=%diagnostic, "UIA timing diagnostic");
     }
+    Some(AttemptTiming {
+        stage_calls: trace.stage_calls,
+        stage_us: trace.stage_us,
+    })
 }
 
 pub(super) fn metrics_snapshot() -> serde_json::Value {
@@ -397,6 +409,23 @@ mod tests {
         assert_eq!(trace.stage_us[Stage::HierarchyCache as usize], 80);
         assert_eq!(trace.stage_calls[Stage::HierarchyCache as usize], 2);
         assert_eq!(trace.first_timeout, Some(Stage::HierarchyCache));
+    }
+
+    #[test]
+    fn finish_returns_closed_trace_once_without_extra_stage_call() {
+        let start = Instant::now();
+        begin(start);
+        let finished = finish(
+            start + Duration::from_micros(12),
+            Duration::from_micros(12),
+            Duration::from_secs(1),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(finished.stage_calls[Stage::TargetIdentity as usize], 1);
+        assert_eq!(finished.stage_us[Stage::TargetIdentity as usize], 12);
+        assert!(finish(start, Duration::ZERO, Duration::from_secs(1), None, &[]).is_none());
     }
 
     #[test]

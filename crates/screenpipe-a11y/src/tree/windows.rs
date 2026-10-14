@@ -17,12 +17,15 @@ use crate::platform::windows_uia::UiaContext;
 
 #[path = "windows_bulk.rs"]
 mod bulk;
+#[path = "windows_process_metrics.rs"]
+mod process_metrics;
 #[path = "windows_timing.rs"]
 mod timing;
 
-pub(super) fn bulk_metrics_snapshot() -> serde_json::Value {
+pub(super) fn bulk_metrics_snapshot(include_process_names: bool) -> serde_json::Value {
     let mut metrics = bulk::metrics_snapshot();
     metrics["timing"] = timing::metrics_snapshot();
+    metrics["process_metrics"] = process_metrics::metrics_snapshot(include_process_names);
     metrics
 }
 
@@ -72,6 +75,54 @@ fn native_policy_metadata_complete(app: &str, title: &str) -> bool {
     !app.trim().is_empty()
         && !app.eq_ignore_ascii_case("unknown")
         && title.encode_utf16().count() < 511
+}
+
+/// Attribute only a currently verified native target and fresh executable name.
+/// A cached logical app alias, changed target or incomplete identity is unknown.
+fn verified_metrics_basename(
+    config: &TreeWalkerConfig,
+    hwnd: Option<isize>,
+    pid: Option<u32>,
+    app: Option<&str>,
+    title: Option<&str>,
+) -> Option<String> {
+    let target = super::WindowsTreeTarget {
+        hwnd: hwnd?,
+        process_id: pid?,
+    };
+    let (app, title) = (app?, title?);
+    if !native_policy_metadata_complete(app, title)
+        || config
+            .windows_target
+            .is_some_and(|expected| expected != target)
+        || !selected_tree_identity_is_current(target)
+    {
+        return None;
+    }
+    let fresh_name = crate::platform::windows::get_process_name_uncached(target.process_id)?;
+    if !metrics_attribution_matches(
+        app,
+        title,
+        &fresh_name,
+        &native_window_title(HWND(target.hwnd as *mut _)),
+        selected_tree_identity_is_current(target),
+    ) {
+        return None;
+    }
+    Some(fresh_name)
+}
+
+fn metrics_attribution_matches(
+    expected_app: &str,
+    expected_title: &str,
+    fresh_basename: &str,
+    fresh_title: &str,
+    identity_current: bool,
+) -> bool {
+    identity_current
+        && native_policy_metadata_complete(expected_app, expected_title)
+        && expected_app.eq_ignore_ascii_case(fresh_basename)
+        && expected_title == fresh_title
 }
 
 fn selected_tree_identity_matches(
@@ -234,6 +285,17 @@ fn classify_text_phase(
     TextPhaseOutcome::Complete
 }
 
+/// Reconcile only the same attempt's known mandatory URL when all of its
+/// unchanged-tree source positions now have unavailable/unknown Value evidence.
+/// This never substitutes a property value or masks a known changed URL.
+fn optional_url_for_comparison<'a>(
+    recording_url: Option<&'a str>,
+    policy_url: Option<&'a str>,
+    missing_sources_unknown: bool,
+) -> Option<&'a str> {
+    recording_url.or_else(|| missing_sources_unknown.then_some(policy_url).flatten())
+}
+
 fn settle_optional_payload(
     status: WindowsTextAcquisition,
     need_url: bool,
@@ -362,6 +424,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         let mut candidate_app = None;
         let mut candidate_title = None;
         let mut published_privacy_elapsed = None;
+        let mut metrics_basename = None;
         let mut result = (|| -> Result<TreeWalkResult> {
             // Paired maximised-window capture supplies the exact bitmap owner.
             // An invalid explicit target fails closed; it never follows new focus.
@@ -582,13 +645,18 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 // across roles; decoding keeps the existing policy scopes.
                 bulk::log_scope(
                     "single_raw_hierarchy_policy_properties",
-                    if applicable_subtree_rules { 5 } else { 4 },
+                    bulk::cache_property_count(false, applicable_subtree_rules, need_url),
                     &rule_refs,
                     0,
                 );
             }
             if !self.config.windows_privacy_only {
-                bulk::log_scope("accessibility_recording", 15, &[], 0);
+                bulk::log_scope(
+                    "accessibility_recording",
+                    bulk::cache_property_count(true, applicable_subtree_rules, need_url),
+                    &[],
+                    0,
+                );
             }
             // A revision invalidation discards every node, URL and text value.
             // A fresh privacy query must finish before the original deadline.
@@ -628,6 +696,22 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         &app_lower,
                         &mut blocked,
                     );
+                    let raw_policy = match evaluate_raw_policy_evidence(
+                        attempt.raw_policy_evidence(),
+                        &ignored_patterns,
+                        &app_lower,
+                        &self.config.ignored_urls,
+                        need_url,
+                        &mut policy_url,
+                    ) {
+                        Ok(result) => result,
+                        Err(_) if !attempt.current(revision) => {
+                            bulk::retry();
+                            continue;
+                        }
+                        Err(reason) => return Err(reason),
+                    };
+                    blocked |= raw_policy.ignored_subtree;
                     if !attempt.current(revision) {
                         bulk::retry();
                         continue;
@@ -639,11 +723,13 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                         }
                         return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
                     }
-                    if policy_url.as_deref().is_some_and(|url| {
-                        timed_ignored_url_check(|| {
-                            crate::url_filter::is_url_blocked(url, &self.config.ignored_urls)
+                    if raw_policy.ignored_url
+                        || policy_url.as_deref().is_some_and(|url| {
+                            timed_ignored_url_check(|| {
+                                crate::url_filter::is_url_blocked(url, &self.config.ignored_urls)
+                            })
                         })
-                    }) {
+                    {
                         if matches!(attempt.finish(revision), Ok(false)) {
                             bulk::retry();
                             continue;
@@ -653,6 +739,8 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     attempt.check()?;
                     let privacy_elapsed = start.elapsed();
                     timing::privacy_complete(privacy_elapsed);
+                    let policy_document_count = attempt.document_value_count();
+                    let policy_url_sources = attempt.document_url_sources(policy_url.as_deref());
 
                     let mut text = String::new();
                     let mut nodes = Vec::new();
@@ -682,21 +770,45 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                                     &app_lower,
                                     &mut recording_blocked,
                                 );
-                                let url_blocked = recording_url.as_deref().is_some_and(|url| {
-                                    timed_ignored_url_check(|| {
-                                        crate::url_filter::is_url_blocked(
-                                            url,
-                                            &self.config.ignored_urls,
-                                        )
-                                    })
-                                });
+                                let raw_policy = match evaluate_raw_policy_evidence(
+                                    attempt.raw_policy_evidence(),
+                                    &ignored_patterns,
+                                    &app_lower,
+                                    &self.config.ignored_urls,
+                                    need_url,
+                                    &mut recording_url,
+                                ) {
+                                    Ok(result) => result,
+                                    Err(_) if !attempt.current(revision) => {
+                                        bulk::retry();
+                                        continue;
+                                    }
+                                    Err(reason) => return Err(reason),
+                                };
+                                recording_blocked |= raw_policy.ignored_subtree;
+                                let url_blocked = raw_policy.ignored_url
+                                    || recording_url.as_deref().is_some_and(|url| {
+                                        timed_ignored_url_check(|| {
+                                            crate::url_filter::is_url_blocked(
+                                                url,
+                                                &self.config.ignored_urls,
+                                            )
+                                        })
+                                    });
                                 let outcome = classify_text_phase(
                                     attempt.current(revision),
                                     recording_blocked || url_blocked,
                                     true,
                                     need_url,
                                     policy_url.as_deref(),
-                                    recording_url.as_deref(),
+                                    optional_url_for_comparison(
+                                        recording_url.as_deref(),
+                                        policy_url.as_deref(),
+                                        attempt.missing_url_is_unknown(
+                                            policy_document_count,
+                                            &policy_url_sources,
+                                        ),
+                                    ),
                                     attempt.check(),
                                 );
                                 match outcome {
@@ -777,6 +889,15 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     attempt.set_deadline(final_deadline);
                     stage = "post_walk_identity";
                     timing::enter(timing::Stage::FocusVerification);
+                    // Attribute while invalidation handlers remain active and
+                    // before the final deadline, focus and revision checks.
+                    metrics_basename = verified_metrics_basename(
+                        &self.config,
+                        Some(hwnd.0 as isize),
+                        Some(pid),
+                        Some(&app_name),
+                        Some(&window_name),
+                    );
                     if let Err(reason) = attempt.check() {
                         return Ok(TreeWalkResult::Skipped(
                             SkipReason::AccessibilityIncomplete(reason),
@@ -927,6 +1048,16 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 SkipReason::AccessibilityIncomplete(bulk::Stop::Timeout),
             ));
         }
+        if !matches!(&result, Ok(TreeWalkResult::Found(_))) {
+            timing::enter(timing::Stage::FailureRecheck);
+            metrics_basename = verified_metrics_basename(
+                &self.config,
+                candidate_hwnd,
+                candidate_pid,
+                candidate_app.as_deref(),
+                candidate_title.as_deref(),
+            );
+        }
         // A failed retrieval cannot grant admission using stale native policy evidence.
         if matches!(
             &result,
@@ -1037,12 +1168,28 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             }
             _ => (None, &[][..]),
         };
-        timing::finish(
+        let attempt_timing = timing::finish(
             Instant::now(),
             elapsed,
             PRIVACY_DEADLINE + TEXT_DEADLINE + FINALIZATION_DEADLINE,
             reason,
             rules,
+        );
+        let metrics_outcome = match &result {
+            Ok(TreeWalkResult::Found(_)) => process_metrics::AttemptOutcome::Completed,
+            Err(_)
+            | Ok(TreeWalkResult::Skipped(
+                SkipReason::AccessibilityRetrievalFailed(_)
+                | SkipReason::AccessibilityIncomplete(_),
+            )) => process_metrics::AttemptOutcome::Failed,
+            _ => process_metrics::AttemptOutcome::Denied,
+        };
+        process_metrics::record_attempt(
+            metrics_basename.as_deref(),
+            elapsed,
+            metrics_outcome,
+            reason,
+            attempt_timing,
         );
         bulk::record_attempt(elapsed, &result);
         result
@@ -1483,14 +1630,88 @@ fn extract_text_from_tree(
     }
 }
 
-/// Scan a chrome-extension:// Document node's subtree (up to 2 levels deep) for
-/// any text matching an ignored pattern.
-///
-/// Chrome extension popups sometimes have page titles that don't include the
-/// extension brand name (e.g. Bitwarden shows "New Login" for the add-login
-/// route).  In that case the top-level Document name check misses it, but the
-/// extension's own UI text always contains the brand name ("Bitwarden",
-/// "1Password", etc.) a few levels in.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct RawPolicyResult {
+    ignored_subtree: bool,
+    ignored_url: bool,
+}
+
+/// Extra policy evidence stays attempt-local and never enters recorded text.
+/// The ControlView tree retains its existing pruning and hierarchy semantics.
+fn evaluate_raw_policy_evidence(
+    evidence: &[bulk::RawPolicyEvidence],
+    ignored_patterns: &[WindowPattern],
+    focused_app_lower: &str,
+    ignored_urls: &[String],
+    need_url: bool,
+    browser_url: &mut Option<String>,
+) -> Result<RawPolicyResult, bulk::Stop> {
+    let mut result = RawPolicyResult::default();
+    let matches = |value: Option<&str>, group| {
+        value.is_some_and(|value| {
+            timing::rule_check(group, || {
+                window_pattern::matches_any(
+                    ignored_patterns,
+                    focused_app_lower,
+                    &value.to_lowercase(),
+                )
+            })
+        })
+    };
+    let mut candidate_url = browser_url.clone();
+    let mut ambiguous_url = false;
+    for item in evidence {
+        let available_url = match item {
+            bulk::RawPolicyEvidence::NestedWindow { name } => {
+                result.ignored_subtree |= matches(name.as_deref(), timing::RuleGroup::NestedWindow);
+                None
+            }
+            bulk::RawPolicyEvidence::Document { name, value } => {
+                result.ignored_subtree |= matches(name.as_deref(), timing::RuleGroup::DocumentName)
+                    || matches(value.as_deref(), timing::RuleGroup::DocumentValue);
+                policy_http_url(value.as_deref())
+            }
+            bulk::RawPolicyEvidence::DocumentUrl { value } => policy_http_url(value.as_deref()),
+            bulk::RawPolicyEvidence::ExtensionShallow { name, value } => {
+                result.ignored_subtree |=
+                    matches(name.as_deref(), timing::RuleGroup::ExtensionShallow)
+                        || matches(value.as_deref(), timing::RuleGroup::ExtensionShallow);
+                None
+            }
+        };
+        if let Some(url) = available_url {
+            result.ignored_url |=
+                timed_ignored_url_check(|| crate::url_filter::is_url_blocked(url, ignored_urls));
+            // The downstream DRM gate accepts one URL. Unknown Values do
+            // not erase a known URL, and differing known candidates cannot
+            // conceal a protected URL behind the selected snapshot URL.
+            if need_url && candidate_url.as_deref().is_some_and(|other| other != url) {
+                ambiguous_url = true;
+            }
+            if candidate_url.is_none() {
+                candidate_url = Some(url.to_string());
+            }
+        }
+    }
+    if ambiguous_url && !result.ignored_subtree && !result.ignored_url {
+        screenpipe_config::sensitive_debug::record(
+            "uia_raw_policy_url_ambiguity",
+            || serde_json::json!({"reason":"multiple_document_urls", "evidence_count":evidence.len()}),
+        );
+        return Err(bulk::Stop::Provider);
+    }
+    *browser_url = candidate_url;
+    Ok(result)
+}
+
+fn policy_http_url(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+}
+
+/// Scan an extension Document's children and grandchildren for ignored text.
+/// This covers generic popup titles whose brand appears only in descendant text.
 fn extension_subtree_matches_ignored(
     node: &AccessibilityNode,
     ignored_patterns: &[WindowPattern],
@@ -1534,6 +1755,433 @@ fn append_text(buffer: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_policy_matching_windows_documents_and_extension_text_block() {
+        use bulk::RawPolicyEvidence as E;
+        let patterns = WindowPattern::parse_list(&["private fixture".into()]);
+        let cases = [
+            E::NestedWindow {
+                name: Some("Private Fixture window".into()),
+            },
+            E::Document {
+                name: Some("Private Fixture document".into()),
+                value: Some(String::new()),
+            },
+            E::Document {
+                name: Some(String::new()),
+                value: Some("Private Fixture value".into()),
+            },
+            E::ExtensionShallow {
+                name: Some("Private Fixture child".into()),
+                value: None,
+            },
+            E::ExtensionShallow {
+                name: Some(String::new()),
+                value: Some("Private Fixture grandchild".into()),
+            },
+        ];
+        for evidence in cases {
+            let result = evaluate_raw_policy_evidence(
+                &[evidence],
+                &patterns,
+                "code.exe",
+                &[],
+                false,
+                &mut None,
+            )
+            .unwrap();
+            assert!(result.ignored_subtree);
+        }
+    }
+
+    #[test]
+    fn raw_policy_nonmatching_evidence_does_not_block_or_supply_url() {
+        use bulk::RawPolicyEvidence as E;
+        let evidence = [
+            E::NestedWindow {
+                name: Some("ordinary window".into()),
+            },
+            E::Document {
+                name: Some(String::new()),
+                value: Some("ordinary content".into()),
+            },
+            E::ExtensionShallow {
+                name: Some("ordinary extension".into()),
+                value: None,
+            },
+        ];
+        let patterns = WindowPattern::parse_list(&["private fixture".into()]);
+        let mut url = None;
+        assert_eq!(
+            evaluate_raw_policy_evidence(&evidence, &patterns, "code.exe", &[], true, &mut url),
+            Ok(RawPolicyResult::default())
+        );
+        assert!(url.is_none());
+    }
+
+    #[test]
+    fn raw_policy_app_scoped_rule_does_not_block_other_app() {
+        let patterns = WindowPattern::parse_list(&["code.exe::private fixture".into()]);
+        let evidence = [bulk::RawPolicyEvidence::NestedWindow {
+            name: Some("private fixture".into()),
+        }];
+        assert!(
+            evaluate_raw_policy_evidence(&evidence, &patterns, "code.exe", &[], false, &mut None)
+                .unwrap()
+                .ignored_subtree
+        );
+        assert!(
+            !evaluate_raw_policy_evidence(&evidence, &patterns, "other.exe", &[], false, &mut None)
+                .unwrap()
+                .ignored_subtree
+        );
+    }
+
+    #[test]
+    fn raw_policy_document_url_is_checked_and_supplies_drm_evidence() {
+        let evidence = [bulk::RawPolicyEvidence::Document {
+            name: None,
+            value: Some(" https://private.example/account ".into()),
+        }];
+        let mut url = None;
+        let result = evaluate_raw_policy_evidence(
+            &evidence,
+            &[],
+            "code.exe",
+            &["private.example".into()],
+            true,
+            &mut url,
+        )
+        .unwrap();
+        assert!(result.ignored_url);
+        assert_eq!(url.as_deref(), Some("https://private.example/account"));
+        assert!(
+            !evaluate_raw_policy_evidence(
+                &evidence,
+                &[],
+                "code.exe",
+                &["other.example".into()],
+                true,
+                &mut None
+            )
+            .unwrap()
+            .ignored_url
+        );
+    }
+
+    #[test]
+    fn raw_policy_conflicting_urls_remain_unknown_unless_already_blocked() {
+        let evidence = [bulk::RawPolicyEvidence::Document {
+            name: None,
+            value: Some("https://second.example".into()),
+        }];
+        let mut url = Some("https://first.example".into());
+        assert_eq!(
+            evaluate_raw_policy_evidence(&evidence, &[], "code.exe", &[], true, &mut url),
+            Err(bulk::Stop::Provider)
+        );
+        assert_eq!(url.as_deref(), Some("https://first.example"));
+        let result = evaluate_raw_policy_evidence(
+            &evidence,
+            &[],
+            "code.exe",
+            &["second.example".into()],
+            true,
+            &mut url,
+        )
+        .unwrap();
+        assert!(result.ignored_url);
+    }
+
+    #[test]
+    fn raw_policy_multiple_candidates_cannot_mask_later_blocker() {
+        use bulk::RawPolicyEvidence as E;
+        let evidence = [
+            E::Document {
+                name: None,
+                value: Some("https://first.example".into()),
+            },
+            E::Document {
+                name: None,
+                value: Some("https://second.example".into()),
+            },
+            E::NestedWindow {
+                name: Some("private fixture".into()),
+            },
+        ];
+        assert_eq!(
+            evaluate_raw_policy_evidence(&evidence[..2], &[], "code.exe", &[], true, &mut None),
+            Err(bulk::Stop::Provider)
+        );
+        let patterns = WindowPattern::parse_list(&["private fixture".into()]);
+        assert!(
+            evaluate_raw_policy_evidence(&evidence, &patterns, "code.exe", &[], true, &mut None)
+                .unwrap()
+                .ignored_subtree
+        );
+    }
+
+    #[test]
+    fn unknown_values_do_not_erase_known_name_value_or_url_blockers() {
+        use bulk::RawPolicyEvidence as E;
+        let patterns = WindowPattern::parse_list(&["private fixture".into()]);
+        for blocker in [
+            E::Document {
+                name: Some("private fixture".into()),
+                value: None,
+            },
+            E::Document {
+                name: Some(String::new()),
+                value: Some("private fixture".into()),
+            },
+            E::ExtensionShallow {
+                name: Some("private fixture".into()),
+                value: None,
+            },
+        ] {
+            for unknown_first in [false, true] {
+                let unknown = E::DocumentUrl { value: None };
+                let evidence = if unknown_first {
+                    vec![unknown, blocker.clone()]
+                } else {
+                    vec![blocker.clone(), unknown]
+                };
+                assert!(
+                    evaluate_raw_policy_evidence(
+                        &evidence,
+                        &patterns,
+                        "code.exe",
+                        &[],
+                        true,
+                        &mut None
+                    )
+                    .unwrap()
+                    .ignored_subtree
+                );
+            }
+        }
+        for unknown_first in [false, true] {
+            let known = E::DocumentUrl {
+                value: Some("https://private.example".into()),
+            };
+            let unknown = E::DocumentUrl { value: None };
+            let evidence = if unknown_first {
+                vec![unknown, known]
+            } else {
+                vec![known, unknown]
+            };
+            let mut url = None;
+            assert!(
+                evaluate_raw_policy_evidence(
+                    &evidence,
+                    &[],
+                    "code.exe",
+                    &["private.example".into()],
+                    true,
+                    &mut url
+                )
+                .unwrap()
+                .ignored_url
+            );
+            assert_eq!(url.as_deref(), Some("https://private.example"));
+        }
+    }
+
+    #[test]
+    fn unknown_values_are_nonblocking_and_do_not_replace_known_drm_url() {
+        let evidence = [
+            bulk::RawPolicyEvidence::Document {
+                name: Some("ordinary document".into()),
+                value: None,
+            },
+            bulk::RawPolicyEvidence::DocumentUrl { value: None },
+        ];
+        let mut url = Some("https://netflix.com/watch/synthetic".into());
+        assert_eq!(
+            evaluate_raw_policy_evidence(&evidence, &[], "code.exe", &[], true, &mut url),
+            Ok(RawPolicyResult::default())
+        );
+        assert_eq!(url.as_deref(), Some("https://netflix.com/watch/synthetic"));
+        assert_eq!(
+            evaluate_raw_policy_evidence(&evidence, &[], "code.exe", &[], true, &mut None),
+            Ok(RawPolicyResult::default())
+        );
+    }
+
+    #[test]
+    fn optional_unknown_selected_url_preserves_mandatory_evidence_without_retry() {
+        let policy_url = Some("https://netflix.com/watch/synthetic");
+        let comparison = optional_url_for_comparison(None, policy_url, true);
+        assert_eq!(comparison, policy_url);
+        assert_eq!(
+            classify_text_phase(true, false, true, true, policy_url, comparison, Ok(())),
+            TextPhaseOutcome::Complete
+        );
+        assert_eq!(
+            classify_text_phase(true, true, true, true, policy_url, comparison, Ok(())),
+            TextPhaseOutcome::Denied
+        );
+        assert_eq!(
+            classify_text_phase(false, false, true, true, policy_url, comparison, Ok(())),
+            TextPhaseOutcome::RetryPrivacy
+        );
+        assert_eq!(
+            classify_text_phase(
+                true,
+                false,
+                true,
+                true,
+                policy_url,
+                comparison,
+                Err(bulk::Stop::Timeout)
+            ),
+            TextPhaseOutcome::Unavailable(bulk::Stop::Timeout)
+        );
+        let changed =
+            optional_url_for_comparison(Some("https://changed.example"), policy_url, true);
+        assert_eq!(
+            classify_text_phase(true, false, true, true, policy_url, changed, Ok(())),
+            TextPhaseOutcome::RetryPrivacy
+        );
+        let known_absence = optional_url_for_comparison(None, policy_url, false);
+        assert_eq!(
+            classify_text_phase(true, false, true, true, policy_url, known_absence, Ok(())),
+            TextPhaseOutcome::RetryPrivacy
+        );
+    }
+
+    #[test]
+    fn later_retained_document_urls_cannot_hide_behind_first_safe_url() {
+        let evidence = [
+            bulk::RawPolicyEvidence::DocumentUrl {
+                value: Some("https://first.example".into()),
+            },
+            bulk::RawPolicyEvidence::DocumentUrl {
+                value: Some("https://private.example".into()),
+            },
+        ];
+        let mut url = Some("https://first.example".into());
+        assert!(
+            evaluate_raw_policy_evidence(
+                &evidence,
+                &[],
+                "code.exe",
+                &["private.example".into()],
+                true,
+                &mut url
+            )
+            .unwrap()
+            .ignored_url
+        );
+        assert_eq!(
+            evaluate_raw_policy_evidence(&evidence, &[], "code.exe", &[], true, &mut None),
+            Err(bulk::Stop::Provider)
+        );
+    }
+
+    #[test]
+    fn process_metrics_without_a_verified_native_target_remain_unknown() {
+        let config = TreeWalkerConfig::default();
+        assert!(
+            verified_metrics_basename(&config, None, Some(1), Some("code.exe"), Some("title"))
+                .is_none()
+        );
+        assert!(
+            verified_metrics_basename(&config, Some(1), None, Some("code.exe"), Some("title"))
+                .is_none()
+        );
+        assert!(
+            verified_metrics_basename(&config, Some(1), Some(1), None, Some("title")).is_none()
+        );
+        assert!(
+            verified_metrics_basename(&config, Some(1), Some(1), Some("code.exe"), None).is_none()
+        );
+    }
+
+    #[test]
+    fn exported_metrics_omit_executable_basenames_by_default() {
+        let exported = bulk_metrics_snapshot(false);
+        assert!(!exported.to_string().contains("\"basename\""));
+        assert!(exported["process_metrics"]["processes"].is_array());
+    }
+
+    #[test]
+    fn process_attribution_rejects_changed_metadata_and_logical_aliases() {
+        assert!(metrics_attribution_matches(
+            "Code.exe", "title", "code.exe", "title", true
+        ));
+        assert!(!metrics_attribution_matches(
+            "Code.exe", "title", "code.exe", "title", false
+        ));
+        assert!(!metrics_attribution_matches(
+            "Code.exe",
+            "title",
+            "code.exe",
+            "new title",
+            true
+        ));
+        assert!(!metrics_attribution_matches(
+            "msedge.exe",
+            "title",
+            "explorer.exe",
+            "title",
+            true
+        ));
+        assert!(!metrics_attribution_matches(
+            "Unknown", "title", "Unknown", "title", true
+        ));
+    }
+
+    #[test]
+    fn extension_fallback_checks_grandchildren_of_pruned_retained_controls() {
+        let patterns = WindowPattern::parse_list(&["private fixture".into()]);
+        for (role, password, value) in [
+            ("Image", Some(false), None),
+            ("Pane", Some(true), None),
+            ("Edit", Some(false), Some("ordinary entry")),
+            ("ComboBox", None, None),
+        ] {
+            let tree = AccessibilityNode {
+                control_type: "Document".into(),
+                name: Some("ordinary extension popup".into()),
+                value: Some("chrome-extension://synthetic/popup".into()),
+                is_password: Some(false),
+                children: vec![AccessibilityNode {
+                    control_type: role.into(),
+                    name: Some("ordinary child".into()),
+                    value: value.map(str::to_string),
+                    is_password: password,
+                    children: vec![AccessibilityNode {
+                        control_type: "Text".into(),
+                        name: Some("private fixture".into()),
+                        is_password: Some(false),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut blocked = false;
+            let mut text = String::new();
+            let mut nodes = Vec::new();
+            extract_text_from_tree(
+                &tree,
+                0,
+                35,
+                &mut text,
+                &mut nodes,
+                &mut None,
+                &None,
+                &None,
+                &patterns,
+                "code.exe",
+                &mut blocked,
+            );
+            assert!(blocked, "extension fallback missed grandchild below {role}");
+            assert!(text.is_empty() && nodes.is_empty());
+        }
+    }
 
     #[test]
     fn optional_text_failure_discards_partial_payload_and_preserves_policy_url() {

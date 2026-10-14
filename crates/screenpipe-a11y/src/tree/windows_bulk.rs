@@ -72,6 +72,70 @@ const EVIDENCE_REJECTION_CODES: [&str; 21] = [
     "raw_only_policy_element",
 ];
 static EVIDENCE_REJECTIONS: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+enum ValueEvidenceKind {
+    KnownString,
+    KnownUnavailable,
+    UnknownVariant,
+    UnknownGetter,
+    UnknownSentinelCheck,
+}
+struct ValueRead {
+    value: Option<String>,
+    kind: ValueEvidenceKind,
+}
+struct DocumentValueObservation {
+    kind: ValueEvidenceKind,
+    http_url: Option<String>,
+}
+fn document_http_url(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+}
+fn document_url_sources(
+    observations: &[DocumentValueObservation],
+    url: Option<&str>,
+) -> Vec<usize> {
+    let Some(url) = url else { return Vec::new() };
+    observations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| (item.http_url.as_deref() == Some(url)).then_some(index))
+        .collect()
+}
+fn document_url_loss_is_unknown(
+    observations: &[DocumentValueObservation],
+    previous_count: usize,
+    previous_sources: &[usize],
+) -> bool {
+    observations.len() == previous_count
+        && !previous_sources.is_empty()
+        && previous_sources.iter().all(|&index| {
+            observations
+                .get(index)
+                .is_some_and(|item| item.kind != ValueEvidenceKind::KnownString)
+        })
+}
+const VALUE_EVIDENCE_CODES: [&str; 5] = [
+    "known_string",
+    "known_unavailable",
+    "unknown_variant",
+    "unknown_getter",
+    "unknown_sentinel_check",
+];
+static VALUE_EVIDENCE_COUNTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+fn note_value_evidence(kind: ValueEvidenceKind, vt: Option<u16>, document: bool) {
+    let index = kind as usize;
+    VALUE_EVIDENCE_COUNTS[index].fetch_add(1, Ordering::Relaxed);
+    if kind != ValueEvidenceKind::KnownString {
+        screenpipe_config::sensitive_debug::record("uia_policy_value_evidence", || {
+            serde_json::json!({"reason":VALUE_EVIDENCE_CODES[index],"reason_id":index,
+                "value_vt":vt,"document":document})
+        });
+    }
+}
 fn evidence_rejected(reason: EvidenceRejection) -> Stop {
     let index = reason as usize;
     let code = EVIDENCE_REJECTION_CODES[index];
@@ -242,6 +306,20 @@ fn required_string_type(vt: u16) -> Result<(), Stop> {
         Err(evidence_rejected(EvidenceRejection::RequiredStringType))
     }
 }
+fn classify_cached_value_type(vt: u16, not_supported: Result<bool, ()>) -> ValueEvidenceKind {
+    match vt {
+        8 => ValueEvidenceKind::KnownString,
+        // The exact UIA sentinel distinguishes a confirmed unavailable Value
+        // from a provider's unrelated VT_UNKNOWN interface. Both are absent
+        // evidence for matching; neither becomes an empty string.
+        13 => match not_supported {
+            Ok(true) => ValueEvidenceKind::KnownUnavailable,
+            Ok(false) => ValueEvidenceKind::UnknownVariant,
+            Err(()) => ValueEvidenceKind::UnknownSentinelCheck,
+        },
+        _ => ValueEvidenceKind::UnknownVariant,
+    }
+}
 fn cached_control_type(value: &VARIANT) -> Result<i32, Stop> {
     if unsafe { value.as_raw().Anonymous.Anonymous.vt } != 3 {
         return Err(evidence_rejected(EvidenceRejection::ControlTypeVariant));
@@ -304,6 +382,9 @@ fn cache_properties(full_text: bool, subtree_rules: bool, need_url: bool) -> Vec
     }
     properties
 }
+pub(super) fn cache_property_count(full_text: bool, subtree_rules: bool, need_url: bool) -> usize {
+    cache_properties(full_text, subtree_rules, need_url).len()
+}
 fn invalidation_properties() -> [UIA_PROPERTY_ID; 5] {
     [
         UIA_NamePropertyId,
@@ -314,43 +395,81 @@ fn invalidation_properties() -> [UIA_PROPERTY_ID; 5] {
     ]
 }
 
-/// The former raw FindAll queries would find these elements but their IDs
-/// would be absent from the ControlView hierarchy. They must still refuse the
-/// attempt when absent from the projected tree.
-fn raw_only_policy_element(
-    control: i32,
-    subtree_rules: bool,
-    need_url: bool,
-    extension_levels: usize,
-) -> bool {
-    (subtree_rules && extension_levels > 0)
-        || (subtree_rules
-            && (control == UIA_WindowControlTypeId.0 || control == UIA_DocumentControlTypeId.0))
-        || ((subtree_rules || need_url)
-            && (control == UIA_DocumentControlTypeId.0
-                || control == UIA_EditControlTypeId.0
-                || control == UIA_ComboBoxControlTypeId.0))
+/// Attempt-local RawView-only rule evidence and retained Document URL candidates.
+/// Raw-only strings never enter the recorded extraction tree or snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RawPolicyEvidence {
+    NestedWindow {
+        name: Option<String>,
+    },
+    Document {
+        name: Option<String>,
+        value: Option<String>,
+    },
+    DocumentUrl {
+        value: Option<String>,
+    },
+    ExtensionShallow {
+        name: Option<String>,
+        value: Option<String>,
+    },
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RawNodeAction {
     Keep,
     Flatten,
-    Reject,
 }
-fn raw_node_action(
+fn raw_node_action(root: bool, is_control: bool) -> RawNodeAction {
+    if root || is_control {
+        RawNodeAction::Keep
+    } else {
+        RawNodeAction::Flatten
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RawPolicyScope {
+    nested_window: bool,
+    document: bool,
+    extension_shallow: bool,
+    name: bool,
+    required_name: bool,
+    value: bool,
+}
+
+fn raw_policy_scope(
     root: bool,
     is_control: bool,
     control: i32,
     subtree_rules: bool,
     need_url: bool,
-    extension_levels: usize,
-) -> RawNodeAction {
-    if root || is_control {
-        RawNodeAction::Keep
-    } else if raw_only_policy_element(control, subtree_rules, need_url, extension_levels) {
-        RawNodeAction::Reject
-    } else {
-        RawNodeAction::Flatten
+    raw_extension_levels: usize,
+    policy_visible: bool,
+    shallow_visible: bool,
+    raw_extension_origin: bool,
+) -> RawPolicyScope {
+    let raw_only = !root && !is_control;
+    let nested_window =
+        policy_visible && raw_only && subtree_rules && control == UIA_WindowControlTypeId.0;
+    let document = policy_visible
+        && raw_only
+        && (subtree_rules || need_url)
+        && control == UIA_DocumentControlTypeId.0;
+    // A retained Document is handled by the ControlView walk. Its raw-only
+    // children need extra evidence; retained children need it only when the
+    // extension Document itself was raw-only and disappeared from that walk.
+    let extension_shallow = shallow_visible
+        && subtree_rules
+        && raw_extension_levels > 0
+        && (raw_only || raw_extension_origin);
+    RawPolicyScope {
+        nested_window,
+        document,
+        extension_shallow,
+        name: nested_window || (document && subtree_rules) || extension_shallow,
+        required_name: nested_window || (document && subtree_rules) || extension_shallow,
+        value: document || extension_shallow,
     }
 }
 
@@ -359,7 +478,6 @@ struct RulePropertyScope {
     name: bool,
     required_name: bool,
     value: bool,
-    required_value: bool,
 }
 fn rule_property_scope(
     control: i32,
@@ -376,8 +494,27 @@ fn rule_property_scope(
         required_name: title,
         value: ((subtree_rules || need_url) && (document || entry))
             || (subtree_rules && extension_levels > 0),
-        required_value: (subtree_rules || need_url) && document,
     }
+}
+fn projected_rule_scope(
+    action: RawNodeAction,
+    control: i32,
+    subtree_rules: bool,
+    need_url: bool,
+    extension_levels: usize,
+) -> Option<RulePropertyScope> {
+    (action == RawNodeAction::Keep)
+        .then(|| rule_property_scope(control, subtree_rules, need_url, extension_levels))
+}
+fn document_url_scope(control: i32, subtree_rules: bool, need_url: bool) -> bool {
+    control == UIA_DocumentControlTypeId.0 && (subtree_rules || need_url)
+}
+fn additional_document_url_evidence(
+    action: RawNodeAction,
+    raw_scope: RawPolicyScope,
+    document_url: bool,
+) -> bool {
+    document_url && (action == RawNodeAction::Keep || !raw_scope.document)
 }
 fn next_extension_levels(
     control: i32,
@@ -394,13 +531,93 @@ fn next_extension_levels(
         extension_levels.saturating_sub(1)
     }
 }
+fn child_extension_state(
+    control: i32,
+    subtree_rules: bool,
+    name: Option<&str>,
+    value: Option<&str>,
+    control_levels: usize,
+    raw_levels: usize,
+    raw_origin: bool,
+    action: RawNodeAction,
+    policy_visible: bool,
+    shallow_visible: bool,
+    scope: RawPolicyScope,
+) -> (usize, usize, bool, bool) {
+    let extension_document = policy_visible
+        && subtree_rules
+        && control == UIA_DocumentControlTypeId.0
+        && value.is_some_and(super::is_extension_url);
+    // Empty non-control layout wrappers do not consume either of the two
+    // shallow policy levels. A named/value-bearing raw node does consume one.
+    let meaningful_raw = action == RawNodeAction::Keep
+        || scope.nested_window
+        || scope.document
+        || (subtree_rules && control == UIA_DocumentControlTypeId.0)
+        || name.is_some_and(|name| !name.trim().is_empty())
+        || value.is_some_and(|value| !value.trim().is_empty());
+    let next_raw = if extension_document {
+        2
+    } else if meaningful_raw {
+        raw_levels.saturating_sub(1)
+    } else {
+        raw_levels
+    };
+    let next_control = if action == RawNodeAction::Keep {
+        next_extension_levels(control, subtree_rules, value, control_levels)
+    } else {
+        control_levels
+    };
+    let next_origin = if extension_document {
+        action == RawNodeAction::Flatten
+    } else {
+        raw_origin
+    };
+    let next_shallow_visible = extension_document || (shallow_visible && next_raw > 0);
+    (next_control, next_raw, next_origin, next_shallow_visible)
+}
+fn retained_control_prunes_policy(
+    control: i32,
+    password: Option<bool>,
+    value: Option<&str>,
+) -> bool {
+    let skipped = [
+        UIA_ScrollBarControlTypeId.0,
+        UIA_ImageControlTypeId.0,
+        UIA_SeparatorControlTypeId.0,
+        UIA_ThumbControlTypeId.0,
+        UIA_ToolTipControlTypeId.0,
+        UIA_ProgressBarControlTypeId.0,
+    ]
+    .contains(&control);
+    let entry = control == UIA_EditControlTypeId.0 || control == UIA_ComboBoxControlTypeId.0;
+    skipped
+        || password == Some(true)
+        || (entry && password.is_none())
+        || (entry && value.is_some_and(|value| !value.trim().is_empty()))
+}
+fn counts_policy_depth(
+    action: RawNodeAction,
+    scope: RawPolicyScope,
+    document_url: bool,
+    name: Option<&str>,
+    value: Option<&str>,
+) -> bool {
+    action == RawNodeAction::Keep
+        || scope.nested_window
+        || scope.document
+        || document_url
+        || (scope.extension_shallow
+            && (name.is_some_and(|name| !name.trim().is_empty())
+                || value.is_some_and(|value| !value.trim().is_empty())))
+}
 fn node_budget(
     now: Instant,
     deadline: Instant,
     nodes: usize,
     max_nodes: usize,
     depth: usize,
-    max_depth: usize,
+    max_raw_depth: usize,
 ) -> Result<(), Stop> {
     if now >= deadline {
         timing::timeout();
@@ -409,11 +626,23 @@ fn node_budget(
     if nodes >= max_nodes {
         return Err(Stop::Nodes);
     }
-    if depth > max_depth {
+    if depth > max_raw_depth {
         return Err(Stop::Depth);
     }
     Ok(())
 }
+fn meaningful_depth_budget(
+    control_depth: usize,
+    policy_depth: usize,
+    max_depth: usize,
+) -> Result<(), Stop> {
+    if control_depth > max_depth || policy_depth > max_depth {
+        Err(Stop::Depth)
+    } else {
+        Ok(())
+    }
+}
+const MAX_RAW_DEPTH: usize = 128;
 fn bounded_utf16(utf16: &[u16], remaining: usize) -> Result<String, Stop> {
     let limit = remaining.min(16 * 1024);
     let mut result = String::new();
@@ -499,6 +728,8 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "reason_counts":METRICS.reasons.iter().map(load).collect::<Vec<_>>(),
         "evidence_rejection_codes":EVIDENCE_REJECTION_CODES,
         "evidence_rejection_counts":EVIDENCE_REJECTIONS.iter().map(load).collect::<Vec<_>>(),
+        "value_evidence_codes":VALUE_EVIDENCE_CODES,
+        "value_evidence_counts":VALUE_EVIDENCE_COUNTS.iter().map(load).collect::<Vec<_>>(),
         "hierarchy_structure_acquisitions":load(&METRICS.privacy_acquisitions),
         "accessibility_recording_acquisitions":load(&METRICS.recording_acquisitions),
         "acquisition_mode":"single_raw_cache_control_projection",
@@ -551,6 +782,8 @@ pub(super) struct Attempt<'a> {
     projected_nodes: usize,
     registered: bool,
     scope_rules: Vec<RuleReference>,
+    raw_policy_evidence: Vec<RawPolicyEvidence>,
+    document_values: Vec<DocumentValueObservation>,
 }
 fn provider(error: windows::core::Error) -> Stop {
     screenpipe_config::sensitive_debug::record(
@@ -653,6 +886,8 @@ impl<'a> Attempt<'a> {
                 projected_nodes: 0,
                 registered: true,
                 scope_rules: Vec::new(),
+                raw_policy_evidence: Vec::new(),
+                document_values: Vec::new(),
             };
             result.check()?;
             Ok(result)
@@ -666,6 +901,26 @@ impl<'a> Attempt<'a> {
     }
     pub fn set_scope_rules(&mut self, rules: Vec<RuleReference>) {
         self.scope_rules = rules;
+    }
+    /// Read immediately after a successful acquire, under the caller's
+    /// revision and focus checks. A later acquire replaces this evidence.
+    pub fn raw_policy_evidence(&self) -> &[RawPolicyEvidence] {
+        &self.raw_policy_evidence
+    }
+    /// Document ordinals refer only to the most recent successful cache
+    /// acquisition and are meaningful under the caller's revision guard.
+    pub fn document_value_count(&self) -> usize {
+        self.document_values.len()
+    }
+    pub fn document_url_sources(&self, url: Option<&str>) -> Vec<usize> {
+        document_url_sources(&self.document_values, url)
+    }
+    pub fn missing_url_is_unknown(
+        &self,
+        previous_count: usize,
+        previous_sources: &[usize],
+    ) -> bool {
+        document_url_loss_is_unknown(&self.document_values, previous_count, previous_sources)
     }
     pub fn current(&self, revision: u64) -> bool {
         self.revision() == revision
@@ -797,6 +1052,52 @@ impl<'a> Attempt<'a> {
             Ok((!result.is_empty()).then_some(result))
         }
     }
+    fn value(&mut self, element: &IUIAutomationElement, document: bool) -> Result<ValueRead, Stop> {
+        self.check()?;
+        let variant =
+            match unsafe { element.GetCachedPropertyValueEx(UIA_ValueValuePropertyId, true) } {
+                Ok(variant) => variant,
+                Err(_) => {
+                    self.check()?;
+                    note_value_evidence(ValueEvidenceKind::UnknownGetter, None, document);
+                    return Ok(ValueRead {
+                        value: None,
+                        kind: ValueEvidenceKind::UnknownGetter,
+                    });
+                }
+            };
+        self.check()?;
+        let vt = unsafe { variant.as_raw().Anonymous.Anonymous.vt };
+        let not_supported = if vt == 13 {
+            self.check()?;
+            let result = unsafe { self.automation.CheckNotSupported(&variant) }
+                .map(|result| result.as_bool())
+                .map_err(|_| ());
+            self.check()?;
+            result
+        } else {
+            Err(())
+        };
+        let kind = classify_cached_value_type(vt, not_supported);
+        note_value_evidence(kind, Some(vt), document);
+        if kind != ValueEvidenceKind::KnownString {
+            return Ok(ValueRead { value: None, kind });
+        }
+        unsafe {
+            let raw = variant.as_raw();
+            let bstr = std::mem::ManuallyDrop::new(windows::core::BSTR::from_raw(
+                raw.Anonymous.Anonymous.Anonymous.bstrVal,
+            ));
+            let remaining = self.text_limit.saturating_sub(self.text_bytes);
+            let result = bounded_utf16(bstr.as_wide(), remaining)?;
+            self.text_bytes += result.len();
+            self.check()?;
+            Ok(ValueRead {
+                value: (!result.is_empty()).then_some(result),
+                kind,
+            })
+        }
+    }
     /// One hierarchy and its cached properties provide all mandatory evidence.
     /// The broad provider acquisition is logged without logging property values.
     pub fn acquire(
@@ -807,6 +1108,10 @@ impl<'a> Attempt<'a> {
     ) -> Result<AccessibilityNode, Stop> {
         let calls_before = self.calls;
         let result = self.acquire_inner(full_text, subtree_rules, need_url);
+        if result.is_err() {
+            self.raw_policy_evidence.clear();
+            self.document_values.clear();
+        }
         METRICS
             .calls
             .fetch_add((self.calls - calls_before) as u64, Ordering::Relaxed);
@@ -827,6 +1132,8 @@ impl<'a> Attempt<'a> {
         self.nodes = 0;
         self.projected_nodes = 0;
         self.text_bytes = 0;
+        self.raw_policy_evidence.clear();
+        self.document_values.clear();
         if !full_text && !subtree_rules && !need_url {
             self.check()?;
             return Ok(AccessibilityNode::default());
@@ -899,6 +1206,12 @@ impl<'a> Attempt<'a> {
             subtree_rules,
             need_url,
             0,
+            0,
+            0,
+            0,
+            true,
+            false,
+            false,
             true,
             &mut projected,
         )?;
@@ -914,7 +1227,13 @@ impl<'a> Attempt<'a> {
         full: bool,
         subtree_rules: bool,
         need_url: bool,
-        extension_levels: usize,
+        control_extension_levels: usize,
+        raw_extension_levels: usize,
+        control_depth: usize,
+        policy_depth: usize,
+        policy_visible: bool,
+        shallow_visible: bool,
+        raw_extension_origin: bool,
         root: bool,
         out: &mut Vec<AccessibilityNode>,
     ) -> Result<(), Stop> {
@@ -926,7 +1245,7 @@ impl<'a> Attempt<'a> {
             self.nodes,
             self.max_nodes,
             raw_depth,
-            self.max_depth,
+            MAX_RAW_DEPTH,
         )?;
         self.nodes += 1;
         let control = cached_control_type(
@@ -946,54 +1265,132 @@ impl<'a> Attempt<'a> {
                 .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
                 .map_err(provider)?,
         )?;
-        match raw_node_action(
+        let action = raw_node_action(root, is_control);
+        let policy_scope = raw_policy_scope(
             root,
             is_control,
             control,
             subtree_rules,
             need_url,
-            extension_levels,
-        ) {
-            RawNodeAction::Reject => {
-                return Err(evidence_rejected(EvidenceRejection::RawOnlyPolicyElement));
-            }
-            RawNodeAction::Flatten => {
-                // A non-control ancestor is transparent in ControlView. Its
-                // Edit, password, or decorative role cannot prune descendants.
-                self.decode_children(
-                    element,
-                    raw_depth,
-                    full,
-                    subtree_rules,
-                    need_url,
-                    extension_levels,
-                    out,
-                )?;
-                return Ok(());
-            }
-            RawNodeAction::Keep => {}
-        }
-        let scope = rule_property_scope(control, subtree_rules, need_url, extension_levels);
-        self.projected_nodes += 1;
-        if scope.required_name {
+            raw_extension_levels,
+            policy_visible,
+            shallow_visible,
+            raw_extension_origin,
+        );
+        let document_url = document_url_scope(control, subtree_rules, need_url);
+        meaningful_depth_budget(control_depth, policy_depth, self.max_depth)?;
+        let child_control_depth = control_depth + usize::from(action == RawNodeAction::Keep);
+        let control_scope = projected_rule_scope(
+            action,
+            control,
+            subtree_rules,
+            need_url,
+            control_extension_levels,
+        );
+        if control_scope.is_some_and(|scope| scope.required_name) || policy_scope.required_name {
             self.require_string(element, UIA_NamePropertyId)?;
         }
-        if scope.required_value {
-            self.require_string(element, UIA_ValueValuePropertyId)?;
+        let projected_name = action == RawNodeAction::Keep
+            && (full || control_scope.is_some_and(|scope| scope.name));
+        let projected_value = action == RawNodeAction::Keep
+            && (full || control_scope.is_some_and(|scope| scope.value));
+        let name = if projected_name || policy_scope.name {
+            self.string(element, UIA_NamePropertyId)?
+        } else {
+            None
+        };
+        let value_read = if projected_value || policy_scope.value || document_url {
+            Some(self.value(element, control == UIA_DocumentControlTypeId.0)?)
+        } else {
+            None
+        };
+        let value_kind = value_read.as_ref().map(|read| read.kind);
+        let value = value_read.and_then(|read| read.value);
+        if document_url {
+            let kind = value_kind.ok_or(Stop::Provider)?;
+            self.document_values.push(DocumentValueObservation {
+                kind,
+                http_url: document_http_url(value.as_deref()).map(str::to_owned),
+            });
         }
+        let retained_pruned = action == RawNodeAction::Keep
+            && retained_control_prunes_policy(control, password, value.as_deref());
+        let child_policy_visible = policy_visible && !retained_pruned;
+        let meaningful_policy_node = counts_policy_depth(
+            action,
+            policy_scope,
+            document_url,
+            name.as_deref(),
+            value.as_deref(),
+        );
+        let child_policy_depth = policy_depth + usize::from(meaningful_policy_node);
+        if policy_scope.nested_window {
+            self.raw_policy_evidence
+                .push(RawPolicyEvidence::NestedWindow { name: name.clone() });
+        }
+        if policy_scope.document {
+            self.raw_policy_evidence.push(RawPolicyEvidence::Document {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+        if additional_document_url_evidence(action, policy_scope, document_url) {
+            self.raw_policy_evidence
+                .push(RawPolicyEvidence::DocumentUrl {
+                    value: value.clone(),
+                });
+        }
+        if policy_scope.extension_shallow {
+            self.raw_policy_evidence
+                .push(RawPolicyEvidence::ExtensionShallow {
+                    name: name.clone(),
+                    value: value.clone(),
+                });
+        }
+        let (
+            child_control_extension_levels,
+            child_raw_extension_levels,
+            child_raw_extension_origin,
+            child_shallow_visible,
+        ) = child_extension_state(
+            control,
+            subtree_rules,
+            name.as_deref(),
+            value.as_deref(),
+            control_extension_levels,
+            raw_extension_levels,
+            raw_extension_origin,
+            action,
+            child_policy_visible,
+            shallow_visible,
+            policy_scope,
+        );
+        if action == RawNodeAction::Flatten {
+            // A non-control ancestor is transparent in ControlView. Its Edit,
+            // password, or decorative role cannot prune retained descendants.
+            self.decode_children(
+                element,
+                raw_depth,
+                full,
+                subtree_rules,
+                need_url,
+                control_extension_levels,
+                child_raw_extension_levels,
+                child_control_depth,
+                child_policy_depth,
+                policy_visible,
+                child_shallow_visible,
+                child_raw_extension_origin,
+                out,
+            )?;
+            return Ok(());
+        }
+        self.projected_nodes += 1;
         let mut node = AccessibilityNode {
             control_type: crate::platform::windows_uia::control_type_id_to_name(control)
                 .to_string(),
-            name: if full || scope.name {
-                self.string(element, UIA_NamePropertyId)?
-            } else {
-                None
-            },
-            value: if full || scope.value {
-                self.string(element, UIA_ValueValuePropertyId)?
-            } else {
-                None
-            },
+            name: if projected_name { name } else { None },
+            value: if projected_value { value } else { None },
             is_password: password,
             ..Default::default()
         };
@@ -1025,19 +1422,19 @@ impl<'a> Attempt<'a> {
             .ok();
             node.bounds = bulk_cached_bounds(element);
         }
-        let child_extension_levels = next_extension_levels(
-            control,
-            subtree_rules,
-            node.value.as_deref(),
-            extension_levels,
-        );
         self.decode_children(
             element,
             raw_depth,
             full,
             subtree_rules,
             need_url,
-            child_extension_levels,
+            child_control_extension_levels,
+            child_raw_extension_levels,
+            child_control_depth,
+            child_policy_depth,
+            child_policy_visible,
+            child_shallow_visible,
+            child_raw_extension_origin,
             &mut node.children,
         )?;
         out.push(node);
@@ -1050,7 +1447,13 @@ impl<'a> Attempt<'a> {
         full: bool,
         subtree_rules: bool,
         need_url: bool,
-        extension_levels: usize,
+        control_extension_levels: usize,
+        raw_extension_levels: usize,
+        control_depth: usize,
+        policy_depth: usize,
+        policy_visible: bool,
+        shallow_visible: bool,
+        raw_extension_origin: bool,
         out: &mut Vec<AccessibilityNode>,
     ) -> Result<(), Stop> {
         // GetCachedChildren is a local cache read. Null means a complete leaf;
@@ -1074,7 +1477,13 @@ impl<'a> Attempt<'a> {
                     full,
                     subtree_rules,
                     need_url,
-                    extension_levels,
+                    control_extension_levels,
+                    raw_extension_levels,
+                    control_depth,
+                    policy_depth,
+                    policy_visible,
+                    shallow_visible,
+                    raw_extension_origin,
                     false,
                     out,
                 )?;
@@ -1274,10 +1683,123 @@ mod tests {
         assert_eq!(result, Err(Stop::Provider));
     }
     #[test]
-    fn fresh_bulk_required_name_and_document_value_reject_unsupported_types() {
+    fn fresh_bulk_required_name_and_partial_value_are_distinct() {
         assert_eq!(required_string_type(8), Ok(())); // includes empty BSTR
         for vt in [0, 13, 3, 11, 0x4008] {
             assert_eq!(required_string_type(vt), Err(Stop::Provider));
+        }
+        assert_eq!(
+            classify_cached_value_type(8, Err(())),
+            ValueEvidenceKind::KnownString
+        );
+        assert_eq!(
+            classify_cached_value_type(13, Ok(true)),
+            ValueEvidenceKind::KnownUnavailable
+        );
+        assert_eq!(
+            classify_cached_value_type(13, Ok(false)),
+            ValueEvidenceKind::UnknownVariant
+        );
+        assert_eq!(
+            classify_cached_value_type(13, Err(())),
+            ValueEvidenceKind::UnknownSentinelCheck
+        );
+        for vt in [0, 3, 11, 0x4008] {
+            assert_eq!(
+                classify_cached_value_type(vt, Ok(true)),
+                ValueEvidenceKind::UnknownVariant
+            );
+        }
+        assert_eq!(VALUE_EVIDENCE_CODES.len(), VALUE_EVIDENCE_COUNTS.len());
+    }
+    #[test]
+    fn fresh_bulk_document_url_loss_requires_same_unknown_sources() {
+        let observed = |kind, url: Option<&str>| DocumentValueObservation {
+            kind,
+            http_url: url.map(str::to_owned),
+        };
+        assert_eq!(
+            document_http_url(Some(" https://private.example/page ")),
+            Some("https://private.example/page")
+        );
+        assert_eq!(document_http_url(Some("about:blank")), None);
+        let mandatory = [
+            observed(
+                ValueEvidenceKind::KnownString,
+                Some("https://private.example/page"),
+            ),
+            observed(ValueEvidenceKind::KnownUnavailable, None),
+            observed(
+                ValueEvidenceKind::KnownString,
+                Some("https://private.example/page"),
+            ),
+        ];
+        let sources = document_url_sources(&mandatory, Some("https://private.example/page"));
+        assert_eq!(sources, [0, 2]);
+        assert!(document_url_sources(&mandatory, None).is_empty());
+        let optional_unknown = [
+            observed(ValueEvidenceKind::UnknownGetter, None),
+            observed(
+                ValueEvidenceKind::KnownString,
+                Some("https://other.example"),
+            ),
+            observed(ValueEvidenceKind::UnknownVariant, None),
+        ];
+        assert!(document_url_loss_is_unknown(
+            &optional_unknown,
+            mandatory.len(),
+            &sources,
+        ));
+        let optional_unavailable = [
+            observed(ValueEvidenceKind::KnownUnavailable, None),
+            observed(ValueEvidenceKind::KnownString, None),
+            observed(ValueEvidenceKind::UnknownSentinelCheck, None),
+        ];
+        assert!(document_url_loss_is_unknown(
+            &optional_unavailable,
+            mandatory.len(),
+            &sources,
+        ));
+        assert!(!document_url_loss_is_unknown(
+            &optional_unknown[..2],
+            mandatory.len(),
+            &sources,
+        ));
+        assert!(!document_url_loss_is_unknown(
+            &optional_unknown,
+            mandatory.len(),
+            &[],
+        ));
+        assert!(!document_url_loss_is_unknown(
+            &optional_unknown,
+            mandatory.len(),
+            &[3],
+        ));
+        for current in [
+            [
+                observed(ValueEvidenceKind::KnownString, None), // known empty
+                observed(ValueEvidenceKind::KnownUnavailable, None),
+                observed(ValueEvidenceKind::UnknownVariant, None),
+            ],
+            [
+                observed(ValueEvidenceKind::KnownString, None), // known non-HTTP
+                observed(ValueEvidenceKind::KnownUnavailable, None),
+                observed(ValueEvidenceKind::UnknownVariant, None),
+            ],
+            [
+                observed(ValueEvidenceKind::UnknownGetter, None),
+                observed(ValueEvidenceKind::KnownUnavailable, None),
+                observed(
+                    ValueEvidenceKind::KnownString,
+                    Some("https://changed.example"),
+                ),
+            ],
+        ] {
+            assert!(!document_url_loss_is_unknown(
+                &current,
+                mandatory.len(),
+                &sources,
+            ));
         }
     }
     #[test]
@@ -1317,13 +1839,63 @@ mod tests {
     fn fresh_bulk_node_depth_boundaries_are_complete_or_failed() {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(1);
-        assert_eq!(node_budget(now, deadline, 4999, 5000, 35, 35), Ok(()));
         assert_eq!(
-            node_budget(now, deadline, 5000, 5000, 35, 35),
+            node_budget(now, deadline, 4999, 5000, 128, MAX_RAW_DEPTH),
+            Ok(())
+        );
+        assert_eq!(
+            node_budget(now, deadline, 5000, 5000, 128, MAX_RAW_DEPTH),
             Err(Stop::Nodes)
         );
         assert_eq!(
-            node_budget(now, deadline, 0, 5000, 36, 35),
+            node_budget(now, deadline, 0, 5000, 129, MAX_RAW_DEPTH),
+            Err(Stop::Depth)
+        );
+        assert_eq!(
+            node_budget(now, deadline, 0, 5000, 80, MAX_RAW_DEPTH),
+            Ok(())
+        );
+        assert_eq!(meaningful_depth_budget(17, 12, 35), Ok(()));
+        assert_eq!(meaningful_depth_budget(36, 12, 35), Err(Stop::Depth));
+        assert_eq!(meaningful_depth_budget(12, 36, 35), Err(Stop::Depth));
+        let mut policy_depth = 0;
+        for raw_depth in 1..=80 {
+            assert_eq!(
+                node_budget(now, deadline, raw_depth, 5000, raw_depth, MAX_RAW_DEPTH),
+                Ok(())
+            );
+            assert!(!counts_policy_depth(
+                RawNodeAction::Flatten,
+                RawPolicyScope::default(),
+                false,
+                None,
+                None,
+            ));
+            assert_eq!(meaningful_depth_budget(0, policy_depth, 35), Ok(()));
+        }
+        let nested_window = raw_policy_scope(
+            false,
+            false,
+            UIA_WindowControlTypeId.0,
+            true,
+            false,
+            0,
+            true,
+            false,
+            false,
+        );
+        for _ in 0..=35 {
+            assert_eq!(meaningful_depth_budget(0, policy_depth, 35), Ok(()));
+            policy_depth += usize::from(counts_policy_depth(
+                RawNodeAction::Flatten,
+                nested_window,
+                false,
+                Some("nested window"),
+                None,
+            ));
+        }
+        assert_eq!(
+            meaningful_depth_budget(0, policy_depth, 35),
             Err(Stop::Depth)
         );
     }
@@ -1367,6 +1939,9 @@ mod tests {
         }
         let full = ids(true, false, false);
         assert_eq!(full.len(), 15);
+        assert_eq!(cache_property_count(true, false, false), 15);
+        assert_eq!(cache_property_count(true, true, false), 15);
+        assert_eq!(cache_property_count(true, false, true), 15);
         for property in [
             name,
             value,
@@ -1383,6 +1958,8 @@ mod tests {
         ] {
             assert!(full.contains(&property));
         }
+        assert!(!full.contains(&UIA_IsValuePatternAvailablePropertyId.0));
+        assert!(!ids(true, true, false).contains(&UIA_IsValuePatternAvailablePropertyId.0));
     }
     #[test]
     fn fresh_bulk_mandatory_cache_properties_all_invalidate_revision() {
@@ -1410,70 +1987,364 @@ mod tests {
                     &VARIANT::from(false),
                 )
                 .unwrap();
+            handler
+                .HandlePropertyChangedEvent(
+                    None::<&IUIAutomationElement>,
+                    UIA_ValueValuePropertyId,
+                    &VARIANT::from("fixture"),
+                )
+                .unwrap();
         }
-        assert_eq!(revision.load(Ordering::SeqCst), 1);
+        assert_eq!(revision.load(Ordering::SeqCst), 2);
     }
     #[test]
-    fn fresh_bulk_raw_only_policy_nodes_reject_and_other_ancestors_flatten() {
+    fn fresh_bulk_raw_only_rule_scope_preserves_control_projection() {
         let window = UIA_WindowControlTypeId.0;
         let document = UIA_DocumentControlTypeId.0;
         let edit = UIA_EditControlTypeId.0;
         let combo = UIA_ComboBoxControlTypeId.0;
         let pane = UIA_PaneControlTypeId.0;
         let image = UIA_ImageControlTypeId.0;
-        let action = |root, control_member, kind, subtree, url, extension| {
-            raw_node_action(root, control_member, kind, subtree, url, extension)
+        let scope = |root, control_member, kind, subtree, url, extension| {
+            raw_policy_scope(
+                root,
+                control_member,
+                kind,
+                subtree,
+                url,
+                extension,
+                true,
+                true,
+                false,
+            )
         };
-        // The raw root was also the root of the old ControlView cache. Even
-        // when membership is false, it retains the required rule properties.
+        // The requested root remains a projected control even if its cached
+        // membership is false; raw-only rule evidence starts below it.
+        assert_eq!(raw_node_action(true, false), RawNodeAction::Keep);
         assert_eq!(
-            action(true, false, window, true, false, 0),
-            RawNodeAction::Keep
+            scope(true, false, window, true, false, 0),
+            RawPolicyScope::default()
         );
         assert!(rule_property_scope(window, true, false, 0).required_name);
         assert_eq!(
-            action(true, false, document, false, true, 0),
-            RawNodeAction::Keep
+            scope(true, false, document, false, true, 0),
+            RawPolicyScope::default()
         );
-        assert!(rule_property_scope(document, false, true, 0).required_value);
-        for kind in [window, document, edit, combo] {
+        assert!(rule_property_scope(document, false, true, 0).value);
+        assert_eq!(raw_node_action(false, true), RawNodeAction::Keep);
+        assert_eq!(raw_node_action(false, false), RawNodeAction::Flatten);
+        assert!(document_url_scope(document, false, true));
+        assert!(document_url_scope(document, true, false));
+        assert!(!document_url_scope(document, false, false));
+        assert!(!document_url_scope(pane, true, true));
+        // URL candidates also count as meaningful policy nodes when the
+        // Document is raw-only and hidden from subtree Name matching.
+        let hidden = RawPolicyScope::default();
+        assert!(counts_policy_depth(
+            RawNodeAction::Flatten,
+            hidden,
+            document_url_scope(document, true, true),
+            None,
+            None,
+        ));
+        assert!(!counts_policy_depth(
+            RawNodeAction::Flatten,
+            hidden,
+            document_url_scope(pane, true, true),
+            None,
+            None,
+        ));
+        let raw_window = scope(false, false, window, true, false, 0);
+        assert!(raw_window.nested_window && raw_window.required_name);
+        assert!(!raw_window.value);
+        let raw_document = scope(false, false, document, true, false, 0);
+        assert!(raw_document.document && raw_document.required_name && raw_document.value);
+        assert!(!additional_document_url_evidence(
+            RawNodeAction::Flatten,
+            raw_document,
+            document_url_scope(document, true, false),
+        ));
+        assert!(additional_document_url_evidence(
+            RawNodeAction::Flatten,
+            hidden,
+            document_url_scope(document, true, false),
+        ));
+        assert!(additional_document_url_evidence(
+            RawNodeAction::Keep,
+            hidden,
+            document_url_scope(document, true, false),
+        ));
+        assert_eq!(
+            classify_cached_value_type(13, Ok(true)),
+            ValueEvidenceKind::KnownUnavailable
+        );
+        let url_document = scope(false, false, document, false, true, 0);
+        assert!(url_document.document && url_document.value);
+        assert!(!url_document.name);
+        assert_eq!(
+            scope(false, false, window, false, true, 0),
+            RawPolicyScope::default()
+        );
+        // Entry values are not direct window-pattern or URL candidates. They
+        // are in scope only as extension children; irrelevant raw-only roles
+        // do not force a broad string probe or prune retained descendants.
+        for kind in [edit, combo, pane, image] {
             assert_eq!(
-                action(false, false, kind, true, false, 0),
-                RawNodeAction::Reject
+                scope(false, false, kind, true, false, 0),
+                RawPolicyScope::default()
             );
         }
-        for kind in [document, edit, combo] {
-            assert_eq!(
-                action(false, false, kind, false, true, 0),
-                RawNodeAction::Reject
-            );
+        for level in [1, 2] {
+            let raw_child = scope(false, false, pane, true, false, level);
+            assert!(raw_child.extension_shallow && raw_child.required_name && raw_child.value);
+            let control_child = scope(false, true, edit, true, false, level);
+            assert!(!control_child.extension_shallow);
+            let raw_origin_control =
+                raw_policy_scope(false, true, edit, true, false, level, true, true, true);
+            assert!(raw_origin_control.extension_shallow && raw_origin_control.required_name);
         }
         assert_eq!(
-            action(false, false, window, false, true, 0),
-            RawNodeAction::Flatten
+            scope(false, false, pane, true, false, 0),
+            RawPolicyScope::default()
         );
-        // A raw-only Image or Pane may carry a password/decorative role; it
-        // must not prune a retained descendant in the ControlView projection.
-        for kind in [image, pane] {
+        assert_eq!(
+            scope(false, false, pane, false, true, 2),
+            RawPolicyScope::default()
+        );
+        assert_eq!(
+            raw_policy_scope(false, false, document, true, false, 0, false, false, false),
+            RawPolicyScope::default()
+        );
+        assert!(
+            raw_policy_scope(false, false, pane, true, false, 1, false, true, false)
+                .extension_shallow
+        );
+        assert!(retained_control_prunes_policy(image, Some(false), None));
+        assert!(retained_control_prunes_policy(pane, Some(true), None));
+        assert!(retained_control_prunes_policy(edit, None, None));
+        assert!(retained_control_prunes_policy(
+            edit,
+            Some(false),
+            Some("entry text")
+        ));
+        assert!(!retained_control_prunes_policy(
+            edit,
+            Some(false),
+            Some("  ")
+        ));
+        assert!(!retained_control_prunes_policy(
+            pane,
+            Some(false),
+            Some("content")
+        ));
+    }
+    #[test]
+    fn fresh_bulk_extension_depth_tracks_raw_and_control_hierarchies_separately() {
+        let document = UIA_DocumentControlTypeId.0;
+        let pane = UIA_PaneControlTypeId.0;
+        let extension_url = Some("chrome-extension://fixed-test-id/page");
+        let scope = RawPolicyScope::default();
+        let (control, raw, origin, shallow) = child_extension_state(
+            document,
+            true,
+            None,
+            extension_url,
+            0,
+            0,
+            false,
+            RawNodeAction::Keep,
+            true,
+            false,
+            scope,
+        );
+        assert_eq!((control, raw), (2, 2));
+        assert!(!origin && shallow);
+        assert!(retained_control_prunes_policy(
+            document,
+            Some(true),
+            extension_url
+        ));
+        let hidden = child_extension_state(
+            document,
+            true,
+            None,
+            extension_url,
+            0,
+            0,
+            false,
+            RawNodeAction::Keep,
+            false,
+            false,
+            scope,
+        );
+        assert_eq!(hidden, (2, 0, false, false));
+        // Empty RawView layout wrappers do not consume the two meaningful
+        // shallow levels or the ControlView level.
+        let empty_wrapper =
+            raw_policy_scope(false, false, pane, true, false, raw, true, shallow, origin);
+        let (control, raw, origin, shallow) = child_extension_state(
+            pane,
+            true,
+            None,
+            None,
+            control,
+            raw,
+            origin,
+            RawNodeAction::Flatten,
+            true,
+            shallow,
+            empty_wrapper,
+        );
+        assert_eq!((control, raw), (2, 2));
+        assert!(shallow && !origin);
+        let (control, raw, origin, shallow) = child_extension_state(
+            pane,
+            true,
+            Some("visible shallow text"),
+            None,
+            control,
+            raw,
+            origin,
+            RawNodeAction::Flatten,
+            true,
+            shallow,
+            empty_wrapper,
+        );
+        assert_eq!((control, raw), (2, 1));
+        let (control, raw, origin, shallow) = child_extension_state(
+            pane,
+            true,
+            Some("second meaningful level"),
+            None,
+            control,
+            raw,
+            origin,
+            RawNodeAction::Flatten,
+            true,
+            shallow,
+            empty_wrapper,
+        );
+        assert_eq!((control, raw), (2, 0));
+        assert!(!shallow);
+        assert!(
+            !raw_policy_scope(false, false, pane, true, false, raw, true, shallow, origin)
+                .extension_shallow
+        );
+        // A raw-only Document starts its own shallow scan while remaining
+        // absent from the projected hierarchy.
+        let (control, raw, origin, shallow) = child_extension_state(
+            document,
+            true,
+            None,
+            extension_url,
+            0,
+            0,
+            false,
+            RawNodeAction::Flatten,
+            true,
+            false,
+            scope,
+        );
+        assert_eq!((control, raw), (0, 2));
+        assert!(origin && shallow);
+        let descendant =
+            raw_policy_scope(false, true, pane, true, false, raw, true, shallow, origin);
+        assert!(descendant.extension_shallow);
+    }
+    #[test]
+    fn fresh_bulk_projected_extension_grandchild_scope_survives_pruned_parent() {
+        let document = UIA_DocumentControlTypeId.0;
+        let text = UIA_TextControlTypeId.0;
+        let extension_url = Some("chrome-extension://fixed-test-id/page");
+        let (document_control_levels, document_raw_levels, raw_origin, shallow_visible) =
+            child_extension_state(
+                document,
+                true,
+                None,
+                extension_url,
+                0,
+                0,
+                false,
+                RawNodeAction::Keep,
+                true,
+                false,
+                RawPolicyScope::default(),
+            );
+        assert_eq!(document_control_levels, 2);
+        let shallow_scope = RulePropertyScope {
+            name: true,
+            required_name: true,
+            value: true,
+        };
+        // The ControlView extension fallback reads child and grandchild
+        // properties even if normal text extraction prunes the child.
+        for (pruned_kind, password, value) in [
+            (UIA_ImageControlTypeId.0, Some(false), None),
+            (UIA_PaneControlTypeId.0, Some(true), None),
+            (UIA_EditControlTypeId.0, Some(false), Some("entry text")),
+        ] {
+            assert!(retained_control_prunes_policy(pruned_kind, password, value));
             assert_eq!(
-                action(false, false, kind, true, false, 0),
-                RawNodeAction::Flatten
+                projected_rule_scope(
+                    RawNodeAction::Keep,
+                    pruned_kind,
+                    true,
+                    false,
+                    document_control_levels,
+                ),
+                Some(shallow_scope)
+            );
+            let (grandchild_control_levels, _, _, _) = child_extension_state(
+                pruned_kind,
+                true,
+                None,
+                value,
+                document_control_levels,
+                document_raw_levels,
+                raw_origin,
+                RawNodeAction::Keep,
+                false,
+                shallow_visible,
+                RawPolicyScope::default(),
+            );
+            assert_eq!(grandchild_control_levels, 1);
+            assert_eq!(
+                projected_rule_scope(
+                    RawNodeAction::Keep,
+                    text,
+                    true,
+                    false,
+                    grandchild_control_levels,
+                ),
+                Some(shallow_scope)
             );
             assert_eq!(
-                action(false, true, window, true, false, 0),
-                RawNodeAction::Keep
-            );
-        }
-        // Old raw extension child/grandchild queries would include generic
-        // non-controls; rejecting them also prevents projected-depth widening.
-        for level in [1, 2] {
-            assert_eq!(
-                action(false, false, pane, true, false, level),
-                RawNodeAction::Reject
+                projected_rule_scope(
+                    RawNodeAction::Flatten,
+                    text,
+                    true,
+                    false,
+                    grandchild_control_levels,
+                ),
+                None
             );
             assert_eq!(
-                action(false, true, pane, true, false, level),
-                RawNodeAction::Keep
+                next_extension_levels(text, true, None, grandchild_control_levels),
+                0
+            );
+            assert!(
+                !raw_policy_scope(
+                    false,
+                    true,
+                    document,
+                    true,
+                    false,
+                    grandchild_control_levels,
+                    false,
+                    false,
+                    false,
+                )
+                .document
             );
         }
     }
@@ -1491,24 +2362,20 @@ mod tests {
             name: true,
             required_name: true,
             value: false,
-            required_value: false,
         };
         let document_scope = RulePropertyScope {
             value: true,
-            required_value: true,
             ..title
         };
         let entry_scope = RulePropertyScope {
             name: false,
             required_name: false,
             value: true,
-            required_value: false,
         };
         let blank = RulePropertyScope {
             name: false,
             required_name: false,
             value: false,
-            required_value: false,
         };
         assert_eq!(scope(window, true, false, 0), title);
         assert_eq!(scope(document, true, false, 0), document_scope);
@@ -1522,7 +2389,6 @@ mod tests {
                 name: false,
                 required_name: false,
                 value: true,
-                required_value: true
             }
         );
         assert_eq!(scope(window, false, true, 0), blank);
@@ -1535,7 +2401,6 @@ mod tests {
                     name: true,
                     required_name: true,
                     value: true,
-                    required_value: false
                 }
             );
             assert_eq!(
@@ -1544,7 +2409,6 @@ mod tests {
                     name: true,
                     required_name: true,
                     value: true,
-                    required_value: false
                 }
             );
         }

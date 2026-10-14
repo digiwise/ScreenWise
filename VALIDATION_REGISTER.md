@@ -12,12 +12,25 @@ private. Historical authored notes are preserved locally under ignored `.local/`
 
 Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
-Current candidate: [fresh single-hierarchy UIA](docs/UIA_SINGLE_CACHE_HANDOFF.md),
+Current candidate: [raw-only rule evaluation, partial Value evidence and local
+process metrics](docs/UIA_SINGLE_CACHE_HANDOFF.md#raw-only-rule-evaluation-follow-up),
+following [fresh single-hierarchy UIA](docs/UIA_SINGLE_CACHE_HANDOFF.md),
 following the [Windows admission/text split](docs/UIA_ADMISSION_TEXT_SPLIT.md)
 and evidence-rejection diagnostics. Owner-run Access probes support investigating
 the acquisition change, not a production privacy/performance conclusion. The
 current implementation is not deployed; live admission comparison awaits owner
 confirmation. Historical hashes do not identify this artifact.
+
+Final combined source passed Astra review before the desktop-only release-local
+build. Accessibility tests: 278 passed, 23 live ignored. Capture admission:
+58 passed. Bounded metrics endpoint: one passed. RootFmt, diff and lockfile checks
+passed; build passed in 10m41s with all 1,080 external artifacts reused. The owner
+explicitly accepts that unknown individual Value evidence can conceal a blocker;
+known blockers and independent traversal/bounds/deadline/focus/revision gates
+remain. Raw depth is capped at 128, projected/policy depth at the configured
+limit up to 35, and nodes at 5,000. No new deployment, capture trial or CLI build.
+Full cached-decoder integration, provider event delivery, input focus recovery
+and the 70%-within-half-budget target remain unresolved. SW-R18 remains open.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
 

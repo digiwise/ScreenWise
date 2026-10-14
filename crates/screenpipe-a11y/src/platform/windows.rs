@@ -2021,7 +2021,7 @@ pub(crate) fn get_effective_app_name(hwnd: HWND, pid: u32) -> String {
     effective
 }
 
-fn get_process_name_uncached(pid: u32) -> Option<String> {
+pub(crate) fn get_process_name_uncached(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,

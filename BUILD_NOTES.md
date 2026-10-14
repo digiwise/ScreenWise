@@ -1,5 +1,15 @@
 # ScreenWise Windows build notes
 
+The [raw-only rule and process-metrics follow-up](docs/UIA_SINGLE_CACHE_HANDOFF.md#raw-only-rule-evaluation-follow-up)
+evaluates policy evidence without the blanket raw-node rejection, implements
+the owner's nonblocking unknown-Value policy, separates raw wrapper depth from
+meaningful depth, and adds bounded authenticated local process aggregates.
+Final Astra review preceded the desktop-only `release-local` build: 10m41s,
+1,080 external artifacts reused, zero external rebuilds. Accessibility 278,
+capture admission 58 and endpoint one checks passed; 23 live tests stayed
+ignored. No CLI build or deployment. Artifact hash and remaining limits are in
+the handoff; live capture recovery remains unverified.
+
 The [fresh single-hierarchy UIA candidate](docs/UIA_SINGLE_CACHE_HANDOFF.md)
 removes RuntimeId joins while preserving fail-closed policy coverage. Its scope
 exceptions, validation, source review and desktop-only build are recorded in

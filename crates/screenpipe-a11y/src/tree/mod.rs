@@ -29,7 +29,20 @@ mod windows_lines;
 pub fn windows_bulk_metrics_snapshot() -> serde_json::Value {
     #[cfg(target_os = "windows")]
     {
-        windows::bulk_metrics_snapshot()
+        windows::bulk_metrics_snapshot(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        serde_json::json!({"available":false})
+    }
+}
+
+/// Local authenticated diagnostics only. Opts in to verified executable
+/// basenames; exporters and ordinary diagnostics should use the anonymous API.
+pub fn windows_local_uia_metrics_snapshot() -> serde_json::Value {
+    #[cfg(target_os = "windows")]
+    {
+        windows::bulk_metrics_snapshot(true)
     }
     #[cfg(not(target_os = "windows"))]
     {
