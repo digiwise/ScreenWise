@@ -92,7 +92,10 @@ may run read-only (`mode=ro`), aggregate-only SQLite queries (counts, sums,
 averages, percentiles grouped by time bucket, `app_name` and `text_source`) over
 `frames.timestamp`, `frames.app_name`, `frames.text_source` and the numeric,
 boolean and fixed-code fields of `capture_privacy.content_screening` and
-`capture_privacy.accessibility.processing`. Never select window titles, URLs,
+`capture_privacy.accessibility.processing`; extended (2026-10-15) to the fixed
+codes `capture_privacy.reason`, `capture_privacy.accessibility.cause` and
+`.phase`, and to `capture_privacy.accessibility.sampled_target_app` (a local app
+name, treated like `app_name`). Never select window titles, URLs,
 document paths, OCR/accessibility text, tree JSON, images or other columns, and
 never dump rows. App names are local activity metadata: keep results out of
 public docs and commits except sanitized numeric summaries. This permits no
