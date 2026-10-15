@@ -2505,7 +2505,9 @@ fn screen_frame_plan(
 }
 
 /// Distinct redactable hit texts across every screened input (borrowed from
-/// the inputs; never copied out of this frame's memory).
+/// the inputs; never copied out of this frame's memory). Production code
+/// uses [`secret_hit_sources`] directly.
+#[cfg(test)]
 fn distinct_secret_hits<'a>(
     plan: &ContentScreeningPlan,
     chunks: &'a ScreeningChunks,
@@ -3188,6 +3190,14 @@ enum FrameScreening {
     Withheld(ContentScreeningVerdict),
 }
 
+/// `(needs_ocr, ocr_forced)`: persisted pixels are always screened through
+/// OCR, and OCR is "forced" exactly when paired capture would otherwise have
+/// stored accessibility text without recognising the frame.
+fn screening_ocr_need(screenshot_disabled: bool, paired_runs_ocr: bool) -> (bool, bool) {
+    let needs_ocr = !screenshot_disabled || paired_runs_ocr;
+    (needs_ocr, needs_ocr && !paired_runs_ocr)
+}
+
 /// Screen one admitted frame in memory and, for the redaction tier, redact it.
 async fn screen_frame_content(
     config: &Arc<ContentScreeningConfig>,
@@ -3215,8 +3225,8 @@ async fn screen_frame_content(
         metadata.window_name,
         metadata.browser_url,
     );
-    let needs_ocr = !screenshot_disabled || paired_runs_ocr;
-    metrics.ocr_forced = Some(needs_ocr && !paired_runs_ocr);
+    let (needs_ocr, ocr_forced) = screening_ocr_need(screenshot_disabled, paired_runs_ocr);
+    metrics.ocr_forced = Some(ocr_forced);
     let ocr = if needs_ocr {
         let started = Instant::now();
         let result = run_ocr(image, languages).await;
@@ -8111,6 +8121,27 @@ fn content_redaction_user_keyword_does_not_match_inserted_labels() {
         .err()
         .unwrap();
     assert!(err.reasons.contains(&ContentScreeningReason::Keyword));
+}
+
+#[cfg(test)]
+#[test]
+fn screening_ocr_is_forced_only_where_paired_capture_would_skip_ocr() {
+    // Screenshot persisted: always OCR; forced only when a usable tree suffices.
+    assert_eq!(screening_ocr_need(false, false), (true, true));
+    assert_eq!(screening_ocr_need(false, true), (true, false));
+    // No screenshot: OCR only where paired capture stores OCR text; never forced.
+    assert_eq!(screening_ocr_need(true, true), (true, false));
+    assert_eq!(screening_ocr_need(true, false), (false, false));
+    // A verified, complete, non-thin tree is exactly the forced case.
+    let tree = redaction_test_tree(&["plenty of accessibility text in an ordinary editor window"]);
+    let paired = screenpipe_capture::paired_capture::paired_capture_runs_ocr(
+        screenpipe_capture::paired_capture::usable_accessibility_snapshot(&tree),
+        Some("Editor"),
+        Some("Notes"),
+        None,
+    );
+    assert!(!paired);
+    assert_eq!(screening_ocr_need(false, paired), (true, true));
 }
 
 #[cfg(test)]

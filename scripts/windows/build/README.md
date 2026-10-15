@@ -112,7 +112,10 @@ Practical notes (2026-10-15):
   build was killed for low memory; `-Jobs 2` completed (about 14 min each for the
   bindings test and the `release-local` build). Use `-Jobs 2` when free RAM is
   under about 8 GB or other heavy work runs. Agent harnesses may also stop idle
-  background builds under memory pressure; check free RAM before long runs.
+  background builds under memory pressure (Claude Code did so with over 6 GB
+  free); running each step in the foreground avoids that. Warm runs fit a
+  10-minute command limit: engine library tests about 1.5 min, `DesktopTest`
+  and `DesktopBuild` about 3 min each at `-Jobs 4` (2026-10-16).
 - Cache baselines are per task/selection signature. A focused `RootTest` with
   `-Package` does not warm a full `RootTest`, and a change to how signatures are
   computed (e.g. the 2026-10-15 ordinal path ordering, which made Windows

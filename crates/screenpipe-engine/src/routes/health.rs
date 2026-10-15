@@ -1375,6 +1375,38 @@ mod tests {
                         }
                     }
                 }
+            } else if key == "initialization" {
+                let init = value.as_object().expect("fixed initialization schema");
+                assert_eq!(init.len(), 6);
+                assert_eq!(
+                    init["failure_codes"],
+                    json!(["com_changed_mode", "com_init_failed", "uia_context_failed"])
+                );
+                let hresult_codes = init["hresult_codes"].as_array().expect("hresult codes");
+                assert_eq!(hresult_codes.len(), 11);
+                assert!(hresult_codes
+                    .iter()
+                    .all(|entry| entry.as_str().is_some_and(|name| {
+                        !name.is_empty()
+                            && name.len() <= 40
+                            && name
+                                .bytes()
+                                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    })));
+                let failures = init["failure_counts"].as_array().expect("failure counts");
+                assert_eq!(failures.len(), 3);
+                assert!(failures.iter().all(serde_json::Value::is_number));
+                let rows = init["failure_hresult_counts"]
+                    .as_array()
+                    .expect("failure hresult counts");
+                assert_eq!(rows.len(), 3);
+                for row in rows {
+                    let row = row.as_array().expect("numeric hresult row");
+                    assert_eq!(row.len(), hresult_codes.len());
+                    assert!(row.iter().all(serde_json::Value::is_number));
+                }
+                assert!(init["apartment_rehomed_walks"].is_number());
+                assert!(init["apartment_rehome_failures"].is_number());
             } else if key == "timing" {
                 let timing = value.as_object().expect("fixed timing schema");
                 let stage_names = timing

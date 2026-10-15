@@ -276,6 +276,8 @@ pub(super) fn retry(cause: RetryCause) {
     METRICS.retries.fetch_add(1, Ordering::Relaxed);
     timing::retry(cause);
 }
+// No production caller remains; kept for its regression tests.
+#[cfg(test)]
 pub(super) fn fresh_until_current<T>(
     deadline: Instant,
     mut now: impl FnMut() -> Instant,
