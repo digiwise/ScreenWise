@@ -15,7 +15,7 @@ import sys
 
 CODE = re.compile(r"^[a-z0-9_]{1,48}$")
 APP = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
-CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason", "path", "foreground_skip"}
+CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason", "path", "foreground_skip", "window_choice"}
 APP_COLUMNS = {"app_name", "sampled_app", "app", "window_app"}
 GENERATED_COLUMNS = {"utc_bucket"}
 
@@ -91,8 +91,8 @@ FROM frames WHERE {WITH_A11Y} GROUP BY 1, 2 ORDER BY frames DESC LIMIT 20"""),
     "privacy": [
         ("Capture outcome x reason x text_source", f"""
 SELECT json_extract(capture_privacy, '$.outcome') AS outcome, json_extract(capture_privacy, '$.reason') AS reason,
-       text_source, COUNT(*) AS frames
-FROM frames WHERE {SINCE} GROUP BY 1, 2, 3 ORDER BY frames DESC"""),
+       json_extract(capture_privacy, '$.active_window_choice') AS window_choice, text_source, COUNT(*) AS frames
+FROM frames WHERE {SINCE} GROUP BY 1, 2, 3, 4 ORDER BY frames DESC"""),
         ("Blocker reason x role (frames)", f"""
 SELECT r.value AS blocker_reason, json_extract(b.value, '$.foreground') AS foreground,
        COUNT(DISTINCT frames.rowid) AS frames

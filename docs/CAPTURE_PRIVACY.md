@@ -128,7 +128,7 @@ which says why no window could be captured on its own:
 |---|---|
 | `phase` | `initial` or `post_capture` evaluation |
 | `path` | `scoped` (foreground-window plan) or `selected_window` (maximised-window plan) |
-| `cause` | `foreground_on_other_monitor` (an excluded or unverified window overlaps a monitor without the foreground window), `foreground_unsuitable` (the foreground window may not be captured alone), `selected_not_enumerated`, `selected_minimized`, `selected_not_on_monitor`, `selected_unsuitable` or `unclassified` |
+| `cause` | On a monitor without the foreground window: `no_safe_window_on_monitor` (no window there may be captured alone) or `safe_windows_hidden` (each such window lies beneath a maximised or monitor-covering window that may not be captured). Otherwise `foreground_unsuitable` (the foreground window may not be captured alone), `selected_not_enumerated`, `selected_minimized`, `selected_not_on_monitor`, `selected_unsuitable` or `unclassified` |
 | `foreground_skip` | Fixed reason the foreground or selected window was unsuitable (`shell_surface`, `builtin_application_skip`, `window_metadata_unavailable`) |
 | `window_app` | Verified executable basename of the foreground (scoped) or selected window, else `null` |
 | `foreground_on_monitor` | Whether the native foreground window is on this monitor; `null` when unknown |
@@ -139,13 +139,30 @@ for every other outcome. A `selected_not_enumerated` cause means the maximised
 window chosen by z-order is absent from the capture library's window list (for
 example a tool window without a title, or one owned by the recorder).
 
+**Monitor without the foreground window (owner policy 2026-10-16).** When an
+excluded or unverified window overlaps such a monitor, ScreenWise no longer
+withholds the whole monitor if another window there may be captured alone. It
+captures the topmost such window (z-order) as `active_window_only`, with the rest
+of the monitor blacked out, and marks the record
+`"active_window_choice": "topmost_safe_window"`. Windows Graphics Capture records
+only that window's own surface, so a partly overlapping excluded window is never
+copied into the bitmap. A maximised or monitor-covering window that may not be
+captured hides everything beneath it, so the monitor is then withheld
+(`safe_windows_hidden`). This frame has no UIA inspection and no app or title
+labels (as for other-monitor full captures); content screening and the
+post-capture recheck still apply. A local foreground window keeps priority: if it
+may not be captured alone, the monitor is withheld rather than falling back to a
+background window.
+
 An empty window title counts as `window_metadata_unavailable` only when a
 configured rule could read the title for that app: an unscoped or `::Title`
 ignore pattern, an `App::Title` pattern for that app, an include list or ignored
 URLs (title heuristics). With only `App::` ignore patterns the decision is the
-same for every possible title, so an empty title is not uncertainty. An empty
-app name is always uncertain, and the foreground-only fallback still rejects a
-focused window without a title.
+same for every possible title, so an empty title is not uncertainty. The same
+rule decides whether an untitled window may be captured alone (owner request
+2026-10-16). An empty app name is always uncertain. Unscoped ignore patterns
+match the app or the title, so with any unscoped pattern configured, untitled
+windows remain unverified; `App::` patterns avoid that.
 
 ## Excluded background windows
 
@@ -163,9 +180,10 @@ separates microphone admission from visual checks; retention policy is unchanged
 
 Non-minimized windows overlapping a monitor conservatively affect its policy,
 even if another window appears to cover them completely. This implementation
-does not prove occlusion or capture arbitrary nonforeground windows. An excluded
-background window permits only a safe foreground window on that same monitor;
-if global focus belongs to another monitor, a placeholder remains appropriate.
+does not prove occlusion. An excluded background window permits only a safe
+foreground window on that same monitor; if global focus belongs to another
+monitor, only the topmost window there that may be captured alone (see above),
+unless a covering window that may not be captured hides it.
 Minimized and nonoverlapping windows do not force this fallback.
 
 Ordinary File Explorer folder windows (`CabinetWClass`, `ExploreWClass`) can now

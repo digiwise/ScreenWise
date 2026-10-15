@@ -1154,6 +1154,10 @@ pub struct WindowsCapturePrivacy {
     /// Only on `no_safe_active_window` decisions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_safe_window: Option<WindowsNoSafeWindowDetail>,
+    /// `topmost_safe_window` when an active-window-only frame captured the
+    /// topmost safe window of a monitor without the foreground window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_window_choice: Option<&'static str>,
     pub foreground_monitor: Option<String>,
     pub is_active_monitor: Option<bool>,
     pub foreground_monitor_changed: bool,
@@ -1251,7 +1255,8 @@ pub struct WindowsNoSafeWindowDetail {
     pub phase: &'static str,
     /// `scoped` (foreground-window plan) or `selected_window` (maximised plan).
     pub path: &'static str,
-    /// `foreground_on_other_monitor`, `foreground_unsuitable`,
+    /// `no_safe_window_on_monitor`, `safe_windows_hidden` (beneath a covering
+    /// window that may not be captured), `foreground_unsuitable`,
     /// `selected_not_enumerated`, `selected_minimized`,
     /// `selected_not_on_monitor`, `selected_unsuitable` or `unclassified`.
     pub cause: &'static str,
@@ -1308,7 +1313,8 @@ fn explain_no_safe_window(
         None => (
             "scoped",
             match focused {
-                None => "foreground_on_other_monitor",
+                None if visible.iter().any(|window| window.can_capture) => "safe_windows_hidden",
+                None => "no_safe_window_on_monitor",
                 Some(window) if !window.can_capture && !window.is_excluded => {
                     "foreground_unsuitable"
                 }
@@ -1344,6 +1350,7 @@ impl Default for WindowsCapturePrivacy {
             accessibility: None,
             content_screening: None,
             no_safe_window: None,
+            active_window_choice: None,
             foreground_monitor: None,
             is_active_monitor: None,
             foreground_monitor_changed: false,
@@ -1417,6 +1424,9 @@ impl WindowsCapturePrivacy {
         };
         if self.reason != Some("no_safe_active_window") {
             self.no_safe_window = None;
+        }
+        if outcome != WindowsCaptureOutcome::BackgroundRedacted {
+            self.active_window_choice = None;
         }
         self
     }
@@ -1734,6 +1744,7 @@ fn foreground_capture_skip_reason(
     title: &str,
     executable: Option<&str>,
     class: Option<&str>,
+    title_required: bool,
 ) -> Option<&'static str> {
     let explorer = app == "Windows Explorer"
         || executable.is_some_and(|v| {
@@ -1746,7 +1757,8 @@ fn foreground_capture_skip_reason(
     } else if SKIP_APPS.contains(app) {
         return Some("builtin_application_skip");
     }
-    if app.is_empty() || title.is_empty() {
+    // An untitled window is unverified only where a configured rule reads titles.
+    if app.is_empty() || (title.is_empty() && title_required) {
         return Some("window_metadata_unavailable");
     }
     if SKIP_TITLES.contains(title) {
@@ -1796,6 +1808,27 @@ struct WindowsPrivacySnapshot {
     is_focused: bool,
     is_excluded: bool,
     can_capture: bool,
+    /// Maximised on, or covering, this monitor: hides every window beneath it.
+    hides_below: bool,
+}
+
+/// The topmost (z-order) window on this monitor that may be captured alone,
+/// unless a window that may not be captured hides everything beneath it.
+/// Window capture records only that window's own surface, so partly
+/// overlapping excluded windows are never copied into the bitmap.
+#[cfg(target_os = "windows")]
+fn topmost_safe_window<'a>(
+    visible_in_z_order: impl IntoIterator<Item = &'a WindowsPrivacySnapshot>,
+) -> Option<u32> {
+    for window in visible_in_z_order {
+        if window.can_capture {
+            return Some(window.id);
+        }
+        if window.hides_below {
+            return None;
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -1824,7 +1857,14 @@ fn choose_windows_capture(
 
     match focused.first() {
         Some(window) if window.can_capture => WindowsCaptureChoice::ActiveWindow(window.id),
-        _ => WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow),
+        Some(_) => {
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        }
+        // The foreground window is on another monitor (owner policy 2026-10-16).
+        None => topmost_safe_window(visible).map_or(
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow),
+            WindowsCaptureChoice::ActiveWindow,
+        ),
     }
 }
 
@@ -2488,17 +2528,21 @@ pub fn evaluate_windows_monitor_capture(
             || url_uncertain
             || url_excluded
             || filter_reason.is_some();
-        let class = if is_focused {
-            window_class_name(id)
-        } else {
-            None
-        };
+        // Every remaining window overlaps this monitor or is focused; any of
+        // them may be captured alone, so each needs the class-based check.
+        let class = window_class_name(id);
         let foreground_skip = foreground_capture_skip_reason(
             &app_name,
             &window_name,
             executable.as_deref(),
             class.as_deref(),
+            window_filters.title_can_affect_exclusion(&app_name_lower),
         );
+        let hides_below = covers_monitor(bounds, monitor_bounds)
+            || (overlaps_monitor
+                && source.is_maximized().inspect_err(|error| {
+                    sensitive_capture_error("window_metadata", "is_maximized", None, error)
+                })?);
         let can_capture = !is_excluded && foreground_skip.is_none();
         let mut reasons = Vec::new();
         if is_screenpipe_ui {
@@ -2556,6 +2600,7 @@ pub fn evaluate_windows_monitor_capture(
                 is_focused,
                 is_excluded,
                 can_capture,
+                hides_below,
             },
             app_name,
             window_name,
@@ -2591,7 +2636,7 @@ pub fn evaluate_windows_monitor_capture(
         ));
         privacy.foreground_blocked("foreground_changed_during_evaluation");
     }
-    let choice = if let Some(selected) = selected_window {
+    let mut choice = if let Some(selected) = selected_window {
         if !selected_capture_matches(Some(selected), sample_maximised_target(monitor)?)
             || (selected_url_checked && foreground != final_foreground)
         {
@@ -2614,6 +2659,25 @@ pub fn evaluate_windows_monitor_capture(
             )
         }
     };
+    // A background window is captured alone only on a monitor that Windows
+    // verifiably does not own the foreground window for; otherwise later stages
+    // would pair the foreground window's labels and tree with these pixels.
+    let mut topmost_safe_window = false;
+    if let WindowsCaptureChoice::ActiveWindow(id) = choice {
+        if selected_window.is_none()
+            && snapshots
+                .iter()
+                .any(|window| window.id == id && !window.is_focused)
+        {
+            if foreground.is_some_and(|sample| sample.monitor.is_some_and(|m| m != monitor.id())) {
+                topmost_safe_window = true;
+            } else {
+                choice = WindowsCaptureChoice::Redacted(
+                    WindowsCaptureRedactionReason::NoSafeActiveWindow,
+                );
+            }
+        }
+    }
     if matches!(
         choice,
         WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
@@ -2627,6 +2691,9 @@ pub fn evaluate_windows_monitor_capture(
         WindowsCaptureChoice::ActiveWindow(_) => WindowsCaptureOutcome::BackgroundRedacted,
         WindowsCaptureChoice::Redacted(reason) => WindowsCaptureOutcome::CaptureRedacted(*reason),
     });
+    if topmost_safe_window {
+        privacy.active_window_choice = Some("topmost_safe_window");
+    }
     if choice == WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow) {
         let window_app = match (selected_window, selected_observation) {
             (Some(selected), Some(observed)) if !observed.enumerated => {
@@ -2791,7 +2858,12 @@ async fn capture_windows_monitor_privacy_safe_once(
     if let Some(detail) = post_privacy.no_safe_window.as_mut() {
         detail.phase = "post_capture";
     }
+    // The captured window follows the post-capture plan (recaptured below),
+    // except where the initial active-window bitmap is kept.
+    let initial_window_choice = privacy.active_window_choice;
+    let post_window_choice = post_privacy.active_window_choice;
     privacy.merge(post_privacy);
+    privacy.active_window_choice = post_window_choice;
     if selected_window.is_some() || post_target.is_some() {
         let outcome = match post.plan {
             WindowsMonitorCapturePlan::ActiveWindow(_)
@@ -2839,13 +2911,16 @@ async fn capture_windows_monitor_privacy_safe_once(
                 privacy: privacy.with_outcome(WindowsCaptureOutcome::FullMonitor),
             }
         }
-        WindowsMonitorCapturePlan::FullMonitor => WindowsPrivacyCapture {
-            image,
-            active_window,
-            outcome: WindowsCaptureOutcome::BackgroundRedacted,
-            duration: started_at.elapsed(),
-            privacy: privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted),
-        },
+        WindowsMonitorCapturePlan::FullMonitor => {
+            privacy.active_window_choice = initial_window_choice;
+            WindowsPrivacyCapture {
+                image,
+                active_window,
+                outcome: WindowsCaptureOutcome::BackgroundRedacted,
+                duration: started_at.elapsed(),
+                privacy: privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted),
+            }
+        }
         WindowsMonitorCapturePlan::ActiveWindow(window) => {
             // Re-capture the current active window rather than trusting the
             // pre-acquisition snapshot. A focus change can otherwise pair the
@@ -3390,6 +3465,7 @@ mod tests {
             is_focused: false,
             is_excluded: false,
             can_capture: true,
+            hides_below: false,
         };
         let hidden_excluded = WindowsPrivacySnapshot {
             id: 2,
@@ -3397,6 +3473,7 @@ mod tests {
             is_focused: false,
             is_excluded: true,
             can_capture: false,
+            hides_below: false,
         };
         assert_eq!(
             choose_selected_window_capture(&[allowed.clone(), hidden_excluded], target),
@@ -3482,13 +3559,129 @@ mod tests {
                 WindowsCaptureChoice::FullMonitor
             );
         }
-        // Excluded background overlap remains a restriction even if another
-        // ordinary window appears to cover it; no occlusion assumption.
+        // Excluded background overlap still prevents monitor pixels; without
+        // a local foreground window only the topmost safe window is captured.
         let mut local = windows.to_vec();
         local.push(privacy_snapshot(3, b, false, true, false));
         assert_eq!(
             choose_windows_capture_scoped(&local, &b, focus, focus, true),
+            WindowsCaptureChoice::ActiveWindow(2)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn monitor_without_foreground_captures_topmost_safe_window_unless_hidden() {
+        let monitor = Rect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let primary = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let part = Rect {
+            x: 2000,
+            y: 100,
+            width: 400,
+            height: 300,
+        };
+        let focused_elsewhere = privacy_snapshot(1, primary, true, false, true);
+        let excluded_part = privacy_snapshot(2, part, false, true, false);
+        let safe = privacy_snapshot(3, monitor, false, false, true);
+        let excluded_maximised = WindowsPrivacySnapshot {
+            hides_below: true,
+            ..privacy_snapshot(4, monitor, false, true, false)
+        };
+        let choose = |windows: &[WindowsPrivacySnapshot]| choose_windows_capture(windows, &monitor);
+        // A partly overlapping excluded window never enters the window's own bitmap.
+        assert_eq!(
+            choose(&[
+                focused_elsewhere.clone(),
+                excluded_part.clone(),
+                safe.clone()
+            ]),
+            WindowsCaptureChoice::ActiveWindow(3)
+        );
+        // A maximised window that may not be captured hides everything beneath it.
+        assert_eq!(
+            choose(&[
+                focused_elsewhere.clone(),
+                excluded_maximised.clone(),
+                safe.clone()
+            ]),
             WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        );
+        assert_eq!(
+            choose(&[
+                focused_elsewhere.clone(),
+                safe.clone(),
+                excluded_maximised.clone()
+            ]),
+            WindowsCaptureChoice::ActiveWindow(3)
+        );
+        // An unsuitable covering window (not excluded) hides beneath it too.
+        let unsuitable_cover = WindowsPrivacySnapshot {
+            hides_below: true,
+            ..privacy_snapshot(5, monitor, false, false, false)
+        };
+        assert_eq!(
+            choose(&[
+                focused_elsewhere.clone(),
+                unsuitable_cover,
+                excluded_part.clone(),
+                safe.clone()
+            ]),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        );
+        // Without an exclusion the monitor is still captured whole.
+        assert_eq!(
+            choose(&[focused_elsewhere.clone(), safe.clone()]),
+            WindowsCaptureChoice::FullMonitor
+        );
+        // A local foreground window keeps priority, and an unsuitable one
+        // still withholds rather than falling back to a background window.
+        let local_unsuitable = privacy_snapshot(6, monitor, true, false, false);
+        assert_eq!(
+            choose(&[local_unsuitable, excluded_part, safe]),
+            WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn untitled_foreground_is_unverified_only_where_titles_are_read() {
+        for (title_required, expected) in
+            [(true, Some("window_metadata_unavailable")), (false, None)]
+        {
+            assert_eq!(
+                foreground_capture_skip_reason(
+                    "Editor",
+                    "",
+                    Some("editor.exe"),
+                    None,
+                    title_required
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            foreground_capture_skip_reason("", "Synthetic", None, None, false),
+            Some("window_metadata_unavailable")
+        );
+        assert_eq!(
+            foreground_capture_skip_reason(
+                "Windows Explorer",
+                "",
+                Some("explorer"),
+                Some("Shell_TrayWnd"),
+                false
+            ),
+            Some("shell_surface")
         );
     }
 
@@ -3609,7 +3802,8 @@ mod tests {
                     "Windows Explorer",
                     "Synthetic folder",
                     Some("explorer"),
-                    Some(class)
+                    Some(class),
+                    true,
                 ),
                 None
             );
@@ -3618,7 +3812,8 @@ mod tests {
                     "Localized Explorer",
                     "Synthetic folder",
                     Some("EXPLORER.EXE"),
-                    Some(class)
+                    Some(class),
+                    true,
                 ),
                 None
             );
@@ -3635,7 +3830,8 @@ mod tests {
                     "Windows Explorer",
                     "Synthetic shell",
                     Some("explorer"),
-                    class
+                    class,
+                    true,
                 ),
                 Some("shell_surface")
             );
@@ -3645,7 +3841,8 @@ mod tests {
                 "Windows Explorer",
                 "",
                 Some("explorer"),
-                Some("CabinetWClass")
+                Some("CabinetWClass"),
+                true,
             ),
             Some("window_metadata_unavailable")
         );
@@ -3667,6 +3864,7 @@ mod tests {
             "Synthetic folder",
             Some("explorer"),
             Some("CabinetWClass"),
+            true,
         )
         .is_none();
         let windows = [
@@ -3926,7 +4124,7 @@ mod tests {
         );
         assert_eq!(
             (detail.path, detail.cause),
-            ("scoped", "foreground_on_other_monitor")
+            ("scoped", "safe_windows_hidden")
         );
         assert_eq!(
             (detail.visible_windows, detail.excluded_visible_windows),
@@ -3986,10 +4184,7 @@ mod tests {
             WindowsCaptureRedactionReason::NoSafeActiveWindow,
         ));
         let json = serde_json::to_value(&privacy).unwrap();
-        assert_eq!(
-            json["no_safe_window"]["cause"],
-            "foreground_on_other_monitor"
-        );
+        assert_eq!(json["no_safe_window"]["cause"], "safe_windows_hidden");
         assert!(!json.to_string().contains("hwnd") && !json.to_string().contains("bounds"));
         let mut merged = WindowsCapturePrivacy::default();
         merged.merge(privacy.clone());
@@ -4017,6 +4212,7 @@ mod tests {
             is_focused,
             is_excluded,
             can_capture,
+            hides_below: false,
         }
     }
 
