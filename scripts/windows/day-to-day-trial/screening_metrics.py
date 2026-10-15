@@ -103,16 +103,28 @@ SELECT json_extract(capture_privacy, '$.reason') AS reason, r.value AS blocker_r
        COUNT(DISTINCT frames.rowid) AS frames
 FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
 WHERE {SINCE} AND json_extract(b.value, '$.foreground') = 1 GROUP BY 1, 2 ORDER BY frames DESC"""),
+        ("Withheld reason x blocker app x reason x role (top 30)", f"""
+SELECT json_extract(capture_privacy, '$.reason') AS reason, json_extract(b.value, '$.app') AS app,
+       r.value AS blocker_reason, json_extract(b.value, '$.foreground') AS foreground,
+       COUNT(DISTINCT frames.rowid) AS frames
+FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
+WHERE {SINCE} AND text_source = 'privacy_placeholder' GROUP BY 1, 2, 3, 4 ORDER BY frames DESC LIMIT 30"""),
+        ("Withheld frames without blockers", f"""
+SELECT json_extract(capture_privacy, '$.reason') AS reason, COUNT(*) AS frames
+FROM frames WHERE {SINCE} AND text_source = 'privacy_placeholder'
+  AND COALESCE(json_array_length(capture_privacy, '$.blockers'), 0) = 0
+GROUP BY 1 ORDER BY frames DESC"""),
         ("Blocker app x reason (top 20)", f"""
 SELECT json_extract(b.value, '$.app') AS app, r.value AS blocker_reason,
        json_extract(b.value, '$.foreground') AS foreground, COUNT(DISTINCT frames.rowid) AS frames
 FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
 WHERE {SINCE} GROUP BY 1, 2, 3 ORDER BY frames DESC LIMIT 20"""),
         ("Monitor provenance", f"""
-SELECT json_extract(capture_privacy, '$.is_active_monitor') AS is_active_monitor,
+SELECT json_extract(capture_privacy, '$.reason') AS reason,
+       json_extract(capture_privacy, '$.is_active_monitor') AS is_active_monitor,
        json_extract(capture_privacy, '$.foreground_monitor_changed') AS monitor_changed,
        json_extract(capture_privacy, '$.blockers_truncated') AS truncated, COUNT(*) AS frames
-FROM frames WHERE {SINCE} GROUP BY 1, 2, 3 ORDER BY frames DESC"""),
+FROM frames WHERE {SINCE} GROUP BY 1, 2, 3, 4 ORDER BY frames DESC"""),
         ("Stored text presence x text_source", f"""
 SELECT text_source, COUNT(*) AS frames,
        SUM(full_text IS NOT NULL AND full_text <> '') AS with_text,
