@@ -121,6 +121,32 @@ filter rejection (`outside_include_filter`), built-in exclusions
 `builtin_application_skip` or `monitor_unverified`. No excluded pattern or URL
 is included to explain a match.
 
+`no_safe_active_window` records (from 2026-10-16) also carry `no_safe_window`,
+which says why no window could be captured on its own:
+
+| Field | Meaning |
+|---|---|
+| `phase` | `initial` or `post_capture` evaluation |
+| `path` | `scoped` (foreground-window plan) or `selected_window` (maximised-window plan) |
+| `cause` | `foreground_on_other_monitor` (an excluded or unverified window overlaps a monitor without the foreground window), `foreground_unsuitable` (the foreground window may not be captured alone), `selected_not_enumerated`, `selected_minimized`, `selected_not_on_monitor`, `selected_unsuitable` or `unclassified` |
+| `foreground_skip` | Fixed reason the foreground or selected window was unsuitable (`shell_surface`, `builtin_application_skip`, `window_metadata_unavailable`) |
+| `window_app` | Verified executable basename of the foreground (scoped) or selected window, else `null` |
+| `foreground_on_monitor` | Whether the native foreground window is on this monitor; `null` when unknown |
+| `visible_windows`, `excluded_visible_windows` | Enumerated windows overlapping this monitor, and how many were excluded or unverified |
+
+It never contains titles, URLs, window handles or geometry, and it is omitted
+for every other outcome. A `selected_not_enumerated` cause means the maximised
+window chosen by z-order is absent from the capture library's window list (for
+example a tool window without a title, or one owned by the recorder).
+
+An empty window title counts as `window_metadata_unavailable` only when a
+configured rule could read the title for that app: an unscoped or `::Title`
+ignore pattern, an `App::Title` pattern for that app, an include list or ignored
+URLs (title heuristics). With only `App::` ignore patterns the decision is the
+same for every possible title, so an empty title is not uncertainty. An empty
+app name is always uncertain, and the foreground-only fallback still rejects a
+focused window without a title.
+
 ## Excluded background windows
 
 When the foreground excluded app belongs to monitor A, B/C can retain admitted

@@ -58,6 +58,16 @@ class ScreeningMetricsTests(unittest.TestCase):
         presence = next(rows for t, _, rows in result if t == "Stored text presence x text_source")
         self.assertEqual(presence, [["privacy_placeholder", 1, 1, 0]])
 
+    def test_no_safe_window_detail_reports_codes_and_counts_only(self):
+        self.add("", "privacy_placeholder", {"reason": "no_safe_active_window", "no_safe_window": {
+            "phase": "initial", "path": "scoped", "cause": "foreground_on_other_monitor",
+            "foreground_skip": None, "window_app": "PRIVATE/CANARY", "foreground_on_monitor": False,
+            "visible_windows": 3, "excluded_visible_windows": 1}})
+        result = self.output()
+        self.assertNotIn("CANARY", json.dumps(result))
+        rows = next(rows for t, _, rows in result if t == "No-safe-window detail")
+        self.assertEqual(rows, [["initial", "scoped", "foreground_on_other_monitor", None, "other", 0, 1, 3.0, 1.0]])
+
 
 if __name__ == "__main__":
     unittest.main()

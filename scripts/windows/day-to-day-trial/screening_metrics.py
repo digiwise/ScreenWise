@@ -15,8 +15,8 @@ import sys
 
 CODE = re.compile(r"^[a-z0-9_]{1,48}$")
 APP = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
-CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason"}
-APP_COLUMNS = {"app_name", "sampled_app", "app"}
+CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason", "path", "foreground_skip"}
+APP_COLUMNS = {"app_name", "sampled_app", "app", "window_app"}
 GENERATED_COLUMNS = {"utc_bucket"}
 
 CS = "json_extract(capture_privacy, '$.content_screening"
@@ -109,6 +109,18 @@ SELECT json_extract(capture_privacy, '$.reason') AS reason, json_extract(b.value
        COUNT(DISTINCT frames.rowid) AS frames
 FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
 WHERE {SINCE} AND text_source = 'privacy_placeholder' GROUP BY 1, 2, 3, 4 ORDER BY frames DESC LIMIT 30"""),
+        ("No-safe-window detail", f"""
+SELECT json_extract(capture_privacy, '$.no_safe_window.phase') AS phase,
+       json_extract(capture_privacy, '$.no_safe_window.path') AS path,
+       json_extract(capture_privacy, '$.no_safe_window.cause') AS cause,
+       json_extract(capture_privacy, '$.no_safe_window.foreground_skip') AS foreground_skip,
+       json_extract(capture_privacy, '$.no_safe_window.window_app') AS window_app,
+       json_extract(capture_privacy, '$.no_safe_window.foreground_on_monitor') AS foreground_on_monitor,
+       COUNT(*) AS frames,
+       ROUND(AVG(json_extract(capture_privacy, '$.no_safe_window.visible_windows')), 1) AS avg_visible,
+       ROUND(AVG(json_extract(capture_privacy, '$.no_safe_window.excluded_visible_windows')), 1) AS avg_excluded
+FROM frames WHERE {SINCE} AND json_extract(capture_privacy, '$.reason') = 'no_safe_active_window'
+GROUP BY 1, 2, 3, 4, 5, 6 ORDER BY frames DESC"""),
         ("Withheld frames without blockers", f"""
 SELECT json_extract(capture_privacy, '$.reason') AS reason, COUNT(*) AS frames
 FROM frames WHERE {SINCE} AND text_source = 'privacy_placeholder'
