@@ -344,15 +344,17 @@ does not create or remove rules. No readiness timeout starts the GUI automatical
 
 ## Screening and UIA failure metrics
 
-`screening_metrics.py` prints read-only aggregates over exactly the fields of
-the standing metrics permission in AGENTS.md: screening outcomes and costs,
-capture reasons, and UIA processing/cause/phase by sampled app. It groups and
+`screening_metrics.py` prints read-only aggregates within the standing metrics
+permission in AGENTS.md: screening outcomes and costs, capture reasons, UIA
+processing/cause/phase by sampled app and, in `privacy`, capture outcomes,
+blocker reasons by role and app, monitor provenance and stored-text presence
+(present versus null/empty only). It groups and
 counts only, and prints any value that is not a fixed code or app basename as
 `other`. Output contains local app names; keep it out of public documents.
 
 ```powershell
 python -I .\scripts\windows\day-to-day-trial\screening_metrics.py <db.sqlite> `
-  --since 2026-10-15T07:00:00Z [--until <UTC>] [--section screening|uia]
+  --since 2026-10-15T07:00:00Z [--until <UTC>] [--section screening|uia|privacy]
 python -I -m unittest discover -s .\scripts\windows\day-to-day-trial -p test_screening_metrics.py
 ```
 

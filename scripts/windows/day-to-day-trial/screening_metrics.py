@@ -1,9 +1,8 @@
 """Read-only, aggregate-only content-screening and UIA failure metrics.
 
-Covers exactly the fields of the owner's standing permission in AGENTS.md:
-frames.timestamp/app_name/text_source, the numeric/boolean/fixed-code fields of
-capture_privacy.content_screening, capture_privacy.reason and
-capture_privacy.accessibility.{processing,cause,phase,sampled_target_app}.
+Covers the owner's standing permissions in AGENTS.md: aggregates over frame
+metadata and capture_privacy fixed codes, flags, counts and executable basenames;
+captured text (full_text) only as present vs null/empty, never its value.
 Every query groups and counts; no row is printed. Code columns are checked
 against a fixed-code pattern and app columns against a basename pattern, and
 anything else prints as `other`, so an unexpected value cannot leak text.
@@ -16,8 +15,8 @@ import sys
 
 CODE = re.compile(r"^[a-z0-9_]{1,48}$")
 APP = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
-CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase"}
-APP_COLUMNS = {"app_name", "sampled_app"}
+CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason"}
+APP_COLUMNS = {"app_name", "sampled_app", "app"}
 GENERATED_COLUMNS = {"utc_bucket"}
 
 CS = "json_extract(capture_privacy, '$.content_screening"
@@ -88,6 +87,37 @@ FROM frames WHERE {WITH_A11Y} GROUP BY 1, 2, 3, 4 ORDER BY frames DESC"""),
 SELECT {A}.sampled_target_app') AS sampled_app, {A}.cause') AS cause, COUNT(*) AS frames,
        SUM(text_source = 'privacy_placeholder') AS withheld
 FROM frames WHERE {WITH_A11Y} GROUP BY 1, 2 ORDER BY frames DESC LIMIT 20"""),
+    ],
+    "privacy": [
+        ("Capture outcome x reason x text_source", f"""
+SELECT json_extract(capture_privacy, '$.outcome') AS outcome, json_extract(capture_privacy, '$.reason') AS reason,
+       text_source, COUNT(*) AS frames
+FROM frames WHERE {SINCE} GROUP BY 1, 2, 3 ORDER BY frames DESC"""),
+        ("Blocker reason x role (frames)", f"""
+SELECT r.value AS blocker_reason, json_extract(b.value, '$.foreground') AS foreground,
+       COUNT(DISTINCT frames.rowid) AS frames
+FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
+WHERE {SINCE} GROUP BY 1, 2 ORDER BY frames DESC"""),
+        ("Capture reason x foreground blocker reason", f"""
+SELECT json_extract(capture_privacy, '$.reason') AS reason, r.value AS blocker_reason,
+       COUNT(DISTINCT frames.rowid) AS frames
+FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
+WHERE {SINCE} AND json_extract(b.value, '$.foreground') = 1 GROUP BY 1, 2 ORDER BY frames DESC"""),
+        ("Blocker app x reason (top 20)", f"""
+SELECT json_extract(b.value, '$.app') AS app, r.value AS blocker_reason,
+       json_extract(b.value, '$.foreground') AS foreground, COUNT(DISTINCT frames.rowid) AS frames
+FROM frames, json_each(capture_privacy, '$.blockers') AS b, json_each(b.value, '$.reasons') AS r
+WHERE {SINCE} GROUP BY 1, 2, 3 ORDER BY frames DESC LIMIT 20"""),
+        ("Monitor provenance", f"""
+SELECT json_extract(capture_privacy, '$.is_active_monitor') AS is_active_monitor,
+       json_extract(capture_privacy, '$.foreground_monitor_changed') AS monitor_changed,
+       json_extract(capture_privacy, '$.blockers_truncated') AS truncated, COUNT(*) AS frames
+FROM frames WHERE {SINCE} GROUP BY 1, 2, 3 ORDER BY frames DESC"""),
+        ("Stored text presence x text_source", f"""
+SELECT text_source, COUNT(*) AS frames,
+       SUM(full_text IS NOT NULL AND full_text <> '') AS with_text,
+       SUM(full_text IS NULL OR full_text = '') AS without_text
+FROM frames WHERE {SINCE} GROUP BY 1 ORDER BY frames DESC"""),
     ],
 }
 

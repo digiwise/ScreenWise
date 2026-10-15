@@ -95,8 +95,11 @@ boolean and fixed-code fields of `capture_privacy.content_screening` and
 `capture_privacy.accessibility.processing`; extended (2026-10-15) to the fixed
 codes `capture_privacy.reason`, `capture_privacy.accessibility.cause` and
 `.phase`, and to `capture_privacy.accessibility.sampled_target_app` (a local app
-name, treated like `app_name`). Never select window titles, URLs,
-document paths, OCR/accessibility text, tree JSON, images or other columns, and
+name, treated like `app_name`). Broadened (2026-10-16) to any aggregate metric
+over recording metadata, `capture_privacy` and the numeric authenticated
+diagnostics, except values of captured text: window titles, URLs, document
+paths, OCR/accessibility text and tree JSON may only be counted as null/empty
+versus present. Never select those values, images or other content, and
 never dump rows. App names are local activity metadata: keep results out of
 public docs and commits except sanitized numeric summaries. This permits no
 capture to generate data; trials keep the readiness gate. Canonical queries are in
