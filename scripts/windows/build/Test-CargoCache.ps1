@@ -94,4 +94,9 @@ $corrupt = New-ScreenWiseCacheMonitor $fixtureRepo $signature $corruptPath
 Assert-Cache (-not (Test-ScreenWiseCacheReady $corrupt).ready) 'Corrupt history cannot claim readiness.'
 Assert-Cache ((Receive-ScreenWiseCargoLine $warm 'ordinary test output') -eq 'ordinary test output') 'Non-Cargo test output is preserved.'
 Assert-Cache ((Receive-ScreenWiseCargoLine $warm '{"reason":"compiler-message","message":{"rendered":"fixed compiler diagnostic"}}') -eq 'fixed compiler diagnostic') 'Rendered compiler diagnostics remain readable.'
+$ordered = Get-ScreenWiseOrdinalSet @('C:\r\crates\screenpipe-capture\Cargo.toml', 'C:\r\crates\screenpipe-capture-policy\Cargo.toml',
+    'C:\r\crates\screenpipe-audio-eval\Cargo.toml', 'C:\r\crates\screenpipe-audio\Cargo.toml', 'C:\R\CRATES\SCREENPIPE-AUDIO\CARGO.TOML', $null)
+Assert-Cache (($ordered -join '|') -ceq ('C:\r\crates\screenpipe-audio-eval\Cargo.toml|C:\r\crates\screenpipe-audio\Cargo.toml|' +
+    'C:\r\crates\screenpipe-capture-policy\Cargo.toml|C:\r\crates\screenpipe-capture\Cargo.toml')) 'Hashed path lists use edition-independent ordinal order without case duplicates.'
+Assert-Cache ((Get-ScreenWiseOrdinalSet @()).Count -eq 0 -and (ConvertTo-Json -Compress -InputObject (Get-ScreenWiseOrdinalSet @())) -eq '[]') 'Empty ordinal sets serialize as empty arrays.'
 Write-Host "Cargo cache regression checks passed: $passed. Synthetic state: $testRoot"

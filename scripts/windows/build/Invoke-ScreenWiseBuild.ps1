@@ -245,7 +245,7 @@ try {
         }
         $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
         $configPaths += @((Join-Path $cargoHome 'config'), (Join-Path $cargoHome 'config.toml'))
-        $files = foreach ($path in @($manifestPaths + $configPaths + (Join-Path $repoRoot 'rust-toolchain.toml') | Sort-Object -Unique)) {
+        $files = foreach ($path in (Get-ScreenWiseOrdinalSet @($manifestPaths + $configPaths + (Join-Path $repoRoot 'rust-toolchain.toml')))) {
             try {
                 $exists = Test-Path -LiteralPath $path -PathType Leaf
                 [ordered]@{ path = $path; sha256 = if ($exists) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } else { $null } }

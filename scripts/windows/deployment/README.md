@@ -163,7 +163,9 @@ then. `deployment.json` records `source_commit`, `source_uncommitted_inputs` and
 `-Build` exports the frontend with provisioned Node/packages, skipping acquisition
 prebuild hooks, and invokes the canonical locked/offline desktop build with the
 selected `-BuildProfile` and `-PlanOnly`. `-BuildScope DesktopAndCli` also builds
-the standalone CLI. Desktop-only builds still require a provisioned CLI artifact
+the standalone CLI. After a manifest, lockfile, toolchain or build-launcher cache
+change, the launcher refuses an unbaselined (cold) build; pass `-AllowColdCache`
+with `-Build` once when that warm-up is expected. Desktop-only builds still require a provisioned CLI artifact
 and native sidecars in the matching profile directory for deployment packaging;
 the script does not silently replace or compile a missing one. Normal output shows
 deployment milestones; `-Verbose` shows full build output and path details. A

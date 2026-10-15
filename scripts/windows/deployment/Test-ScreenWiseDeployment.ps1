@@ -147,6 +147,12 @@ $bothPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -Buil
 Check (@($bothPlan.build_tasks).Count -eq 2 -and $bothPlan.build_tasks[0] -ceq 'DesktopBuild' -and
     $bothPlan.build_tasks[1] -ceq 'RootBuild') 'explicit desktop and CLI build selects both'
 Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -BuildScope DesktopAndCli } 'build scope requires build'
+$coldPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -Build -AllowColdCache | Out-String | ConvertFrom-Json)
+Check ($coldPlan.allow_cold_cache -eq $true -and $bothPlan.allow_cold_cache -eq $false) 'cold-cache permission is explicit and off by default'
+Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -AllowColdCache } 'cold-cache permission requires build'
+$deployText = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1')
+Check ($deployText -like '*if ($AllowColdCache) { $buildArgs.AllowColdCache = $true }*' -and
+    $deployText -like '*& $builder @buildArgs -PlanOnly*') 'cold-cache permission reaches the build launcher'
 Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -ShutdownTimeoutSeconds 0 } 'invalid shutdown timeout rejected'
 Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -PrepareOnly -Launch } 'conflicting startup switches rejected'
 # Execute the dispatch with a synthetic launcher only. No actual GUI or firewall access.

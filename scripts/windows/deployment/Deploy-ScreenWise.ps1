@@ -12,6 +12,7 @@ param(
     [ValidateSet('release-local', 'release')][string]$BuildProfile = 'release-local',
     [switch]$Build,
     [ValidateSet('Desktop', 'DesktopAndCli')][string]$BuildScope = 'Desktop',
+    [switch]$AllowColdCache, # Permit the launcher's first build after manifest/toolchain changes.
     [switch]$RegisterStartup,
     [switch]$Launch, # Compatibility: startup is now the default.
     [switch]$PrepareOnly,
@@ -22,6 +23,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($Launch -and $PrepareOnly) { throw 'Choose automatic startup or -PrepareOnly, not both.' }
 if ($PSBoundParameters.ContainsKey('BuildScope') -and !$Build) { throw '-BuildScope requires -Build.' }
+if ($AllowColdCache -and !$Build) { throw '-AllowColdCache requires -Build.' }
 Import-Module (Join-Path $PSScriptRoot 'Deployment.psm1') -Force
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $private = Join-Path $repo '.local'
@@ -46,7 +48,7 @@ $buildTasks = if (!$Build) { @() } elseif ($BuildScope -eq 'DesktopAndCli') {
     @('DesktopBuild', 'RootBuild')
 } else { @('DesktopBuild') }
 if ($PlanOnly) {
-    [pscustomobject]@{ build_requested = [bool]$Build; build_scope = $BuildScope; build_tasks = @($buildTasks);
+    [pscustomobject]@{ build_requested = [bool]$Build; build_scope = $BuildScope; build_tasks = @($buildTasks); allow_cold_cache = [bool]$AllowColdCache;
         profile = $BuildProfile; deployment = $binary;
         gui_source = $guiBuild; recorder_source = $cliBuild;
         data = $DataDirectory; port = $Port; register_startup = [bool]$RegisterStartup;
@@ -147,12 +149,14 @@ if ($Build) {
         } finally { Pop-Location }
         foreach ($task in $buildTasks) {
             Write-Host "Building $task ($BuildProfile)..."
-            $null = & $builder -Task $task -BuildProfile $BuildProfile -PlanOnly
+            $buildArgs = @{ Task = $task; BuildProfile = $BuildProfile }
+            if ($AllowColdCache) { $buildArgs.AllowColdCache = $true }
+            $null = & $builder @buildArgs -PlanOnly
             if ($VerbosePreference -eq 'Continue') {
-                & $builder -Task $task -BuildProfile $BuildProfile
+                & $builder @buildArgs
             } else {
                 # The launcher converts Cargo stderr itself and throws on failure.
-                & $builder -Task $task -BuildProfile $BuildProfile *>&1 | ForEach-Object { [string]$_ } |
+                & $builder @buildArgs *>&1 | ForEach-Object { [string]$_ } |
                     Add-Content -LiteralPath $buildLog -Encoding UTF8
             }
         }

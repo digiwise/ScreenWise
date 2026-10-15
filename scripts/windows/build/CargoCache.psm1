@@ -5,6 +5,15 @@ function Get-ScreenWiseCacheHash([string]$Text) {
     finally { $algorithm.Dispose() }
 }
 
+# Sort-Object is culture-sensitive and orders e.g. 'capture-policy\' and 'capture\'
+# differently in Windows PowerShell and PowerShell 7. Hashed lists use ordinal
+# order (case-insensitive, de-duplicated) so both editions share cache baselines.
+function Get-ScreenWiseOrdinalSet([object[]]$Values) {
+    $set = New-Object 'System.Collections.Generic.SortedSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($value in $Values) { if ($null -ne $value) { $null = $set.Add([string]$value) } }
+    return ,([string[]]@($set))
+}
+
 function Get-ScreenWiseCacheSignature([object]$Inputs) {
     return Get-ScreenWiseCacheHash ($Inputs | ConvertTo-Json -Depth 12 -Compress)
 }
@@ -70,7 +79,7 @@ function Receive-ScreenWiseCargoLine([hashtable]$Monitor, [string]$Line) {
             $key = Get-ScreenWiseCacheSignature ([ordered]@{
                 package = $message.package_id; target_name = $message.target.name
                 target_kind = @($message.target.kind); crate_types = @($message.target.crate_types)
-                profile = $message.profile; features = @($message.features | Sort-Object)
+                profile = $message.profile; features = (Get-ScreenWiseOrdinalSet @($message.features))
             })
             if ($Monitor.Seen.ContainsKey($key)) { return }
             $Monitor.Seen[$key] = $true
@@ -133,4 +142,4 @@ function Complete-ScreenWiseCacheMonitor([hashtable]$Monitor, [int]$ExitCode, [s
     return [pscustomobject]$summary
 }
 
-Export-ModuleMember -Function Get-ScreenWiseCacheSignature, New-ScreenWiseCacheMonitor, Test-ScreenWiseCacheReady, Receive-ScreenWiseCargoLine, Complete-ScreenWiseCacheMonitor
+Export-ModuleMember -Function Get-ScreenWiseOrdinalSet, Get-ScreenWiseCacheSignature,New-ScreenWiseCacheMonitor, Test-ScreenWiseCacheReady, Receive-ScreenWiseCargoLine, Complete-ScreenWiseCacheMonitor
