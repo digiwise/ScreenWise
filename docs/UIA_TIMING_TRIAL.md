@@ -17,6 +17,19 @@ reads. Timeout/over-budget warnings are sampled at the first diagnostic and ever
 and up to 64 applicable rule references. It contains no captured text, URL,
 title, app identity, pattern, HWND, PID or file path.
 
+`initialization` (2026-10-15) splits `uia_initialization_failed` into fixed
+`failure_codes`/`failure_counts`: `com_changed_mode` (the thread was already in
+a single-threaded apartment), `com_init_failed` and `uia_context_failed`
+(creating the UIA client objects failed). `failure_hresult_counts` has one row
+per failure code and one column per fixed `hresult_codes` entry (ten known
+COM/UIA HRESULTs, then `other`); the sensitive debug record
+`uia_initialization_failure` adds the exact numeric HRESULT, never the error
+message. Walks run on shared blocking-pool
+threads; one that arrives on a thread another component left outside the MTA
+runs on a fresh thread instead and counts in `apartment_rehomed_walks`
+(`apartment_rehome_failures` if that thread could not run it, which fails
+closed).
+
 The desktop GUI owns the live loopback API and links `screenpipe-a11y` directly.
 Build and deploy the desktop executable as well as the recorder for a live trial;
 updating `screenpipe.exe` alone leaves this endpoint on the previous schema.

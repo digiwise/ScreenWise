@@ -60,6 +60,20 @@ class NumericTrialTests(unittest.TestCase):
         self.assertEqual(result["histogram_counts"], [1, None, 2])
         self.assertNotIn("PRIVATE_CANARY", json.dumps(result))
 
+    def test_initialization_counts_are_fixed_numeric_fields(self):
+        result = trial.uia_projection({"initialization": {
+            "failure_codes": ["PRIVATE_CANARY"], "failure_counts": [4, 0, "PRIVATE_CANARY"],
+            "hresult_codes": ["PRIVATE_CANARY"],
+            "failure_hresult_counts": [[4] + [0] * 10, [0] * 10 + ["PRIVATE_CANARY"], [1]],
+            "apartment_rehomed_walks": 9, "apartment_rehome_failures": "PRIVATE_CANARY"}})
+        self.assertEqual(result["initialization"], {"failure_counts": [4, 0, None],
+                                                    "failure_hresult_counts": [[4] + [0] * 10,
+                                                                               [0] * 10 + [None], None],
+                                                    "apartment_rehomed_walks": 9,
+                                                    "apartment_rehome_failures": None})
+        self.assertNotIn("PRIVATE_CANARY", json.dumps(result))
+        self.assertIsNone(trial.uia_projection({})["initialization"]["failure_counts"])
+
     def test_timing_projection_keeps_only_fixed_numeric_vectors(self):
         source = {"stage_names": ["PRIVATE_CANARY"],
                   "stages": {"calls": [1] * trial.TIMING_STAGE_COUNT,

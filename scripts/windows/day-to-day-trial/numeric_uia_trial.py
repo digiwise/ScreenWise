@@ -125,6 +125,17 @@ def uia_projection(source):
     for key, length in (("value_evidence_counts", 5), ("evidence_rejection_counts", 21)):
         result[key] = numeric_vector(source.get(key), length)
     result["process_metrics"] = process_projection(source.get("process_metrics"))
+    # Rows follow com_changed_mode, com_init_failed, uia_context_failed; columns
+    # follow the endpoint's fixed hresult_codes (10 known codes, then other).
+    init = source.get("initialization")
+    init = init if isinstance(init, dict) else {}
+    rows = init.get("failure_hresult_counts")
+    rows = ([numeric_vector(row, 11) for row in rows]
+            if isinstance(rows, list) and len(rows) == 3 else None)
+    result["initialization"] = {"failure_counts": numeric_vector(init.get("failure_counts"), 3),
+                                "failure_hresult_counts": rows,
+                                "apartment_rehomed_walks": numeric(init.get("apartment_rehomed_walks")),
+                                "apartment_rehome_failures": numeric(init.get("apartment_rehome_failures"))}
     return result
 
 

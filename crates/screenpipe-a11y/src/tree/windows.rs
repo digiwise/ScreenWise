@@ -26,7 +26,93 @@ pub(super) fn bulk_metrics_snapshot(include_process_names: bool) -> serde_json::
     let mut metrics = bulk::metrics_snapshot();
     metrics["timing"] = timing::metrics_snapshot();
     metrics["process_metrics"] = process_metrics::metrics_snapshot(include_process_names);
+    metrics["initialization"] = initialization_metrics_snapshot();
     metrics
+}
+
+/// Fixed causes of `uia_initialization_failed`, exported as numeric counts only.
+const INITIALIZATION_FAILURE_CODES: [&str; 3] =
+    ["com_changed_mode", "com_init_failed", "uia_context_failed"];
+static INITIALIZATION_FAILURES: [AtomicU64; INITIALIZATION_FAILURE_CODES.len()] =
+    [const { AtomicU64::new(0) }; INITIALIZATION_FAILURE_CODES.len()];
+/// Fixed HRESULTs counted per initialization failure cause; anything else is
+/// `other`, so the exported cardinality stays bounded.
+const INITIALIZATION_HRESULTS: [(u32, &str); 10] = [
+    (0x8001_0106, "rpc_e_changed_mode"),
+    (0x8007_0005, "e_accessdenied"),
+    (0x8007_000E, "e_outofmemory"),
+    (0x8004_0154, "regdb_e_classnotreg"),
+    (0x8008_0005, "co_e_server_exec_failure"),
+    (0x8004_01F0, "co_e_notinitialized"),
+    (0x8001_0108, "rpc_e_disconnected"),
+    (0x8000_4002, "e_nointerface"),
+    (0x8000_4005, "e_fail"),
+    (
+        windows::Win32::UI::Accessibility::UIA_E_TIMEOUT as u32,
+        "uia_e_timeout",
+    ),
+];
+const INITIALIZATION_HRESULT_SLOTS: usize = INITIALIZATION_HRESULTS.len() + 1;
+static INITIALIZATION_FAILURE_HRESULTS: [[AtomicU64; INITIALIZATION_HRESULT_SLOTS];
+    INITIALIZATION_FAILURE_CODES.len()] =
+    [const { [const { AtomicU64::new(0) }; INITIALIZATION_HRESULT_SLOTS] };
+        INITIALIZATION_FAILURE_CODES.len()];
+/// Walks that arrived on a thread another component left in a non-MTA
+/// apartment and therefore ran on a fresh thread, and those that could not.
+static APARTMENT_REHOMED_WALKS: AtomicU64 = AtomicU64::new(0);
+static APARTMENT_REHOME_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum InitializationFailure {
+    ComChangedMode,
+    ComInitFailed,
+    UiaContextFailed,
+}
+
+fn initialization_hresult_slot(hresult: u32) -> usize {
+    INITIALIZATION_HRESULTS
+        .iter()
+        .position(|(code, _)| *code == hresult)
+        .unwrap_or(INITIALIZATION_HRESULTS.len())
+}
+
+fn record_initialization_failure(kind: InitializationFailure, hresult: u32) {
+    INITIALIZATION_FAILURES[kind as usize].fetch_add(1, Ordering::Relaxed);
+    INITIALIZATION_FAILURE_HRESULTS[kind as usize][initialization_hresult_slot(hresult)]
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+fn initialization_metrics_snapshot() -> serde_json::Value {
+    let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+    let hresult_codes: Vec<&str> = INITIALIZATION_HRESULTS
+        .iter()
+        .map(|(_, name)| *name)
+        .chain(["other"])
+        .collect();
+    serde_json::json!({
+        "failure_codes": INITIALIZATION_FAILURE_CODES,
+        "failure_counts": INITIALIZATION_FAILURES.iter().map(load).collect::<Vec<_>>(),
+        // One row per failure code, one column per `hresult_codes` entry.
+        "hresult_codes": hresult_codes,
+        "failure_hresult_counts": INITIALIZATION_FAILURE_HRESULTS
+            .iter()
+            .map(|row| row.iter().map(load).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        "apartment_rehomed_walks": load(&APARTMENT_REHOMED_WALKS),
+        "apartment_rehome_failures": load(&APARTMENT_REHOME_FAILURES),
+    })
+}
+
+/// True when this thread already belongs to a single-threaded or neutral
+/// apartment, where joining the MTA fails with RPC_E_CHANGED_MODE. Walks run
+/// on shared blocking-pool threads, so any component that initializes COM as
+/// STA there without uninitializing would otherwise fail every later walk.
+fn thread_in_non_mta_apartment() -> bool {
+    let mut kind = APTTYPE::default();
+    let mut qualifier = APTTYPEQUALIFIER::default();
+    // CO_E_NOTINITIALIZED: the thread is free to join the MTA.
+    unsafe { CoGetApartmentType(&mut kind, &mut qualifier) }.is_ok() && kind != APTTYPE_MTA
 }
 
 pub(super) fn timed_ignored_url_check(check: impl FnOnce() -> bool) -> bool {
@@ -44,6 +130,7 @@ use chrono::Utc;
 use screenpipe_capture_policy::password_managers;
 use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -51,7 +138,10 @@ use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{
+    CoGetApartmentType, CoInitializeEx, APTTYPE, APTTYPEQUALIFIER, APTTYPE_MTA,
+    COINIT_MULTITHREADED,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
 };
@@ -366,9 +456,9 @@ pub struct WindowsTreeWalker {
     state: UnsafeCell<WalkerState>,
 }
 
-/// Safety: WindowsTreeWalker is created on the main thread then sent to a
-/// dedicated walker thread that initializes COM in apartment-threaded mode.
-/// After the initial send, it is never moved again — all access is single-threaded.
+/// Safety: a WindowsTreeWalker is created per attempt and sent once to the
+/// blocking thread that walks; it joins the MTA there (or the attempt moves to a
+/// fresh walker on a new thread) and is never moved again after initialization.
 /// The `Send` bound is required by `TreeWalkerPlatform` (for `Box<dyn …>` transfer).
 unsafe impl Send for WindowsTreeWalker {}
 
@@ -394,20 +484,35 @@ impl WindowsTreeWalker {
             if hr.is_ok() {
                 state.com_initialized_by_us = true;
                 state.com_ready = true;
-            } else if hr.0 == RPC_E_CHANGED_MODE_CODE {
-                timing::native_hresult(hr.0 as u32);
-                return Err(anyhow::anyhow!(
-                    "UIA event invalidation requires an MTA apartment"
-                ));
             } else {
+                // Errors keep the windows::core::Error so callers can report the HRESULT.
                 timing::native_hresult(hr.0 as u32);
-                return Err(anyhow::anyhow!("COM init failed: {:?}", hr));
+                let (kind, message) = if hr.0 == RPC_E_CHANGED_MODE_CODE {
+                    (
+                        InitializationFailure::ComChangedMode,
+                        "UIA event invalidation requires an MTA apartment",
+                    )
+                } else {
+                    (InitializationFailure::ComInitFailed, "COM init failed")
+                };
+                record_initialization_failure(kind, hr.0 as u32);
+                return Err(anyhow::Error::new(windows::core::Error::from(hr)).context(message));
             }
         }
         if state.uia.is_none() {
             // A capture attempt owns one deadline. Multi-second initialization
             // sleeps cannot fit that deadline and must never precede admission.
-            state.uia = Some(UiaContext::new()?);
+            match UiaContext::new() {
+                Ok(uia) => state.uia = Some(uia),
+                Err(error) => {
+                    timing::native_hresult(error.code().0 as u32);
+                    record_initialization_failure(
+                        InitializationFailure::UiaContextFailed,
+                        error.code().0 as u32,
+                    );
+                    return Err(anyhow::Error::new(error).context("UIA client creation failed"));
+                }
+            }
         }
         Ok(state.uia.as_ref().unwrap())
     }
@@ -428,6 +533,32 @@ impl Drop for WindowsTreeWalker {
 
 impl TreeWalkerPlatform for WindowsTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
+        if !thread_in_non_mta_apartment() {
+            return self.walk_in_current_thread();
+        }
+        // Run this attempt on a fresh thread (which joins the MTA) instead of
+        // failing it as `uia_initialization_failed`. The walker is per attempt,
+        // so a new one with the same configuration is equivalent.
+        APARTMENT_REHOMED_WALKS.fetch_add(1, Ordering::Relaxed);
+        let config = self.config.clone();
+        let walk = std::thread::Builder::new()
+            .name("screenwise-uia-mta-walk".into())
+            .spawn(move || WindowsTreeWalker::new(config).walk_in_current_thread())
+            .map_err(anyhow::Error::from)
+            .and_then(|walker| {
+                walker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("UIA walk thread panicked"))
+            });
+        walk.unwrap_or_else(|error| {
+            APARTMENT_REHOME_FAILURES.fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        })
+    }
+}
+
+impl WindowsTreeWalker {
+    fn walk_in_current_thread(&self) -> Result<TreeWalkResult> {
         let start = Instant::now();
         timing::begin(start, start + PRIVACY_DEADLINE, start + TOTAL_DEADLINE);
         let mut stage = "target_identity";
@@ -567,8 +698,12 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     screenpipe_config::sensitive_debug::record(
                         "uia_initialization_failure",
                         || {
-                            let _ = error;
-                            serde_json::json!({"stage":stage, "reason":"uia_initialization_failed"})
+                            // Only the numeric HRESULT; the message is not retained.
+                            let hresult = error
+                                .downcast_ref::<windows::core::Error>()
+                                .map(|error| format!("0x{:08X}", error.code().0 as u32));
+                            serde_json::json!({"stage":stage, "reason":"uia_initialization_failed",
+                                "hresult":hresult})
                         },
                     );
                     return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(
@@ -2148,6 +2283,80 @@ mod tests {
         let exported = bulk_metrics_snapshot(false);
         assert!(!exported.to_string().contains("\"basename\""));
         assert!(exported["process_metrics"]["processes"].is_array());
+        let initialization = &exported["initialization"];
+        assert_eq!(
+            initialization["failure_codes"],
+            serde_json::json!(INITIALIZATION_FAILURE_CODES)
+        );
+        assert_eq!(
+            initialization["failure_counts"].as_array().map(Vec::len),
+            Some(INITIALIZATION_FAILURE_CODES.len())
+        );
+        assert!(initialization["apartment_rehomed_walks"].is_u64());
+        assert!(initialization["apartment_rehome_failures"].is_u64());
+        let codes = initialization["hresult_codes"].as_array().unwrap();
+        assert_eq!(codes.len(), INITIALIZATION_HRESULT_SLOTS);
+        assert_eq!(codes.last().unwrap(), "other");
+        let rows = initialization["failure_hresult_counts"].as_array().unwrap();
+        assert_eq!(rows.len(), INITIALIZATION_FAILURE_CODES.len());
+        assert!(rows
+            .iter()
+            .all(|row| row.as_array().map(Vec::len) == Some(INITIALIZATION_HRESULT_SLOTS)));
+    }
+
+    #[test]
+    fn initialization_hresults_use_fixed_slots_and_errors_keep_the_code() {
+        assert_eq!(initialization_hresult_slot(0x8001_0106), 0);
+        assert_eq!(
+            initialization_hresult_slot(0x8123_4567),
+            INITIALIZATION_HRESULTS.len()
+        );
+        let row = InitializationFailure::UiaContextFailed as usize;
+        let before = INITIALIZATION_FAILURE_HRESULTS[row][1].load(Ordering::Relaxed);
+        record_initialization_failure(InitializationFailure::UiaContextFailed, 0x8007_0005);
+        assert!(INITIALIZATION_FAILURE_HRESULTS[row][1].load(Ordering::Relaxed) > before);
+        let hr = windows::core::HRESULT(RPC_E_CHANGED_MODE_CODE);
+        let error = anyhow::Error::new(windows::core::Error::from(hr)).context("fixture");
+        assert_eq!(
+            error
+                .downcast_ref::<windows::core::Error>()
+                .map(|error| error.code().0 as u32),
+            Some(0x8001_0106)
+        );
+    }
+
+    #[test]
+    fn walks_from_a_single_threaded_apartment_run_on_a_fresh_mta_thread() {
+        use windows::Win32::System::Com::{CoUninitialize, COINIT_APARTMENTTHREADED};
+        std::thread::spawn(|| unsafe {
+            assert!(!thread_in_non_mta_apartment());
+            assert!(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok());
+            assert!(thread_in_non_mta_apartment());
+            let before = APARTMENT_REHOMED_WALKS.load(Ordering::Relaxed);
+            // An invalid explicit target fails closed before UIA or any window content.
+            let walker = WindowsTreeWalker::new(TreeWalkerConfig {
+                windows_target: Some(super::super::WindowsTreeTarget {
+                    hwnd: 0,
+                    process_id: 1,
+                }),
+                ..Default::default()
+            });
+            assert!(matches!(
+                walker.walk_focused_window(),
+                Ok(TreeWalkResult::Skipped(SkipReason::MonitorUnverified))
+            ));
+            assert!(APARTMENT_REHOMED_WALKS.load(Ordering::Relaxed) > before);
+            CoUninitialize();
+        })
+        .join()
+        .unwrap();
+        std::thread::spawn(|| unsafe {
+            assert!(CoInitializeEx(None, COINIT_MULTITHREADED).is_ok());
+            assert!(!thread_in_non_mta_apartment());
+            windows::Win32::System::Com::CoUninitialize();
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

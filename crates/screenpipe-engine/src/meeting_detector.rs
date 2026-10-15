@@ -1412,8 +1412,22 @@ fn windows_scan_process_uia(
         TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_NamePropertyId,
     };
 
+    /// Balances a successful CoInitializeEx on every exit path, including early
+    /// returns and unwinding. This runs on a shared blocking-pool thread: a
+    /// leaked STA would make later accessibility walks there fail to join the
+    /// MTA, and uninitializing after a failed call would release another
+    /// owner's COM. Declared before any COM object so those drop first.
+    struct ComApartment(bool);
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _apartment = ComApartment(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok());
 
         let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)
             .map_err(|e| format!("UIA init failed: {}", e))?;
@@ -1578,7 +1592,6 @@ fn windows_scan_process_uia(
             }
         }
 
-        CoUninitialize();
         Ok(found)
     }
 }
