@@ -24,6 +24,7 @@
 //! compatibility with existing callers and the `pauseOnDrmContent` config key.
 
 use once_cell::sync::Lazy;
+use screenpipe_capture_policy::drm;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
@@ -183,101 +184,6 @@ pub(crate) fn initialize_pause_notice() {
     report_pause_reason(drm_content_paused(), reason);
 }
 
-/// Apps that trigger macOS content protection while ScreenCaptureKit is active
-/// (DRM streaming services plus remote-desktop clients that defensively blank
-/// their windows when any app holds an SCK session). Lowercased for comparison.
-const DRM_APPS: &[&str] = &[
-    "netflix",
-    "disney+",
-    "hulu",
-    "prime video",
-    "apple tv",
-    "peacock",
-    "paramount+",
-    "hbo max",
-    "max",
-    "crunchyroll",
-    "dazn",
-    // Remote-desktop clients using macOS content protection.
-    // Matches Omnissa Horizon Client, Omnissa Horizon Client Next,
-    // and the legacy VMware Horizon Client branding.
-    "horizon client",
-];
-
-/// Check whether `app_name` matches a known DRM streaming app.
-pub fn is_drm_app(app_name: &str) -> bool {
-    let lower = app_name.to_lowercase();
-    for &drm in DRM_APPS {
-        if drm == "max" {
-            if lower == "max" {
-                return true;
-            }
-        } else if lower.contains(drm) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Known DRM streaming domains.
-const DRM_DOMAINS: &[&str] = &[
-    "netflix.com",
-    "disneyplus.com",
-    "hulu.com",
-    "primevideo.com",
-    "tv.apple.com",
-    "peacocktv.com",
-    "paramountplus.com",
-    "play.max.com",
-    "crunchyroll.com",
-    "dazn.com",
-];
-
-/// URL path patterns for streaming services on generic domains.
-const DRM_URL_PATHS: &[(&str, &str)] = &[("amazon.com", "/gp/video/")];
-
-/// Check whether `url` points to a known DRM streaming site.
-pub fn is_drm_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    let host_and_path = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
-        .unwrap_or(&lower);
-    let normalized = host_and_path.strip_prefix("www.").unwrap_or(host_and_path);
-    // Extract just the host portion (before any path slash)
-    let host = normalized.split('/').next().unwrap_or(normalized);
-
-    for &domain in DRM_DOMAINS {
-        // Match exact host or any subdomain (e.g. "apps.disneyplus.com" matches "disneyplus.com")
-        if host == domain || host.strip_suffix(domain).is_some_and(|s| s.ends_with('.')) {
-            return true;
-        }
-    }
-    for &(domain, path) in DRM_URL_PATHS {
-        if normalized.starts_with(domain) {
-            if let Some(url_path) = normalized.strip_prefix(domain) {
-                if url_path.starts_with(path) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Combined check: is the foreground content DRM-protected?
-pub fn is_drm_content(app_name: &str, url: Option<&str>) -> bool {
-    if is_drm_app(app_name) {
-        return true;
-    }
-    if let Some(u) = url {
-        if is_drm_url(u) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Update the global DRM pause flag based on current foreground content.
 /// Returns `true` if capture should be skipped (DRM content detected).
 pub fn check_and_update_drm_state(
@@ -293,7 +199,7 @@ pub fn check_and_update_drm_state(
     }
 
     let app = app_name.unwrap_or("");
-    if is_drm_content(app, browser_url) {
+    if drm::is_drm_content(app, browser_url) {
         set_drm_paused(true);
         true
     } else if !app.is_empty() {
@@ -402,7 +308,7 @@ fn get_drm_url_from_window_title(app: &cidre::ax::UiElement) -> Option<String> {
 
     // Check each DRM domain's base name against the window title.
     // "netflix.com" → check for "netflix", "disneyplus.com" → "disneyplus", etc.
-    for &domain in DRM_DOMAINS {
+    for &domain in drm::DRM_DOMAINS {
         let base = domain.split('.').next().unwrap_or(domain);
         if title_lower.contains(base) {
             debug!(
@@ -441,7 +347,7 @@ pub fn pre_capture_drm_check(pause_on_drm_content: bool, trigger_app_name: Optio
     let result = std::panic::catch_unwind(|| -> bool {
         // Fast path: use the trigger app name if available
         if let Some(app) = trigger_app_name {
-            if is_drm_app(app) {
+            if drm::is_drm_app(app) {
                 info!("pre-capture DRM check: native DRM app '{}' — blocking", app);
                 set_drm_paused(true);
                 return true;
@@ -455,7 +361,7 @@ pub fn pre_capture_drm_check(pause_on_drm_content: bool, trigger_app_name: Optio
                             app, name, url
                         );
                         if let Some(ref u) = url {
-                            if is_drm_url(u) {
+                            if drm::is_drm_url(u) {
                                 info!(
                                     "pre-capture DRM check: browser '{}' on DRM URL {} — blocking",
                                     app, u
@@ -475,7 +381,7 @@ pub fn pre_capture_drm_check(pause_on_drm_content: bool, trigger_app_name: Optio
 
         // No trigger app name (Idle, Click, etc.) — query the focused app
         if let Some((app_name, url)) = get_focused_app_info() {
-            if is_drm_content(&app_name, url.as_deref()) {
+            if drm::is_drm_content(&app_name, url.as_deref()) {
                 info!(
                     "pre-capture DRM check: focused app='{}', url={:?} — blocking",
                     app_name, url
@@ -566,7 +472,7 @@ fn any_drm_window_on_screen() -> bool {
             if let Some(owner_cf) = owner_val.try_as_string() {
                 let owner_str = owner_cf.to_string();
 
-                if is_drm_app(&owner_str) {
+                if drm::is_drm_app(&owner_str) {
                     debug!(
                         "DRM window still on screen: app='{}' (native DRM app)",
                         owner_str
@@ -580,7 +486,7 @@ fn any_drm_window_on_screen() -> bool {
                         if let Some(name_cf) = name_val.try_as_string() {
                             let title = name_cf.to_string().to_lowercase();
 
-                            for &domain in DRM_DOMAINS {
+                            for &domain in drm::DRM_DOMAINS {
                                 let base = domain.split('.').next().unwrap_or(domain);
                                 if title.contains(base) {
                                     debug!(
@@ -616,13 +522,13 @@ pub fn poll_drm_clear() -> bool {
 
     match result {
         Ok(Some((app_name, url))) => {
-            if is_drm_app(&app_name) {
+            if drm::is_drm_app(&app_name) {
                 debug!("DRM app still focused: {}", app_name);
                 return true;
             }
             if is_browser(&app_name) {
                 if let Some(ref u) = url {
-                    if is_drm_url(u) {
+                    if drm::is_drm_url(u) {
                         debug!(
                             "browser '{}' still on DRM URL: {} — keeping pause",
                             app_name, u
@@ -916,7 +822,7 @@ fn windows_foreground_assessment() -> WindowsForegroundAssessment {
         .rsplit(['\\', '/'])
         .next()
         .unwrap_or(process_path.as_ref());
-    if is_drm_app(process_name) {
+    if drm::is_drm_app(process_name) {
         screenpipe_config::sensitive_debug::record(
             "content_protection_policy",
             || serde_json::json!({"policy":"protected application matched","hwnd":hwnd.0 as usize,"pid":pid,"process_path":process_path}),
@@ -1038,96 +944,6 @@ mod tests {
             again.suppression_since,
             Some(now + chrono::Duration::seconds(30))
         );
-    }
-
-    #[test]
-    fn test_is_drm_app_positive() {
-        assert!(is_drm_app("Netflix"));
-        assert!(is_drm_app("netflix"));
-        assert!(is_drm_app("Disney+"));
-        assert!(is_drm_app("Hulu"));
-        assert!(is_drm_app("Prime Video"));
-        assert!(is_drm_app("Apple TV"));
-        assert!(is_drm_app("Peacock"));
-        assert!(is_drm_app("Paramount+"));
-        assert!(is_drm_app("HBO Max"));
-        assert!(is_drm_app("Crunchyroll"));
-        assert!(is_drm_app("Max"));
-        assert!(is_drm_app("max"));
-    }
-
-    #[test]
-    fn test_is_drm_app_negative() {
-        assert!(!is_drm_app("Finder"));
-        assert!(!is_drm_app("Safari"));
-        assert!(!is_drm_app("Chrome"));
-        assert!(!is_drm_app("Maximize"));
-        assert!(!is_drm_app("Max Mustermann"));
-        assert!(!is_drm_app("3ds Max"));
-        assert!(!is_drm_app("Terminal"));
-    }
-
-    #[test]
-    fn test_is_drm_app_horizon_variants() {
-        assert!(is_drm_app("Omnissa Horizon Client"));
-        assert!(is_drm_app("Omnissa Horizon Client Next"));
-        assert!(is_drm_app("VMware Horizon Client"));
-        assert!(is_drm_app("horizon client"));
-        // Guard against overly broad matches.
-        assert!(!is_drm_app("Horizon Zero Dawn"));
-        assert!(!is_drm_app("Blue Horizon"));
-    }
-
-    #[test]
-    fn test_is_drm_url_positive() {
-        assert!(is_drm_url("https://netflix.com/watch/12345"));
-        assert!(is_drm_url("https://www.netflix.com/browse"));
-        assert!(is_drm_url("https://disneyplus.com/video/abc"));
-        assert!(is_drm_url("https://hulu.com/watch"));
-        assert!(is_drm_url("https://primevideo.com/detail"));
-        assert!(is_drm_url("https://tv.apple.com/show/123"));
-        assert!(is_drm_url("https://peacocktv.com/watch"));
-        assert!(is_drm_url("https://paramountplus.com/shows"));
-        assert!(is_drm_url("https://play.max.com/movie/abc"));
-        assert!(is_drm_url("https://crunchyroll.com/watch"));
-        assert!(is_drm_url("http://netflix.com/watch/12345"));
-        assert!(is_drm_url(
-            "https://www.amazon.com/gp/video/detail/B0CXGTK4HY/ref=atv_hm"
-        ));
-        assert!(is_drm_url("https://amazon.com/gp/video/detail/something"));
-        // subdomain matching
-        assert!(is_drm_url(
-            "https://apps.disneyplus.com/il/shows/scrubs/123/watch"
-        ));
-        assert!(is_drm_url("https://watch.hulu.com/show/abc"));
-    }
-
-    #[test]
-    fn test_is_drm_url_negative() {
-        assert!(!is_drm_url("https://google.com"));
-        assert!(!is_drm_url("https://github.com"));
-        assert!(!is_drm_url("https://max.com"));
-        assert!(!is_drm_url("https://example.com/netflix.com"));
-        assert!(!is_drm_url("https://amazon.com/dp/B09V3KXJPB"));
-        assert!(!is_drm_url("https://amazon.com/s?k=headphones"));
-        // subdomain anchor — must not match lookalike domains
-        assert!(!is_drm_url("https://netflix.com.evil.com/phish"));
-        assert!(!is_drm_url("https://notdisneyplus.com/page"));
-    }
-
-    #[test]
-    fn test_is_drm_content_combined() {
-        assert!(is_drm_content("Netflix", None));
-        assert!(is_drm_content(
-            "Google Chrome",
-            Some("https://netflix.com/watch/123")
-        ));
-        assert!(is_drm_content(
-            "Arc",
-            Some("https://www.amazon.com/gp/video/detail/B0CXGTK4HY/ref=atv_hm")
-        ));
-        assert!(!is_drm_content("Finder", Some("https://google.com")));
-        assert!(!is_drm_content("Finder", None));
     }
 
     #[test]
@@ -1329,7 +1145,7 @@ mod tests {
             println!("Comet front window title: '{}'", title);
 
             let title_lower = title.to_lowercase();
-            let has_netflix = DRM_DOMAINS.iter().any(|domain| {
+            let has_netflix = drm::DRM_DOMAINS.iter().any(|domain| {
                 let base = domain.split('.').next().unwrap_or(domain);
                 title_lower.contains(base)
             });
@@ -1341,7 +1157,7 @@ mod tests {
             println!("✓ Window title contains Netflix — DRM detection would fire");
 
             // Also verify the pure logic: if we had the URL, would it be detected?
-            assert!(is_drm_content("Comet", Some("https://netflix.com")));
+            assert!(drm::is_drm_content("Comet", Some("https://netflix.com")));
             println!("✓ is_drm_content('Comet', 'https://netflix.com') = true");
         }
 

@@ -1,0 +1,12 @@
+[package]
+name = "screenpipe-capture-policy"
+version.workspace = true
+authors.workspace = true
+description = "Pure capture-policy matchers (URL, window pattern, DRM) shared by capture admission and content screening"
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+regex = "1.10"
+url = "2.5"

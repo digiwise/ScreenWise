@@ -7,7 +7,8 @@
 //! Provides settings for what to capture, privacy filters, and performance tuning.
 
 use regex::Regex;
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::password_managers;
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -91,12 +92,12 @@ pub struct UiCaptureConfig {
     pub excluded_window_pattern_strings: Vec<String>,
 
     /// User-configured app/window names to skip (case-insensitive substring match).
-    /// Supports `App::Title` scoping — see `screenpipe-core::window_pattern`.
+    /// Supports `App::Title` scoping — see `screenpipe-capture-policy::window_pattern`.
     #[serde(default)]
     pub ignored_windows: Vec<String>,
 
     /// Optional user-configured allow-list for app/window names.
-    /// Supports `App::Title` scoping — see `screenpipe-core::window_pattern`.
+    /// Supports `App::Title` scoping — see `screenpipe-capture-policy::window_pattern`.
     #[serde(default)]
     pub included_windows: Vec<String>,
 
@@ -205,15 +206,14 @@ impl Default for UiCaptureConfig {
             skip_password_fields: true,
             apply_pii_removal: true,
             skip_secure_input: true,
-            excluded_apps: vec![
-                "1Password".to_string(),
-                "Bitwarden".to_string(),
-                "LastPass".to_string(),
-                "Dashlane".to_string(),
-                "KeePassXC".to_string(),
-                "Keychain Access".to_string(),
-                "Credential Manager".to_string(),
-            ],
+            // Canonical password-manager identities plus the OS credential viewers.
+            excluded_apps: password_managers::desktop_app_display_names()
+                .chain([
+                    password_managers::KEYCHAIN_ACCESS,
+                    password_managers::CREDENTIAL_MANAGER,
+                ])
+                .map(str::to_string)
+                .collect(),
             excluded_window_patterns: Vec::new(),
             // Incognito / private browsing detection is handled by the
             // `crate::incognito` module with comprehensive localized matching
@@ -432,6 +432,22 @@ mod tests {
         assert!(config.capture_window_focus);
         assert!(!config.capture_keystrokes); // Should be off by default
         assert!(config.capture_clipboard_content); // On by default
+    }
+
+    #[test]
+    fn default_excluded_apps_are_unchanged() {
+        assert_eq!(
+            UiCaptureConfig::default().excluded_apps,
+            [
+                "1Password",
+                "Bitwarden",
+                "LastPass",
+                "Dashlane",
+                "KeePassXC",
+                "Keychain Access",
+                "Credential Manager",
+            ]
+        );
     }
 
     #[test]

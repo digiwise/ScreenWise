@@ -187,8 +187,9 @@ provider event coverage, embedded browsers/extensions, rapid changes, cross-
 monitor focus, OCR recovery and permanently hung COM calls remain validation
 gaps. Production now acquires Raw View and control membership, so those earlier
 Control View probe timings do not directly measure this candidate. Separate
-raw-wrapper and meaningful-depth limits apply as described above. The temporary timing checkpoint
-in AGENTS.md remains applicable.
+raw-wrapper and meaningful-depth limits apply as described above. The
+[timing diagnostic guide](UIA_TIMING_TRIAL.md) describes the limits on
+interpreting these measurements. These validation gaps remain open.
 
 The standalone numeric probe source is preserved in
 `scripts/windows/uia-runtimeid-probe/`. It does not alter production admission,

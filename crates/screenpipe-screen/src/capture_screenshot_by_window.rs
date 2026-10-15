@@ -4,7 +4,7 @@
 
 use image::DynamicImage;
 use once_cell::sync::Lazy;
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -355,7 +355,7 @@ impl WindowFilters {
     const BUILTIN_IGNORED: &'static [&'static str] = &["loginwindow", "logonui"];
 
     /// O(n) over ignore + include patterns. Patterns support an optional
-    /// `AppName::WindowTitle` scope (parsed in `screenpipe-core::window_pattern`);
+    /// `AppName::WindowTitle` scope (parsed in `screenpipe-capture-policy::window_pattern`);
     /// legacy unscoped strings keep the historical "app OR title contains" behavior.
     pub fn is_valid(&self, app_name: &str, title: &str) -> bool {
         self.exclusion_reason(app_name, title).is_none()
@@ -393,10 +393,10 @@ impl WindowFilters {
     /// Uses domain-level matching to avoid false positives (e.g., "chase" won't match "purchase.com")
     /// Returns true if the URL is blocked (should be skipped)
     ///
-    /// Delegates to [`screenpipe_a11y::url_filter::is_url_blocked`] so the
+    /// Delegates to [`screenpipe_capture_policy::url_filter::is_url_blocked`] so the
     /// vision path and the a11y tree walker agree on what "blocked" means.
     pub fn is_url_blocked(&self, url: &str) -> bool {
-        screenpipe_a11y::url_filter::is_url_blocked(url, &self.ignored_urls)
+        screenpipe_capture_policy::url_filter::is_url_blocked(url, &self.ignored_urls)
     }
 
     #[cfg(target_os = "windows")]
@@ -992,6 +992,8 @@ pub enum WindowsCaptureRedactionReason {
     ActiveWindowExcluded,
     NoSafeActiveWindow,
     InconsistentFocus,
+    /// In-memory content screening blocked the frame or could not complete.
+    ContentScreening,
 }
 
 #[cfg(target_os = "windows")]
@@ -1001,6 +1003,7 @@ impl fmt::Display for WindowsCaptureRedactionReason {
             Self::ActiveWindowExcluded => "active window is excluded",
             Self::NoSafeActiveWindow => "no safe active window is available",
             Self::InconsistentFocus => "window focus snapshot is inconsistent",
+            Self::ContentScreening => "content screening withheld the frame",
         })
     }
 }
@@ -1075,6 +1078,9 @@ impl WindowsCaptureOutcome {
                 WindowsCaptureRedactionReason::InconsistentFocus => {
                     "CAPTURE REDACTED — INCONSISTENT FOCUS"
                 }
+                WindowsCaptureRedactionReason::ContentScreening => {
+                    "CAPTURE REDACTED — CONTENT SCREENING"
+                }
             }),
             Self::CaptureFailed(stage) => Some(match stage {
                 WindowsCaptureFailureStage::InitialPrivacyEvaluation => {
@@ -1124,6 +1130,10 @@ pub struct WindowsCapturePrivacy {
     pub blockers_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accessibility: Option<WindowsAccessibilityDecision>,
+    /// In-memory content screening decision. Absent when screening did not run
+    /// (disabled, or the frame was withheld before screening).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_screening: Option<WindowsContentScreeningDecision>,
     pub foreground_monitor: Option<String>,
     pub is_active_monitor: Option<bool>,
     pub foreground_monitor_changed: bool,
@@ -1146,6 +1156,51 @@ pub struct WindowsAccessibilityDecision {
     /// Verified executable sampled from the inspected target; not an exclusion match.
     /// Unknown remains null. Titles, URLs and raw native identities are never stored here.
     pub sampled_target_app: Option<String>,
+}
+
+/// Content-free outcome of in-memory content screening for one frame.
+/// Only fixed codes, timings and counts are stored: never matched text,
+/// titles, URLs or positions. Every metric is optional and omitted when
+/// unknown, so the shape stays additive.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct WindowsContentScreeningDecision {
+    /// `passed`, `redacted`, `blocked` or `unavailable`.
+    pub outcome: &'static str,
+    /// Fixed `content_*` reason codes, sorted and deduplicated.
+    pub reasons: Vec<&'static str>,
+    /// True when screening was required because a UIA evidence-acquisition
+    /// failure in a configured fail-open window would otherwise withhold it.
+    pub fail_open: bool,
+    /// Only for `redacted`: how many pixel regions were blacked out in memory
+    /// before the frame was written (a count only; never positions or text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redacted_regions: Option<u32>,
+    /// True when OCR ran only because screening needed it (paired capture
+    /// would not have recognised this frame); false when paired capture
+    /// would have run OCR anyway or no OCR ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_forced: Option<bool>,
+    /// Wall time of the screening OCR, in whole milliseconds (saturating).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_ms: Option<u32>,
+    /// Wall time of text screening (chunking, rules, tier), in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_ms: Option<u32>,
+    /// Wall time of in-memory redaction planning and pixel fill, in
+    /// milliseconds; only when the redaction tier ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redact_ms: Option<u32>,
+    /// Distinct redactable secrets found only in OCR text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hits_ocr_only: Option<u32>,
+    /// Distinct redactable secrets found only in accessibility text/tree
+    /// fields or window metadata (metadata counts as accessibility).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hits_a11y_only: Option<u32>,
+    /// Distinct redactable secrets found in both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hits_both: Option<u32>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1177,6 +1232,7 @@ impl Default for WindowsCapturePrivacy {
             rule_matches: Vec::new(),
             blockers_truncated: false,
             accessibility: None,
+            content_screening: None,
             foreground_monitor: None,
             is_active_monitor: None,
             foreground_monitor_changed: false,
@@ -1203,7 +1259,9 @@ impl WindowsCapturePrivacy {
     pub fn with_outcome(mut self, outcome: WindowsCaptureOutcome) -> Self {
         if outcome.is_placeholder() {
             if let Some(failure) = &mut self.accessibility {
-                if failure.processing == "proceeding" {
+                // A fail-open candidate that never reached a passing screen is
+                // withheld like any other frame stopped by a later check.
+                if matches!(failure.processing, "proceeding" | "screening_required") {
                     failure.processing = "withheld_by_other_check";
                 }
             }
@@ -1224,6 +1282,7 @@ impl WindowsCapturePrivacy {
                     WindowsCaptureRedactionReason::ActiveWindowExcluded => "active_window_excluded",
                     WindowsCaptureRedactionReason::NoSafeActiveWindow => "no_safe_active_window",
                     WindowsCaptureRedactionReason::InconsistentFocus => "inconsistent_focus",
+                    WindowsCaptureRedactionReason::ContentScreening => "content_screening",
                 }),
             ),
             WindowsCaptureOutcome::CaptureFailed(stage) => (
@@ -3887,6 +3946,11 @@ mod tests {
             .marker_text(),
             Some("CAPTURE REDACTED — INCONSISTENT FOCUS")
         );
+        assert_eq!(
+            WindowsCaptureOutcome::CaptureRedacted(WindowsCaptureRedactionReason::ContentScreening)
+                .marker_text(),
+            Some("CAPTURE REDACTED — CONTENT SCREENING")
+        );
         for (stage, expected) in [
             (
                 WindowsCaptureFailureStage::InitialPrivacyEvaluation,
@@ -3911,6 +3975,140 @@ mod tests {
             );
         }
         assert_eq!(WindowsCaptureOutcome::FullMonitor.marker_text(), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_content_screening_decision_is_additive_and_fixed_code_only() {
+        // Absent decision keeps the existing persisted shape unchanged.
+        let unchanged = serde_json::to_value(
+            WindowsCapturePrivacy::default().with_outcome(WindowsCaptureOutcome::FullMonitor),
+        )
+        .unwrap();
+        assert!(unchanged.get("content_screening").is_none());
+        assert_eq!(unchanged["schema_version"], 1);
+
+        let mut privacy = WindowsCapturePrivacy::default();
+        privacy.accessibility = Some(WindowsAccessibilityDecision {
+            phase: "privacy_admission",
+            cause: "uia_walk_timeout",
+            processing: "screening_required",
+            unresolved_rules: Vec::new(),
+            rules_truncated: false,
+            sampled_target_app: None,
+        });
+        privacy.content_screening = Some(WindowsContentScreeningDecision {
+            outcome: "blocked",
+            reasons: vec!["content_secret"],
+            fail_open: true,
+            ..Default::default()
+        });
+        let outcome =
+            WindowsCaptureOutcome::CaptureRedacted(WindowsCaptureRedactionReason::ContentScreening);
+        assert!(outcome.is_placeholder());
+        let json = serde_json::to_value(privacy.with_outcome(outcome)).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["outcome"], "redacted");
+        assert_eq!(json["reason"], "content_screening");
+        // A fail-open candidate stopped by screening is not admitted.
+        assert_eq!(
+            json["accessibility"]["processing"],
+            "withheld_by_other_check"
+        );
+        assert_eq!(
+            json["content_screening"],
+            serde_json::json!({"outcome":"blocked","reasons":["content_secret"],"fail_open":true})
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_content_screening_redacted_decision_carries_only_a_region_count() {
+        let mut privacy = WindowsCapturePrivacy::default();
+        privacy.content_screening = Some(WindowsContentScreeningDecision {
+            outcome: "redacted",
+            reasons: vec!["content_secret"],
+            fail_open: false,
+            redacted_regions: Some(2),
+            ..Default::default()
+        });
+        // A redacted frame is a real capture, not a placeholder.
+        let json =
+            serde_json::to_value(privacy.with_outcome(WindowsCaptureOutcome::FullMonitor)).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["outcome"], "full_monitor");
+        assert!(json["reason"].is_null());
+        assert_eq!(
+            json["content_screening"],
+            serde_json::json!({
+                "outcome":"redacted","reasons":["content_secret"],"fail_open":false,
+                "redacted_regions":2
+            })
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_content_screening_metrics_are_additive_counts_and_timings() {
+        let mut privacy = WindowsCapturePrivacy::default();
+        privacy.content_screening = Some(WindowsContentScreeningDecision {
+            outcome: "redacted",
+            reasons: vec!["content_secret"],
+            fail_open: false,
+            redacted_regions: Some(1),
+            ocr_forced: Some(true),
+            ocr_ms: Some(87),
+            screen_ms: Some(3),
+            redact_ms: Some(u32::MAX),
+            hits_ocr_only: Some(0),
+            hits_a11y_only: Some(1),
+            hits_both: Some(2),
+        });
+        let json =
+            serde_json::to_value(privacy.with_outcome(WindowsCaptureOutcome::FullMonitor)).unwrap();
+        assert_eq!(
+            json["content_screening"],
+            serde_json::json!({
+                "outcome":"redacted","reasons":["content_secret"],"fail_open":false,
+                "redacted_regions":1,"ocr_forced":true,"ocr_ms":87,"screen_ms":3,
+                "redact_ms":4294967295u32,"hits_ocr_only":0,"hits_a11y_only":1,"hits_both":2
+            })
+        );
+        // Unknown metrics are omitted rather than serialised as null.
+        let mut partial = WindowsCapturePrivacy::default();
+        partial.content_screening = Some(WindowsContentScreeningDecision {
+            outcome: "unavailable",
+            reasons: vec!["content_screening_unavailable"],
+            ocr_forced: Some(false),
+            ocr_ms: Some(12),
+            ..Default::default()
+        });
+        let json = serde_json::to_value(partial.with_outcome(
+            WindowsCaptureOutcome::CaptureRedacted(WindowsCaptureRedactionReason::ContentScreening),
+        ))
+        .unwrap();
+        assert_eq!(
+            json["content_screening"],
+            serde_json::json!({
+                "outcome":"unavailable","reasons":["content_screening_unavailable"],
+                "fail_open":false,"ocr_forced":false,"ocr_ms":12
+            })
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_privacy_without_screening_is_byte_identical() {
+        // Screening disabled leaves `content_screening` unset: the persisted
+        // JSON is exactly the pre-screening shape, byte for byte.
+        let json = serde_json::to_string(
+            &WindowsCapturePrivacy::default().with_outcome(WindowsCaptureOutcome::FullMonitor),
+        )
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"schema_version":1,"outcome":"full_monitor","reason":null,"blockers":[],"rule_matches":[],"blockers_truncated":false,"foreground_monitor":null,"is_active_monitor":null,"foreground_monitor_changed":false}"#
+        );
     }
 
     // ==================== is_url_blocked tests ====================

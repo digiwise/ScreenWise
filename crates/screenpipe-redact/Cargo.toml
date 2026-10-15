@@ -12,6 +12,7 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
+screenpipe-capture-policy = { path = "../screenpipe-capture-policy" }
 # Re-exports & shared deps
 aho-corasick = "1"
 anyhow = "1"

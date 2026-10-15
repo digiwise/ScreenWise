@@ -44,8 +44,8 @@ Windows' 50 ms minimum,
 and reject another native request when insufficient time remains. These checks
 bound accepted results and configured client waits; they cannot cancel a
 permanently hung COM provider or promise a hard wall-clock return bound. The
-existing temporary timing checkpoint still requires an external watchdog before
-being claimed as hardened diagnostics.
+[timing diagnostic guide](UIA_TIMING_TRIAL.md) describes these hang limits;
+watchdog implementation is separate UIA work.
 
 Windows mandatory admission no longer inherits the adaptive accessibility-text
 walk's 250 ms override or long application cooldown. Other platforms and the

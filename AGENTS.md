@@ -37,20 +37,32 @@ claims; it does not weaken the implementation requirements below.
 
 ## Start and preserve
 
-### Temporary UIA timing checkpoint (2026-10-14)
+### UIA diagnostics
 
-`crates/screenpipe-a11y/src/tree/windows_timing.rs` is temporary diagnostic
-instrumentation for the current UIA timeout investigation. Before beginning
-significant work outside UIA timing, either harden it for ongoing production use
-or remove it. Hardening must settle log volume/rate limiting, schema stability,
-the distinction between shared acquisition and individual rule cost, and an
-external watchdog for COM calls that never return. Validate the timing data on
-an owner-run live trial before treating it as a performance conclusion. This
-checkpoint does not authorize deployment, capture, or reduced privacy checks.
-The opt-in privacy-only comparison and targeted failure-budget/retry diagnostics
-in [the comparison handoff](docs/UIA_PRIVACY_ONLY_COMPARISON.md) are covered by
-this same harden-or-remove checkpoint. Normal launch remains privacy-and-text;
-comparison configuration is startup-scoped and never reuses admission state.
+UIA diagnostics in `crates/screenpipe-a11y/src/tree/windows_timing.rs` include
+aggregate attempt durations/outcomes, bounded process metrics, detailed
+stage/rule/retry/budget observations and sampled warnings. Use these diagnostics
+with the limits below. An external watchdog and further diagnostic expansion
+are separate UIA work, not prerequisites for completing content screening.
+These diagnostics do not establish production hardening or measured performance.
+
+Keep diagnostics observational: they must not change admission decisions,
+extend deadlines or relax privacy checks. Keep trace storage and process
+cardinality bounded, messages content-free and warnings sampled. Preserve fixed
+schema labels/vector ordering; version any incompatible schema change and update
+its consumers. Shared provider acquisition time cannot be assigned to individual
+rules; rule timings measure matching work separately. A first observed timeout
+stage or native error is not proof of the terminal failure's cause.
+
+Finished-attempt traces and process totals omit calls that never return; some
+phase counters update before attempt completion. In-process timing cannot cancel
+a hung COM call or guarantee a wall-clock return bound. Live usefulness and
+overhead remain unvalidated; validate on an owner-run live trial before drawing
+performance conclusions. This policy does not authorize deployment, capture or
+reduced privacy checks. The opt-in privacy-only comparison and targeted failure
+diagnostics in [the comparison handoff](docs/UIA_PRIVACY_ONLY_COMPARISON.md) remain
+available. Normal launch remains privacy-and-text; comparison configuration is
+startup-scoped and never reuses admission state.
 
 Inspect branch, status and recent history before changing files; do not assume a
 documented historical HEAD is current. Development currently uses `screenwise`.
@@ -64,6 +76,18 @@ passwords, recordings, screenshots, transcripts, bearer tokens and SQLite stores
 Do not publish them. `.local/`, `target/`, `smoke*/`, caches and generated media
 are private/generated, not source. Ignore rules do not protect already tracked
 files: inspect the exact staged paths before every commit.
+
+Owner standing permission (2026-10-15) for content-free screening metrics: agents
+may run read-only (`mode=ro`), aggregate-only SQLite queries (counts, sums,
+averages, percentiles grouped by time bucket, `app_name` and `text_source`) over
+`frames.timestamp`, `frames.app_name`, `frames.text_source` and the numeric,
+boolean and fixed-code fields of `capture_privacy.content_screening` and
+`capture_privacy.accessibility.processing`. Never select window titles, URLs,
+document paths, OCR/accessibility text, tree JSON, images or other columns, and
+never dump rows. App names are local activity metadata: keep results out of
+public docs and commits except sanitized numeric summaries. This permits no
+capture to generate data; trials keep the readiness gate. Canonical queries are in
+[content screening](docs/CONTENT_SCREENING.md#evaluating-always-ocr).
 
 Detailed pre-publication maintainer notes may exist under ignored `.local/`.
 They are not needed by a fresh clone and are not current instructions or renewed
@@ -200,6 +224,12 @@ classification requires inspection and monitoring, not owner approval.
 - Do not casually change dependency versions or either Rust lockfile. Earlier
   hardening intentionally changed lockfile graphs; compare against pre-task HEAD,
   not the obsolete claim that they still equal the upstream baseline.
+- Owner preference (2026-10-15): logical structure and reuse outweigh minimal
+  dependency diffs. Place code in the crate whose responsibility it is and reuse
+  existing engines and canonical lists instead of duplicating them to avoid a new
+  workspace edge, small crate or lockfile entry. Avoid broad grab-bag crates. Propose
+  the clean structure to the owner (dependency changes remain owner decisions); keep
+  lockfile diffs to the intended packages/edges and never use `cargo update`.
 - Use Visual Studio Developer PowerShell and the native environment described in
   docs/WINDOWS_SETUP.md. Never hard-code one developer's checkout or runtime paths.
 - On Windows, cold release builds and native tests that link libsamplerate use
@@ -250,6 +280,18 @@ evidence; unknown Values cannot override known blockers or independent gates.
 Acquisition/traversal failures, incomplete trees, bounds, deadlines, required
 Name/structural evidence and focus/revision failures remain fail closed. Keep
 fixed Value reason/count diagnostics without property contents.
+The owner's UIA fail-open exception (2026-10-14) lets windows matching the
+explicit `uiaFailOpenWindows` setting proceed after a UIA evidence-acquisition
+failure only when in-memory content screening is enabled and that frame then
+passes it; see [content screening](docs/CONTENT_SCREENING.md). The list is
+empty by default. Matched exclusions, private windows, incomplete-tree and
+monitor/focus/identity/target checks, lock, detected DRM content and screening
+failure never fail open, and unscreened pixels or text must never be persisted.
+Owner clarification (2026-10-15): an unverifiable DRM URL alone does not block
+fail-open; DRM app detection and DRM-domain screening of the frame's text still
+apply. In stage 1 a fail-open frame with any screening hit is withheld, never
+redacted; the agreed phased plan in that document may relax this only when its
+profile phase is implemented.
 Per-process UIA aggregates may expose freshly verified executable basenames
 only through authenticated local diagnostics. Default public/exported metrics
 omit names; generic notices must not gain them. Bound named cardinality to 32

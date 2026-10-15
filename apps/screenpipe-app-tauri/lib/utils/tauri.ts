@@ -1974,6 +1974,31 @@ includedWindows: string[];
  */
 ignoredUrls?: string[];
 /**
+ * Screen every captured frame in memory before anything is persisted: OCR text,
+ * accessibility text and tree fields, and the window title, URL and document path.
+ * Secrets (API keys, tokens, payment cards, credentials in URLs, sensitive URL
+ * parameters) are redacted in memory and the frame is stored; blockers (blocked or
+ * protected domains, password-manager UI, keywords) and anything that cannot be
+ * redacted reliably withhold the frame (a source-free placeholder on Windows; other
+ * platforms skip the frame). Best-effort heuristics, not a guarantee: unrecognised
+ * secrets can still be persisted. Default true.
+ */
+contentScreeningEnabled?: boolean;
+/**
+ * Extra case-insensitive substrings that withhold a frame during content
+ * screening, in addition to the fixed rules. Blank entries are ignored.
+ */
+contentScreeningKeywords?: string[];
+/**
+ * Window patterns that let a frame proceed after a UIA evidence-acquisition
+ * failure, only while `contentScreeningEnabled` is true and only when the frame
+ * then passes screening with no hit at all (in stage 1 any screening hit withholds
+ * the frame; it is never redacted). Only the `App::` / `App::Title` form is
+ * honoured: a pattern without an app part is ignored, because window titles are
+ * controlled by page content. Empty by default.
+ */
+uiaFailOpenWindows?: string[];
+/**
  * Automatically detect and skip incognito / private browsing windows.
  */
 ignoreIncognitoWindows: boolean;

@@ -59,6 +59,17 @@
 //!   JPG, and stamps `frames.image_redacted_at` (the single
 //!   "is processed" gate after the 20260507 drop-duplicates migration).
 //!
+//! ### Content screening
+//!
+//! - [`content_screening`] — pure, in-memory frame screening (blocked
+//!   domains, password managers, secrets, sensitive URLs, keywords). Secret
+//!   detection reuses [`adapters::regex::redact_one`] with stricter
+//!   frame-level filters.
+//! - [`content_redaction`] — pure helpers for the in-memory redaction tier
+//!   (the shared secret replacement function, exact/partial secret location,
+//!   whole-frame thresholds, OCR-line pixel regions), whose regions are
+//!   filled by [`image::frame_redactor::redact_regions_in_place`].
+//!
 //! ## Defaults
 //!
 //! Off. Users opt in via Settings → Privacy. See worker docs for the
@@ -67,6 +78,8 @@
 #![warn(clippy::all)]
 
 pub mod adapters;
+pub mod content_redaction;
+pub mod content_screening;
 pub mod image;
 pub mod pipeline;
 pub mod provisioning;
@@ -76,6 +89,12 @@ mod cache;
 mod error;
 mod span;
 
+pub use content_screening::{
+    screen_text, screen_text_plan, screening_tier, ContentScreeningConfig, ContentScreeningPlan,
+    ContentScreeningReason, ContentScreeningTier, ContentScreeningVerdict, SecretHitKind,
+    MAX_MATCHER_SECRETS, MAX_REDACTED_AREA_PERCENT, MAX_REDACTION_HITS, MAX_SECRET_LOCATIONS,
+    MIN_PARTIAL_MATCH_CHARS, SENSITIVE_URL_PARAM_NAMES,
+};
 pub use error::RedactError;
 pub use image::{ImageRedactionPolicy, ImageRedactor, ImageRegion};
 pub use pipeline::{Pipeline, PipelineConfig};

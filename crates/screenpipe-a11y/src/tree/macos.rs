@@ -12,10 +12,25 @@ use crate::tree::macos_lines::{self, NormalizeRefs};
 use anyhow::Result;
 use chrono::Utc;
 use cidre::{arc::Retained, ax, cf, ns};
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::password_managers;
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tracing::debug;
+
+/// Lowercased app names excluded outright: the canonical password managers,
+/// the macOS credential viewer, then screenpipe itself and the login window.
+fn excluded_apps() -> &'static [String] {
+    static APPS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    APPS.get_or_init(|| {
+        password_managers::desktop_process_names()
+            .iter()
+            .cloned()
+            .chain([password_managers::KEYCHAIN_ACCESS.to_lowercase()])
+            .chain(["screenpipe".to_string(), "loginwindow".to_string()])
+            .collect()
+    })
+}
 
 /// Known browser app names (lowercase). Matches vision crate's list.
 const BROWSER_NAMES: &[&str] = &[
@@ -333,17 +348,10 @@ impl MacosTreeWalker {
 
         // Skip excluded apps (password managers, etc.)
         let app_lower = app_name.to_lowercase();
-        const EXCLUDED_APPS: &[&str] = &[
-            "1password",
-            "bitwarden",
-            "lastpass",
-            "dashlane",
-            "keepassxc",
-            "keychain access",
-            "screenpipe",
-            "loginwindow",
-        ];
-        if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
+        if excluded_apps()
+            .iter()
+            .any(|ex| app_lower.contains(ex.as_str()))
+        {
             return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
         }
 
@@ -1641,6 +1649,23 @@ fn fill_ax_props(node: &mut AccessibilityTreeNode, elem: &ax::UiElement, role_st
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn excluded_apps_are_unchanged() {
+        assert_eq!(
+            super::excluded_apps(),
+            [
+                "1password",
+                "bitwarden",
+                "lastpass",
+                "dashlane",
+                "keepassxc",
+                "keychain access",
+                "screenpipe",
+                "loginwindow",
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

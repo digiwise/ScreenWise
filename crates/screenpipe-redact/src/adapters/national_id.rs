@@ -221,12 +221,19 @@ pub fn credit_card(s: &str) -> bool {
     let visa = d[0] == 4 && matches!(n, 13 | 16 | 19);
     let mc = (((51..=55).contains(&two)) || (2221..=2720).contains(&four)) && n == 16;
     let amex = (two == 34 || two == 37) && n == 15;
+    let three = d[..3].iter().fold(0u32, |a, &x| a * 10 + x as u32);
     let discover =
-        (four == 6011 || two == 65 || (644..=649).contains(&four)) && matches!(n, 16 | 19);
-    let diners = (two == 36 || two == 38 || (300..=305).contains(&four)) && matches!(n, 14 | 16);
+        (four == 6011 || two == 65 || (644..=649).contains(&three)) && matches!(n, 16 | 19);
+    let diners = (two == 36 || two == 38 || (300..=305).contains(&three)) && matches!(n, 14 | 16);
+    // Maestro: only the issued IIN ranges (5018, 5020, 5038, 5893, 6304,
+    // 6759, 6761-6763). The scheme allows 12-19 digits; like the other
+    // detectors this stays within 13-19. A broad "50 / 56-58 / any 6x" rule
+    // would accept roughly one in ten Luhn-passing 6-prefixed identifiers.
+    let maestro = matches!(four, 5018 | 5020 | 5038 | 5893 | 6304 | 6759 | 6761..=6763)
+        && (13..=19).contains(&n);
     let jcb = (3528..=3589).contains(&four) && matches!(n, 16 | 19);
     let unionpay = (622126..=622925).contains(&six) || (two == 62 && (16..=19).contains(&n));
-    visa || mc || amex || discover || diners || jcb || unionpay
+    visa || mc || amex || discover || diners || jcb || unionpay || maestro
 }
 
 /// Spain NIE (foreigner ID): X/Y/Z prefix mapped to 0/1/2, then the same
@@ -2168,6 +2175,66 @@ mod tests {
         assert!(!credit_card("20260220000000"));
         // Valid Luhn, 16 digits, but prefix 93 is not a card brand.
         assert!(!credit_card("9341454322218551"));
+    }
+
+    /// Append the Luhn check digit that makes `body` valid.
+    fn luhn_completed(body: &str) -> String {
+        (0..=9)
+            .map(|d| format!("{body}{d}"))
+            .find(|s| luhn(s))
+            .expect("one check digit is always valid")
+    }
+
+    #[test]
+    fn credit_card_maestro_only_issued_iin_ranges() {
+        // Issued Maestro IINs at 13, 16 and 19 digits.
+        for prefix in [
+            "5018", "5020", "5038", "5893", "6304", "6759", "6761", "6762", "6763",
+        ] {
+            for len in [13usize, 16, 19] {
+                let body = format!("{prefix}{}", "1".repeat(len - prefix.len() - 1));
+                let number = luhn_completed(&body);
+                assert_eq!(number.len(), len);
+                assert!(credit_card(&number), "{number}");
+            }
+        }
+        // Luhn-valid numbers in the former broad 50 / 56-58 / 6x ranges
+        // that no issued Maestro, Discover or UnionPay IIN covers.
+        for prefix in [
+            "5000", "5019", "5600", "5700", "5812", "6000", "6123", "6305", "6390", "6712", "6760",
+            "6764", "6999",
+        ] {
+            for len in [13usize, 16, 19] {
+                let body = format!("{prefix}{}", "1".repeat(len - prefix.len() - 1));
+                let number = luhn_completed(&body);
+                assert!(!credit_card(&number), "{number}");
+            }
+        }
+        // Too short / too long for the detector, even with a Maestro IIN.
+        assert!(!credit_card(&luhn_completed("50181111111")));
+        assert!(!credit_card(&luhn_completed("50181111111111111111")));
+    }
+
+    #[test]
+    fn credit_card_diners_and_discover_three_digit_ranges() {
+        // Diners 300-305 (14 digits) and Discover 644-649 (16 digits).
+        for prefix in ["300", "303", "305"] {
+            let number = luhn_completed(&format!("{prefix}{}", "1".repeat(10)));
+            assert!(credit_card(&number), "{number}");
+        }
+        for prefix in ["644", "647", "649"] {
+            let number = luhn_completed(&format!("{prefix}{}", "1".repeat(12)));
+            assert!(credit_card(&number), "{number}");
+        }
+        // Adjacent three-digit prefixes are not Diners / Discover.
+        assert!(!credit_card(&luhn_completed(&format!(
+            "306{}",
+            "1".repeat(10)
+        ))));
+        assert!(!credit_card(&luhn_completed(&format!(
+            "643{}",
+            "1".repeat(12)
+        ))));
     }
 
     #[test]

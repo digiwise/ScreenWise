@@ -93,8 +93,20 @@ timeout warnings are sampled at the first diagnostic and every 64th thereafter;
 Phase and overall remaining-budget diagnostics describe failures; they are
 observations, not extensions to any deadline. Provider calls can exceed their
 configured timeout, and an in-process timer cannot interrupt a COM call that
-never returns. The existing temporary diagnostics checkpoint in AGENTS.md
-still applies. No persistent worker or permission cache is introduced.
+never returns. See the [timing diagnostic guide](UIA_TIMING_TRIAL.md) for
+interpretation and validation limits. No persistent worker or permission cache is introduced.
+
+Trace arrays have fixed sizes. Process metrics have at most 32 named buckets
+plus unknown/overflow aggregates. Timing logs contain fixed codes and numeric
+measurements; timing hooks record observations without changing capture policy.
+Live usefulness and overhead remain unmeasured.
+
+Finished-attempt stage traces and process totals omit calls that never return;
+phase counters may already have advanced. Shared provider acquisition serves
+multiple rules, while rule timings measure matching work only. Rule timings
+overlap stage timings and must not be added as independent costs. Neither a
+stage nor a native error alone establishes causation, and these observations do
+not guarantee deadline enforcement against a hung provider.
 
 Process metrics schema 2 adds `uia_monitor_unverified` as failure reason index
 8, followed by `unknown` at 9. Unverified focus/monitor checks are counted as

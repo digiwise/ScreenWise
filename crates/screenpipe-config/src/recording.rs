@@ -293,6 +293,31 @@ pub struct RecordingSettings {
     #[serde(rename = "ignoredUrls", default)]
     pub ignored_urls: Vec<String>,
 
+    /// Screen every captured frame in memory before anything is persisted: OCR text,
+    /// accessibility text and tree fields, and the window title, URL and document path.
+    /// Secrets (API keys, tokens, payment cards, credentials in URLs, sensitive URL
+    /// parameters) are redacted in memory and the frame is stored; blockers (blocked or
+    /// protected domains, password-manager UI, keywords) and anything that cannot be
+    /// redacted reliably withhold the frame (a source-free placeholder on Windows; other
+    /// platforms skip the frame). Best-effort heuristics, not a guarantee: unrecognised
+    /// secrets can still be persisted. Default true.
+    #[serde(rename = "contentScreeningEnabled", default = "default_true")]
+    pub content_screening_enabled: bool,
+
+    /// Extra case-insensitive substrings that withhold a frame during content
+    /// screening, in addition to the fixed rules. Blank entries are ignored.
+    #[serde(rename = "contentScreeningKeywords", default)]
+    pub content_screening_keywords: Vec<String>,
+
+    /// Window patterns that let a frame proceed after a UIA evidence-acquisition
+    /// failure, only while `contentScreeningEnabled` is true and only when the frame
+    /// then passes screening with no hit at all (in stage 1 any screening hit withholds
+    /// the frame; it is never redacted). Only the `App::` / `App::Title` form is
+    /// honoured: a pattern without an app part is ignored, because window titles are
+    /// controlled by page content. Empty by default.
+    #[serde(rename = "uiaFailOpenWindows", default)]
+    pub uia_fail_open_windows: Vec<String>,
+
     /// Automatically detect and skip incognito / private browsing windows.
     #[serde(rename = "ignoreIncognitoWindows")]
     pub ignore_incognito_windows: bool,
@@ -504,6 +529,9 @@ impl Default for RecordingSettings {
             ignored_windows: vec![],
             included_windows: vec![],
             ignored_urls: vec![],
+            content_screening_enabled: true,
+            content_screening_keywords: vec![],
+            uia_fail_open_windows: vec![],
             ignore_incognito_windows: true,
             pause_on_drm_content: false,
             disable_clipboard_capture: true,
@@ -770,6 +798,63 @@ mod tests {
         let json = r#"{"audioChunkDuration": 0}"#;
         let s: RecordingSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.audio_chunk_duration, 0);
+    }
+
+    #[test]
+    fn content_screening_settings_default_when_missing_from_existing_stores() {
+        // Existing store.bin / config.toml files predate these keys.
+        for settings in [
+            serde_json::from_str::<RecordingSettings>("{}").unwrap(),
+            serde_json::from_str::<RecordingSettings>(r#"{"ignoredUrls":["bank.example"]}"#)
+                .unwrap(),
+            toml::from_str::<RecordingSettings>("port = 4040").unwrap(),
+            RecordingSettings::default(),
+        ] {
+            assert!(settings.content_screening_enabled);
+            assert!(settings.content_screening_keywords.is_empty());
+            assert!(settings.uia_fail_open_windows.is_empty());
+        }
+    }
+
+    #[test]
+    fn content_screening_settings_round_trip_with_camel_case_keys() {
+        let settings = RecordingSettings {
+            content_screening_enabled: false,
+            content_screening_keywords: vec!["project falcon".into(), " ".into()],
+            uia_fail_open_windows: vec!["code.exe::".into(), "notepad::draft".into()],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["contentScreeningEnabled"], false);
+        assert_eq!(
+            value["contentScreeningKeywords"],
+            serde_json::json!(["project falcon", " "])
+        );
+        assert_eq!(
+            value["uiaFailOpenWindows"],
+            serde_json::json!(["code.exe::", "notepad::draft"])
+        );
+        let restored: RecordingSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, settings);
+        let toml_str = toml::to_string_pretty(&settings).unwrap();
+        assert_eq!(
+            toml::from_str::<RecordingSettings>(&toml_str).unwrap(),
+            settings
+        );
+
+        // Desktop store flattening keeps the keys at the top level.
+        #[derive(Serialize, Deserialize)]
+        struct FakeSettingsStore {
+            #[serde(flatten)]
+            recording: RecordingSettings,
+        }
+        let store: FakeSettingsStore = serde_json::from_str(
+            r#"{"contentScreeningEnabled":false,"uiaFailOpenWindows":["code.exe::"]}"#,
+        )
+        .unwrap();
+        assert!(!store.recording.content_screening_enabled);
+        assert_eq!(store.recording.uia_fail_open_windows, ["code.exe::"]);
+        assert!(store.recording.content_screening_keywords.is_empty());
     }
 
     #[test]

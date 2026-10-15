@@ -487,7 +487,7 @@ pub struct TreeWalkerConfig {
     /// User-configured windows to include (whitelist — if non-empty, only these are captured).
     pub included_windows: Vec<String>,
     /// User-configured URLs to ignore (domain-level match on the focused
-    /// browser tab's URL — see [`crate::url_filter::is_url_blocked`]).
+    /// browser tab's URL — see [`screenpipe_capture_policy::url_filter::is_url_blocked`]).
     pub ignored_urls: Vec<String>,
     /// Monitor origin X in screen points (virtual desktop coordinate space).
     /// Used to normalize element bounds to monitor-relative 0-1 coords.
@@ -615,8 +615,8 @@ impl AccessibilityFailure {
         app_name: String,
         window_name: String,
     ) -> Self {
+        use screenpipe_capture_policy::window_pattern::WindowPattern;
         use screenpipe_config::capture_diagnostics::{RuleKind, RuleOrigin, RuleReference};
-        use screenpipe_core::window_pattern::WindowPattern;
         let app = app_name.to_lowercase();
         let mut unresolved_rules = Vec::new();
         // Native title/include/private checks have already passed. These exclusions
@@ -772,10 +772,11 @@ impl TreeWalkerPlatform for UrlFilteredWalker {
             if let Some(ref url) = snapshot.browser_url {
                 #[cfg(target_os = "windows")]
                 let blocked = windows::timed_ignored_url_check(|| {
-                    crate::url_filter::is_url_blocked(url, &self.ignored_urls)
+                    screenpipe_capture_policy::url_filter::is_url_blocked(url, &self.ignored_urls)
                 });
                 #[cfg(not(target_os = "windows"))]
-                let blocked = crate::url_filter::is_url_blocked(url, &self.ignored_urls);
+                let blocked =
+                    screenpipe_capture_policy::url_filter::is_url_blocked(url, &self.ignored_urls);
                 if blocked {
                     screenpipe_config::sensitive_debug::record("uia_url_policy_refusal", || {
                         serde_json::json!({"reason":"blocked_url", "stage":"snapshot_url_policy",
@@ -1328,11 +1329,11 @@ fn failed_retrieval_keeps_empty_url_entry_fallback_policy() {
     use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
     let mut config = TreeWalkerConfig::default();
     config.ignored_urls = vec![String::new()];
-    assert!(crate::url_filter::is_url_blocked(
+    assert!(screenpipe_capture_policy::url_filter::is_url_blocked(
         "https://example.com./",
         &config.ignored_urls
     ));
-    assert!(crate::url_filter::is_url_blocked(
+    assert!(screenpipe_capture_policy::url_filter::is_url_blocked(
         "http:// invalid",
         &config.ignored_urls
     ));

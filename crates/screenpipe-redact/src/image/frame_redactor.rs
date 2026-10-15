@@ -182,6 +182,100 @@ fn write_image_atomically(image_path: &Path, image: &DynamicImage) -> Result<(),
     })
 }
 
+/// An axis-aligned pixel rectangle (top-left origin) to fill solid black.
+/// `Debug` prints the area only, never the position.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl std::fmt::Debug for PixelRect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PixelRect")
+            .field("pixels", &(u64::from(self.width) * u64::from(self.height)))
+            .finish()
+    }
+}
+
+/// Totals for [`redact_regions`] / [`redact_regions_in_place`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionFill {
+    /// Rectangles that covered at least one pixel after clamping.
+    pub regions: usize,
+    /// Pixels filled (overlapping rectangles count each time).
+    pub pixels: u64,
+}
+
+/// Clamp `rect` to a `width` x `height` image: `None` when it covers no pixel.
+fn clamp_rect(rect: &PixelRect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    let x2 = rect.x.saturating_add(rect.width).min(width);
+    let y2 = rect.y.saturating_add(rect.height).min(height);
+    if rect.x >= width || rect.y >= height || rect.x >= x2 || rect.y >= y2 {
+        return None;
+    }
+    Some((rect.x, rect.y, x2, y2))
+}
+
+/// Call `fill` for every pixel of every rectangle clamped to a `width` x
+/// `height` image; rectangles entirely off-image are skipped and not counted.
+fn fill_rects(
+    width: u32,
+    height: u32,
+    rects: &[PixelRect],
+    mut fill: impl FnMut(u32, u32),
+) -> RegionFill {
+    let mut totals = RegionFill::default();
+    for rect in rects {
+        let Some((x1, y1, x2, y2)) = clamp_rect(rect, width, height) else {
+            continue;
+        };
+        for px in x1..x2 {
+            for py in y1..y2 {
+                // safety: bounds checked by clamp_rect
+                fill(px, py);
+            }
+        }
+        totals.regions += 1;
+        totals.pixels += u64::from(x2 - x1) * u64::from(y2 - y1);
+    }
+    totals
+}
+
+/// Fill each rectangle solid black (never blur) in an in-memory RGB image.
+/// Rectangles extending past the image are clamped; ones entirely off-image
+/// are skipped and not counted. Pure pixel pushing: no I/O, no banner. The
+/// path-based [`redact_frame`] uses the same fill.
+pub fn redact_regions(image: &mut image::RgbImage, rects: &[PixelRect]) -> RegionFill {
+    let (width, height) = image.dimensions();
+    fill_rects(width, height, rects, |x, y| {
+        image.put_pixel(x, y, Rgb([0, 0, 0]))
+    })
+}
+
+/// [`redact_regions`] for a decoded frame of any pixel layout, in place and
+/// without changing its variant (alpha, where present, becomes opaque).
+pub fn redact_regions_in_place(image: &mut DynamicImage, rects: &[PixelRect]) -> RegionFill {
+    use image::GenericImage;
+    match image {
+        DynamicImage::ImageRgb8(buf) => redact_regions(buf, rects),
+        DynamicImage::ImageRgba8(buf) => {
+            let (width, height) = buf.dimensions();
+            fill_rects(width, height, rects, |x, y| {
+                buf.put_pixel(x, y, image::Rgba([0, 0, 0, 255]))
+            })
+        }
+        other => {
+            let (width, height) = (other.width(), other.height());
+            fill_rects(width, height, rects, |x, y| {
+                other.put_pixel(x, y, image::Rgba([0, 0, 0, 255]))
+            })
+        }
+    }
+}
+
 /// What the redactor did to one frame.
 #[derive(Debug, Clone, Default)]
 pub struct FrameRedactionOutcome {
@@ -218,32 +312,27 @@ pub fn redact_frame(
 ) -> Result<FrameRedactionOutcome, RedactError> {
     let img = image::open(image_path)
         .map_err(|e| RedactError::Runtime(format!("open {}: {e}", image_path.display())))?;
-    let (img_w, img_h) = (img.width(), img.height());
     let mut buf = img.to_rgb8();
 
-    let mut redacted = 0usize;
     let mut dropped = 0usize;
-    let mut redacted_px: u64 = 0;
+    let mut kept = Vec::with_capacity(regions.len());
     for r in regions {
         if !policy.allow.contains(&r.label) || r.score < policy.min_score {
             dropped += 1;
             continue;
         }
-        let [x, y, w, h] = r.bbox;
-        let x2 = x.saturating_add(w).min(img_w);
-        let y2 = y.saturating_add(h).min(img_h);
-        if x >= img_w || y >= img_h || x >= x2 || y >= y2 {
-            continue; // bbox entirely off-image
-        }
-        for px in x..x2 {
-            for py in y..y2 {
-                // safety: bounds checked above
-                buf.put_pixel(px, py, Rgb([0, 0, 0]));
-            }
-        }
-        redacted += 1;
-        redacted_px += u64::from(x2 - x) * u64::from(y2 - y);
+        let [x, y, width, height] = r.bbox;
+        kept.push(PixelRect {
+            x,
+            y,
+            width,
+            height,
+        });
     }
+    // Off-image boxes are clamped or skipped (and not counted) by the shared fill.
+    let fill = redact_regions(&mut buf, &kept);
+    let redacted = fill.regions;
+    let redacted_px = fill.pixels;
 
     if redacted > 0 {
         draw_redaction_banner(&mut buf);
@@ -434,6 +523,85 @@ mod tests {
         let out = redact_frame(&p, &[r], &ImageRedactionPolicy::default()).unwrap();
         // 80..100 × 70..80 = 20 × 10 = 200 px
         assert_eq!(out.redacted_pixels, 200);
+    }
+
+    #[test]
+    fn in_memory_fill_matches_path_based_redaction_without_banner() {
+        let rects = [
+            PixelRect {
+                x: 10,
+                y: 30,
+                width: 30,
+                height: 20,
+            },
+            // Clamped at the edge.
+            PixelRect {
+                x: 80,
+                y: 70,
+                width: 999,
+                height: 999,
+            },
+            // Entirely off-image: skipped and not counted.
+            PixelRect {
+                x: 100,
+                y: 0,
+                width: 5,
+                height: 5,
+            },
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 5,
+            },
+        ];
+        let tan = Rgb([200, 180, 160]);
+        let mut rgb = ImageBuffer::from_pixel(100, 80, tan);
+        let fill = redact_regions(&mut rgb, &rects);
+        assert_eq!(fill.regions, 2);
+        assert_eq!(fill.pixels, 30 * 20 + 20 * 10);
+        assert_eq!(rgb.get_pixel(10, 30), &Rgb([0, 0, 0]));
+        assert_eq!(rgb.get_pixel(39, 49), &Rgb([0, 0, 0]));
+        assert_eq!(rgb.get_pixel(99, 79), &Rgb([0, 0, 0]));
+        // Outside every rectangle, including the top row a banner would use.
+        assert_eq!(rgb.get_pixel(40, 30), &tan);
+        assert_eq!(rgb.get_pixel(50, 0), &tan);
+        assert_eq!(rgb.get_pixel(0, 0), &tan);
+
+        // Same counts as the path-based worker for the same boxes.
+        let d = tempdir().unwrap();
+        let p = make_test_jpg(d.path());
+        let regions: Vec<ImageRegion> = rects
+            .iter()
+            .map(|r| ImageRegion {
+                bbox: [r.x, r.y, r.width, r.height],
+                label: SpanLabel::Secret,
+                score: 1.0,
+            })
+            .collect();
+        let out = redact_frame(&p, &regions, &ImageRedactionPolicy::default()).unwrap();
+        assert_eq!(out.regions_redacted, fill.regions);
+        assert_eq!(out.redacted_pixels, fill.pixels);
+
+        // RGBA frames keep their variant; filled pixels become opaque black.
+        let mut rgba = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            100,
+            80,
+            image::Rgba([200, 180, 160, 128]),
+        ));
+        let fill = redact_regions_in_place(&mut rgba, &rects);
+        assert_eq!(fill.regions, 2);
+        let DynamicImage::ImageRgba8(buf) = &rgba else {
+            panic!("variant changed");
+        };
+        assert_eq!(buf.get_pixel(10, 30), &image::Rgba([0, 0, 0, 255]));
+        assert_eq!(buf.get_pixel(50, 0), &image::Rgba([200, 180, 160, 128]));
+        // Other layouts go through the generic path.
+        let mut luma =
+            DynamicImage::ImageLuma8(ImageBuffer::from_pixel(100, 80, image::Luma([200])));
+        assert_eq!(redact_regions_in_place(&mut luma, &rects).regions, 2);
+        assert_eq!(luma.get_pixel(10, 30), image::Rgba([0, 0, 0, 255]));
+        assert_eq!(luma.get_pixel(50, 0), image::Rgba([200, 200, 200, 255]));
     }
 
     #[test]

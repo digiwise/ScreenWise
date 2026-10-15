@@ -15,10 +15,24 @@ use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::paired_capture::{
-    paired_capture, usable_accessibility_snapshot, CaptureContext, PairedCaptureResult,
+    paired_capture, paired_capture_runs_ocr, run_ocr, usable_accessibility_snapshot,
+    CaptureContext, PairedCaptureResult,
 };
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::url_filter;
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
+use screenpipe_redact::content_redaction::{
+    check_secret_coverage, locate_ocr_hits, mask_secret_labels, merge_spans,
+    redacted_area_exceeds_limit, replace_secret_spans, OcrWord, SecretCopies, SecretCount,
+    SecretMatcher, TextMatches,
+};
+use screenpipe_redact::image::frame_redactor::{redact_regions_in_place, PixelRect};
+#[cfg(test)]
+use screenpipe_redact::screen_text;
+use screenpipe_redact::{
+    screen_text_plan, screening_tier, ContentScreeningConfig, ContentScreeningPlan,
+    ContentScreeningReason, ContentScreeningTier, ContentScreeningVerdict, SecretHitKind,
+};
 #[cfg(not(target_os = "windows"))]
 use screenpipe_screen::capture_screenshot_by_window::get_excluded_sck_window_ids;
 use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
@@ -56,6 +70,66 @@ pub struct CaptureParams<'a> {
     pub use_pii_removal: bool,
     pub pause_on_drm_content: bool,
     pub languages: &'a [screenpipe_core::Language],
+    /// In-memory content screening rules. `None` when screening is disabled.
+    pub content_screening: Option<Arc<ContentScreeningConfig>>,
+    /// Parsed `uiaFailOpenWindows` (`App::` / `App::Title` patterns only).
+    /// Empty unless content screening is enabled.
+    pub uia_fail_open_windows: &'a [WindowPattern],
+    /// Pipeline metrics (`/health`): OCR latency is recorded whenever this
+    /// capture path runs OCR.
+    pub vision_metrics: &'a screenpipe_screen::PipelineMetrics,
+}
+
+/// User settings for in-memory content screening and UIA fail-open windows,
+/// passed unchanged from `VisionManagerConfig` to each monitor's capture loop.
+/// `Debug` prints counts only (keywords and patterns are user content).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ContentScreeningSettings {
+    pub enabled: bool,
+    pub keywords: Vec<String>,
+    pub uia_fail_open_windows: Vec<String>,
+}
+
+impl std::fmt::Debug for ContentScreeningSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentScreeningSettings")
+            .field("enabled", &self.enabled)
+            .field("keywords", &self.keywords.len())
+            .field("uia_fail_open_windows", &self.uia_fail_open_windows.len())
+            .finish()
+    }
+}
+
+impl ContentScreeningSettings {
+    /// Screening rules for one capture loop, or `None` when disabled.
+    fn screening_config(
+        &self,
+        ignored_urls: &[String],
+        pause_on_drm_content: bool,
+    ) -> Option<Arc<ContentScreeningConfig>> {
+        self.enabled.then(|| {
+            Arc::new(ContentScreeningConfig {
+                blocked_url_patterns: ignored_urls.to_vec(),
+                protected_domains: pause_on_drm_content,
+                keywords: self.keywords.clone(),
+            })
+        })
+    }
+
+    /// Fail-open patterns only exist while screening is enabled, and only in
+    /// `App::` / `App::Title` form: a pattern without an app part would match
+    /// on the window title alone, which page content controls, so it is
+    /// ignored.
+    fn fail_open_patterns(&self) -> Vec<WindowPattern> {
+        if self.enabled {
+            WindowPattern::parse_list(&self.uia_fail_open_windows)
+                .into_iter()
+                .filter(WindowPattern::is_scoped)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 async fn capture_with_timeout<F, T>(
@@ -587,6 +661,7 @@ pub async fn event_driven_capture_loop(
     hot_frame_cache: Option<Arc<HotFrameCache>>,
     use_pii_removal: bool,
     pause_on_drm_content: bool,
+    content_screening: ContentScreeningSettings,
     languages: Vec<screenpipe_core::Language>,
     power_profile_rx: Option<watch::Receiver<PowerProfile>>,
     focus_controller: Arc<crate::focus_aware_controller::FocusAwareController>,
@@ -680,6 +755,7 @@ pub async fn event_driven_capture_loop(
     // suppresses. Stays false when no controller is wired.
     let mut hd_active = false;
 
+    let uia_fail_open_windows = content_screening.fail_open_patterns();
     let capture_params = CaptureParams {
         db: &db,
         monitor: &monitor,
@@ -690,6 +766,10 @@ pub async fn event_driven_capture_loop(
         use_pii_removal,
         pause_on_drm_content,
         languages: &languages,
+        content_screening: content_screening
+            .screening_config(&tree_walker_config.ignored_urls, pause_on_drm_content),
+        uia_fail_open_windows: &uia_fail_open_windows,
+        vision_metrics: &vision_metrics,
     };
 
     // Capture immediately on startup so the timeline has a frame right away.
@@ -1495,20 +1575,17 @@ pub async fn event_driven_capture_loop(
                                 use screenpipe_config::capture_diagnostics::*;
                                 for channel in [CaptureChannel::Accessibility, CaptureChannel::Ocr]
                                 {
+                                    let (condition, reasons) = redaction_observation(
+                                        output.content_redacted,
+                                        channel,
+                                        result.pii_text_redacted,
+                                    );
                                     observe(
                                         channel,
                                         DiagnosticSource::Redaction,
                                         CaptureScope::Monitor(monitor_id),
-                                        if result.pii_text_redacted {
-                                            CaptureCondition::PartiallyRedacted
-                                        } else {
-                                            CaptureCondition::Admitted
-                                        },
-                                        vec![if result.pii_text_redacted {
-                                            CaptureReason::PiiTextRedaction
-                                        } else {
-                                            CaptureReason::GateOpen
-                                        }],
+                                        condition,
+                                        reasons,
                                         Vec::new(),
                                     );
                                 }
@@ -1721,6 +1798,35 @@ pub async fn event_driven_capture_loop(
     Ok(())
 }
 
+/// Redaction-source observation for one text channel of a stored frame.
+/// Without content redaction this is exactly the previous PII-only mapping.
+fn redaction_observation(
+    content: ContentRedacted,
+    channel: screenpipe_config::capture_diagnostics::CaptureChannel,
+    pii_text_redacted: bool,
+) -> (
+    screenpipe_config::capture_diagnostics::CaptureCondition,
+    Vec<screenpipe_config::capture_diagnostics::CaptureReason>,
+) {
+    use screenpipe_config::capture_diagnostics::{CaptureChannel, CaptureCondition, CaptureReason};
+    let content_redacted = match channel {
+        CaptureChannel::Accessibility => content.accessibility,
+        _ => content.ocr,
+    };
+    let mut reasons = Vec::new();
+    if content_redacted {
+        reasons.push(CaptureReason::ContentScreeningRedacted);
+    }
+    if pii_text_redacted {
+        reasons.push(CaptureReason::PiiTextRedaction);
+    }
+    if reasons.is_empty() {
+        (CaptureCondition::Admitted, vec![CaptureReason::GateOpen])
+    } else {
+        (CaptureCondition::PartiallyRedacted, reasons)
+    }
+}
+
 /// Push a capture result into the hot frame cache.
 async fn push_to_hot_cache(
     cache: &HotFrameCache,
@@ -1761,8 +1867,20 @@ struct CaptureOutput {
     image: image::DynamicImage,
     /// Whether elements were deduped (referenced another frame's elements).
     elements_deduped: bool,
+    /// Which persisted channels the content-screening redaction tier changed
+    /// in memory (all false unless the frame was redacted).
+    content_redacted: ContentRedacted,
     #[cfg(target_os = "windows")]
     windows_outcome: WindowsCaptureOutcome,
+}
+
+/// Content-free flags for the in-memory content-screening redaction tier.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ContentRedacted {
+    /// Screenshot pixels and/or OCR text/JSON were redacted.
+    ocr: bool,
+    /// Accessibility tree text or frame metadata (title, URL, path) was redacted.
+    accessibility: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1870,6 +1988,7 @@ async fn persist_windows_placeholder(
             result: None,
             image,
             elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
             windows_outcome: outcome,
         });
     }
@@ -1893,6 +2012,7 @@ async fn persist_windows_placeholder(
         screenshot_disabled,
         placeholder_text: Some(marker),
         capture_privacy: Some(&capture_privacy_json),
+        precomputed_ocr: None,
     };
     let result = paired_capture(&ctx, None).await?;
     let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());
@@ -1900,6 +2020,7 @@ async fn persist_windows_placeholder(
         result: Some(result),
         image,
         elements_deduped: false,
+        content_redacted: ContentRedacted::default(),
         windows_outcome: outcome,
     })
 }
@@ -2035,7 +2156,7 @@ fn windows_drm_url_for_acquired_bitmap<'a>(
     // blocker even if the later UIA tree has no URL or names a different page.
     // A safe earlier URL cannot replace positive evidence from the UIA policy.
     bitmap_url
-        .filter(|url| crate::drm_detector::is_drm_url(url))
+        .filter(|url| screenpipe_capture_policy::drm::is_drm_url(url))
         .or(resolved_url)
 }
 
@@ -2185,6 +2306,1047 @@ fn bypasses_capture_throttles(trigger: &CaptureTrigger) -> bool {
     )
 }
 
+/// Per-input bound for in-memory screening. Mirrors the screening module's
+/// internal scan prefix: a longer single text fails closed instead of having
+/// an unscreened suffix persisted.
+const CONTENT_SCREENING_MAX_TEXT_BYTES: usize = 512 * 1024;
+
+/// Resolved frame metadata that is persisted with the frame and is therefore
+/// screened alongside OCR and accessibility text.
+#[derive(Clone, Copy, Default)]
+struct FrameScreeningMetadata<'a> {
+    app_name: Option<&'a str>,
+    window_name: Option<&'a str>,
+    browser_url: Option<&'a str>,
+    document_path: Option<&'a str>,
+}
+
+/// A screened value that paired capture may persist. Used only to map
+/// screening hits back to the value they came from, in memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ScreenedField {
+    WindowName,
+    BrowserUrl,
+    DocumentPath,
+    TextContent,
+    NodeText(usize),
+    NodeValue(usize),
+    NodeHelpText(usize),
+    NodeUrl(usize),
+    NodePlaceholder(usize),
+    /// Structural node strings (role, automation id, class name, ...): screened
+    /// but never redacted, so any hit withholds the whole frame.
+    NodeStructural(usize),
+}
+
+/// Byte range of one screened value inside a screening chunk.
+#[derive(Clone, Copy)]
+struct ChunkSegment {
+    field: ScreenedField,
+    start: usize,
+    len: usize,
+}
+
+/// Every text that paired capture could persist from this frame's admitted
+/// accessibility tree and metadata, grouped into bounded chunks, plus where
+/// each value sits inside its chunk (in memory only, for redaction).
+struct ScreeningChunks {
+    texts: Vec<String>,
+    segments: Vec<Vec<ChunkSegment>>,
+}
+
+#[derive(Default)]
+struct ScreeningChunkBuilder {
+    texts: Vec<String>,
+    segments: Vec<Vec<ChunkSegment>>,
+    chunk: String,
+    chunk_segments: Vec<ChunkSegment>,
+}
+
+impl ScreeningChunkBuilder {
+    /// Append one value; `false` when it is too large to screen completely.
+    fn push(&mut self, field: ScreenedField, value: &str) -> bool {
+        if value.is_empty() {
+            return true;
+        }
+        if value.len() > CONTENT_SCREENING_MAX_TEXT_BYTES {
+            return false;
+        }
+        if self.chunk.len() + value.len() + 1 > CONTENT_SCREENING_MAX_TEXT_BYTES {
+            self.texts.push(std::mem::take(&mut self.chunk));
+            self.segments.push(std::mem::take(&mut self.chunk_segments));
+        }
+        if !self.chunk.is_empty() {
+            self.chunk.push('\n');
+        }
+        self.chunk_segments.push(ChunkSegment {
+            field,
+            start: self.chunk.len(),
+            len: value.len(),
+        });
+        self.chunk.push_str(value);
+        true
+    }
+
+    fn finish(mut self) -> ScreeningChunks {
+        if !self.chunk.is_empty() {
+            self.texts.push(self.chunk);
+            self.segments.push(self.chunk_segments);
+        }
+        ScreeningChunks {
+            texts: self.texts,
+            segments: self.segments,
+        }
+    }
+}
+
+/// Screening chunks for a frame. `None` when a single value is too large to
+/// screen completely.
+fn screening_chunks(
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    metadata: FrameScreeningMetadata<'_>,
+) -> Option<ScreeningChunks> {
+    let mut builder = ScreeningChunkBuilder::default();
+    // The application label is a fixed executable/logical name; titles, URLs
+    // and paths are user-visible content and are screened.
+    for (field, value) in [
+        (ScreenedField::WindowName, metadata.window_name),
+        (ScreenedField::BrowserUrl, metadata.browser_url),
+        (ScreenedField::DocumentPath, metadata.document_path),
+    ] {
+        if let Some(value) = value {
+            if !builder.push(field, value) {
+                return None;
+            }
+        }
+    }
+    if let Some(tree) = tree {
+        // `text_content` is screened as one text so nearby words keep their
+        // context; node fields cover everything serialized into tree JSON.
+        if !builder.push(ScreenedField::TextContent, &tree.text_content) {
+            return None;
+        }
+        let mut structural_seen = std::collections::HashSet::new();
+        for (index, node) in tree.nodes.iter().enumerate() {
+            for (field, value) in [
+                (ScreenedField::NodeText(index), Some(node.text.as_str())),
+                (ScreenedField::NodeValue(index), node.value.as_deref()),
+                (
+                    ScreenedField::NodeHelpText(index),
+                    node.help_text.as_deref(),
+                ),
+                (ScreenedField::NodeUrl(index), node.url.as_deref()),
+                (
+                    ScreenedField::NodePlaceholder(index),
+                    node.placeholder.as_deref(),
+                ),
+            ] {
+                if let Some(value) = value {
+                    if !builder.push(field, value) {
+                        return None;
+                    }
+                }
+            }
+            // Structural strings repeat across nodes (roles above all): screen
+            // each distinct value once; a hit in any of them withholds the frame.
+            for value in node_unscreened_strings(node) {
+                if structural_seen.insert(value)
+                    && !builder.push(ScreenedField::NodeStructural(index), value)
+                {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(builder.finish())
+}
+
+/// The screening chunk texts alone (see [`screening_chunks`]).
+#[cfg(test)]
+fn content_screening_texts(
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    metadata: FrameScreeningMetadata<'_>,
+) -> Option<Vec<String>> {
+    screening_chunks(tree, metadata).map(|chunks| chunks.texts)
+}
+
+/// Pure screening decision for already-extracted frame text.
+#[cfg(test)]
+fn screen_frame_texts(
+    config: &ContentScreeningConfig,
+    ocr_text: Option<&str>,
+    texts: Option<&[String]>,
+) -> ContentScreeningVerdict {
+    let Some(texts) = texts else {
+        return ContentScreeningVerdict::unavailable();
+    };
+    if ocr_text.is_some_and(|text| text.len() > CONTENT_SCREENING_MAX_TEXT_BYTES) {
+        return ContentScreeningVerdict::unavailable();
+    }
+    let mut refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+    refs.extend(ocr_text);
+    screen_text(&refs, config)
+}
+
+/// Screening plan for the chunks followed by the OCR text (the last input
+/// when present). `None` when screening cannot cover every persisted text.
+fn screen_frame_plan(
+    config: &ContentScreeningConfig,
+    ocr_text: Option<&str>,
+    chunks: Option<&ScreeningChunks>,
+) -> Option<ContentScreeningPlan> {
+    let chunks = chunks?;
+    if ocr_text.is_some_and(|text| text.len() > CONTENT_SCREENING_MAX_TEXT_BYTES) {
+        return None;
+    }
+    let mut refs = chunks.texts.iter().map(String::as_str).collect::<Vec<_>>();
+    refs.extend(ocr_text);
+    Some(screen_text_plan(&refs, config))
+}
+
+/// Distinct redactable hit texts across every screened input (borrowed from
+/// the inputs; never copied out of this frame's memory).
+fn distinct_secret_hits<'a>(
+    plan: &ContentScreeningPlan,
+    chunks: &'a ScreeningChunks,
+    ocr_text: Option<&'a str>,
+) -> std::collections::BTreeSet<&'a str> {
+    secret_hit_sources(plan, chunks, ocr_text)
+        .into_keys()
+        .collect()
+}
+
+/// Every distinct unmerged hit text with its provenance, for the secret
+/// matcher. A text that was hit as a detector secret anywhere is a detector
+/// secret (fragments are matched); otherwise a card, otherwise a URL part
+/// (exact copies inside URL tokens only).
+fn matcher_secrets<'a>(
+    plan: &ContentScreeningPlan,
+    chunks: &'a ScreeningChunks,
+    ocr_text: Option<&'a str>,
+) -> Vec<(&'a str, SecretHitKind)> {
+    let mut hits: std::collections::BTreeMap<&str, SecretHitKind> =
+        std::collections::BTreeMap::new();
+    for (index, text) in chunks
+        .texts
+        .iter()
+        .map(String::as_str)
+        .chain(ocr_text)
+        .enumerate()
+    {
+        for (span, kind) in plan.secret_hits(index) {
+            let Some(hit) = text.get(span.clone()) else {
+                continue;
+            };
+            let rank = |kind: SecretHitKind| match kind {
+                SecretHitKind::Detector => 0,
+                SecretHitKind::Card => 1,
+                SecretHitKind::UrlValue => 2,
+                SecretHitKind::UrlPart => 3,
+            };
+            hits.entry(hit)
+                .and_modify(|known| {
+                    if rank(*kind) < rank(*known) {
+                        *known = *kind;
+                    }
+                })
+                .or_insert(*kind);
+        }
+    }
+    hits.into_iter().collect()
+}
+
+/// Where a distinct detected secret was found: `(ocr, accessibility)`. Window
+/// metadata, node fields and tree text all count as accessibility.
+type HitSources = (bool, bool);
+
+/// Every distinct redactable hit text with the sources it was detected in.
+fn secret_hit_sources<'a>(
+    plan: &ContentScreeningPlan,
+    chunks: &'a ScreeningChunks,
+    ocr_text: Option<&'a str>,
+) -> std::collections::BTreeMap<&'a str, HitSources> {
+    let mut hits: std::collections::BTreeMap<&str, HitSources> = std::collections::BTreeMap::new();
+    for (index, text) in chunks
+        .texts
+        .iter()
+        .map(String::as_str)
+        .chain(ocr_text)
+        .enumerate()
+    {
+        let is_ocr = index == chunks.texts.len();
+        for span in plan.secret_spans(index) {
+            if let Some(hit) = text.get(span.clone()) {
+                let sources = hits.entry(hit).or_default();
+                if is_ocr {
+                    sources.0 = true;
+                } else {
+                    sources.1 = true;
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// Content-free timings and counts of one frame's screening, for the Windows
+/// capture-decision JSON. Every value is optional: unknown stays absent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+struct ScreeningMetrics {
+    /// OCR ran only because screening needed it.
+    ocr_forced: Option<bool>,
+    ocr_ms: Option<u32>,
+    screen_ms: Option<u32>,
+    redact_ms: Option<u32>,
+    hits_ocr_only: Option<u32>,
+    hits_a11y_only: Option<u32>,
+    hits_both: Option<u32>,
+    /// Wall time of the screening OCR, for pipeline metrics.
+    ocr_duration: Option<Duration>,
+}
+
+fn millis_u32(duration: Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
+fn count_u32(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+impl ScreeningMetrics {
+    fn with_hit_sources(mut self, sources: &std::collections::BTreeMap<&str, HitSources>) -> Self {
+        let count = |wanted: HitSources| sources.values().filter(|s| **s == wanted).count();
+        self.hits_ocr_only = Some(count_u32(count((true, false))));
+        self.hits_a11y_only = Some(count_u32(count((false, true))));
+        self.hits_both = Some(count_u32(count((true, true))));
+        self
+    }
+
+    /// The persisted capture-decision record for this frame's outcome.
+    #[cfg(target_os = "windows")]
+    fn decision(
+        &self,
+        outcome: &'static str,
+        reasons: Vec<&'static str>,
+        fail_open: bool,
+        redacted_regions: Option<u32>,
+    ) -> screenpipe_screen::capture_screenshot_by_window::WindowsContentScreeningDecision {
+        screenpipe_screen::capture_screenshot_by_window::WindowsContentScreeningDecision {
+            outcome,
+            reasons,
+            fail_open,
+            redacted_regions,
+            ocr_forced: self.ocr_forced,
+            ocr_ms: self.ocr_ms,
+            screen_ms: self.screen_ms,
+            redact_ms: self.redact_ms,
+            hits_ocr_only: self.hits_ocr_only,
+            hits_a11y_only: self.hits_a11y_only,
+            hits_both: self.hits_both,
+        }
+    }
+}
+
+/// Numeric OCR JSON field: Windows/Apple/Tesseract store numbers as strings.
+fn ocr_json_number(entry: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<f64> {
+    let value = entry.get(key)?;
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+}
+
+/// OCR words with their normalised boxes, or `None` if any entry lacks them.
+fn ocr_json_words(
+    entries: &[serde_json::Map<String, serde_json::Value>],
+) -> Option<Vec<OcrWord<'_>>> {
+    entries
+        .iter()
+        .map(|entry| {
+            Some(OcrWord {
+                text: entry.get("text")?.as_str()?,
+                left: ocr_json_number(entry, "left")?,
+                top: ocr_json_number(entry, "top")?,
+                width: ocr_json_number(entry, "width")?,
+                height: ocr_json_number(entry, "height")?,
+            })
+        })
+        .collect()
+}
+
+/// Accessibility node strings persisted in tree JSON that are not screened
+/// fields. Checked for leftover copies of a redacted hit.
+fn node_unscreened_strings(
+    node: &screenpipe_a11y::tree::AccessibilityTreeNode,
+) -> impl Iterator<Item = &str> {
+    [
+        Some(node.role.as_str()),
+        node.automation_id.as_deref(),
+        node.class_name.as_deref(),
+        node.role_description.as_deref(),
+        node.subrole.as_deref(),
+        node.accelerator_key.as_deref(),
+        node.access_key.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// Link-role nodes across platforms (UIA `Hyperlink`, macOS `AXLink`, AT-SPI
+/// `Link`): their URL-valued fields are targets, not drawn text.
+/// True only when exactly one URL token spans the whole trimmed value, so a
+/// link value with surrounding prose (possibly visible text) stays counted.
+fn value_is_single_url_token(value: &str) -> bool {
+    let trimmed = value.trim();
+    let mut tokens = url_filter::url_token_spans(trimmed);
+    match (tokens.next(), tokens.next()) {
+        (Some(token), None) => token.start == 0 && token.end == trimmed.len(),
+        _ => false,
+    }
+}
+
+fn is_link_role(role: &str) -> bool {
+    ["Hyperlink", "AXLink", "Link"]
+        .iter()
+        .any(|link| role.eq_ignore_ascii_case(link))
+}
+
+/// Redacted replacements for one frame. Holds redacted content only; hit
+/// positions and original text stay in the planner's locals.
+struct FrameRedaction {
+    /// Redacted `(text, text_json)` OCR result (unchanged when OCR had no hit).
+    ocr: Option<(String, String)>,
+    /// Redacted copy of the accessibility snapshot, when a tree field had a hit.
+    tree: Option<screenpipe_a11y::tree::TreeSnapshot>,
+    window_name: Option<String>,
+    browser_url: Option<String>,
+    document_path: Option<String>,
+    /// Pixel regions to black out (empty when no pixels are persisted).
+    rects: Vec<PixelRect>,
+    /// Redacted copy of the frame, filled after planning.
+    image: Option<image::DynamicImage>,
+    content: ContentRedacted,
+    /// Diagnostic count: partial-match (fragment) locations redacted across
+    /// every persisted text. Never positions or text.
+    partial_locations: usize,
+    /// Diagnostic count: sensitive URLs found by screening.
+    url_hits: usize,
+}
+
+/// Locate the frame's secrets in one persisted value and redact every
+/// location (plus the screening `detector_spans`, relative to the value) with
+/// the shared replacement function. Returns the matches and, when anything
+/// matched, the redacted value; a replacement error withholds the frame.
+fn redact_screened_value(
+    matcher: &SecretMatcher<'_>,
+    value: &str,
+    detector_spans: Option<&Vec<std::ops::Range<usize>>>,
+) -> std::result::Result<(TextMatches, Option<String>), ContentScreeningVerdict> {
+    let found = matcher.locate(value);
+    let spans = merge_spans(
+        found
+            .spans()
+            .iter()
+            .cloned()
+            .chain(detector_spans.into_iter().flatten().cloned()),
+    );
+    if spans.is_empty() {
+        return Ok((found, None));
+    }
+    match replace_secret_spans(value, &spans) {
+        Ok(redacted) => Ok((found, Some(redacted))),
+        Err(_) => Err(ContentScreeningVerdict::secret()),
+    }
+}
+
+/// Plan the in-memory redaction of a frame whose screening tier is
+/// `Redact`. Pure: no I/O, no logging. Any hit that cannot be located,
+/// mapped or covered, any threshold, any replacement error, or any finding of
+/// the post-redaction self-check withholds the frame (`Err`).
+///
+/// Rules (owner decisions 2026-10-15):
+/// - Every plausible location of every distinct detected secret is redacted
+///   in every persisted text: exact copies and fragments of at least
+///   `MIN_PARTIAL_MATCH_CHARS` characters ([`SecretMatcher`]), not only the
+///   detector's span. All replacements go through [`replace_secret_spans`].
+/// - OCR locations must map to OCR words (byte offsets in the space-joined
+///   Windows OCR text) with valid boxes; their whole lines are blacked out
+///   (padded) and every word of those lines becomes `[SECRET]` in the OCR
+///   JSON, while the located spans become `[SECRET]` in the OCR text.
+///   Without word boxes for the platform an OCR location withholds the frame.
+/// - Copies are counted per source: OCR; accessibility (the larger of the
+///   `text_content` count and the node-field count, a node's `url` not
+///   counted again when it equals its `value`); metadata (summed). More than
+///   `MAX_SECRET_LOCATIONS` in any source withholds the frame, and so does,
+///   when pixels are persisted, an accessibility or metadata count above the
+///   OCR count (accessibility node bounds are not used for pixel coverage).
+/// - Every exact copy in `text_content` must also be an exact copy in some
+///   node field, so the node JSON cannot keep fragments of it.
+/// - Redaction rectangles covering more than `MAX_REDACTED_AREA_PERCENT` of
+///   the image withhold the frame.
+/// - After redaction every persisted text is screened again, and no location
+///   (exact or partial) of any secret may remain in any persisted text or
+///   node string.
+#[allow(clippy::too_many_arguments)]
+fn plan_frame_redaction(
+    config: &ContentScreeningConfig,
+    plan: &ContentScreeningPlan,
+    chunks: &ScreeningChunks,
+    ocr: Option<&(String, String)>,
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    metadata: FrameScreeningMetadata<'_>,
+    image_size: (u32, u32),
+    pixels_persisted: bool,
+    word_boxes_available: bool,
+) -> std::result::Result<FrameRedaction, ContentScreeningVerdict> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let secret = ContentScreeningVerdict::secret;
+    let ocr_index = chunks.texts.len();
+
+    // Map every chunk hit back to the single value it lies in.
+    let mut field_spans: BTreeMap<ScreenedField, Vec<std::ops::Range<usize>>> = BTreeMap::new();
+    for (index, (text, segments)) in chunks.texts.iter().zip(&chunks.segments).enumerate() {
+        for span in plan.secret_spans(index) {
+            let Some(segment) = segments
+                .iter()
+                .find(|s| span.start >= s.start && span.end <= s.start + s.len)
+            else {
+                return Err(secret());
+            };
+            // Structural strings are never redacted: a hit withholds the frame.
+            if matches!(segment.field, ScreenedField::NodeStructural(_))
+                || text.get(span.clone()).is_none()
+            {
+                return Err(secret());
+            }
+            field_spans
+                .entry(segment.field)
+                .or_default()
+                .push(span.start - segment.start..span.end - segment.start);
+        }
+    }
+    let mut processed: BTreeSet<ScreenedField> = BTreeSet::new();
+
+    // Every distinct detected hit text with its provenance, wherever it was
+    // detected: it decides how further copies are located.
+    let secrets = matcher_secrets(plan, chunks, ocr.map(|(text, _)| text.as_str()));
+    let Some(matcher) = SecretMatcher::new(&secrets) else {
+        return Err(secret());
+    };
+    if matcher.is_empty() {
+        return Err(secret());
+    }
+    let mut copies = vec![SecretCopies::default(); matcher.len()];
+    let mut partial_locations = 0usize;
+
+    // OCR: locate every copy, map it to words and lines, redact text and JSON.
+    let mut rects = Vec::new();
+    let mut redacted_ocr = ocr.cloned();
+    let mut ocr_json_text = None;
+    let mut ocr_redacted = false;
+    if let Some((text, json)) = ocr {
+        let found = matcher.locate(text);
+        for (index, count) in copies.iter_mut().enumerate() {
+            count.ocr = found.count(index).total();
+        }
+        partial_locations += found.partial_locations();
+        let spans = merge_spans(
+            found
+                .spans()
+                .iter()
+                .chain(plan.secret_spans(ocr_index))
+                .cloned(),
+        );
+        if !spans.is_empty() {
+            if !word_boxes_available {
+                return Err(secret());
+            }
+            let Ok(mut entries) =
+                serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(json)
+            else {
+                return Err(secret());
+            };
+            let location = {
+                let Some(words) = ocr_json_words(&entries) else {
+                    return Err(secret());
+                };
+                locate_ocr_hits(text, &words, &spans, image_size.0, image_size.1)
+            };
+            let Some(location) = location else {
+                return Err(secret());
+            };
+            for &word in &location.words {
+                let Some(entry) = entries.get_mut(word) else {
+                    return Err(secret());
+                };
+                let Some(original) = entry.get("text").and_then(|v| v.as_str()) else {
+                    return Err(secret());
+                };
+                // The whole word of an affected line is replaced.
+                let Ok(redacted) = replace_secret_spans(original, &[0..original.len()]) else {
+                    return Err(secret());
+                };
+                entry.insert("text".to_string(), serde_json::Value::String(redacted));
+            }
+            let Ok(json) = serde_json::to_string(&entries) else {
+                return Err(secret());
+            };
+            ocr_json_text = Some(
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            let Ok(redacted_text) = replace_secret_spans(text, &spans) else {
+                return Err(secret());
+            };
+            redacted_ocr = Some((redacted_text, json));
+            ocr_redacted = true;
+            if pixels_persisted {
+                rects = location.rects;
+            }
+        }
+    }
+
+    // Metadata: each value is its own copy; counts are summed.
+    let mut url_copies = vec![0usize; copies.len()];
+    let (mut window_name, mut browser_url, mut document_path) = (None, None, None);
+    for (field, value, slot) in [
+        (
+            ScreenedField::WindowName,
+            metadata.window_name,
+            &mut window_name,
+        ),
+        (
+            ScreenedField::BrowserUrl,
+            metadata.browser_url,
+            &mut browser_url,
+        ),
+        (
+            ScreenedField::DocumentPath,
+            metadata.document_path,
+            &mut document_path,
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        processed.insert(field);
+        let (found, redacted) = redact_screened_value(&matcher, value, field_spans.get(&field))?;
+        for (index, count) in copies.iter_mut().enumerate() {
+            let copies_here = found.count(index).total();
+            count.metadata += copies_here;
+            if field == ScreenedField::BrowserUrl {
+                url_copies[index] += copies_here;
+            }
+        }
+        partial_locations += found.partial_locations();
+        *slot = redacted;
+    }
+
+    // Accessibility: `text_content` and the node fields represent the same
+    // tree; the larger count is its number of copies.
+    let mut redacted_tree = None;
+    if let Some(source) = tree {
+        let mut replacements: Vec<(ScreenedField, String)> = Vec::new();
+        processed.insert(ScreenedField::TextContent);
+        let (content_found, redacted) = redact_screened_value(
+            &matcher,
+            &source.text_content,
+            field_spans.get(&ScreenedField::TextContent),
+        )?;
+        partial_locations += content_found.partial_locations();
+        if let Some(redacted) = redacted {
+            replacements.push((ScreenedField::TextContent, redacted));
+        }
+        let mut node_counts = vec![SecretCount::default(); matcher.len()];
+        // Exact copies in any node field, counted or not.
+        let mut node_exact_any = vec![0usize; matcher.len()];
+        // Counted address-bar nodes (value or url equal to the browser URL) per
+        // secret: each duplicates the browser-URL metadata copy.
+        let mut address_bar_nodes = vec![0usize; matcher.len()];
+        for (i, node) in source.nodes.iter().enumerate() {
+            // `url` is extracted from `value` when URL-like: an identical
+            // string in both is one copy of one control.
+            let url_is_value = node.url.is_some() && node.url == node.value;
+            // A link's target (UIA Hyperlink value, AXURL, `url`) is text only:
+            // it is not drawn, so it is redacted in the text but needs no OCR
+            // copy to cover pixels. Edit/ComboBox/Document values stay counted.
+            let link = is_link_role(&node.role);
+            let value_is_link_target =
+                link && node.value.as_deref().is_some_and(value_is_single_url_token);
+            let mut node_hit = vec![false; matcher.len()];
+            for (field, value, counted) in [
+                (ScreenedField::NodeText(i), Some(node.text.as_str()), true),
+                (
+                    ScreenedField::NodeValue(i),
+                    node.value.as_deref(),
+                    !value_is_link_target,
+                ),
+                (
+                    ScreenedField::NodeHelpText(i),
+                    node.help_text.as_deref(),
+                    true,
+                ),
+                (
+                    ScreenedField::NodeUrl(i),
+                    node.url.as_deref(),
+                    !url_is_value && !link,
+                ),
+                (
+                    ScreenedField::NodePlaceholder(i),
+                    node.placeholder.as_deref(),
+                    true,
+                ),
+            ] {
+                let Some(value) = value else { continue };
+                processed.insert(field);
+                let (found, redacted) =
+                    redact_screened_value(&matcher, value, field_spans.get(&field))?;
+                if counted
+                    && matches!(
+                        field,
+                        ScreenedField::NodeValue(_) | ScreenedField::NodeUrl(_)
+                    )
+                    && metadata.browser_url == Some(value)
+                {
+                    for (index, hit) in node_hit.iter_mut().enumerate() {
+                        *hit |= found.count(index).total() > 0;
+                    }
+                }
+                partial_locations += found.partial_locations();
+                for (index, any) in node_exact_any.iter_mut().enumerate() {
+                    *any += found.count(index).exact;
+                }
+                if counted {
+                    for (index, count) in node_counts.iter_mut().enumerate() {
+                        *count += found.count(index);
+                    }
+                }
+                if let Some(redacted) = redacted {
+                    replacements.push((field, redacted));
+                }
+            }
+            for (index, hit) in node_hit.iter().enumerate() {
+                address_bar_nodes[index] += usize::from(*hit);
+            }
+        }
+        for (index, count) in copies.iter_mut().enumerate() {
+            let content = content_found.count(index);
+            if content.exact > node_exact_any[index] {
+                return Err(secret());
+            }
+            count.accessibility = content.total().max(node_counts[index].total());
+            count.address_bar_duplicates = address_bar_nodes[index].min(url_copies[index]);
+        }
+        if !replacements.is_empty() {
+            let mut snapshot = source.clone();
+            for (field, value) in replacements {
+                let target = match field {
+                    ScreenedField::TextContent => Some(&mut snapshot.text_content),
+                    ScreenedField::NodeText(i) => snapshot.nodes.get_mut(i).map(|node| {
+                        // Line spans index the original text; drop them.
+                        node.lines = None;
+                        &mut node.text
+                    }),
+                    ScreenedField::NodeValue(i) => {
+                        snapshot.nodes.get_mut(i).and_then(|n| n.value.as_mut())
+                    }
+                    ScreenedField::NodeHelpText(i) => {
+                        snapshot.nodes.get_mut(i).and_then(|n| n.help_text.as_mut())
+                    }
+                    ScreenedField::NodeUrl(i) => {
+                        snapshot.nodes.get_mut(i).and_then(|n| n.url.as_mut())
+                    }
+                    ScreenedField::NodePlaceholder(i) => snapshot
+                        .nodes
+                        .get_mut(i)
+                        .and_then(|n| n.placeholder.as_mut()),
+                    _ => None,
+                };
+                let Some(target) = target else {
+                    return Err(secret());
+                };
+                *target = value;
+            }
+            // Persisted hashes are derived from the redacted text only.
+            snapshot.content_hash =
+                screenpipe_a11y::tree::TreeSnapshot::compute_hash(&snapshot.text_content);
+            snapshot.simhash =
+                screenpipe_a11y::tree::TreeSnapshot::compute_simhash(&snapshot.text_content);
+            redacted_tree = Some(snapshot);
+        }
+    }
+    // A screening hit in a value that was not redacted above (cannot happen
+    // for consistent inputs) withholds the frame.
+    if field_spans.keys().any(|field| !processed.contains(field)) {
+        return Err(secret());
+    }
+
+    // Whole-frame thresholds: copies per source, OCR coverage of persisted
+    // pixels, redacted area.
+    if check_secret_coverage(&copies, pixels_persisted).is_err()
+        || redacted_area_exceeds_limit(&rects, image_size.0, image_size.1)
+    {
+        return Err(secret());
+    }
+
+    // Self-check: screen every redacted text again.
+    let checked_tree = redacted_tree.as_ref().or(tree);
+    let checked_metadata = FrameScreeningMetadata {
+        app_name: metadata.app_name,
+        window_name: window_name.as_deref().or(metadata.window_name),
+        browser_url: browser_url.as_deref().or(metadata.browser_url),
+        document_path: document_path.as_deref().or(metadata.document_path),
+    };
+    let Some(checked_chunks) = screening_chunks(checked_tree, checked_metadata) else {
+        return Err(secret());
+    };
+    let mut checked: Vec<&str> = checked_chunks.texts.iter().map(String::as_str).collect();
+    if let Some((text, _)) = &redacted_ocr {
+        checked.push(text);
+    }
+    if let Some(words) = &ocr_json_text {
+        checked.push(words);
+    }
+    if checked
+        .iter()
+        .any(|text| text.len() > CONTENT_SCREENING_MAX_TEXT_BYTES)
+    {
+        return Err(secret());
+    }
+    // The labels redaction inserted are not content: hide them from the
+    // keyword/rule screen so a user keyword such as "secret" does not withhold
+    // every redacted frame.
+    let masked: Vec<_> = checked
+        .iter()
+        .map(|text| mask_secret_labels(text))
+        .collect();
+    let masked_refs: Vec<&str> = masked.iter().map(|text| text.as_ref()).collect();
+    let recheck = screen_text_plan(&masked_refs, config).verdict();
+    if recheck.blocked() {
+        let mut reasons = recheck.reasons;
+        reasons.push(ContentScreeningReason::Secret);
+        reasons.sort();
+        reasons.dedup();
+        return Err(ContentScreeningVerdict { reasons });
+    }
+    // No exact copy or fragment may remain anywhere that is persisted.
+    let leftover = |text: &str| !matcher.locate(text).is_empty();
+    if checked.iter().copied().any(leftover)
+        || checked_tree.is_some_and(|snapshot| {
+            snapshot
+                .nodes
+                .iter()
+                .any(|node| node_unscreened_strings(node).any(leftover))
+        })
+    {
+        return Err(secret());
+    }
+
+    // Without OCR input, paired capture must not start recognising the
+    // (unredacted, unscreened) frame because the redacted text changed its plan.
+    if ocr.is_none()
+        && paired_capture_runs_ocr(
+            checked_tree,
+            checked_metadata.app_name,
+            checked_metadata.window_name,
+            checked_metadata.browser_url,
+        )
+    {
+        return Err(ContentScreeningVerdict::unavailable());
+    }
+
+    let accessibility = redacted_tree.is_some()
+        || window_name.is_some()
+        || browser_url.is_some()
+        || document_path.is_some();
+    Ok(FrameRedaction {
+        content: ContentRedacted {
+            ocr: ocr_redacted,
+            accessibility,
+        },
+        ocr: redacted_ocr,
+        tree: redacted_tree,
+        window_name,
+        browser_url,
+        document_path,
+        rects,
+        image: None,
+        partial_locations,
+        url_hits: plan.url_hits(),
+    })
+}
+
+/// Outcome of screening one admitted frame in memory.
+enum FrameScreening {
+    /// No hits. Carries the OCR result for reuse (`None`: no OCR ran because
+    /// no pixels and no OCR text will be persisted).
+    Passed(Option<(String, String)>),
+    /// Only redactable secrets, all redacted in memory.
+    Redacted(Box<FrameRedaction>),
+    /// Withhold the frame with this fixed verdict.
+    Withheld(ContentScreeningVerdict),
+}
+
+/// Screen one admitted frame in memory and, for the redaction tier, redact it.
+async fn screen_frame_content(
+    config: &Arc<ContentScreeningConfig>,
+    image: &Arc<image::DynamicImage>,
+    languages: &[screenpipe_core::Language],
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    metadata: FrameScreeningMetadata<'_>,
+    screenshot_disabled: bool,
+    fail_open_pending: bool,
+) -> (FrameScreening, ScreeningMetrics) {
+    let mut metrics = ScreeningMetrics::default();
+    // A fail-open frame has no trustworthy accessibility text; without a
+    // stored screenshot its admission cannot be satisfied.
+    if screenshot_disabled && fail_open_pending {
+        return (
+            FrameScreening::Withheld(ContentScreeningVerdict::unavailable()),
+            metrics,
+        );
+    }
+    // Pixels being persisted are always screened through OCR. Without a
+    // screenshot, OCR runs only where paired capture would store OCR text.
+    let paired_runs_ocr = paired_capture_runs_ocr(
+        tree,
+        metadata.app_name,
+        metadata.window_name,
+        metadata.browser_url,
+    );
+    let needs_ocr = !screenshot_disabled || paired_runs_ocr;
+    metrics.ocr_forced = Some(needs_ocr && !paired_runs_ocr);
+    let ocr = if needs_ocr {
+        let started = Instant::now();
+        let result = run_ocr(image, languages).await;
+        let elapsed = started.elapsed();
+        metrics.ocr_ms = Some(millis_u32(elapsed));
+        metrics.ocr_duration = Some(elapsed);
+        match result {
+            Ok(ocr) => Some(ocr),
+            // Never fall back to unscreened storage.
+            Err(_) => {
+                return (
+                    FrameScreening::Withheld(ContentScreeningVerdict::unavailable()),
+                    metrics,
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let screen_started = Instant::now();
+    let chunks = screening_chunks(tree, metadata);
+    let screening_config = Arc::clone(config);
+    // Regex screening is CPU work; keep it off the async worker like OCR.
+    let screened = tokio::task::spawn_blocking(move || {
+        let plan = screen_frame_plan(
+            &screening_config,
+            ocr.as_ref().map(|(text, _)| text.as_str()),
+            chunks.as_ref(),
+        );
+        (plan, chunks, ocr)
+    })
+    .await;
+    let Ok((Some(plan), Some(chunks), ocr)) = screened else {
+        metrics.screen_ms = Some(millis_u32(screen_started.elapsed()));
+        return (
+            FrameScreening::Withheld(ContentScreeningVerdict::unavailable()),
+            metrics,
+        );
+    };
+    let sources = secret_hit_sources(&plan, &chunks, ocr.as_ref().map(|(text, _)| text.as_str()));
+    let distinct = sources.len();
+    metrics = metrics.with_hit_sources(&sources);
+    drop(sources);
+    let tier = screening_tier(&plan, distinct, fail_open_pending);
+    metrics.screen_ms = Some(millis_u32(screen_started.elapsed()));
+    let screening = match tier {
+        ContentScreeningTier::Pass => FrameScreening::Passed(ocr),
+        ContentScreeningTier::Drop(verdict) => FrameScreening::Withheld(verdict),
+        ContentScreeningTier::Redact => {
+            let redact_started = Instant::now();
+            // Rare path: own the inputs so redaction runs off the async worker.
+            let tree = tree.cloned();
+            let owned = [
+                metadata.app_name,
+                metadata.window_name,
+                metadata.browser_url,
+                metadata.document_path,
+            ]
+            .map(|value| value.map(str::to_string));
+            let image = Arc::clone(image);
+            let config = Arc::clone(config);
+            let redacted = tokio::task::spawn_blocking(move || {
+                let [app_name, window_name, browser_url, document_path] = &owned;
+                let mut redaction = plan_frame_redaction(
+                    &config,
+                    &plan,
+                    &chunks,
+                    ocr.as_ref(),
+                    tree.as_ref(),
+                    FrameScreeningMetadata {
+                        app_name: app_name.as_deref(),
+                        window_name: window_name.as_deref(),
+                        browser_url: browser_url.as_deref(),
+                        document_path: document_path.as_deref(),
+                    },
+                    (image.width(), image.height()),
+                    !screenshot_disabled,
+                    cfg!(target_os = "windows"),
+                )?;
+                if !redaction.rects.is_empty() {
+                    // Clone-on-write: only a redacted frame copies its pixels.
+                    let mut copy = (*image).clone();
+                    let fill = redact_regions_in_place(&mut copy, &redaction.rects);
+                    if fill.regions != redaction.rects.len() {
+                        return Err(ContentScreeningVerdict::secret());
+                    }
+                    redaction.image = Some(copy);
+                }
+                Ok(redaction)
+            })
+            .await;
+            metrics.redact_ms = Some(millis_u32(redact_started.elapsed()));
+            match redacted {
+                Ok(Ok(redaction)) => FrameScreening::Redacted(Box::new(redaction)),
+                Ok(Err(verdict)) => FrameScreening::Withheld(verdict),
+                Err(_) => FrameScreening::Withheld(ContentScreeningVerdict::unavailable()),
+            }
+        }
+    };
+    (screening, metrics)
+}
+
+/// Fixed, content-free screening observation for platforms without the
+/// Windows capture-decision report. `None` means the frame was stored
+/// (`redacted`: after in-memory redaction).
+#[cfg(not(target_os = "windows"))]
+fn observe_content_screening(monitor_id: u32, withheld_unavailable: Option<bool>, redacted: bool) {
+    use screenpipe_config::capture_diagnostics::*;
+    // Same channels as the Windows decision report (screen and OCR).
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        observe(
+            channel,
+            DiagnosticSource::Redaction,
+            CaptureScope::Monitor(monitor_id),
+            match withheld_unavailable {
+                None if redacted => CaptureCondition::PartiallyRedacted,
+                None => CaptureCondition::Admitted,
+                Some(_) => CaptureCondition::Redacted,
+            },
+            vec![match withheld_unavailable {
+                None if redacted => CaptureReason::ContentScreeningRedacted,
+                None => CaptureReason::GateOpen,
+                Some(true) => CaptureReason::ContentScreeningUnavailable,
+                Some(false) => CaptureReason::ContentScreeningBlocked,
+            }],
+            Vec::new(),
+        );
+    }
+}
+
 /// Perform a single event-driven capture.
 ///
 /// When `previous_content_hash` is `Some` and matches the current accessibility
@@ -2279,6 +3441,7 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
             #[cfg(target_os = "windows")]
             windows_outcome,
         });
@@ -2412,6 +3575,7 @@ async fn do_capture(
                     result: None,
                     image,
                     elements_deduped: false,
+                    content_redacted: ContentRedacted::default(),
                     #[cfg(target_os = "windows")]
                     windows_outcome,
                 });
@@ -2437,6 +3601,7 @@ async fn do_capture(
                 result: None,
                 image,
                 elements_deduped: false,
+                content_redacted: ContentRedacted::default(),
                 #[cfg(target_os = "windows")]
                 windows_outcome,
             });
@@ -2507,7 +3672,17 @@ async fn do_capture(
                 .and_then(|window| window.browser_url.as_ref())
                 .map(String::as_str),
         );
-        apply_windows_accessibility_failure(&mut windows_privacy, failure, requires_drm_url);
+        if apply_windows_accessibility_failure(&mut windows_privacy, failure, requires_drm_url) {
+            // Owner exception (2026-10-14): a configured window may continue
+            // only as `screening_required`. Every later check still applies
+            // and the frame is persisted only if content screening passes.
+            apply_windows_uia_fail_open(
+                &mut windows_privacy,
+                failure,
+                params.uia_fail_open_windows,
+                params.content_screening.is_some(),
+            );
+        }
         use screenpipe_config::capture_diagnostics::*;
         observe(
             CaptureChannel::Accessibility,
@@ -2638,6 +3813,8 @@ async fn do_capture(
             screenpipe_a11y::tree::SkipReason::AccessibilityRetrievalFailed(failure),
         ) => {
             // Earlier retrieval assessment survives subsequent target-check failures.
+            // `screening_required` (UIA fail-open) continues without any tree
+            // text and must pass content screening before persistence.
             if windows_privacy
                 .accessibility
                 .as_ref()
@@ -2726,6 +3903,7 @@ async fn do_capture(
                     result: None,
                     image,
                     elements_deduped: false,
+                    content_redacted: ContentRedacted::default(),
                     #[cfg(target_os = "windows")]
                     windows_outcome,
                 });
@@ -2776,6 +3954,7 @@ async fn do_capture(
                         result: None,
                         image,
                         elements_deduped: false,
+                        content_redacted: ContentRedacted::default(),
                         #[cfg(target_os = "windows")]
                         windows_outcome,
                     });
@@ -2828,6 +4007,7 @@ async fn do_capture(
                 result: None,
                 image,
                 elements_deduped: false,
+                content_redacted: ContentRedacted::default(),
                 #[cfg(target_os = "windows")]
                 windows_outcome,
             });
@@ -2854,6 +4034,7 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
             #[cfg(target_os = "windows")]
             windows_outcome,
         });
@@ -2898,6 +4079,7 @@ async fn do_capture(
                     result: None,
                     image,
                     elements_deduped: false,
+                    content_redacted: ContentRedacted::default(),
                     #[cfg(target_os = "windows")]
                     windows_outcome,
                 });
@@ -2926,6 +4108,7 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
             #[cfg(target_os = "windows")]
             windows_outcome,
         });
@@ -2938,6 +4121,7 @@ async fn do_capture(
             result: None,
             image,
             elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
             #[cfg(target_os = "windows")]
             windows_outcome,
         });
@@ -2965,9 +4149,13 @@ async fn do_capture(
     }
 
     // Publish after every privacy/UIA check, including for a verified dedup
-    // observation which does not write another frame.
+    // observation which does not write another frame. With content screening
+    // enabled, publication waits for the screening result (or the dedup skip)
+    // so a withheld frame is not first reported as admitted.
     #[cfg(target_os = "windows")]
-    report_windows_privacy(params.monitor_id, &windows_privacy);
+    if params.content_screening.is_none() {
+        report_windows_privacy(params.monitor_id, &windows_privacy);
+    }
 
     // Content dedup: skip capture if accessibility text hasn't changed.
     // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
@@ -2985,10 +4173,15 @@ async fn do_capture(
                             new_hash,
                             trigger.as_str()
                         );
+                        #[cfg(target_os = "windows")]
+                        if params.content_screening.is_some() {
+                            report_windows_privacy(params.monitor_id, &windows_privacy);
+                        }
                         return Ok(CaptureOutput {
                             result: None,
                             image,
                             elements_deduped: false,
+                            content_redacted: ContentRedacted::default(),
                             #[cfg(target_os = "windows")]
                             windows_outcome,
                         });
@@ -3000,7 +4193,7 @@ async fn do_capture(
 
     // The caller's candidate was derived from the previous capture. Recheck
     // against this acquired tree, especially after focus moves to another monitor.
-    let elements_ref_frame_id = matching_elements_reference(
+    let mut elements_ref_frame_id = matching_elements_reference(
         tree_snapshot
             .as_ref()
             .and_then(usable_accessibility_snapshot)
@@ -3008,6 +4201,227 @@ async fn do_capture(
         previous_content_hash,
         elements_ref_frame_id,
     );
+
+    // In-memory content screening: after every privacy/UIA/target/DRM/lock
+    // check and dedup, immediately before anything (JPEG, OCR, accessibility
+    // text, tree JSON) can be written. A blocked or unscreenable frame is never
+    // persisted; Windows records a source-free placeholder instead. A frame
+    // whose only hits are redactable secrets is redacted in memory instead
+    // (owner decision 2026-10-15) and only the redacted data flows on.
+    let mut image = Arc::new(image);
+    #[cfg(target_os = "windows")]
+    let fail_open_pending = windows_privacy
+        .accessibility
+        .as_ref()
+        .is_some_and(|decision| decision.processing == "screening_required");
+    #[cfg(not(target_os = "windows"))]
+    let fail_open_pending = false;
+    let mut precomputed_ocr = None;
+    let mut redaction: Option<Box<FrameRedaction>> = None;
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    let mut screening_metrics = ScreeningMetrics::default();
+    let screening_verdict = match params.content_screening.as_ref() {
+        Some(screening) => {
+            let (screened, metrics) = screen_frame_content(
+                screening,
+                &image,
+                params.languages,
+                tree_snapshot
+                    .as_ref()
+                    .and_then(usable_accessibility_snapshot),
+                FrameScreeningMetadata {
+                    app_name: app_name_owned.as_deref(),
+                    window_name: window_name_owned.as_deref(),
+                    browser_url: browser_url_owned.as_deref(),
+                    document_path: document_path_owned.as_deref(),
+                },
+                screenshot_disabled,
+                fail_open_pending,
+            )
+            .await;
+            screening_metrics = metrics;
+            // `/health` OCR latency covers the screening OCR as well.
+            if let Some(elapsed) = metrics.ocr_duration {
+                params.vision_metrics.record_ocr(elapsed, 0, 0);
+            }
+            match screened {
+                FrameScreening::Passed(ocr) => {
+                    precomputed_ocr = ocr;
+                    None
+                }
+                FrameScreening::Redacted(redacted) => {
+                    redaction = Some(redacted);
+                    None
+                }
+                FrameScreening::Withheld(verdict) => Some(verdict),
+            }
+        }
+        // Fail-open requires screening; this cannot be reached, and fails closed.
+        None if fail_open_pending => Some(ContentScreeningVerdict::unavailable()),
+        None => None,
+    };
+    if let Some(verdict) = screening_verdict {
+        let unavailable = verdict
+            .reasons
+            .contains(&ContentScreeningReason::Unavailable);
+        screenpipe_config::sensitive_debug::record(
+            "content_screening",
+            || serde_json::json!({"reasons": verdict.codes(), "fail_open": fail_open_pending}),
+        );
+        debug!(
+            "content screening withheld frame on monitor {} ({:?})",
+            params.monitor_id,
+            verdict.codes()
+        );
+        #[cfg(target_os = "windows")]
+        {
+            windows_privacy.content_screening = Some(screening_metrics.decision(
+                if unavailable {
+                    "unavailable"
+                } else {
+                    "blocked"
+                },
+                verdict.codes(),
+                fail_open_pending,
+                None,
+            ));
+            drop(image);
+            return persist_windows_placeholder(
+                params,
+                trigger,
+                captured_at,
+                WindowsCaptureOutcome::CaptureRedacted(
+                    screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ContentScreening,
+                ),
+                screenshot_disabled,
+                &windows_privacy,
+            )
+            .await;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            observe_content_screening(params.monitor_id, Some(unavailable), false);
+            return Ok(CaptureOutput {
+                result: None,
+                image: Arc::try_unwrap(image).unwrap_or_else(|arc| (*arc).clone()),
+                elements_deduped: false,
+                content_redacted: ContentRedacted::default(),
+            });
+        }
+    }
+    // Fixed region count only; never positions or text.
+    let redacted_regions = redaction
+        .as_ref()
+        .map(|redaction| u32::try_from(redaction.rects.len()).unwrap_or(u32::MAX));
+    // Bounded diagnostic counts only (never fragments, URLs or positions).
+    let redaction_counts = redaction.as_ref().map(|redaction| {
+        (
+            u32::try_from(redaction.partial_locations).unwrap_or(u32::MAX),
+            u32::try_from(redaction.url_hits).unwrap_or(u32::MAX),
+        )
+    });
+    if params.content_screening.is_some() {
+        if let (Some(regions), Some((partial_matches, url_redactions))) =
+            (redacted_regions, redaction_counts)
+        {
+            screenpipe_config::sensitive_debug::record("content_screening", || {
+                serde_json::json!({
+                    "reasons": ContentScreeningVerdict::secret().codes(),
+                    "fail_open": fail_open_pending,
+                    "redacted_regions": regions,
+                    "partial_matches": partial_matches,
+                    "url_redactions": url_redactions,
+                })
+            });
+            debug!(
+                "content screening redacted {} region(s) in memory on monitor {}",
+                regions, params.monitor_id
+            );
+        }
+        // Screening adds OCR time before the first write. A lock or privacy
+        // pause that arrived meanwhile still prevents persistence, and the
+        // status report below is published only after this re-check so a frame
+        // that is not written is never reported as admitted.
+        if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+            return Ok(CaptureOutput {
+                result: None,
+                image: Arc::try_unwrap(image).unwrap_or_else(|arc| (*arc).clone()),
+                elements_deduped: false,
+                content_redacted: ContentRedacted::default(),
+                #[cfg(target_os = "windows")]
+                windows_outcome,
+            });
+        }
+        #[cfg(target_os = "windows")]
+        {
+            windows_privacy.content_screening = Some(screening_metrics.decision(
+                if redacted_regions.is_some() {
+                    "redacted"
+                } else {
+                    "passed"
+                },
+                if redacted_regions.is_some() {
+                    ContentScreeningVerdict::secret().codes()
+                } else {
+                    Vec::new()
+                },
+                fail_open_pending,
+                redacted_regions,
+            ));
+            if fail_open_pending {
+                if let Some(decision) = windows_privacy.accessibility.as_mut() {
+                    decision.processing = "screened_fail_open";
+                }
+            }
+            report_windows_privacy(params.monitor_id, &windows_privacy);
+        }
+        #[cfg(not(target_os = "windows"))]
+        observe_content_screening(params.monitor_id, None, redacted_regions.is_some());
+    }
+
+    // Apply an in-memory redaction. Every later consumer — the JPEG write,
+    // OCR text/JSON and accessibility tree persistence, frame metadata and
+    // the hot-frame cache (built from the paired-capture result) — sees only
+    // redacted data. The frame comparer keeps the original bitmap: it is
+    // in-memory change detection only and already compares unscreened probe
+    // captures; a redacted bitmap there would re-trigger captures.
+    let mut comparer_image = None;
+    let mut content_redacted = ContentRedacted::default();
+    let mut dedup_hashes = None;
+    let mut tree_snapshot = tree_snapshot;
+    let (mut window_name_owned, mut browser_url_owned, mut document_path_owned) =
+        (window_name_owned, browser_url_owned, document_path_owned);
+    if let Some(redaction) = redaction {
+        let redaction = *redaction;
+        content_redacted = redaction.content;
+        if let Some(redacted_image) = redaction.image {
+            comparer_image = Some(std::mem::replace(&mut image, Arc::new(redacted_image)));
+        }
+        if let Some(redacted_tree) = redaction.tree {
+            // The previous frame's persisted elements were not produced from
+            // this redacted tree: write this frame's redacted elements instead
+            // of referencing them.
+            elements_ref_frame_id = None;
+            dedup_hashes = tree_snapshot.as_ref().map(|original| {
+                (
+                    original.content_hash as i64,
+                    redacted_tree.content_hash as i64,
+                )
+            });
+            tree_snapshot = Some(redacted_tree);
+        }
+        if let Some(value) = redaction.window_name {
+            window_name_owned = Some(value);
+        }
+        if let Some(value) = redaction.browser_url {
+            browser_url_owned = Some(value);
+        }
+        if let Some(value) = redaction.document_path {
+            document_path_owned = Some(value);
+        }
+        precomputed_ocr = redaction.ocr;
+    }
+
     #[cfg(target_os = "windows")]
     let capture_privacy_json = Some(serde_json::to_string(
         &windows_privacy.with_outcome(windows_outcome),
@@ -3017,7 +4431,7 @@ async fn do_capture(
     let ctx = CaptureContext {
         db: params.db,
         snapshot_writer: params.snapshot_writer,
-        image: Arc::new(image),
+        image,
         captured_at,
         monitor_id: params.monitor_id,
         device_name: params.device_name,
@@ -3039,9 +4453,23 @@ async fn do_capture(
         screenshot_disabled,
         placeholder_text: None,
         capture_privacy: capture_privacy_json.as_deref(),
+        // Reuse the screening OCR so one frame is never recognised twice.
+        precomputed_ocr,
     };
 
-    let result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
+    let mut result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
+    // OCR that paired capture ran itself (a reused screening result has none).
+    if let Some(elapsed) = result.ocr_duration {
+        params.vision_metrics.record_ocr(elapsed, 0, 0);
+    }
+    // Only the redacted tree's hash is persisted. In memory, dedup keeps the
+    // walker's hash of the original tree so an unchanged redacted screen is
+    // deduplicated like any other.
+    if let Some((original, redacted)) = dedup_hashes {
+        if result.content_hash == Some(redacted) {
+            result.content_hash = Some(original);
+        }
+    }
     // Real paired-capture success only: privacy placeholders and dedup/no-write paths
     // deliberately do not establish capture or storage evidence.
     if result.text_source.as_deref() != Some("privacy_placeholder") {
@@ -3065,11 +4493,13 @@ async fn do_capture(
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.
-    let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());
+    let image = comparer_image.unwrap_or(ctx.image);
+    let image = Arc::try_unwrap(image).unwrap_or_else(|arc| (*arc).clone());
     Ok(CaptureOutput {
         result: Some(result),
         image,
         elements_deduped: deduped,
+        content_redacted,
         #[cfg(target_os = "windows")]
         windows_outcome,
     })
@@ -3275,7 +4705,7 @@ mod tests {
             Some(&selected),
         );
         assert_eq!(resolved_url.as_deref(), Some(drm_url));
-        assert!(crate::drm_detector::is_drm_url(
+        assert!(screenpipe_capture_policy::drm::is_drm_url(
             resolved_url.as_deref().unwrap()
         ));
         // Mandatory acquisition may complete without a Document URL. Later
@@ -3312,7 +4742,9 @@ mod tests {
                 bitmap.browser_url.as_deref(),
             );
             assert_eq!(candidate, Some(drm_url));
-            assert!(crate::drm_detector::is_drm_url(candidate.unwrap()));
+            assert!(screenpipe_capture_policy::drm::is_drm_url(
+                candidate.unwrap()
+            ));
         }
         // Ordinary earlier metadata must not override the fresh policy URL.
         assert_eq!(
@@ -4304,10 +5736,97 @@ fn apply_windows_accessibility_failure_with_target_app(
     blocked
 }
 
+/// Whether the owner's configured `uiaFailOpenWindows` covers the natively
+/// sampled app/title of a failed UIA attempt. Never applies when content
+/// screening is disabled, the list is empty or the app identity is unknown.
+#[cfg(target_os = "windows")]
+fn windows_uia_fail_open_applies(
+    patterns: &[WindowPattern],
+    app: &str,
+    title: &str,
+    screening_enabled: bool,
+) -> bool {
+    if !screening_enabled || patterns.is_empty() {
+        return false;
+    }
+    let app = app.trim().to_lowercase();
+    if app.is_empty() || app == "unknown" {
+        return false;
+    }
+    // Only `App::` / `App::Title` patterns count: a pattern without an app part
+    // would match on the page-controlled window title alone.
+    // Unlike ignore rules (substring match), the app part must name the
+    // sampled executable exactly: `code::` is `Code.exe`, not `vscode.exe`.
+    let title = title.to_lowercase();
+    let app = app.strip_suffix(".exe").unwrap_or(&app);
+    patterns.iter().any(|pattern| {
+        let Some(pattern_app) = pattern.app.as_deref() else {
+            return false;
+        };
+        let pattern_app = pattern_app.trim();
+        let pattern_app = pattern_app.strip_suffix(".exe").unwrap_or(pattern_app);
+        pattern_app == app && (pattern.title.is_empty() || title.contains(pattern.title.as_str()))
+    })
+}
+
+/// A retrieval failure is eligible only when native window policy and the
+/// inspected identity were freshly re-verified: unresolved native policy,
+/// focus, identity, metadata or monitor checks never fail open.
+#[cfg(target_os = "windows")]
+fn windows_uia_failure_may_fail_open(
+    failure: &screenpipe_a11y::tree::AccessibilityFailure,
+    patterns: &[WindowPattern],
+    screening_enabled: bool,
+) -> bool {
+    use screenpipe_config::capture_diagnostics::RuleKind;
+    failure.verified_target.is_some()
+        && !failure
+            .unresolved_rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::NativeWindowPolicy)
+        && windows_uia_fail_open_applies(
+            patterns,
+            &failure.app_name,
+            &failure.window_name,
+            screening_enabled,
+        )
+}
+
+/// Convert a `withheld` UIA privacy-admission decision for an eligible
+/// configured window into `screening_required`. The unresolved rules stay
+/// recorded for transparency. Returns whether the exception was applied.
+#[cfg(target_os = "windows")]
+fn apply_windows_uia_fail_open(
+    privacy: &mut WindowsCapturePrivacy,
+    failure: &screenpipe_a11y::tree::AccessibilityFailure,
+    patterns: &[WindowPattern],
+    screening_enabled: bool,
+) -> bool {
+    let Some(decision) = privacy.accessibility.as_mut() else {
+        return false;
+    };
+    if decision.phase != "privacy_admission"
+        || decision.processing != "withheld"
+        || !windows_uia_failure_may_fail_open(failure, patterns, screening_enabled)
+    {
+        return false;
+    }
+    decision.processing = "screening_required";
+    true
+}
+
 #[cfg(target_os = "windows")]
 fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
     use screenpipe_config::capture_diagnostics::*;
+    // A stored frame redacted in memory by content screening.
+    let content_redacted = privacy
+        .content_screening
+        .as_ref()
+        .is_some_and(|decision| decision.outcome == "redacted");
     let condition = match privacy.outcome {
+        "full_monitor" | "active_window_only" if content_redacted => {
+            CaptureCondition::PartiallyRedacted
+        }
         "full_monitor" => CaptureCondition::Admitted,
         "active_window_only" => CaptureCondition::ActiveWindowOnly,
         "capture_failed" => CaptureCondition::Failed,
@@ -4367,8 +5886,22 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
             "inconsistent_focus" => CaptureReason::InconsistentFocus,
             "excluded_background" => CaptureReason::ExcludedBackground,
             "maximised_window_only" => CaptureReason::MaximisedWindowOnly,
+            "content_screening" => {
+                if privacy
+                    .content_screening
+                    .as_ref()
+                    .is_some_and(|decision| decision.outcome == "unavailable")
+                {
+                    CaptureReason::ContentScreeningUnavailable
+                } else {
+                    CaptureReason::ContentScreeningBlocked
+                }
+            }
             _ => CaptureReason::NoSafeWindow,
         });
+    }
+    if content_redacted && matches!(privacy.outcome, "full_monitor" | "active_window_only") {
+        reasons.push(CaptureReason::ContentScreeningRedacted);
     }
     if reasons.is_empty() && privacy.accessibility.is_none() {
         reasons.push(CaptureReason::GateOpen);
@@ -4405,6 +5938,11 @@ fn report_windows_privacy(monitor_id: u32, privacy: &WindowsCapturePrivacy) {
         match failure.processing {
             "withheld" => reasons.push(CaptureReason::AccessibilityPrivacyUnverified),
             "proceeding" => reasons.push(CaptureReason::AccessibilityProcessingContinues),
+            // One stable reason before and after the screen so unchanged
+            // fail-open state does not oscillate between notices.
+            "screening_required" | "screened_fail_open" => {
+                reasons.push(CaptureReason::AccessibilityFailOpenScreened)
+            }
             _ => {}
         }
         rules.splice(0..0, failure.unresolved_rules.iter().copied());
@@ -5029,5 +6567,1637 @@ fn capture_diagnostic_protected_content_url_requires_independent_evidence() {
     assert_eq!(
         privacy.accessibility.as_ref().unwrap().processing,
         "withheld_by_other_check"
+    );
+}
+
+#[cfg(test)]
+fn content_screening_test_snapshot(
+    text_content: &str,
+    nodes: Vec<screenpipe_a11y::tree::AccessibilityTreeNode>,
+) -> screenpipe_a11y::tree::TreeSnapshot {
+    screenpipe_a11y::tree::TreeSnapshot {
+        app_name: "editor.exe".into(),
+        window_name: "ordinary document".into(),
+        text_content: text_content.into(),
+        nodes,
+        browser_url: None,
+        document_path: None,
+        timestamp: Utc::now(),
+        node_count: 1,
+        walk_duration: Duration::from_millis(1),
+        content_hash: 1,
+        simhash: 1,
+        truncated: false,
+        truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+        max_depth_reached: 0,
+        #[cfg(target_os = "windows")]
+        windows_capture_verification: None,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn content_screening_covers_every_persisted_text_and_fails_closed_when_unbounded() {
+    use screenpipe_a11y::tree::AccessibilityTreeNode;
+    let config = ContentScreeningConfig {
+        blocked_url_patterns: Vec::new(),
+        protected_domains: false,
+        keywords: vec!["synthetic-blocked-term".into()],
+    };
+    let ordinary = content_screening_test_snapshot(
+        "ordinary visible text",
+        vec![AccessibilityTreeNode {
+            role: "Edit".into(),
+            text: "ordinary".into(),
+            ..Default::default()
+        }],
+    );
+    let texts = content_screening_texts(Some(&ordinary), FrameScreeningMetadata::default());
+    assert!(!screen_frame_texts(&config, Some("plain ocr"), texts.as_deref()).blocked());
+    assert!(!screen_frame_texts(&config, None, texts.as_deref()).blocked());
+
+    // Blocked content in OCR, every serialized tree field and persisted
+    // metadata withholds the frame with a fixed reason only.
+    assert_eq!(
+        screen_frame_texts(
+            &config,
+            Some("ocr shows Synthetic-Blocked-Term"),
+            texts.as_deref()
+        )
+        .codes(),
+        ["content_keyword"]
+    );
+    for field in 0..5 {
+        let mut node = AccessibilityTreeNode {
+            role: "Edit".into(),
+            ..Default::default()
+        };
+        let value = Some("contains synthetic-blocked-term".to_string());
+        match field {
+            0 => node.text = value.unwrap(),
+            1 => node.value = value,
+            2 => node.help_text = value,
+            3 => node.url = value,
+            _ => node.placeholder = value,
+        }
+        let tree = content_screening_test_snapshot("ordinary", vec![node]);
+        let texts = content_screening_texts(Some(&tree), FrameScreeningMetadata::default());
+        assert!(
+            screen_frame_texts(&config, None, texts.as_deref()).blocked(),
+            "{field}"
+        );
+    }
+    for metadata in [
+        FrameScreeningMetadata {
+            window_name: Some("synthetic-blocked-term title"),
+            ..Default::default()
+        },
+        FrameScreeningMetadata {
+            browser_url: Some("https://example.test/synthetic-blocked-term"),
+            ..Default::default()
+        },
+        FrameScreeningMetadata {
+            document_path: Some("synthetic-blocked-term.txt"),
+            ..Default::default()
+        },
+    ] {
+        let texts = content_screening_texts(None, metadata);
+        assert!(screen_frame_texts(&config, None, texts.as_deref()).blocked());
+    }
+
+    // Many ordinary nodes are chunked within the per-text scan bound.
+    let many = content_screening_test_snapshot(
+        "",
+        (0..2_000)
+            .map(|_| AccessibilityTreeNode {
+                role: "Text".into(),
+                text: "x".repeat(1_000),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let chunks = content_screening_texts(Some(&many), FrameScreeningMetadata::default()).unwrap();
+    assert!(chunks.len() > 1);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.len() <= CONTENT_SCREENING_MAX_TEXT_BYTES));
+
+    // A single value or OCR result too large to scan completely fails closed.
+    let huge = "y".repeat(CONTENT_SCREENING_MAX_TEXT_BYTES + 1);
+    let oversized = content_screening_test_snapshot(&huge, Vec::new());
+    let texts = content_screening_texts(Some(&oversized), FrameScreeningMetadata::default());
+    assert!(texts.is_none());
+    assert_eq!(
+        screen_frame_texts(&config, None, texts.as_deref()),
+        ContentScreeningVerdict::unavailable()
+    );
+    assert_eq!(
+        screen_frame_texts(&config, Some(huge.as_str()), Some(&[][..])),
+        ContentScreeningVerdict::unavailable()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn content_screening_settings_disable_rules_and_fail_open_together() {
+    let disabled = ContentScreeningSettings {
+        enabled: false,
+        keywords: vec!["synthetic".into()],
+        uia_fail_open_windows: vec!["notepad.exe::".into()],
+    };
+    assert!(disabled.screening_config(&[], true).is_none());
+    assert!(disabled.fail_open_patterns().is_empty());
+
+    let enabled = ContentScreeningSettings {
+        enabled: true,
+        ..disabled
+    };
+    let config = enabled
+        .screening_config(&["bank.example".into()], true)
+        .unwrap();
+    assert_eq!(config.blocked_url_patterns, ["bank.example"]);
+    assert_eq!(config.keywords, ["synthetic"]);
+    assert!(config.protected_domains);
+    assert!(
+        !enabled
+            .screening_config(&[], false)
+            .unwrap()
+            .protected_domains
+    );
+    assert_eq!(enabled.fail_open_patterns().len(), 1);
+
+    // Patterns without an app part (bare words, `::Title`) are ignored.
+    let mixed = ContentScreeningSettings {
+        enabled: true,
+        keywords: Vec::new(),
+        uia_fail_open_windows: vec![
+            "legacyapp".into(),
+            "::draft".into(),
+            "code::draft".into(),
+            "notepad.exe::".into(),
+            "  ".into(),
+        ],
+    };
+    let patterns = mixed.fail_open_patterns();
+    assert_eq!(patterns.len(), 2);
+    assert!(patterns.iter().all(WindowPattern::is_scoped));
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn fail_open_test_failure(
+    cause: screenpipe_config::capture_diagnostics::AccessibilityStopReason,
+    app: &str,
+    title: &str,
+) -> screenpipe_a11y::tree::AccessibilityFailure {
+    let mut config = TreeWalkerConfig::default();
+    config.ignored_urls = vec!["bank.example".into()];
+    config.ignored_windows = vec!["::confidential".into()];
+    let mut failure = screenpipe_a11y::tree::AccessibilityFailure::after_native_policy(
+        cause,
+        &config,
+        app.into(),
+        title.into(),
+    );
+    failure.verified_target = Some(screenpipe_a11y::tree::WindowsTreeTarget {
+        hwnd: 1,
+        process_id: 2,
+    });
+    failure
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_uia_fail_open_helper_matrix() {
+    let patterns = WindowPattern::parse_list(&[
+        "notepad.exe::".into(),
+        "code::draft".into(),
+        "legacyapp".into(),
+        "::draft".into(),
+    ]);
+    for (app, title, expected) in [
+        ("notepad.exe", "any title", true),
+        ("Code.exe", "My Draft notes", true),
+        ("code.exe", "other", false),
+        // The app part is an exact executable name, ignoring `.exe` on
+        // either side, never a substring.
+        ("Code", "draft", true),
+        ("notepad", "x", true),
+        ("vscode.exe", "draft", false),
+        ("barcode.exe", "draft", false),
+        ("code.exe.bak", "draft", false),
+        ("notepad++.exe", "x", false),
+        ("xnotepad.exe", "x", false),
+        // Patterns without an `App::` part never apply (titles are
+        // page-controlled), neither by app nor by title.
+        ("legacyapp.exe", "anything", false),
+        ("chrome.exe", "legacyapp page", false),
+        ("chrome.exe", "any draft", false),
+        ("excel.exe", "budget", false),
+        ("", "notepad.exe", false),
+        ("unknown", "legacyapp", false),
+    ] {
+        assert_eq!(
+            windows_uia_fail_open_applies(&patterns, app, title, true),
+            expected,
+            "{app}/{title}"
+        );
+        assert!(!windows_uia_fail_open_applies(&patterns, app, title, false));
+        assert!(!windows_uia_fail_open_applies(&[], app, title, true));
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
+    use screenpipe_config::capture_diagnostics::*;
+    let patterns = WindowPattern::parse_list(&["notepad.exe::".into()]);
+    let eligible = fail_open_test_failure(AccessibilityStopReason::Timeout, "notepad.exe", "draft");
+    assert!(windows_uia_failure_may_fail_open(
+        &eligible, &patterns, true
+    ));
+    assert!(!windows_uia_failure_may_fail_open(
+        &eligible, &patterns, false
+    ));
+
+    let mut unverified = eligible.clone();
+    unverified.verified_target = None;
+    assert!(!windows_uia_failure_may_fail_open(
+        &unverified,
+        &patterns,
+        true
+    ));
+
+    let mut native_policy = eligible.clone();
+    native_policy.unresolved_rules.push(RuleReference {
+        origin: RuleOrigin::Builtin,
+        index: 0,
+        kind: RuleKind::NativeWindowPolicy,
+    });
+    assert!(!windows_uia_failure_may_fail_open(
+        &native_policy,
+        &patterns,
+        true
+    ));
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(apply_windows_accessibility_failure_with_target_app(
+        &mut privacy,
+        &native_policy,
+        false,
+        None
+    ));
+    assert!(!apply_windows_uia_fail_open(
+        &mut privacy,
+        &native_policy,
+        &patterns,
+        true
+    ));
+    assert_eq!(
+        privacy.accessibility.as_ref().unwrap().processing,
+        "withheld"
+    );
+
+    // An unverified provider error has no native identity at all.
+    let provider = screenpipe_a11y::tree::AccessibilityFailure::unverified_provider(
+        &TreeWalkerConfig::default(),
+        &anyhow::anyhow!("synthetic"),
+    );
+    assert!(!windows_uia_failure_may_fail_open(
+        &provider, &patterns, true
+    ));
+
+    // A proceeding decision (no unresolved rules) is never rewritten.
+    let mut proceeding = WindowsCapturePrivacy::default();
+    let mut ordinary = eligible.clone();
+    ordinary.unresolved_rules.clear();
+    assert!(!apply_windows_accessibility_failure_with_target_app(
+        &mut proceeding,
+        &ordinary,
+        false,
+        None
+    ));
+    assert!(!apply_windows_uia_fail_open(
+        &mut proceeding,
+        &ordinary,
+        &patterns,
+        true
+    ));
+    assert_eq!(
+        proceeding.accessibility.as_ref().unwrap().processing,
+        "proceeding"
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_uia_fail_open_is_inert_without_list_or_screening() {
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason;
+    let matching = WindowPattern::parse_list(&["notepad.exe::".into()]);
+    for cause in [
+        AccessibilityStopReason::Timeout,
+        AccessibilityStopReason::Nodes,
+        AccessibilityStopReason::Depth,
+        AccessibilityStopReason::PropertyText,
+        AccessibilityStopReason::AggregateText,
+        AccessibilityStopReason::Provider,
+        AccessibilityStopReason::Backoff,
+        AccessibilityStopReason::Initialization,
+    ] {
+        for requires_drm_url in [false, true] {
+            let failure = fail_open_test_failure(cause, "notepad.exe", "draft");
+            let mut baseline = WindowsCapturePrivacy::default();
+            assert!(apply_windows_accessibility_failure_with_target_app(
+                &mut baseline,
+                &failure,
+                requires_drm_url,
+                Some("notepad.exe".into()),
+            ));
+            for (patterns, screening_enabled) in
+                [(&[][..], true), (&[][..], false), (&matching[..], false)]
+            {
+                let mut privacy = baseline.clone();
+                assert!(!apply_windows_uia_fail_open(
+                    &mut privacy,
+                    &failure,
+                    patterns,
+                    screening_enabled
+                ));
+                assert_eq!(privacy.accessibility, baseline.accessibility);
+                for outcome in [
+                    WindowsCaptureOutcome::FullMonitor,
+                    WindowsCaptureOutcome::CaptureFailed(
+                        WindowsCaptureFailureStage::AccessibilityInspection,
+                    ),
+                ] {
+                    assert_eq!(
+                        serde_json::to_string(&privacy.clone().with_outcome(outcome)).unwrap(),
+                        serde_json::to_string(&baseline.clone().with_outcome(outcome)).unwrap()
+                    );
+                }
+            }
+            assert_eq!(
+                baseline.accessibility.as_ref().unwrap().processing,
+                "withheld"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_uia_fail_open_decision_json_and_diagnostics() {
+    use screenpipe_config::capture_diagnostics::*;
+    use screenpipe_screen::capture_screenshot_by_window::{
+        WindowsCaptureRedactionReason, WindowsContentScreeningDecision,
+    };
+    let patterns = WindowPattern::parse_list(&["notepad.exe::".into()]);
+    let failure = fail_open_test_failure(
+        AccessibilityStopReason::Timeout,
+        "notepad.exe",
+        "private draft title",
+    );
+    let mut privacy = WindowsCapturePrivacy::default();
+    assert!(apply_windows_accessibility_failure_with_target_app(
+        &mut privacy,
+        &failure,
+        true,
+        Some("notepad.exe".into()),
+    ));
+    let unresolved = privacy
+        .accessibility
+        .as_ref()
+        .unwrap()
+        .unresolved_rules
+        .clone();
+    assert!(apply_windows_uia_fail_open(
+        &mut privacy,
+        &failure,
+        &patterns,
+        true
+    ));
+    let decision = privacy.accessibility.as_ref().unwrap();
+    assert_eq!(decision.processing, "screening_required");
+    assert_eq!(decision.phase, "privacy_admission");
+    // Unresolved rules stay visible for transparency, including DRM evidence.
+    assert_eq!(decision.unresolved_rules, unresolved);
+    assert!(unresolved.iter().any(|rule| rule.kind == RuleKind::DrmUrl));
+
+    let monitor = 994_100;
+    let scope = CaptureScope::Monitor(monitor);
+    report_windows_privacy(monitor, &privacy);
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        let row = current()
+            .into_iter()
+            .find(|row| {
+                row.channel == channel
+                    && row.source == DiagnosticSource::WindowPolicy
+                    && row.scope == scope
+            })
+            .unwrap();
+        assert_eq!(row.condition, CaptureCondition::Admitted);
+        assert!(row
+            .reasons
+            .contains(&CaptureReason::AccessibilityFailOpenScreened));
+        assert!(row.reasons.contains(&CaptureReason::UiaWalkTimeout));
+        assert!(!row
+            .reasons
+            .contains(&CaptureReason::AccessibilityPrivacyUnverified));
+        assert!(!row
+            .reasons
+            .contains(&CaptureReason::AccessibilityProcessingContinues));
+        assert!(!row.message().contains("private draft title"));
+    }
+
+    // Passing screen: admitted via the fail-open exception, same diagnostic state.
+    let mut passed = privacy.clone();
+    passed.accessibility.as_mut().unwrap().processing = "screened_fail_open";
+    passed.content_screening = Some(WindowsContentScreeningDecision {
+        outcome: "passed",
+        reasons: Vec::new(),
+        fail_open: true,
+        redacted_regions: None,
+        ..Default::default()
+    });
+    drain();
+    report_windows_privacy(monitor, &passed);
+    assert_eq!(
+        drain().into_iter().filter(|row| row.scope == scope).count(),
+        0,
+        "unchanged fail-open state must not emit a new notice"
+    );
+    let json = serde_json::to_value(
+        passed
+            .clone()
+            .with_outcome(WindowsCaptureOutcome::FullMonitor),
+    )
+    .unwrap();
+    assert_eq!(json["outcome"], "full_monitor");
+    assert_eq!(json["accessibility"]["processing"], "screened_fail_open");
+    assert_eq!(json["accessibility"]["cause"], "uia_walk_timeout");
+    assert_eq!(
+        json["content_screening"],
+        serde_json::json!({"outcome":"passed","reasons":[],"fail_open":true})
+    );
+    let serialized = json.to_string();
+    for forbidden in ["private draft title", "hwnd", "process_id", "bank.example"] {
+        assert!(!serialized.contains(forbidden));
+    }
+
+    // A later independent check still withholds a fail-open candidate.
+    let later = privacy
+        .clone()
+        .with_outcome(WindowsCaptureOutcome::CaptureFailed(
+            WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+        ));
+    assert_eq!(
+        later.accessibility.as_ref().unwrap().processing,
+        "withheld_by_other_check"
+    );
+
+    // Blocked and unavailable screens persist only the ContentScreening placeholder.
+    for (offset, (outcome, reasons, expected)) in [
+        (
+            "blocked",
+            vec!["content_password_manager", "content_secret"],
+            CaptureReason::ContentScreeningBlocked,
+        ),
+        (
+            "unavailable",
+            vec!["content_screening_unavailable"],
+            CaptureReason::ContentScreeningUnavailable,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut blocked = privacy.clone();
+        blocked.content_screening = Some(WindowsContentScreeningDecision {
+            outcome,
+            reasons: reasons.clone(),
+            fail_open: true,
+            redacted_regions: None,
+            ..Default::default()
+        });
+        let placeholder =
+            WindowsCaptureOutcome::CaptureRedacted(WindowsCaptureRedactionReason::ContentScreening);
+        assert!(placeholder.is_placeholder());
+        assert_eq!(
+            placeholder.marker_text(),
+            Some("CAPTURE REDACTED — CONTENT SCREENING")
+        );
+        let blocked = blocked.with_outcome(placeholder);
+        let json = serde_json::to_value(&blocked).unwrap();
+        assert_eq!(json["outcome"], "redacted");
+        assert_eq!(json["reason"], "content_screening");
+        assert_eq!(
+            json["accessibility"]["processing"],
+            "withheld_by_other_check"
+        );
+        assert_eq!(
+            json["content_screening"],
+            serde_json::json!({"outcome":outcome,"reasons":reasons,"fail_open":true})
+        );
+        let monitor = 994_110 + offset as u32;
+        report_windows_privacy(monitor, &blocked);
+        for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+            let row = current()
+                .into_iter()
+                .find(|row| {
+                    row.channel == channel
+                        && row.source == DiagnosticSource::WindowPolicy
+                        && row.scope == CaptureScope::Monitor(monitor)
+                })
+                .unwrap();
+            assert_eq!(row.condition, CaptureCondition::Redacted);
+            assert!(row.reasons.contains(&expected));
+            assert!(!row.reasons.contains(&CaptureReason::NoSafeWindow));
+        }
+        // Repeating the unchanged withheld condition is deduplicated.
+        drain();
+        report_windows_privacy(monitor, &blocked);
+        assert_eq!(
+            drain()
+                .into_iter()
+                .filter(|row| row.scope == CaptureScope::Monitor(monitor))
+                .count(),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+const REDACTION_TEST_KEY: &str = "AKIA1234567890ABCDEF";
+
+#[cfg(test)]
+fn redaction_test_config() -> ContentScreeningConfig {
+    ContentScreeningConfig {
+        blocked_url_patterns: Vec::new(),
+        protected_domains: false,
+        keywords: Vec::new(),
+    }
+}
+
+/// Windows-shaped OCR result: words joined by single spaces, with string
+/// normalised boxes, one row per line.
+#[cfg(test)]
+fn redaction_test_ocr(lines: &[&[&str]]) -> (String, String) {
+    let mut words = Vec::new();
+    let mut entries = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        for (column, word) in line.iter().enumerate() {
+            words.push(*word);
+            entries.push(serde_json::json!({
+                "text": word,
+                "left": (0.05 + 0.15 * column as f32).to_string(),
+                "top": (0.1 + 0.1 * row as f32).to_string(),
+                "width": "0.12",
+                "height": "0.05",
+                "conf": "1.0",
+            }));
+        }
+    }
+    (words.join(" "), serde_json::to_string(&entries).unwrap())
+}
+
+#[cfg(test)]
+fn redaction_test_node(text: &str) -> screenpipe_a11y::tree::AccessibilityTreeNode {
+    screenpipe_a11y::tree::AccessibilityTreeNode {
+        role: "Text".into(),
+        text: text.into(),
+        ..Default::default()
+    }
+}
+
+/// A tree whose text is long enough not to count as "thin" accessibility text.
+#[cfg(test)]
+fn redaction_test_tree(texts: &[&str]) -> screenpipe_a11y::tree::TreeSnapshot {
+    redaction_test_tree_nodes(texts.iter().map(|t| redaction_test_node(t)).collect())
+}
+
+/// [`redaction_test_tree`] from prepared nodes (a filler node is appended;
+/// `text_content` joins the node texts).
+#[cfg(test)]
+fn redaction_test_tree_nodes(
+    mut nodes: Vec<screenpipe_a11y::tree::AccessibilityTreeNode>,
+) -> screenpipe_a11y::tree::TreeSnapshot {
+    let filler = "ordinary paragraph text that is long enough to be treated as real document content by the capture plan";
+    nodes.push(redaction_test_node(filler));
+    let text_content = nodes
+        .iter()
+        .map(|n| n.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    #[allow(unused_mut)]
+    let mut snapshot = content_screening_test_snapshot(&text_content, nodes);
+    // Screening only ever sees a usable (fully verified) Windows snapshot.
+    #[cfg(target_os = "windows")]
+    {
+        use screenpipe_a11y::tree::{
+            WindowsCaptureVerification, WindowsPrivacyVerification, WindowsTextAcquisition,
+        };
+        snapshot.windows_capture_verification = Some(WindowsCaptureVerification {
+            privacy: WindowsPrivacyVerification::Verified,
+            text: WindowsTextAcquisition::Complete,
+        });
+    }
+    snapshot
+}
+
+/// Screen and, if the tier is `Redact`, plan the redaction.
+#[cfg(test)]
+fn redaction_test_run(
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    metadata: FrameScreeningMetadata<'_>,
+    ocr: Option<&(String, String)>,
+    pixels_persisted: bool,
+    word_boxes_available: bool,
+) -> std::result::Result<FrameRedaction, ContentScreeningVerdict> {
+    redaction_test_run_with(
+        &redaction_test_config(),
+        tree,
+        metadata,
+        ocr,
+        pixels_persisted,
+        word_boxes_available,
+    )
+}
+
+/// [`redaction_test_run`] with explicit screening rules.
+#[cfg(test)]
+fn redaction_test_run_with(
+    config: &ContentScreeningConfig,
+    tree: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    metadata: FrameScreeningMetadata<'_>,
+    ocr: Option<&(String, String)>,
+    pixels_persisted: bool,
+    word_boxes_available: bool,
+) -> std::result::Result<FrameRedaction, ContentScreeningVerdict> {
+    let chunks = screening_chunks(tree, metadata).unwrap();
+    let ocr_text = ocr.map(|(text, _)| text.as_str());
+    let plan = screen_frame_plan(config, ocr_text, Some(&chunks)).unwrap();
+    let distinct = distinct_secret_hits(&plan, &chunks, ocr_text).len();
+    match screening_tier(&plan, distinct, false) {
+        ContentScreeningTier::Redact => plan_frame_redaction(
+            config,
+            &plan,
+            &chunks,
+            ocr,
+            tree,
+            metadata,
+            (1000, 1000),
+            pixels_persisted,
+            word_boxes_available,
+        ),
+        ContentScreeningTier::Drop(verdict) => Err(verdict),
+        ContentScreeningTier::Pass => panic!("fixture has a hit"),
+    }
+}
+
+#[cfg(test)]
+fn redaction_test_json_texts(json: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<serde_json::Value>>(json)
+        .unwrap()
+        .iter()
+        .map(|entry| entry["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_ocr_hit_blacks_out_its_line_and_redacts_text_and_json() {
+    let ocr = redaction_test_ocr(&[&["key", REDACTION_TEST_KEY, "end"], &["second", "line"]]);
+    let none = FrameScreeningMetadata::default();
+    let redaction = redaction_test_run(None, none, Some(&ocr), true, true).unwrap();
+    assert_eq!(redaction.rects.len(), 1);
+    let rect = redaction.rects[0];
+    // The first line only (y 100..150 plus padding), never the second.
+    assert!(rect.y < 100 && rect.y + rect.height > 150 && rect.y + rect.height < 200);
+    let (text, json) = redaction.ocr.as_ref().unwrap();
+    assert_eq!(text, "key [SECRET] end second line");
+    assert_eq!(
+        redaction_test_json_texts(json),
+        ["[SECRET]", "[SECRET]", "[SECRET]", "second", "line"]
+    );
+    // Boxes and other fields keep their original strings.
+    let entries: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+    assert_eq!(entries[1]["width"], "0.12");
+    assert!(!json.contains(REDACTION_TEST_KEY) && !text.contains(REDACTION_TEST_KEY));
+    assert_eq!(
+        redaction.content,
+        ContentRedacted {
+            ocr: true,
+            accessibility: false
+        }
+    );
+    assert!(redaction.tree.is_none() && redaction.window_name.is_none());
+    assert!(redaction.image.is_none(), "the planner never copies pixels");
+
+    // No persisted screenshot: OCR text and JSON are still redacted, no regions.
+    let redaction = redaction_test_run(None, none, Some(&ocr), false, true).unwrap();
+    assert!(redaction.rects.is_empty());
+    assert!(!redaction.ocr.unwrap().1.contains(REDACTION_TEST_KEY));
+
+    // Without word boxes for the platform the frame is withheld.
+    assert_eq!(
+        redaction_test_run(None, none, Some(&ocr), true, false).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    // OCR JSON that does not match the OCR text cannot be located.
+    let mismatched = (ocr.0.clone(), redaction_test_ocr(&[&["other", "words"]]).1);
+    assert_eq!(
+        redaction_test_run(None, none, Some(&mismatched), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    let unparsable = (ocr.0.clone(), "not json".to_string());
+    assert!(redaction_test_run(None, none, Some(&unparsable), true, true).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_accessibility_hits_need_ocr_coverage_when_pixels_persist() {
+    let none = FrameScreeningMetadata::default();
+    let node_text = format!("Access key {REDACTION_TEST_KEY}");
+    let mut tree = redaction_test_tree(&[node_text.as_str()]);
+    tree.nodes[0].lines = Some(Vec::new());
+    let covered = redaction_test_ocr(&[&["Access", "key", REDACTION_TEST_KEY]]);
+    let redaction = redaction_test_run(Some(&tree), none, Some(&covered), true, true).unwrap();
+    assert_eq!(redaction.rects.len(), 1);
+    let redacted = redaction.tree.as_ref().unwrap();
+    assert_eq!(redacted.nodes[0].text, "Access key [SECRET]");
+    assert!(redacted.nodes[0].lines.is_none());
+    assert_eq!(redacted.nodes[1].text, tree.nodes[1].text);
+    assert!(!redacted.text_content.contains(REDACTION_TEST_KEY));
+    assert!(redacted.text_content.contains("[SECRET]"));
+    assert_eq!(
+        redacted.content_hash,
+        screenpipe_a11y::tree::TreeSnapshot::compute_hash(&redacted.text_content)
+    );
+    assert_ne!(redacted.content_hash, tree.content_hash);
+    assert_eq!(
+        redaction.content,
+        ContentRedacted {
+            ocr: true,
+            accessibility: true
+        }
+    );
+
+    // Pixels persisted but OCR did not see the hit: accessibility bounds are
+    // not used for coverage, so the frame is withheld.
+    let uncovered = redaction_test_ocr(&[&["unrelated", "words"]]);
+    assert_eq!(
+        redaction_test_run(Some(&tree), none, Some(&uncovered), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+
+    // No screenshot and no OCR persisted: text-only redaction is enough.
+    let redaction = redaction_test_run(Some(&tree), none, None, false, true).unwrap();
+    assert!(redaction.rects.is_empty() && redaction.ocr.is_none());
+    assert_eq!(
+        redaction.tree.as_ref().unwrap().nodes[0].text,
+        "Access key [SECRET]"
+    );
+    assert!(!paired_capture_runs_ocr(
+        redaction.tree.as_ref(),
+        None,
+        None,
+        None
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_metadata_text_content_and_leftovers() {
+    let none = FrameScreeningMetadata::default();
+    let ocr = redaction_test_ocr(&[&["Deploy", REDACTION_TEST_KEY, "Editor"]]);
+    let title = format!("Deploy {REDACTION_TEST_KEY} - Editor");
+    let metadata = FrameScreeningMetadata {
+        app_name: Some("editor.exe"),
+        window_name: Some(&title),
+        ..Default::default()
+    };
+    let redaction = redaction_test_run(None, metadata, Some(&ocr), true, true).unwrap();
+    assert_eq!(
+        redaction.window_name.as_deref(),
+        Some("Deploy [SECRET] - Editor")
+    );
+    assert!(redaction.browser_url.is_none() && redaction.document_path.is_none());
+    assert!(redaction.content.accessibility && redaction.content.ocr);
+
+    // A text_content hit that no node field shares (split across nodes)
+    // would leave fragments in the node JSON: withheld.
+    let mut split = redaction_test_tree(&["AKIA1234567", "890ABCDEF"]);
+    split.text_content = format!("x {REDACTION_TEST_KEY}\n{}", split.text_content);
+    assert_eq!(
+        redaction_test_run(Some(&split), none, None, false, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+
+    // A copy in an unscreened persisted node string is a leftover: withheld.
+    let node_text = format!("Access key {REDACTION_TEST_KEY}");
+    let mut leftover = redaction_test_tree(&[node_text.as_str()]);
+    leftover.nodes[0].automation_id = Some(REDACTION_TEST_KEY.into());
+    assert_eq!(
+        redaction_test_run(Some(&leftover), none, None, false, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+
+    // More than MAX_REDACTION_HITS distinct secrets withhold the frame.
+    let keys = ["A", "B", "C", "D"].map(|suffix| format!("AKIA1234567890ABCDE{suffix}"));
+    let line: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let many = redaction_test_ocr(&[&line]);
+    assert_eq!(
+        redaction_test_run(None, none, Some(&many), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    let three = redaction_test_ocr(&[&line[..3]]);
+    assert!(redaction_test_run(None, none, Some(&three), true, true).is_ok());
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_tier_keeps_drop_reasons_and_fail_open() {
+    let config = ContentScreeningConfig {
+        keywords: vec!["synthetic-blocked-term".into()],
+        ..redaction_test_config()
+    };
+    let ocr = format!("synthetic-blocked-term {REDACTION_TEST_KEY}");
+    let chunks = screening_chunks(None, FrameScreeningMetadata::default()).unwrap();
+    let plan = screen_frame_plan(&config, Some(ocr.as_str()), Some(&chunks)).unwrap();
+    let distinct = distinct_secret_hits(&plan, &chunks, Some(ocr.as_str())).len();
+    assert_eq!(distinct, 1);
+    assert_eq!(
+        screening_tier(&plan, distinct, false),
+        ContentScreeningTier::Drop(ContentScreeningVerdict {
+            reasons: vec![
+                ContentScreeningReason::Secret,
+                ContentScreeningReason::Keyword
+            ],
+        })
+    );
+    // A fail-open frame never redacts: any hit withholds it.
+    let ocr = format!("key {REDACTION_TEST_KEY}");
+    let plan =
+        screen_frame_plan(&redaction_test_config(), Some(ocr.as_str()), Some(&chunks)).unwrap();
+    assert_eq!(
+        screening_tier(&plan, 1, true),
+        ContentScreeningTier::Drop(ContentScreeningVerdict::secret())
+    );
+    assert_eq!(
+        screening_tier(&plan, 1, false),
+        ContentScreeningTier::Redact
+    );
+    // Oversized OCR text cannot be screened completely.
+    let huge = "y".repeat(CONTENT_SCREENING_MAX_TEXT_BYTES + 1);
+    assert!(screen_frame_plan(&config, Some(huge.as_str()), Some(&chunks)).is_none());
+    assert!(screen_frame_plan(&config, None, None).is_none());
+    // Screening chunks keep the previous text layout; a distinct structural
+    // node string (here the shared role) follows its first node's fields.
+    let tree = redaction_test_tree(&["one"]);
+    let chunks = screening_chunks(Some(&tree), FrameScreeningMetadata::default()).unwrap();
+    assert_eq!(chunks.texts.len(), 1);
+    let expected = [
+        tree.text_content.as_str(),
+        tree.nodes[0].text.as_str(),
+        "Text",
+        tree.nodes[1].text.as_str(),
+    ]
+    .to_vec()
+    .join("\n");
+    assert_eq!(chunks.texts[0], expected);
+    for segment in &chunks.segments[0] {
+        assert!(segment.start + segment.len <= chunks.texts[0].len());
+    }
+}
+
+/// Windows-shaped OCR result with explicit normalised word boxes
+/// `(text, left, top, width, height)`.
+#[cfg(test)]
+fn redaction_test_ocr_boxes(words: &[(&str, f32, f32, f32, f32)]) -> (String, String) {
+    let entries: Vec<serde_json::Value> = words
+        .iter()
+        .map(|(text, left, top, width, height)| {
+            serde_json::json!({
+                "text": text,
+                "left": left.to_string(),
+                "top": top.to_string(),
+                "width": width.to_string(),
+                "height": height.to_string(),
+                "conf": "1.0",
+            })
+        })
+        .collect();
+    let text = words.iter().map(|w| w.0).collect::<Vec<_>>().join(" ");
+    (text, serde_json::to_string(&entries).unwrap())
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_masks_every_ocr_copy_not_only_detector_spans() {
+    // The detector rejects the mid-identifier copy on line two (`my-AKIA…`),
+    // but it is an exact copy of a detected secret: masked and replaced too.
+    let embedded = format!("my-{REDACTION_TEST_KEY}");
+    let ocr = redaction_test_ocr(&[
+        &["Deploy", REDACTION_TEST_KEY, "Editor"],
+        &[embedded.as_str(), "suffix"],
+        &["plain", "line"],
+    ]);
+    let title = format!("Deploy {REDACTION_TEST_KEY} - Editor");
+    let metadata = FrameScreeningMetadata {
+        app_name: Some("editor.exe"),
+        window_name: Some(&title),
+        ..Default::default()
+    };
+    let redaction = redaction_test_run(None, metadata, Some(&ocr), true, true).unwrap();
+    assert_eq!(redaction.rects.len(), 2);
+    let (text, json) = redaction.ocr.as_ref().unwrap();
+    assert_eq!(text, "Deploy [SECRET] Editor my-[SECRET] suffix plain line");
+    assert_eq!(
+        redaction_test_json_texts(json),
+        ["[SECRET]", "[SECRET]", "[SECRET]", "[SECRET]", "[SECRET]", "plain", "line"]
+    );
+    assert_eq!(
+        redaction.window_name.as_deref(),
+        Some("Deploy [SECRET] - Editor")
+    );
+    assert_eq!(redaction.partial_locations, 0);
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_more_accessibility_copies_than_ocr_withholds_with_pixels() {
+    let none = FrameScreeningMetadata::default();
+    let first = format!("Access key {REDACTION_TEST_KEY}");
+    let second = format!("Copy of {REDACTION_TEST_KEY}");
+    let tree = redaction_test_tree(&[first.as_str(), second.as_str()]);
+    // OCR located one copy; the tree shows two.
+    let one = redaction_test_ocr(&[&["Access", "key", REDACTION_TEST_KEY]]);
+    assert_eq!(
+        redaction_test_run(Some(&tree), none, Some(&one), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    // Both copies located: redacted.
+    let two = redaction_test_ocr(&[
+        &["Access", "key", REDACTION_TEST_KEY],
+        &["Copy", "of", REDACTION_TEST_KEY],
+    ]);
+    let redaction = redaction_test_run(Some(&tree), none, Some(&two), true, true).unwrap();
+    assert_eq!(redaction.rects.len(), 2);
+    // Without persisted pixels every copy is text-redacted.
+    let redaction = redaction_test_run(Some(&tree), none, Some(&one), false, true).unwrap();
+    let redacted = redaction.tree.unwrap();
+    assert_eq!(redacted.nodes[0].text, "Access key [SECRET]");
+    assert_eq!(redacted.nodes[1].text, "Copy of [SECRET]");
+    assert!(!redacted.text_content.contains(REDACTION_TEST_KEY));
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_covers_every_persisted_node_field_and_dedups_url_value() {
+    let none = FrameScreeningMetadata::default();
+    // Shares no 8-character run with REDACTION_TEST_KEY (that would be a
+    // partial-match location of it).
+    let other = "ASIAZYXWVUTSRQPONMLK";
+    let mut node = redaction_test_node(&format!("t {REDACTION_TEST_KEY}"));
+    node.help_text = Some(format!("h {REDACTION_TEST_KEY}"));
+    node.placeholder = Some(format!("p {REDACTION_TEST_KEY}"));
+    let mut field = redaction_test_node("API key");
+    field.value = Some(other.to_string());
+    // Windows extracts `url` from a URL-like `value`: one copy, not two.
+    field.url = Some(other.to_string());
+    let tree = redaction_test_tree_nodes(vec![node, field]);
+    let redaction = redaction_test_run(Some(&tree), none, None, false, true).unwrap();
+    let redacted = redaction.tree.as_ref().unwrap();
+    assert_eq!(redacted.nodes[0].text, "t [SECRET]");
+    assert_eq!(redacted.nodes[0].help_text.as_deref(), Some("h [SECRET]"));
+    assert_eq!(redacted.nodes[0].placeholder.as_deref(), Some("p [SECRET]"));
+    assert_eq!(redacted.nodes[1].value.as_deref(), Some("[SECRET]"));
+    assert_eq!(redacted.nodes[1].url.as_deref(), Some("[SECRET]"));
+    let json = serde_json::to_string(&redacted.nodes).unwrap();
+    assert!(!json.contains(REDACTION_TEST_KEY) && !json.contains(other));
+    assert!(redaction.content.accessibility && !redaction.content.ocr);
+
+    // With pixels: the deduplicated value/url pair needs one OCR copy.
+    let mut field = redaction_test_node("API key");
+    field.value = Some(other.to_string());
+    field.url = Some(other.to_string());
+    let tree = redaction_test_tree_nodes(vec![field.clone()]);
+    let ocr = redaction_test_ocr(&[&["API", "key", other]]);
+    assert!(redaction_test_run(Some(&tree), none, Some(&ocr), true, true).is_ok());
+    // A different url string is a second copy that OCR did not locate.
+    field.url = Some(format!("{other} "));
+    let tree = redaction_test_tree_nodes(vec![field]);
+    assert_eq!(
+        redaction_test_run(Some(&tree), none, Some(&ocr), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_partial_matches_mask_their_line_and_token() {
+    let title = format!("Deploy {REDACTION_TEST_KEY} - Editor");
+    let metadata = FrameScreeningMetadata {
+        app_name: Some("editor.exe"),
+        window_name: Some(&title),
+        ..Default::default()
+    };
+    // The title bar shows a truncated copy: a 14-character fragment.
+    let ocr = redaction_test_ocr(&[&["Deploy", "AKIA1234567890…"], &["body", "text"]]);
+    let redaction = redaction_test_run(None, metadata, Some(&ocr), true, true).unwrap();
+    assert_eq!(redaction.rects.len(), 1);
+    let (text, json) = redaction.ocr.as_ref().unwrap();
+    assert_eq!(text, "Deploy [SECRET] body text");
+    assert_eq!(
+        redaction_test_json_texts(json),
+        ["[SECRET]", "[SECRET]", "body", "text"]
+    );
+    assert_eq!(redaction.partial_locations, 1);
+
+    // A fragment in an accessibility node is replaced as a whole token.
+    let tree = redaction_test_tree(&["id xAKIA12345678y and more"]);
+    let redaction = redaction_test_run(Some(&tree), metadata, None, false, true).unwrap();
+    assert_eq!(
+        redaction.tree.unwrap().nodes[0].text,
+        "id [SECRET] and more"
+    );
+
+    // Seven characters are not a location: the metadata copy is uncovered.
+    let short = redaction_test_ocr(&[&["Deploy", "AKIA123…"]]);
+    assert_eq!(
+        redaction_test_run(None, metadata, Some(&short), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_thresholds_locations_and_area() {
+    let none = FrameScreeningMetadata::default();
+    let key = REDACTION_TEST_KEY;
+    // Three locations of one secret: redacted; four: whole frame.
+    let three = redaction_test_ocr(&[&["a", key], &["b", key], &["c", key]]);
+    assert_eq!(
+        redaction_test_run(None, none, Some(&three), true, true)
+            .unwrap()
+            .rects
+            .len(),
+        3
+    );
+    let four = redaction_test_ocr(&[&["a", key], &["b", key], &["c", key], &["d", key]]);
+    assert_eq!(
+        redaction_test_run(None, none, Some(&four), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    // The location limit applies to text-only redaction too.
+    assert!(redaction_test_run(None, none, Some(&four), false, true).is_err());
+
+    // A 30%-tall line pads to 45% of the image: redacted. A 50%-tall line
+    // pads past half the image: whole frame, unless pixels are not stored.
+    let tall = redaction_test_ocr_boxes(&[(key, 0.05, 0.1, 0.9, 0.3)]);
+    let redaction = redaction_test_run(None, none, Some(&tall), true, true).unwrap();
+    assert_eq!(
+        screenpipe_redact::content_redaction::union_area(&redaction.rects, 1000, 1000),
+        1000 * 450,
+        "{:?}",
+        redaction.rects
+    );
+    let taller = redaction_test_ocr_boxes(&[(key, 0.05, 0.1, 0.9, 0.5)]);
+    assert_eq!(
+        redaction_test_run(None, none, Some(&taller), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    assert!(redaction_test_run(None, none, Some(&taller), false, true).is_ok());
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_url_credentials_keep_host_and_path() {
+    let url = "https://example.com/cb?code=abc123def&state=xyz";
+    let metadata = FrameScreeningMetadata {
+        app_name: Some("browser.exe"),
+        window_name: Some("Signed in"),
+        browser_url: Some(url),
+        document_path: None,
+    };
+    // The address bar shows the URL without its scheme.
+    let ocr = redaction_test_ocr(&[
+        &["example.com/cb?code=abc123def&state=xyz"],
+        &["page", "text"],
+    ]);
+    let redaction = redaction_test_run(None, metadata, Some(&ocr), true, true).unwrap();
+    assert_eq!(
+        redaction.browser_url.as_deref(),
+        Some("https://example.com/cb?[SECRET]")
+    );
+    let (text, json) = redaction.ocr.as_ref().unwrap();
+    assert_eq!(text, "example.com/cb?[SECRET] page text");
+    assert_eq!(
+        redaction_test_json_texts(json),
+        ["[SECRET]", "page", "text"]
+    );
+    assert_eq!(redaction.rects.len(), 1);
+    assert_eq!(redaction.url_hits, 2);
+    assert!(redaction.window_name.is_none());
+
+    // Not visible in OCR while pixels are stored: whole frame.
+    let unrelated = redaction_test_ocr(&[&["page", "text"]]);
+    assert_eq!(
+        redaction_test_run(None, metadata, Some(&unrelated), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    // Without persisted pixels the URL is text-redacted only.
+    let redaction = redaction_test_run(None, metadata, Some(&unrelated), false, true).unwrap();
+    assert_eq!(
+        redaction.browser_url.as_deref(),
+        Some("https://example.com/cb?[SECRET]")
+    );
+
+    // A blocked host is checked on the original URL: withheld, not redacted.
+    let config = ContentScreeningConfig {
+        blocked_url_patterns: vec!["example.com".into()],
+        ..redaction_test_config()
+    };
+    let chunks = screening_chunks(None, metadata).unwrap();
+    let plan = screen_frame_plan(&config, None, Some(&chunks)).unwrap();
+    assert_eq!(
+        screening_tier(&plan, 1, false),
+        ContentScreeningTier::Drop(ContentScreeningVerdict {
+            reasons: vec![
+                ContentScreeningReason::BlockedDomain,
+                ContentScreeningReason::Secret
+            ],
+        })
+    );
+    // A URL without a sensitive name passes unchanged.
+    let plain = FrameScreeningMetadata {
+        browser_url: Some("https://example.com/search?q=hello&page=2"),
+        ..metadata
+    };
+    let chunks = screening_chunks(None, plain).unwrap();
+    let plan = screen_frame_plan(&redaction_test_config(), None, Some(&chunks)).unwrap();
+    assert_eq!(screening_tier(&plan, 0, false), ContentScreeningTier::Pass);
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_observation_is_unchanged_without_redaction() {
+    use screenpipe_config::capture_diagnostics::{CaptureChannel, CaptureCondition, CaptureReason};
+    for channel in [CaptureChannel::Accessibility, CaptureChannel::Ocr] {
+        assert_eq!(
+            redaction_observation(ContentRedacted::default(), channel, false),
+            (CaptureCondition::Admitted, vec![CaptureReason::GateOpen])
+        );
+        assert_eq!(
+            redaction_observation(ContentRedacted::default(), channel, true),
+            (
+                CaptureCondition::PartiallyRedacted,
+                vec![CaptureReason::PiiTextRedaction]
+            )
+        );
+    }
+    let ocr_only = ContentRedacted {
+        ocr: true,
+        accessibility: false,
+    };
+    assert_eq!(
+        redaction_observation(ocr_only, CaptureChannel::Ocr, true),
+        (
+            CaptureCondition::PartiallyRedacted,
+            vec![
+                CaptureReason::ContentScreeningRedacted,
+                CaptureReason::PiiTextRedaction
+            ]
+        )
+    );
+    assert_eq!(
+        redaction_observation(ocr_only, CaptureChannel::Accessibility, false),
+        (CaptureCondition::Admitted, vec![CaptureReason::GateOpen])
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_content_screening_redacted_frame_reports_partial_redaction() {
+    use screenpipe_config::capture_diagnostics::*;
+    use screenpipe_screen::capture_screenshot_by_window::WindowsContentScreeningDecision;
+    let mut privacy = WindowsCapturePrivacy::default();
+    privacy.content_screening = Some(WindowsContentScreeningDecision {
+        outcome: "redacted",
+        reasons: vec!["content_secret"],
+        fail_open: false,
+        redacted_regions: Some(1),
+        ..Default::default()
+    });
+    let monitor = 994_200;
+    let scope = CaptureScope::Monitor(monitor);
+    report_windows_privacy(monitor, &privacy);
+    for channel in [CaptureChannel::Screen, CaptureChannel::Ocr] {
+        let row = current()
+            .into_iter()
+            .find(|row| {
+                row.channel == channel
+                    && row.source == DiagnosticSource::WindowPolicy
+                    && row.scope == scope
+            })
+            .unwrap();
+        assert_eq!(row.condition, CaptureCondition::PartiallyRedacted);
+        assert_eq!(row.reasons, vec![CaptureReason::ContentScreeningRedacted]);
+        assert!(row.message().contains("redacted in memory"));
+    }
+    drain();
+    report_windows_privacy(monitor, &privacy);
+    assert_eq!(
+        drain().into_iter().filter(|row| row.scope == scope).count(),
+        0,
+        "an unchanged redacted state is deduplicated"
+    );
+    let json =
+        serde_json::to_value(privacy.with_outcome(WindowsCaptureOutcome::FullMonitor)).unwrap();
+    assert_eq!(json["outcome"], "full_monitor");
+    assert_eq!(
+        json["content_screening"],
+        serde_json::json!({
+            "outcome":"redacted","reasons":["content_secret"],"fail_open":false,
+            "redacted_regions":1
+        })
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn content_screening_screens_structural_node_strings_and_withholds_on_a_hit() {
+    use screenpipe_a11y::tree::AccessibilityTreeNode;
+    let none = FrameScreeningMetadata::default();
+    type Setter = fn(&mut AccessibilityTreeNode, String);
+    let setters: [(&str, Setter); 7] = [
+        ("role", |n, v| n.role = v),
+        ("automation_id", |n, v| n.automation_id = Some(v)),
+        ("class_name", |n, v| n.class_name = Some(v)),
+        ("role_description", |n, v| n.role_description = Some(v)),
+        ("subrole", |n, v| n.subrole = Some(v)),
+        ("accelerator_key", |n, v| n.accelerator_key = Some(v)),
+        ("access_key", |n, v| n.access_key = Some(v)),
+    ];
+    for (name, set) in setters {
+        // A redactable secret in a structural field is never redacted.
+        let mut node = redaction_test_node("ordinary label");
+        set(&mut node, REDACTION_TEST_KEY.to_string());
+        let tree = redaction_test_tree_nodes(vec![node]);
+        assert_eq!(
+            redaction_test_run(Some(&tree), none, None, false, true).err(),
+            Some(ContentScreeningVerdict::secret()),
+            "{name}"
+        );
+        // A blocker (user keyword) there withholds with its own reason.
+        let config = ContentScreeningConfig {
+            keywords: vec!["projectx".into()],
+            ..redaction_test_config()
+        };
+        let mut node = redaction_test_node("ordinary label");
+        set(&mut node, "ProjectX".to_string());
+        let tree = redaction_test_tree_nodes(vec![node]);
+        let chunks = screening_chunks(Some(&tree), none).unwrap();
+        let plan = screen_frame_plan(&config, None, Some(&chunks)).unwrap();
+        assert_eq!(plan.blocking(), [ContentScreeningReason::Keyword], "{name}");
+    }
+    // Repeated structural values (every node's role) are screened once.
+    let nodes: Vec<_> = (0..50)
+        .map(|i| redaction_test_node(&format!("n{i}")))
+        .collect();
+    let tree = redaction_test_tree_nodes(nodes);
+    let chunks = screening_chunks(Some(&tree), none).unwrap();
+    let structural = chunks
+        .segments
+        .iter()
+        .flatten()
+        .filter(|s| matches!(s.field, ScreenedField::NodeStructural(_)))
+        .count();
+    assert_eq!(structural, 1);
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_pem_private_keys_withhold_in_ocr_and_accessibility_text() {
+    let none = FrameScreeningMetadata::default();
+    let body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun";
+    let secret = Some(ContentScreeningVerdict::secret());
+    // OCR: words joined by spaces, as Windows OCR produces them.
+    let words = [
+        "-----BEGIN",
+        "RSA",
+        "PRIVATE",
+        "KEY-----",
+        body,
+        "-----END",
+        "RSA",
+        "PRIVATE",
+        "KEY-----",
+    ];
+    let ocr = redaction_test_ocr(&[&words]);
+    assert_eq!(
+        redaction_test_run(None, none, Some(&ocr), true, true).err(),
+        secret
+    );
+    // Accessibility: a multi-line node (and without any OCR input).
+    let pem = format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----");
+    let tree = redaction_test_tree(&[pem.as_str()]);
+    assert_eq!(
+        redaction_test_run(Some(&tree), none, None, false, true).err(),
+        secret
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_link_targets_are_text_only_but_other_values_need_ocr_copies() {
+    let none = FrameScreeningMetadata::default();
+    let href = "https://example.com/cb?token=abc123def";
+    let ocr = redaction_test_ocr(&[&["Docs"]]);
+    // A hidden href (UIA Hyperlink value/url) with no OCR copy: text redacted,
+    // pixels untouched, frame persisted.
+    let mut link = redaction_test_node("Docs");
+    link.role = "Hyperlink".into();
+    link.value = Some(href.into());
+    link.url = Some(href.into());
+    let tree = redaction_test_tree_nodes(vec![link]);
+    let redaction = redaction_test_run(Some(&tree), none, Some(&ocr), true, true).unwrap();
+    let redacted = redaction.tree.as_ref().unwrap();
+    assert_eq!(
+        redacted.nodes[0].url.as_deref(),
+        Some("https://example.com/cb?[SECRET]")
+    );
+    assert_eq!(redacted.nodes[0].value, redacted.nodes[0].url);
+    assert_eq!(redacted.nodes[0].text, "Docs");
+    assert!(redaction.rects.is_empty());
+    assert!(!serde_json::to_string(&redacted.nodes)
+        .unwrap()
+        .contains("abc123def"));
+    // The same URL as an AXLink `url` only.
+    let mut mac_link = redaction_test_node("Docs");
+    mac_link.role = "AXLink".into();
+    mac_link.url = Some(href.into());
+    let tree = redaction_test_tree_nodes(vec![mac_link]);
+    assert!(redaction_test_run(Some(&tree), none, Some(&ocr), true, true).is_ok());
+
+    // An Edit/ComboBox/Document value is drawn text: it needs an OCR copy.
+    for role in ["Edit", "ComboBox", "Document"] {
+        let mut field = redaction_test_node("Address");
+        field.role = role.into();
+        field.value = Some(href.into());
+        let tree = redaction_test_tree_nodes(vec![field]);
+        assert_eq!(
+            redaction_test_run(Some(&tree), none, Some(&ocr), true, true).err(),
+            Some(ContentScreeningVerdict::secret()),
+            "{role}"
+        );
+        // Without persisted pixels there is nothing to cover.
+        assert!(
+            redaction_test_run(Some(&tree), none, Some(&ocr), false, true).is_ok(),
+            "{role}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_link_exemption_needs_one_url_token_spanning_the_value() {
+    assert!(value_is_single_url_token(
+        "https://x.example/a?token=abc123def"
+    ));
+    assert!(value_is_single_url_token(
+        "  https://x.example/a?token=abc123def \n"
+    ));
+    for value in [
+        "Docs https://x.example/a?token=abc123def extra",
+        "https://x.example/a?token=abc123def extra",
+        "see https://x.example/a?token=abc123def",
+        "https://x.example/a https://y.example/b",
+        "no url here",
+        "",
+    ] {
+        assert!(!value_is_single_url_token(value), "{value:?}");
+    }
+    // A link whose value carries visible prose around the URL is counted: its
+    // copy needs an OCR location (here there is none).
+    let none = FrameScreeningMetadata::default();
+    let ocr = redaction_test_ocr(&[&["Docs"]]);
+    let mut link = redaction_test_node("Docs");
+    link.role = "Hyperlink".into();
+    link.value = Some("Docs https://x.example/a?token=abc123def extra".into());
+    let tree = redaction_test_tree_nodes(vec![link]);
+    assert_eq!(
+        redaction_test_run(Some(&tree), none, Some(&ocr), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    // The same value is exempt only when it is the bare URL.
+    let mut bare = redaction_test_node("Docs");
+    bare.role = "Hyperlink".into();
+    bare.value = Some("https://x.example/a?token=abc123def".into());
+    let tree = redaction_test_tree_nodes(vec![bare]);
+    assert!(redaction_test_run(Some(&tree), none, Some(&ocr), true, true).is_ok());
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_url_secret_values_are_masked_elsewhere_in_the_frame() {
+    let url = "https://e.com/reset?token=Zq81xLmP0wT6AbCd";
+    let value = "Zq81xLmP0wT6AbCd";
+    let metadata = FrameScreeningMetadata {
+        browser_url: Some(url),
+        ..Default::default()
+    };
+    let page = "Your code: Zq81xLmP0wT6AbCd";
+    let tree = redaction_test_tree(&[page]);
+
+    // Address bar and page copy both visible in OCR: masked in every text.
+    let ocr = redaction_test_ocr(&[&[url], &["Your", "code:", value]]);
+    let redaction = redaction_test_run(Some(&tree), metadata, Some(&ocr), true, true).unwrap();
+    let redacted_tree = redaction.tree.as_ref().unwrap();
+    assert_eq!(redacted_tree.nodes[0].text, "Your code: [SECRET]");
+    assert!(!redacted_tree.text_content.contains(value));
+    assert_eq!(
+        redaction.browser_url.as_deref(),
+        Some("https://e.com/reset?[SECRET]")
+    );
+    let (ocr_text, ocr_json) = redaction.ocr.as_ref().unwrap();
+    assert!(!ocr_text.contains(value) && !ocr_json.contains(value));
+    assert!(!redaction.rects.is_empty());
+
+    // Only the address bar is located in OCR: the page copy has no pixels to
+    // mask, so the frame is withheld.
+    let ocr = redaction_test_ocr(&[&[url]]);
+    assert_eq!(
+        redaction_test_run(Some(&tree), metadata, Some(&ocr), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    // Without persisted pixels the text copies are simply redacted.
+    let redaction = redaction_test_run(Some(&tree), metadata, Some(&ocr), false, true).unwrap();
+    assert!(!redaction
+        .tree
+        .as_ref()
+        .unwrap()
+        .text_content
+        .contains(value));
+
+    // The address-bar node (value == browser URL) duplicates the browser URL
+    // copy: one OCR copy covers both; a body copy needs another.
+    let mut bar = redaction_test_node("Address");
+    bar.role = "Edit".into();
+    bar.value = Some(url.into());
+    let one_ocr = redaction_test_ocr(&[&[url]]);
+    let two_ocr = redaction_test_ocr(&[&[url], &["Your", "code:", value]]);
+    let bar_only = redaction_test_tree_nodes(vec![bar.clone()]);
+    assert!(redaction_test_run(Some(&bar_only), metadata, Some(&one_ocr), true, true).is_ok());
+    let bar_and_body = redaction_test_tree_nodes(vec![redaction_test_node(page), bar.clone()]);
+    assert_eq!(
+        redaction_test_run(Some(&bar_and_body), metadata, Some(&one_ocr), true, true).err(),
+        Some(ContentScreeningVerdict::secret())
+    );
+    assert!(redaction_test_run(Some(&bar_and_body), metadata, Some(&two_ocr), true, true).is_ok());
+
+    // A short value never matches ordinary words.
+    let metadata = FrameScreeningMetadata {
+        browser_url: Some("https://e.com/cb?code=abc"),
+        ..Default::default()
+    };
+    let tree = redaction_test_tree(&["the abc of a code, abc"]);
+    let ocr = redaction_test_ocr(&[&["https://e.com/cb?code=abc"], &["the", "abc", "of"]]);
+    let redaction = redaction_test_run(Some(&tree), metadata, Some(&ocr), true, true).unwrap();
+    assert!(redaction.tree.is_none());
+    assert_eq!(
+        redaction.browser_url.as_deref(),
+        Some("https://e.com/cb?[SECRET]")
+    );
+    assert!(redaction.ocr.as_ref().unwrap().0.contains("the abc of"));
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_card_copies_with_other_separators_are_redacted() {
+    let none = FrameScreeningMetadata::default();
+    let ocr = redaction_test_ocr(&[&["Card", "4111", "1111", "1111", "1111"]]);
+    for text in [
+        "Card\u{a0}number\u{a0}4111\u{a0}1111\u{a0}1111\u{a0}1111",
+        "Card number 4111-1111-1111-1111",
+        "Card number 4111\u{2010}1111\u{2013}1111\u{2212}1111",
+        "Card number 4111 1111\n1111 1111",
+        "Card number 4111111111111111",
+    ] {
+        let tree = redaction_test_tree(&[text]);
+        let redaction = redaction_test_run(Some(&tree), none, Some(&ocr), true, true).unwrap();
+        let redacted = redaction.tree.as_ref().unwrap();
+        assert!(redacted.nodes[0].text.contains("[SECRET]"), "{text:?}");
+        assert!(!redacted.nodes[0].text.contains("4111"), "{text:?}");
+        assert!(!redacted.text_content.contains("4111"), "{text:?}");
+        assert!(!redaction.ocr.as_ref().unwrap().0.contains("4111"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn content_redaction_user_keyword_does_not_match_inserted_labels() {
+    let none = FrameScreeningMetadata::default();
+    let config = ContentScreeningConfig {
+        keywords: vec!["secret".into()],
+        ..redaction_test_config()
+    };
+    let node_text = format!("key {REDACTION_TEST_KEY}");
+    let tree = redaction_test_tree(&[node_text.as_str()]);
+    let redaction = redaction_test_run_with(&config, Some(&tree), none, None, false, true).unwrap();
+    assert_eq!(redaction.tree.unwrap().nodes[0].text, "key [SECRET]");
+    // A keyword in the original text still withholds with its own reason.
+    let node_text = format!("secret key {REDACTION_TEST_KEY}");
+    let tree = redaction_test_tree(&[node_text.as_str()]);
+    let err = redaction_test_run_with(&config, Some(&tree), none, None, false, true)
+        .err()
+        .unwrap();
+    assert!(err.reasons.contains(&ContentScreeningReason::Keyword));
+}
+
+#[cfg(test)]
+#[test]
+fn screening_metrics_count_distinct_hits_by_source() {
+    let (a, b, c) = (
+        REDACTION_TEST_KEY,
+        "ASIAZYXWVUTSRQPONMLK",
+        "AKIAQWERTYUIOPASDFGH",
+    );
+    let node_text = format!("a {a} b {b}");
+    let tree = redaction_test_tree(&[node_text.as_str()]);
+    let ocr = redaction_test_ocr(&[&[a, c]]);
+    let chunks = screening_chunks(Some(&tree), FrameScreeningMetadata::default()).unwrap();
+    let plan = screen_frame_plan(&redaction_test_config(), Some(&ocr.0), Some(&chunks)).unwrap();
+    let sources = secret_hit_sources(&plan, &chunks, Some(&ocr.0));
+    assert_eq!(sources.len(), 3);
+    assert_eq!(distinct_secret_hits(&plan, &chunks, Some(&ocr.0)).len(), 3);
+    let metrics = ScreeningMetrics::default().with_hit_sources(&sources);
+    // c only in OCR; b only in accessibility; a in both.
+    assert_eq!(
+        (
+            metrics.hits_ocr_only,
+            metrics.hits_a11y_only,
+            metrics.hits_both
+        ),
+        (Some(1), Some(1), Some(1))
+    );
+    // Metadata counts as accessibility.
+    let metadata = FrameScreeningMetadata {
+        window_name: Some(c),
+        ..Default::default()
+    };
+    let chunks = screening_chunks(None, metadata).unwrap();
+    let plan = screen_frame_plan(&redaction_test_config(), Some(&ocr.0), Some(&chunks)).unwrap();
+    let metrics = ScreeningMetrics::default().with_hit_sources(&secret_hit_sources(
+        &plan,
+        &chunks,
+        Some(&ocr.0),
+    ));
+    assert_eq!(
+        (
+            metrics.hits_ocr_only,
+            metrics.hits_a11y_only,
+            metrics.hits_both
+        ),
+        (Some(1), Some(0), Some(1))
+    );
+    // Saturating millisecond conversion.
+    assert_eq!(millis_u32(Duration::from_millis(87)), 87);
+    assert_eq!(millis_u32(Duration::from_secs(u64::MAX / 2)), u32::MAX);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn screening_metrics_become_additive_decision_fields() {
+    let metrics = ScreeningMetrics {
+        ocr_forced: Some(true),
+        ocr_ms: Some(80),
+        screen_ms: Some(2),
+        redact_ms: None,
+        hits_ocr_only: Some(1),
+        hits_a11y_only: Some(0),
+        hits_both: Some(0),
+        ocr_duration: Some(Duration::from_millis(80)),
+    };
+    let json =
+        serde_json::to_value(metrics.decision("blocked", vec!["content_secret"], false, None))
+            .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "outcome":"blocked","reasons":["content_secret"],"fail_open":false,
+            "ocr_forced":true,"ocr_ms":80,"screen_ms":2,
+            "hits_ocr_only":1,"hits_a11y_only":0,"hits_both":0
+        })
+    );
+    // Nothing known: the shape is the pre-metrics one.
+    let json = serde_json::to_value(ScreeningMetrics::default().decision(
+        "passed",
+        Vec::new(),
+        false,
+        None,
+    ))
+    .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"outcome":"passed","reasons":[],"fail_open":false})
     );
 }

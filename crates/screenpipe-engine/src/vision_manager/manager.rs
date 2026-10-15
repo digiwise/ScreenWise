@@ -42,6 +42,13 @@ pub struct VisionManagerConfig {
     pub ignore_incognito_windows: bool,
     /// Pause all screen capture when a DRM streaming app (Netflix, etc.) is focused.
     pub pause_on_drm_content: bool,
+    /// Screen every frame's OCR/accessibility text in memory before persistence.
+    pub content_screening_enabled: bool,
+    /// Extra case-insensitive keywords that block a frame during screening.
+    pub content_screening_keywords: Vec<String>,
+    /// Window patterns whose UIA evidence-acquisition failures may fail open,
+    /// only while content screening is enabled and the frame passes it.
+    pub uia_fail_open_windows: Vec<String>,
     /// Languages for OCR recognition.
     pub languages: Vec<screenpipe_core::Language>,
     /// Single user-facing quality preset that drives both JPEG quality and
@@ -456,6 +463,15 @@ impl VisionManager {
         }
     }
 
+    /// Content-screening and UIA fail-open inputs for one monitor's capture loop.
+    fn content_screening_settings(&self) -> crate::event_driven_capture::ContentScreeningSettings {
+        crate::event_driven_capture::ContentScreeningSettings {
+            enabled: self.config.content_screening_enabled,
+            keywords: self.config.content_screening_keywords.clone(),
+            uia_fail_open_windows: self.config.uia_fail_open_windows.clone(),
+        }
+    }
+
     /// Start event-driven capture for a specific monitor.
     async fn start_event_driven_monitor(
         &self,
@@ -557,6 +573,7 @@ impl VisionManager {
         let hot_frame_cache = self.hot_frame_cache.clone();
         let use_pii_removal = self.config.use_pii_removal;
         let pause_on_drm_content = self.config.pause_on_drm_content;
+        let content_screening = self.content_screening_settings();
         let languages = self.config.languages.clone();
         let power_profile_rx = self.power_profile_rx.clone();
         let focus_controller = self.focus_controller.clone();
@@ -612,6 +629,7 @@ impl VisionManager {
                 hot_frame_cache,
                 use_pii_removal,
                 pause_on_drm_content,
+                content_screening,
                 languages,
                 power_profile_rx,
                 focus_controller,
@@ -786,6 +804,23 @@ mod tests {
         assert_eq!(normal.walk_timeout, privacy_only.walk_timeout);
     }
 
+    #[tokio::test]
+    async fn content_screening_settings_reach_each_capture_loop() {
+        let mut manager = make_vm_with_monitor_ids(Vec::new()).await;
+        let defaults = manager.content_screening_settings();
+        assert!(defaults.enabled);
+        assert!(defaults.keywords.is_empty());
+        assert!(defaults.uia_fail_open_windows.is_empty());
+
+        manager.config.content_screening_enabled = false;
+        manager.config.content_screening_keywords = vec!["synthetic keyword".into()];
+        manager.config.uia_fail_open_windows = vec!["synthetic.exe::".into()];
+        let configured = manager.content_screening_settings();
+        assert!(!configured.enabled);
+        assert_eq!(configured.keywords, ["synthetic keyword"]);
+        assert_eq!(configured.uia_fail_open_windows, ["synthetic.exe::"]);
+    }
+
     #[test]
     fn configured_media_directory_is_not_nested_under_another_data_directory() {
         let configured = std::path::PathBuf::from("recording-root").join("data");
@@ -812,6 +847,9 @@ mod tests {
             use_all_monitors: false,
             ignore_incognito_windows: false,
             pause_on_drm_content: false,
+            content_screening_enabled: true,
+            content_screening_keywords: vec![],
+            uia_fail_open_windows: vec![],
             languages: vec![Language::English],
             video_quality: "balanced".to_string(),
             idle_capture_interval_ms: None,

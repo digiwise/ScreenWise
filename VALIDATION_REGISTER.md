@@ -1,6 +1,7 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-14. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-15. **Partial validation, not a completed privacy/firewall certification.**
+
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
 > that the system or code is safe for confidential use. The maintainer and
@@ -24,8 +25,10 @@ Combined source passed final Astra review before the desktop-only release-local
 build (4m52s; all 1,080 external artifacts reused). Accessibility 280, capture 45,
 mode two, endpoint one and collector 11 tests passed, plus 125 synthetic
 deployment-script checks. Twenty-three live accessibility tests stayed ignored.
-The temporary diagnostics checkpoint remains; live cached COM/provider events,
-capture recovery and the 70%-within-half-budget target remain unverified.
+The [timing diagnostic guide](docs/UIA_TIMING_TRIAL.md) describes interpretation and validation
+limits. The 2026-10-15 documentation/comment update adds no runtime validation.
+Live diagnostic usefulness/overhead, cached COM/provider events, capture recovery
+and the 70%-within-half-budget target remain unverified.
 
 Preceding candidate: [raw-only rule evaluation, partial Value evidence and local
 process metrics](docs/UIA_SINGLE_CACHE_HANDOFF.md#raw-only-rule-evaluation-follow-up),
@@ -48,6 +51,28 @@ Full cached-decoder integration, provider event delivery, input focus recovery
 and the 70%-within-half-budget target remain unresolved. SW-R18 remains open.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+
+## Content screening stage 1 (2026-10-15)
+
+In-memory OCR screening, redaction and UIA fail-open windows
+([content screening](docs/CONTENT_SCREENING.md)), the `screenpipe-capture-policy`
+crate and `redact_one` detector fixes. **Evidence is focused unit/integration
+tests and a `release-local` desktop build only**; no live capture trial, no
+measured OCR/screening overhead, non-Windows paths uncompiled. Final evidence:
+redact lib 173 (`20261015T035530586Z-Root-Test-8795510b`), engine
+event_driven_capture 85 (`20261015T035636948Z-Root-Test-6b55b695`), capture-policy
+46 (`20261015T032803895Z-Root-Test-a54724ec`), screen 30
+(`20261015T032834668Z-Root-Test-0ca3cf16`), config recording 13 single-threaded
+(`20261015T032935042Z-Root-Test-9c356082`), capture 26
+(`20261015T032956627Z-Root-Test-38e447cd`), RootFmt
+(`20261015T035521989Z-Root-Fmt-f5a2f34a`), DesktopFmt
+(`20261015T033635936Z-Desktop-Fmt-fb87f377`), bindings current
+(`20261015T052221936Z-Desktop-Test-bc601965`), `release-local` DesktopBuild
+(`20261015T053610789Z-Desktop-Build-f56fee7f`), vitest 80/80 and `tsc --noEmit`.
+A final extra-effort source review's blocker
+(private-key bodies persisted on redaction) and should-fix findings were addressed
+before commit. Known issue: `screenpipe-config` global-state tests can fail
+intermittently in parallel runs; run that suite single-threaded.
 
 ## Windows UIA admission/text split (2026-10-14)
 

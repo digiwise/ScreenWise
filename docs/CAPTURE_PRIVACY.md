@@ -457,3 +457,14 @@ IDs, reasons and aggregate counts replace content-bearing acquisition logging.
 The authenticated numeric endpoint supports the pending comparison. Synthetic
 tests/builds do not prove provider event completeness or useful live capture;
 deployment and the 20-minute numeric trial await owner confirmation.
+
+## Content screening fields (2026-10-15)
+
+With content screening enabled, each persisted Windows frame's metadata includes
+`content_screening` (`outcome`, fixed `reasons`, `fail_open`, `redacted_regions`,
+`ocr_forced`, `ocr_ms`, `screen_ms`, `redact_ms`, `hits_ocr_only`,
+`hits_a11y_only`, `hits_both`); a withheld frame's placeholder uses the redaction
+reason `content_screening`, and `accessibility.processing` may be
+`screened_fail_open`. The field is omitted when screening is disabled, so earlier
+metadata is unchanged. Semantics, limits and permitted aggregate queries are in
+[content screening](CONTENT_SCREENING.md).

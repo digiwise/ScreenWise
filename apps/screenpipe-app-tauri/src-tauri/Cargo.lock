@@ -8469,13 +8469,13 @@ dependencies = [
  "parking_lot",
  "regex",
  "rusqlite",
+ "screenpipe-capture-policy",
  "screenpipe-config",
  "screenpipe-core",
  "screenpipe-db",
  "serde",
  "serde_json",
  "tracing",
- "url",
  "windows 0.58.0",
  "windows-core 0.58.0",
  "zbus",
@@ -8666,6 +8666,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "screenpipe-capture-policy"
+version = "0.4.15"
+dependencies = [
+ "regex",
+ "url",
+]
+
+[[package]]
 name = "screenpipe-config"
 version = "0.4.15"
 dependencies = [
@@ -8786,6 +8794,7 @@ dependencies = [
  "screenpipe-apple-intelligence",
  "screenpipe-audio",
  "screenpipe-capture",
+ "screenpipe-capture-policy",
  "screenpipe-config",
  "screenpipe-connect",
  "screenpipe-core",
@@ -8846,6 +8855,7 @@ dependencies = [
  "once_cell",
  "ort",
  "regex",
+ "screenpipe-capture-policy",
  "screenpipe-rfdetr-mlx",
  "serde",
  "serde_json",
@@ -8890,6 +8900,7 @@ dependencies = [
  "rusty-tesseract",
  "sck-rs",
  "screenpipe-a11y",
+ "screenpipe-capture-policy",
  "screenpipe-config",
  "screenpipe-core",
  "screenpipe-db",

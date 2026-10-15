@@ -32,7 +32,7 @@ use crate::{
 /// Bumped whenever we add or change a pattern in [`PATTERNS`]. Cached
 /// rows redacted under an old version are eligible for re-redaction by
 /// the worker.
-pub const REGEX_REDACTOR_VERSION: u32 = 2;
+pub const REGEX_REDACTOR_VERSION: u32 = 3;
 
 struct Pattern {
     re: Regex,
@@ -100,8 +100,9 @@ static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
         (r"\bgh[psouvr]_[A-Za-z0-9]{30,}\b", SpanLabel::Secret),
         // Slack bot/app/refresh tokens
         (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", SpanLabel::Secret),
-        // AWS access key
-        (r"\bAKIA[0-9A-Z]{16}\b", SpanLabel::Secret),
+        // AWS access key id (AKIA long-term, ASIA temporary STS): exactly
+        // 20 characters, boundary-delimited.
+        (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", SpanLabel::Secret),
         // Google access token (ya29.…)
         (r"\bya29\.[A-Za-z0-9_-]{10,}\b", SpanLabel::Secret),
         // HuggingFace token
@@ -211,8 +212,66 @@ static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             &["sedol", "security", "securities"],
             Some(national_id::sedol),
         ),
+        // Credit / debit card, real layouts first. Each layout is its own
+        // detector so a failed longer candidate (e.g. a 19-digit 4-4-4-4-3
+        // that fails Luhn) does not hide the shorter card inside it, and so
+        // text after the number (expiry `12/27`, year, CVV, a lone digit)
+        // cannot be swallowed into the match and break the checksum. A
+        // single consistent separator (space or dash) per layout.
+        (
+            r"\b\d{4} \d{4} \d{4} \d{4} \d{3}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
+        (
+            r"\b\d{4}-\d{4}-\d{4}-\d{4}-\d{3}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
+        (
+            r"\b\d{4} \d{4} \d{4} \d{4}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
+        (
+            r"\b\d{4}-\d{4}-\d{4}-\d{4}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
+        // Amex 4-6-5 and Diners 4-6-4.
+        (
+            r"\b\d{4} \d{6} \d{4,5}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
+        (
+            r"\b\d{4}-\d{6}-\d{4,5}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
+        // Unbroken 13-19 digit number (bounded by non-word characters).
+        (
+            r"\b\d{13,19}\b",
+            SpanLabel::Id,
+            Some("credit_card"),
+            &[],
+            Some(national_id::credit_card),
+        ),
         // Credit / debit card — brand IIN + length + Luhn (the brand gate
-        // is what stops Luhn-passing hashes / timestamps).
+        // is what stops Luhn-passing hashes / timestamps). Catch-all for
+        // other single-separator groupings.
         (
             r"\b(?:\d[ -]?){13,19}\b",
             SpanLabel::Id,
@@ -1294,7 +1353,7 @@ static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
         // secrets already in `raw` (OpenAI/Stripe/GitHub/Slack/AWS/JWT). ----
         // Google API key (Maps/Firebase/GCP): "AIza" + 35.
         (
-            r"\bAIza[0-9A-Za-z_-]{35}\b",
+            r"\bAIza[0-9A-Za-z_-]{35,}\b",
             SpanLabel::Secret,
             Some("google_api_key"),
             &[],
@@ -1302,7 +1361,7 @@ static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
         ),
         // GitLab personal access token.
         (
-            r"\bglpat-[0-9A-Za-z_-]{20}\b",
+            r"\bglpat-[0-9A-Za-z_-]{20,}\b",
             SpanLabel::Secret,
             Some("gitlab_pat"),
             &[],
@@ -1404,9 +1463,9 @@ static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             &[],
             None,
         ),
-        // GitHub fine-grained PAT: github_pat_ + 82.
+        // GitHub fine-grained PAT: github_pat_ + 60 or more (real tokens: 82).
         (
-            r"\bgithub_pat_[0-9A-Za-z_]{82}\b",
+            r"\bgithub_pat_[0-9A-Za-z_]{60,}\b",
             SpanLabel::Secret,
             Some("github_fine_grained_pat"),
             &[],
@@ -1994,6 +2053,93 @@ mod tests {
                 "false secret on {neg}"
             );
         }
+    }
+
+    fn secret_subtype(text: &str) -> Option<String> {
+        run(text)
+            .spans
+            .iter()
+            .find(|s| s.label == SpanLabel::Secret)
+            .map(|s| s.subtype.clone().unwrap_or_default())
+    }
+
+    #[test]
+    fn screening_token_shapes_caught_and_mid_identifier_rejected() {
+        let google = format!("AIza{}", "aB3_".repeat(9) + "x"); // 4 + 37
+        let gitlab = format!("glpat-{}z", "aB3-".repeat(8)); // 33 body
+        let fine = format!("github_pat_{}", "aB3_".repeat(16)); // 64 body
+        let asia = "ASIA1234567890ABCDEF";
+        let akia = "AKIA1234567890ABCDEF";
+        let anthropic = format!("sk-ant-api03-{}", "aB3dE6gH9jK2".repeat(3));
+        for tok in [
+            google.as_str(),
+            gitlab.as_str(),
+            fine.as_str(),
+            asia,
+            akia,
+            anthropic.as_str(),
+        ] {
+            for text in [
+                tok.to_string(),
+                format!("key={tok} end"),
+                format!("\"{tok}\""),
+            ] {
+                let got = run(&text);
+                assert!(
+                    got.spans
+                        .iter()
+                        .any(|s| s.label == SpanLabel::Secret && &text[s.start..s.end] == tok),
+                    "missed {tok} in {text}"
+                );
+            }
+            // Mid-identifier: a word character directly before the prefix.
+            let glued = format!("my{tok}");
+            assert!(secret_subtype(&glued).is_none(), "glued {glued}");
+        }
+        // Subtype labels for the extended shapes.
+        assert_eq!(secret_subtype(&google).as_deref(), Some("google_api_key"));
+        assert_eq!(secret_subtype(&gitlab).as_deref(), Some("gitlab_pat"));
+        assert_eq!(
+            secret_subtype(&fine).as_deref(),
+            Some("github_fine_grained_pat")
+        );
+        // Too short / wrong length.
+        assert!(secret_subtype(&format!("github_pat_{}", "a".repeat(40))).is_none());
+        assert!(secret_subtype("AKIA1234567890ABCDEFG").is_none()); // 21 chars
+        assert!(secret_subtype("ASIA1234567890ABCDE").is_none()); // 19 chars
+        assert!(secret_subtype("ASIAPACIFICREGIONCODE").is_none());
+        assert!(secret_subtype("sk-ant").is_none());
+    }
+
+    #[test]
+    fn card_layouts_with_trailing_text_and_issuers() {
+        let card = |t: &str| {
+            run(t)
+                .spans
+                .iter()
+                .any(|s| s.subtype.as_deref() == Some("credit_card") && s.label == SpanLabel::Id)
+        };
+        // Expiry / year / CVV / stray digit after the number.
+        assert!(card("4111 1111 1111 1111 12/27"));
+        assert!(card("4111-1111-1111-1111 05/29"));
+        assert!(card("4111111111111111 2026"));
+        assert!(card("378282246310005 1225"));
+        assert!(card("4111 1111 1111 1111 5"));
+        assert!(card("4111 1111 1111 1111 123"));
+        assert!(card("3782 822463 10005 exp 12/27"));
+        // Diners (300-305 / 36 / 38) and Maestro (issued IINs such as 6759).
+        assert!(card("30569309025904"));
+        assert!(card("3056 930902 5904"));
+        assert!(card("6759649826438453"));
+        // Luhn-valid identifiers in the former broad 6x / 56-58 Maestro
+        // ranges are not cards.
+        assert!(!card("6123456789012344"));
+        assert!(!card("6123 4567 8901 2344"));
+        assert!(!card("5712345678901239"));
+        // Invalid checksum / unknown issuer / wrong length stay unflagged.
+        assert!(!card("4111 1111 1111 1112 12/27"));
+        assert!(!card("1234 5678 1234 5670"));
+        assert!(!card("41111111111111111111")); // 20 digits
     }
 
     #[test]

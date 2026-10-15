@@ -10,6 +10,8 @@ import type { SettingsField } from "./settings-search";
 export const searchIndex: SettingsField[] = [
   { label: "Blocklist", keywords: ["ignore", "exclude", "block"] },
   { label: "PII masking", keywords: ["mask", "redact"] },
+  { label: "Content screening", keywords: ["screening", "ocr", "password manager", "secrets", "keywords"] },
+  { label: "Fail-open windows", keywords: ["uia", "accessibility", "fail open", "fail-open"] },
 ];
 import {
   Eye,
@@ -26,6 +28,9 @@ import {
   ClipboardX,
   Keyboard,
   FolderTree,
+  ShieldAlert,
+  KeyRound,
+  Unlock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -178,6 +183,27 @@ const createUrlOptions = (
 
   return [...urlOptions, ...customOptions];
 };
+
+/**
+ * Interprets one add-or-remove edit reported by a MultiSelect, which hands back
+ * the full next value list. Both checks are case-insensitive. An add wins over a
+ * removal, and only the first changed item is applied. `added` is set only for
+ * an add so callers can apply add-side effects. Returns null when nothing changed.
+ */
+function applyListChange(
+  current: string[],
+  values: string[],
+): { next: string[]; added?: string } | null {
+  const lowerCurrent = current.map((v) => v.toLowerCase());
+  const lowerValues = values.map((v) => v.toLowerCase());
+  const added = values.find((v) => !lowerCurrent.includes(v.toLowerCase()));
+  if (added !== undefined) return { next: [...current, added], added };
+  const removed = current.find((v) => !lowerValues.includes(v.toLowerCase()));
+  if (removed !== undefined) {
+    return { next: current.filter((v) => v !== removed) };
+  }
+  return null;
+}
 
 function EncryptDataCard({
   encryptStore,
@@ -601,102 +627,66 @@ export function PrivacySection() {
     handleIncludedWindowsChange([...settings.includedWindows, pattern]);
   };
 
+  // Adding a window pattern to one list also drops it (case-insensitively) from
+  // the opposite list, so a pattern is never both ignored and included.
   const handleIgnoredWindowsChange = (values: string[]) => {
-    const lowerCaseValues = values.map((v) => v.toLowerCase());
-    const currentLowerCase = settings.ignoredWindows.map((v) =>
-      v.toLowerCase()
-    );
-    const addedValues = values.filter(
-      (v) => !currentLowerCase.includes(v.toLowerCase())
-    );
-    const removedValues = settings.ignoredWindows.filter(
-      (v) => !lowerCaseValues.includes(v.toLowerCase())
-    );
-
-    if (addedValues.length > 0) {
-      const newValue = addedValues[0];
+    const change = applyListChange(settings.ignoredWindows, values);
+    if (!change) return;
+    if (change.added !== undefined) {
+      const added = change.added.toLowerCase();
       handleSettingsChange(
         {
-          ignoredWindows: [...settings.ignoredWindows, newValue],
+          ignoredWindows: change.next,
           includedWindows: settings.includedWindows.filter(
-            (w) => w.toLowerCase() !== newValue.toLowerCase()
+            (w) => w.toLowerCase() !== added
           ),
         },
         true
       );
-    } else if (removedValues.length > 0) {
-      const removedValue = removedValues[0];
-      handleSettingsChange(
-        {
-          ignoredWindows: settings.ignoredWindows.filter(
-            (w) => w !== removedValue
-          ),
-        },
-        true
-      );
+    } else {
+      handleSettingsChange({ ignoredWindows: change.next }, true);
     }
   };
 
   const handleIncludedWindowsChange = (values: string[]) => {
-    const lowerCaseValues = values.map((v) => v.toLowerCase());
-    const currentLowerCase = settings.includedWindows.map((v) =>
-      v.toLowerCase()
-    );
-    const addedValues = values.filter(
-      (v) => !currentLowerCase.includes(v.toLowerCase())
-    );
-    const removedValues = settings.includedWindows.filter(
-      (v) => !lowerCaseValues.includes(v.toLowerCase())
-    );
-
-    if (addedValues.length > 0) {
-      const newValue = addedValues[0];
+    const change = applyListChange(settings.includedWindows, values);
+    if (!change) return;
+    if (change.added !== undefined) {
+      const added = change.added.toLowerCase();
       handleSettingsChange(
         {
-          includedWindows: [...settings.includedWindows, newValue],
+          includedWindows: change.next,
           ignoredWindows: settings.ignoredWindows.filter(
-            (w) => w.toLowerCase() !== newValue.toLowerCase()
+            (w) => w.toLowerCase() !== added
           ),
         },
         true
       );
-    } else if (removedValues.length > 0) {
-      const removedValue = removedValues[0];
-      handleSettingsChange(
-        {
-          includedWindows: settings.includedWindows.filter(
-            (w) => w !== removedValue
-          ),
-        },
-        true
-      );
+    } else {
+      handleSettingsChange({ includedWindows: change.next }, true);
     }
   };
 
   const handleIgnoredUrlsChange = (values: string[]) => {
-    const currentUrls = settings.ignoredUrls || [];
-    const lowerCaseValues = values.map((v) => v.toLowerCase());
-    const currentLowerCase = currentUrls.map((v) => v.toLowerCase());
-    const addedValues = values.filter(
-      (v) => !currentLowerCase.includes(v.toLowerCase())
-    );
-    const removedValues = currentUrls.filter(
-      (v) => !lowerCaseValues.includes(v.toLowerCase())
-    );
+    const change = applyListChange(settings.ignoredUrls || [], values);
+    if (!change) return;
+    handleSettingsChange({ ignoredUrls: change.next }, true);
+  };
 
-    if (addedValues.length > 0) {
-      const newValue = addedValues[0];
-      handleSettingsChange(
-        { ignoredUrls: [...currentUrls, newValue] },
-        true
-      );
-    } else if (removedValues.length > 0) {
-      const removedValue = removedValues[0];
-      handleSettingsChange(
-        { ignoredUrls: currentUrls.filter((u) => u !== removedValue) },
-        true
-      );
-    }
+  const handleContentScreeningToggle = (checked: boolean) => {
+    handleSettingsChange({ contentScreeningEnabled: checked }, true);
+  };
+
+  const handleContentScreeningKeywordsChange = (values: string[]) => {
+    const change = applyListChange(settings.contentScreeningKeywords || [], values);
+    if (!change) return;
+    handleSettingsChange({ contentScreeningKeywords: change.next }, true);
+  };
+
+  const handleUiaFailOpenWindowsChange = (values: string[]) => {
+    const change = applyListChange(settings.uiaFailOpenWindows || [], values);
+    if (!change) return;
+    handleSettingsChange({ uiaFailOpenWindows: change.next }, true);
   };
 
   return (
@@ -1271,6 +1261,100 @@ export function PrivacySection() {
 
       </div>
       </>
+
+      {/* Content screening */}
+      <div className="space-y-2">
+        <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
+          Content screening
+        </h2>
+
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5">
+                <ShieldAlert className="h-4 w-4 text-muted-foreground shrink-0" />
+                <div>
+                  <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                    Screen frames before saving
+                    <HelpTooltip text="Before a frame is saved, its screenshot is OCR'd in memory and the OCR, accessibility and window text are checked. Detected secrets (API keys, tokens, card numbers, credential URLs) are blacked out and replaced with [SECRET]. Password-manager UI, private keys, blocked or protected domains, your keywords below, and anything that cannot be reliably redacted withhold the whole frame instead. These are best-effort pattern checks: they can miss sensitive content and can redact or withhold ordinary frames. They are not a privacy guarantee." />
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Best-effort: secrets are redacted before saving; password-manager UI, private keys, blocked domains and your keywords withhold the frame.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                id="contentScreeningEnabled"
+                checked={Boolean(settings.contentScreeningEnabled ?? true)}
+                onCheckedChange={handleContentScreeningToggle}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center space-x-2.5 mb-2">
+              <KeyRound className="h-4 w-4 text-muted-foreground shrink-0" />
+              <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                Blocking keywords
+                <HelpTooltip text="Extra case-insensitive substrings that withhold the whole frame during content screening, on top of the built-in rules. Only used while content screening is on." />
+              </h3>
+            </div>
+            <div className="ml-[26px]">
+              <MultiSelect
+                options={(settings.contentScreeningKeywords || []).map((kw) => ({
+                  value: kw,
+                  label: kw,
+                  icon: KeyRound,
+                }))}
+                defaultValue={settings.contentScreeningKeywords || []}
+                value={settings.contentScreeningKeywords || []}
+                onValueChange={handleContentScreeningKeywordsChange}
+                placeholder="e.g. acme-internal, project-codename..."
+                allowCustomValues
+                disabled={!(settings.contentScreeningEnabled ?? true)}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border bg-card">
+          <CardContent
+            className={cn(
+              "px-3 py-2.5",
+              !(settings.contentScreeningEnabled ?? true) && "opacity-50"
+            )}
+          >
+            <div className="flex items-center space-x-2.5 mb-2">
+              <Unlock className="h-4 w-4 text-muted-foreground shrink-0" />
+              <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                Fail-open windows (accessibility)
+                <HelpTooltip text="Normally, if accessibility (UIA) inspection fails for a window, ScreenWise fails closed and withholds the frame. A matching pattern here lets that failure fail open instead, but only while content screening is on and only if the frame then has no screening hits at all (any hit withholds it). Exclusions, private windows, lock, detected DRM content and identity, focus, target and monitor checks still apply. Patterns must use the 'App::' or 'App::Title' form; title-only patterns are ignored here." />
+              </h3>
+            </div>
+            <div className="ml-[26px]">
+              <MultiSelect
+                options={(settings.uiaFailOpenWindows || []).map((pattern) => ({
+                  value: pattern,
+                  label: pattern,
+                  icon: AppWindowMac,
+                  iconUrl: getAppIconUrl(pattern.includes("::") ? pattern.split("::")[0] : pattern),
+                }))}
+                defaultValue={settings.uiaFailOpenWindows || []}
+                value={settings.uiaFailOpenWindows || []}
+                onValueChange={handleUiaFailOpenWindowsChange}
+                placeholder="e.g. MyApp::, MyApp::Title (App:: form required)"
+                allowCustomValues
+                disabled={!(settings.contentScreeningEnabled ?? true)}
+              />
+              <p className="text-xs text-muted-foreground mt-1.5">
+                Only applies when accessibility inspection fails for a matching window, while content screening is on, and only to frames with no screening hits. Exclusions, private windows, lock, DRM and identity, focus, target and monitor checks still apply. Use the <code>App::</code> or <code>App::Title</code> form; title-only patterns are ignored.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
       <div className="space-y-2">
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">

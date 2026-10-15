@@ -89,6 +89,26 @@ and restore the caller's environment. Cargo's offline environment also applies
 to any internal metadata query during formatting. `Jobs`, `Diagnostics`, target
 selectors and test-runner/lint options are rejected where they do not apply.
 
+Practical notes (2026-10-15):
+
+- `Fmt` only checks. Apply formatting with `rustfmt --edition 2021 <file>` on the
+  files you changed (or `cargo fmt --all` when every reported diff is yours),
+  then rerun `-Task RootFmt`/`DesktopFmt`.
+- There is no thread-count option. Run a suite single-threaded with
+  `-TestArguments @('--test-threads=1')`; `screenpipe-config` global-state tests
+  (`pressure_warns…`, `audio_privacy::privacy_permit_roundtrip…`) can fail
+  intermittently in parallel runs.
+- The launcher cannot refresh a lockfile: compiling presets and `Metadata` use
+  `--locked`. After an owner-approved manifest change such as a new workspace
+  crate, run once per workspace, from its root, `cargo metadata --offline
+  --format-version 1 > $null` (record the command; never `cargo update`). It
+  rewrites `Cargo.lock` during resolution and may then exit 101 trying to download
+  uncached non-Windows packages such as `alsa`; inspect `git diff` of both
+  lockfiles and accept only the intended package entries and edges. The next
+  compiling run of each touched variant needs `-AllowColdCache`. A dedicated
+  offline lock-refresh preset that verifies the diff is a candidate launcher
+  improvement.
+
 The explicit `SCREENWISE_DESKTOP_CARGO_TARGET_DIR` override remains supported for
 desktop checks/Clippy/tests. Choose it before warming the cache; do not change it between
 runs. A leftover `CARGO_TARGET_DIR` from a different workspace is temporarily

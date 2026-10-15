@@ -83,6 +83,152 @@ pub struct CaptureContext<'a> {
     pub placeholder_text: Option<&'a str>,
     /// Serialized safe capture-decision metadata, persisted atomically with the frame.
     pub capture_privacy: Option<&'a str>,
+    /// Raw `(text, text_json)` from [`run_ocr`] on this exact `image`, already
+    /// computed by the caller (in-memory content screening). Used only where
+    /// paired capture would run OCR anyway, so one frame is never recognised
+    /// twice; storage behaviour is otherwise unchanged.
+    pub precomputed_ocr: Option<(String, String)>,
+}
+
+/// Which text sources paired capture uses for a frame.
+struct TextSourcePlan {
+    app_prefers_ocr: bool,
+    has_accessibility_text: bool,
+    a11y_is_thin: bool,
+}
+
+impl TextSourcePlan {
+    fn runs_ocr(&self) -> bool {
+        !self.has_accessibility_text || self.a11y_is_thin
+    }
+}
+
+/// `tree_snapshot` must already be filtered by [`usable_accessibility_snapshot`].
+fn text_source_plan(
+    is_placeholder: bool,
+    tree_snapshot: Option<&TreeSnapshot>,
+    app_name: Option<&str>,
+    window_name: Option<&str>,
+    browser_url: Option<&str>,
+) -> TextSourcePlan {
+    // --- Check if accessibility tree already provides text ---
+    // When the tree snapshot has text we skip OCR entirely. This avoids
+    // ~50-200ms of Apple Vision CPU work per capture AND prevents cloning
+    // the Arc<DynamicImage> into the spawn_blocking closure (which would
+    // make Arc::try_unwrap fail later, forcing a full image copy).
+    //
+    // Exception: terminal emulators expose their buffer via AXTextArea,
+    // which returns non-empty but low-quality text (raw buffer content
+    // without visual formatting). For these apps we always run OCR to get
+    // proper bounding-box text positions for the selectable overlay.
+    let app_prefers_ocr = !is_placeholder
+        && app_name.is_some_and(|name| {
+            let n = name.to_lowercase();
+            // Terminal emulators whose AX text is raw buffer and not useful
+            // for bounding-box overlay. OCR produces better results.
+            // Note: Ghostty, iTerm2, and Terminal.app were removed — they have
+            // full AX support and the thin-detection heuristic handles them
+            // correctly. See https://github.com/screenpipe/screenpipe/issues/2685
+            n.contains("wezterm")
+                || n.contains("alacritty")
+                || n.contains("kitty")
+                || n.contains("hyper")
+                || n.contains("warp")
+        });
+    let has_accessibility_text = !is_placeholder
+        && !app_prefers_ocr
+        && tree_snapshot
+            .map(|s| !s.text_content.is_empty())
+            .unwrap_or(false);
+
+    // Check if accessibility text is "thin" — the tree returned SOME text
+    // (toolbar, sidebar, browser chrome) but likely missed the main content.
+    // This happens with canvas-rendered apps (Google Docs, Figma, etc.)
+    // where the document body is invisible to the accessibility tree.
+    let a11y_is_thin = has_accessibility_text
+        && tree_snapshot
+            .map(|s| a11y_content_is_thin(s, window_name, browser_url, app_name))
+            .unwrap_or(false);
+    TextSourcePlan {
+        app_prefers_ocr,
+        has_accessibility_text,
+        a11y_is_thin,
+    }
+}
+
+/// Whether [`paired_capture`] would run OCR for an ordinary (non-placeholder)
+/// frame with this accessibility tree and metadata. Lets an in-memory screen
+/// match the text that paired capture would actually persist.
+pub fn paired_capture_runs_ocr(
+    tree_snapshot: Option<&TreeSnapshot>,
+    app_name: Option<&str>,
+    window_name: Option<&str>,
+    browser_url: Option<&str>,
+) -> bool {
+    text_source_plan(
+        false,
+        tree_snapshot.and_then(usable_accessibility_snapshot),
+        app_name,
+        window_name,
+        browser_url,
+    )
+    .runs_ocr()
+}
+
+/// Run the platform OCR engine on an in-memory image. Nothing is persisted.
+///
+/// Returns the raw `(text, text_json)` (gutter-noise stripping is applied by
+/// [`paired_capture`] when storing). An OCR engine failure is an `Err`, never
+/// an empty result, so a screening caller cannot mistake it for a blank frame.
+/// A successful recognition of a blank frame returns empty text.
+pub async fn run_ocr(
+    image: &Arc<DynamicImage>,
+    languages: &[screenpipe_core::Language],
+) -> Result<(String, String)> {
+    // Windows OCR blocks its thread: the PNG encode and every WinRT `.get()`
+    // wait synchronously. Run it on a blocking thread with its own Arc so the
+    // async reactor keeps serving other monitors and tasks meanwhile.
+    #[cfg(target_os = "windows")]
+    {
+        let image_for_ocr = Arc::clone(image);
+        let languages = languages.to_vec();
+        let (text, json, _confidence) = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(screenpipe_screen::perform_ocr_windows(
+                &image_for_ocr,
+                &languages,
+            ))
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OCR task did not complete"))??;
+        Ok((text, json))
+    }
+    // Apple and Tesseract OCR are sync, use spawn_blocking with semaphore
+    // to limit concurrent OCR and avoid CPU spikes on multi-monitor setups.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _permit = ocr_semaphore()
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("OCR concurrency limiter closed"))?;
+        let image_for_ocr = image.clone();
+        let languages = languages.to_vec();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(target_os = "macos")]
+            {
+                let (text, json, _confidence) =
+                    screenpipe_screen::perform_ocr_apple(&image_for_ocr, &languages);
+                (text, json)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let (text, json, _confidence) =
+                    screenpipe_screen::perform_ocr_tesseract(&image_for_ocr, languages);
+                (text, json)
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OCR task did not complete"))
+    }
 }
 
 /// Result of a paired capture operation.
@@ -112,6 +258,9 @@ pub struct PairedCaptureResult {
     pub browser_url: Option<String>,
     /// Content hash from accessibility tree (for dedup)
     pub content_hash: Option<i64>,
+    /// Wall time of the OCR this call ran itself (`None` when no OCR ran or
+    /// a precomputed result was reused). For pipeline metrics only.
+    pub ocr_duration: Option<std::time::Duration>,
 }
 
 /// Performs a paired capture: screenshot + accessibility tree data.
@@ -148,83 +297,41 @@ pub async fn paired_capture(
         snapshot_path.to_string_lossy().to_string()
     };
 
-    // --- Check if accessibility tree already provides text ---
-    // When the tree snapshot has text we skip OCR entirely. This avoids
-    // ~50-200ms of Apple Vision CPU work per capture AND prevents cloning
-    // the Arc<DynamicImage> into the spawn_blocking closure (which would
-    // make Arc::try_unwrap fail later, forcing a full image copy).
-    //
-    // Exception: terminal emulators expose their buffer via AXTextArea,
-    // which returns non-empty but low-quality text (raw buffer content
-    // without visual formatting). For these apps we always run OCR to get
-    // proper bounding-box text positions for the selectable overlay.
-    let app_prefers_ocr = ctx.placeholder_text.is_none()
-        && ctx.app_name.is_some_and(|name| {
-            let n = name.to_lowercase();
-            // Terminal emulators whose AX text is raw buffer and not useful
-            // for bounding-box overlay. OCR produces better results.
-            // Note: Ghostty, iTerm2, and Terminal.app were removed — they have
-            // full AX support and the thin-detection heuristic handles them
-            // correctly. See https://github.com/screenpipe/screenpipe/issues/2685
-            n.contains("wezterm")
-                || n.contains("alacritty")
-                || n.contains("kitty")
-                || n.contains("hyper")
-                || n.contains("warp")
-        });
-    let has_accessibility_text = ctx.placeholder_text.is_none()
-        && !app_prefers_ocr
-        && tree_snapshot
-            .map(|s| !s.text_content.is_empty())
-            .unwrap_or(false);
-
-    // Check if accessibility text is "thin" — the tree returned SOME text
-    // (toolbar, sidebar, browser chrome) but likely missed the main content.
-    // This happens with canvas-rendered apps (Google Docs, Figma, etc.)
-    // where the document body is invisible to the accessibility tree.
-    let a11y_is_thin = has_accessibility_text
-        && tree_snapshot
-            .map(|s| a11y_content_is_thin(s, ctx.window_name, ctx.browser_url, ctx.app_name))
-            .unwrap_or(false);
+    let TextSourcePlan {
+        app_prefers_ocr,
+        has_accessibility_text,
+        a11y_is_thin,
+    } = text_source_plan(
+        ctx.placeholder_text.is_some(),
+        tree_snapshot,
+        ctx.app_name,
+        ctx.window_name,
+        ctx.browser_url,
+    );
 
     // Run OCR when: no a11y text, app prefers OCR, OR a11y text is thin (hybrid)
+    let mut ocr_duration = None;
     let (ocr_text, ocr_text_json) = if ctx.placeholder_text.is_some() {
         (String::new(), "[]".to_string())
     } else if !has_accessibility_text || a11y_is_thin {
-        // Windows native OCR is async, so call it directly (not inside spawn_blocking)
-        #[cfg(target_os = "windows")]
-        let raw = {
-            match screenpipe_screen::perform_ocr_windows(&ctx.image, &ctx.languages).await {
-                Ok((text, json, _confidence)) => (text, json),
-                Err(e) => {
-                    warn!("windows OCR failed: {}", e);
-                    (String::new(), "[]".to_string())
+        let raw = match &ctx.precomputed_ocr {
+            // The caller already recognised this exact image in memory.
+            Some((text, json)) => (text.clone(), json.clone()),
+            None => {
+                let ocr_started = Instant::now();
+                let result = run_ocr(&ctx.image, &ctx.languages).await;
+                ocr_duration = Some(ocr_started.elapsed());
+                match result {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        #[cfg(target_os = "windows")]
+                        warn!("windows OCR failed: {}", e);
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = e;
+                        (String::new(), "[]".to_string())
+                    }
                 }
             }
-        };
-        // Apple and Tesseract OCR are sync, use spawn_blocking with semaphore
-        // to limit concurrent OCR and avoid CPU spikes on multi-monitor setups.
-        #[cfg(not(target_os = "windows"))]
-        let raw = {
-            let _permit = ocr_semaphore().acquire().await.unwrap();
-            let image_for_ocr = ctx.image.clone();
-            let languages = ctx.languages.clone();
-            tokio::task::spawn_blocking(move || {
-                #[cfg(target_os = "macos")]
-                {
-                    let (text, json, _confidence) =
-                        screenpipe_screen::perform_ocr_apple(&image_for_ocr, &languages);
-                    (text, json)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (text, json, _confidence) =
-                        screenpipe_screen::perform_ocr_tesseract(&image_for_ocr, languages);
-                    (text, json)
-                }
-            })
-            .await
-            .unwrap_or_else(|_| (String::new(), "[]".to_string()))
         };
 
         // Strip editor gutter noise (see strip_gutter_noise doc). Applied to
@@ -411,6 +518,7 @@ pub async fn paired_capture(
         window_name: sanitized_window_name,
         browser_url: sanitized_browser_url,
         content_hash,
+        ocr_duration,
     })
 }
 
@@ -776,15 +884,139 @@ mod tests {
             screenshot_disabled: false,
             placeholder_text: None,
             capture_privacy: None,
+            precomputed_ocr: None,
         };
 
         let result = paired_capture(&ctx, None).await.unwrap();
 
         assert!(result.frame_id > 0);
         assert!(result.snapshot_path.ends_with(".jpg"));
+        // OCR ran here (on a blocking thread on Windows) and was timed.
+        assert!(result.ocr_duration.is_some());
         assert_eq!(result.capture_trigger, "click");
         assert!(result.accessibility_text.is_none());
         assert!(result.text_source.is_none());
+    }
+
+    fn rich_tree_snapshot(verified: bool) -> TreeSnapshot {
+        #[cfg(not(target_os = "windows"))]
+        let _ = verified;
+        let text = "ordinary document body text ".repeat(10);
+        TreeSnapshot {
+            #[cfg(target_os = "windows")]
+            windows_capture_verification: verified.then_some(
+                screenpipe_a11y::tree::WindowsCaptureVerification {
+                    privacy: screenpipe_a11y::tree::WindowsPrivacyVerification::Verified,
+                    text: screenpipe_a11y::tree::WindowsTextAcquisition::Complete,
+                },
+            ),
+            app_name: "Editor".to_string(),
+            window_name: "Notes".to_string(),
+            text_content: text.clone(),
+            nodes: vec![AccessibilityTreeNode {
+                role: "AXStaticText".to_string(),
+                text,
+                ..Default::default()
+            }],
+            browser_url: None,
+            document_path: None,
+            timestamp: Utc::now(),
+            node_count: 1,
+            walk_duration: std::time::Duration::from_millis(1),
+            content_hash: 7,
+            simhash: 8,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+        }
+    }
+
+    #[test]
+    fn paired_capture_runs_ocr_matches_text_source_selection() {
+        assert!(paired_capture_runs_ocr(None, Some("Editor"), None, None));
+        let rich = rich_tree_snapshot(true);
+        assert!(!paired_capture_runs_ocr(
+            Some(&rich),
+            Some("Editor"),
+            Some("Notes"),
+            None
+        ));
+        // Terminals and canvas/meeting apps still need OCR.
+        assert!(paired_capture_runs_ocr(
+            Some(&rich),
+            Some("WezTerm"),
+            Some("Notes"),
+            None
+        ));
+        assert!(paired_capture_runs_ocr(
+            Some(&rich),
+            Some("Editor"),
+            Some("Figma design"),
+            None
+        ));
+        // An unverified Windows tree is never used as text, so OCR runs.
+        #[cfg(target_os = "windows")]
+        assert!(paired_capture_runs_ocr(
+            Some(&rich_tree_snapshot(false)),
+            Some("Editor"),
+            Some("Notes"),
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn precomputed_ocr_is_reused_only_where_ocr_would_run() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let precomputed = Some((
+            "precomputed screening text".to_string(),
+            r#"[{"text":"precomputed"}]"#.to_string(),
+        ));
+        let ctx = |app_name: &'static str| CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some(app_name),
+            window_name: Some("Notes"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "click",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            placeholder_text: None,
+            capture_privacy: None,
+            precomputed_ocr: precomputed.clone(),
+        };
+
+        // No accessibility text: the screening OCR becomes the stored OCR text.
+        let result = paired_capture(&ctx("Editor"), None).await.unwrap();
+        assert_eq!(result.text_source.as_deref(), Some("ocr"));
+        assert_eq!(
+            result.accessibility_text.as_deref(),
+            Some("precomputed screening text")
+        );
+        assert!(result.snapshot_path.ends_with(".jpg"));
+        // Reused OCR is not timed again: the caller records its own run.
+        assert_eq!(result.ocr_duration, None);
+
+        // Sufficient accessibility text: storage is unchanged and OCR is not stored.
+        let rich = rich_tree_snapshot(true);
+        let result = paired_capture(&ctx("Editor"), Some(&rich)).await.unwrap();
+        assert_eq!(result.text_source.as_deref(), Some("accessibility"));
+        assert_eq!(result.ocr_duration, None);
+        assert_eq!(
+            db.get_frame_ocr_text_json(result.frame_id).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -822,6 +1054,7 @@ mod tests {
             screenshot_disabled: false,
             placeholder_text: Some("CAPTURE REDACTED"),
             capture_privacy: Some(&privacy_json),
+            precomputed_ocr: None,
         };
         let snap = TreeSnapshot {
             #[cfg(target_os = "windows")]
@@ -901,6 +1134,7 @@ mod tests {
             screenshot_disabled: false,
             placeholder_text: None,
             capture_privacy: None,
+            precomputed_ocr: None,
         };
 
         let snap = TreeSnapshot {
@@ -973,6 +1207,7 @@ mod tests {
             screenshot_disabled: true,
             placeholder_text: None,
             capture_privacy: None,
+            precomputed_ocr: None,
         };
 
         let snap = TreeSnapshot {
@@ -1087,6 +1322,7 @@ mod tests {
             screenshot_disabled: false,
             placeholder_text: None,
             capture_privacy: None,
+            precomputed_ocr: None,
         };
 
         // Empty accessibility text should be treated as no text

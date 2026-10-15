@@ -7,6 +7,7 @@ default-members = [
     "crates/screenpipe-apple-intelligence",
     "crates/screenpipe-audio",
     "crates/screenpipe-capture",
+    "crates/screenpipe-capture-policy",
     "crates/screenpipe-config",
     "crates/screenpipe-connect",
     "crates/screenpipe-core",

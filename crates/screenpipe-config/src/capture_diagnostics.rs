@@ -142,6 +142,16 @@ pub enum CaptureReason {
     MonitorUnverified,
     PermissionNeeded,
     PermissionLost,
+    /// In-memory content screening matched a fixed rule; the frame was withheld.
+    ContentScreeningBlocked,
+    /// Required in-memory content screening could not complete; the frame was withheld.
+    ContentScreeningUnavailable,
+    /// UIA privacy evidence was unavailable for a window configured to fail
+    /// open; the frame is admitted only after in-memory content screening.
+    AccessibilityFailOpenScreened,
+    /// In-memory content screening found only redactable secrets; they were
+    /// blacked out / replaced in memory before the frame was written.
+    ContentScreeningRedacted,
 }
 impl CaptureReason {
     pub fn code(self) -> &'static str {
@@ -220,6 +230,10 @@ impl CaptureReason {
             Self::MonitorUnverified => "capture_monitor_unverified",
             Self::PermissionNeeded => "capture_permission_required",
             Self::PermissionLost => "capture_permission_lost",
+            Self::ContentScreeningBlocked => "capture_content_screening_blocked",
+            Self::ContentScreeningUnavailable => "capture_content_screening_unavailable",
+            Self::AccessibilityFailOpenScreened => "capture_accessibility_fail_open_screened",
+            Self::ContentScreeningRedacted => "capture_content_screening_redacted",
         }
     }
 }
@@ -375,6 +389,30 @@ impl CaptureDiagnostic {
             .contains(&CaptureReason::AccessibilityProcessingContinues)
         {
             message.push_str(" Screenshot storage and OCR proceed despite accessibility retrieval failure; applicable privacy checks passed independently.");
+        } else if self
+            .reasons
+            .contains(&CaptureReason::AccessibilityFailOpenScreened)
+        {
+            message.push_str(" Accessibility privacy checks are unresolved for a window configured to fail open; frames are stored only after in-memory content screening passes.");
+        }
+        if self
+            .reasons
+            .contains(&CaptureReason::ContentScreeningUnavailable)
+        {
+            message.push_str(" Content screening could not complete, so the frame was withheld.");
+        } else if self
+            .reasons
+            .contains(&CaptureReason::ContentScreeningBlocked)
+        {
+            message
+                .push_str(" Content screening matched a blocking rule, so the frame was withheld.");
+        } else if self
+            .reasons
+            .contains(&CaptureReason::ContentScreeningRedacted)
+        {
+            message.push_str(
+                " Content screening found secrets that were redacted in memory before the frame was saved.",
+            );
         }
         if !self.rules.is_empty() {
             // Exact rule indices already live in diagnostic.rules. Group the
@@ -898,6 +936,49 @@ mod tests {
         assert_eq!(json["rules"].as_array().unwrap().len(), 23);
         assert_eq!(json["rules"][21]["index"], 21);
         assert_eq!(json["rules"][22]["kind"], "drm_url");
+    }
+
+    #[test]
+    fn content_screening_reasons_use_fixed_codes_and_messages() {
+        for (reason, serialized, label, suffix) in [
+            (
+                CaptureReason::ContentScreeningBlocked,
+                "content_screening_blocked",
+                "content screening blocked",
+                "matched a blocking rule",
+            ),
+            (
+                CaptureReason::ContentScreeningUnavailable,
+                "content_screening_unavailable",
+                "content screening unavailable",
+                "could not complete",
+            ),
+            (
+                CaptureReason::AccessibilityFailOpenScreened,
+                "accessibility_fail_open_screened",
+                "accessibility fail open screened",
+                "configured to fail open",
+            ),
+            (
+                CaptureReason::ContentScreeningRedacted,
+                "content_screening_redacted",
+                "content screening redacted",
+                "redacted in memory before the frame was saved",
+            ),
+        ] {
+            assert_eq!(reason.code(), format!("capture_{serialized}"));
+            let mut event = fixture(CaptureChannel::Screen, 100);
+            event.condition = CaptureCondition::Redacted;
+            event.reasons = vec![reason];
+            assert!(event.is_safe());
+            let message = event.message();
+            assert!(message.contains(label), "{message}");
+            assert!(message.contains(suffix), "{message}");
+            let json = serde_json::to_value(&event).unwrap();
+            assert_eq!(json["reasons"][0], serialized);
+            let restored: CaptureDiagnostic = serde_json::from_value(json).unwrap();
+            assert_eq!(restored.reasons, [reason]);
+        }
     }
 
     fn simulated_event(

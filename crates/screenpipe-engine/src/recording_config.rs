@@ -78,6 +78,14 @@ pub struct RecordingConfig {
     pub ignore_incognito_windows: bool,
     /// Pause all screen capture when a DRM streaming app (Netflix, etc.) is focused.
     pub pause_on_drm_content: bool,
+    /// Screen every frame's OCR/accessibility text in memory before persistence.
+    /// See `RecordingSettings.content_screening_enabled`.
+    pub content_screening_enabled: bool,
+    /// Extra case-insensitive keywords that block a frame during screening.
+    pub content_screening_keywords: Vec<String>,
+    /// Window patterns whose UIA evidence-acquisition failures may fail open,
+    /// only while content screening is enabled and the frame passes it.
+    pub uia_fail_open_windows: Vec<String>,
     /// Skip persisting clipboard rows/content in the UI recorder. Clipboard
     /// operations can still wake event-driven capture when clipboard-triggered
     /// capture is enabled.
@@ -242,6 +250,9 @@ impl RecordingConfig {
             ignored_urls: settings.ignored_urls.clone(),
             ignore_incognito_windows: settings.ignore_incognito_windows,
             pause_on_drm_content: settings.pause_on_drm_content,
+            content_screening_enabled: settings.content_screening_enabled,
+            content_screening_keywords: settings.content_screening_keywords.clone(),
+            uia_fail_open_windows: settings.uia_fail_open_windows.clone(),
             disable_clipboard_capture: settings.disable_clipboard_capture,
             disable_keyboard_capture: settings.disable_keyboard_capture,
             disable_pointer_capture: settings.disable_pointer_capture,
@@ -388,6 +399,9 @@ impl RecordingConfig {
             use_all_monitors: self.use_all_monitors,
             ignore_incognito_windows: self.ignore_incognito_windows,
             pause_on_drm_content: self.pause_on_drm_content,
+            content_screening_enabled: self.content_screening_enabled,
+            content_screening_keywords: self.content_screening_keywords.clone(),
+            uia_fail_open_windows: self.uia_fail_open_windows.clone(),
             languages: self.languages.clone(),
             video_quality: self.video_quality.clone(),
             idle_capture_interval_ms: self.idle_capture_interval_ms,
@@ -575,6 +589,38 @@ mod tests {
         assert_eq!(vision.min_capture_interval_ms, Some(120));
         assert_eq!(vision.capture_on_keystroke, Some(true));
         assert_eq!(vision.capture_on_clipboard, Some(true));
+    }
+
+    #[test]
+    fn content_screening_settings_flow_to_vision_manager_config() {
+        let defaults = build(&screenpipe_config::RecordingSettings::default());
+        assert!(defaults.content_screening_enabled);
+        assert!(defaults.content_screening_keywords.is_empty());
+        assert!(defaults.uia_fail_open_windows.is_empty());
+
+        let settings = screenpipe_config::RecordingSettings {
+            content_screening_enabled: false,
+            content_screening_keywords: vec!["synthetic keyword".to_string()],
+            uia_fail_open_windows: vec!["synthetic.exe::".to_string()],
+            ..Default::default()
+        };
+        let config = build(&settings);
+        assert!(!config.content_screening_enabled);
+        assert_eq!(
+            config.content_screening_keywords,
+            settings.content_screening_keywords
+        );
+        assert_eq!(config.uia_fail_open_windows, settings.uia_fail_open_windows);
+        let vision = config.to_vision_manager_config(
+            "capture-output".to_string(),
+            std::sync::Arc::new(PipelineMetrics::new()),
+        );
+        assert!(!vision.content_screening_enabled);
+        assert_eq!(
+            vision.content_screening_keywords,
+            settings.content_screening_keywords
+        );
+        assert_eq!(vision.uia_fail_open_windows, settings.uia_fail_open_windows);
     }
 
     fn langs(items: &[&str]) -> Vec<String> {

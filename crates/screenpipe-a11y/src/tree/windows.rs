@@ -41,7 +41,8 @@ fn is_extension_url(value: &str) -> bool {
 
 use anyhow::Result;
 use chrono::Utc;
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::password_managers;
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -175,22 +176,31 @@ fn identity_is_current(
         && crate::platform::windows::get_effective_app_name(hwnd, fresh_pid) == app_name
 }
 
-/// Excluded apps — password managers and security tools (matches macOS list).
-const EXCLUDED_APPS: &[&str] = &[
-    "1password",
-    "bitwarden",
-    "lastpass",
-    "dashlane",
-    "keepassxc",
-    "credential manager",
+/// Windows system-UI processes that produce noise (logon/lock screen, search,
+/// notifications, pickers, snipping). Not password managers; excluded from
+/// capture by app name together with [`excluded_apps`]' credential tools.
+const SYSTEM_UI_APPS: &[&str] = &[
     "logonui",
-    // System UI processes that produce noise (lock screen, search, notifications, etc.)
     "lockapp",
     "searchhost",
     "shellexperiencehost",
     "pickerhost",
     "snippingtool",
 ];
+
+/// Lowercased app names excluded outright: the canonical password managers,
+/// the Windows credential viewer, then [`SYSTEM_UI_APPS`].
+fn excluded_apps() -> &'static [String] {
+    static APPS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    APPS.get_or_init(|| {
+        password_managers::desktop_process_names()
+            .iter()
+            .cloned()
+            .chain([password_managers::CREDENTIAL_MANAGER.to_lowercase()])
+            .chain(SYSTEM_UI_APPS.iter().map(|app| app.to_string()))
+            .collect()
+    })
+}
 
 /// UIA control types that should be skipped (decorative, not text-bearing).
 const SKIP_TYPES: &[&str] = &[
@@ -484,7 +494,10 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
 
             // Skip excluded apps
             let app_lower = app_name.to_lowercase();
-            if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
+            if excluded_apps()
+                .iter()
+                .any(|ex| app_lower.contains(ex.as_str()))
+            {
                 debug!("a11y: hardcoded app exclusion");
                 return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
             }
@@ -729,7 +742,10 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                     if raw_policy.ignored_url
                         || policy_url.as_deref().is_some_and(|url| {
                             timed_ignored_url_check(|| {
-                                crate::url_filter::is_url_blocked(url, &self.config.ignored_urls)
+                                screenpipe_capture_policy::url_filter::is_url_blocked(
+                                    url,
+                                    &self.config.ignored_urls,
+                                )
                             })
                         })
                     {
@@ -793,7 +809,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                                 let url_blocked = raw_policy.ignored_url
                                     || recording_url.as_deref().is_some_and(|url| {
                                         timed_ignored_url_check(|| {
-                                            crate::url_filter::is_url_blocked(
+                                            screenpipe_capture_policy::url_filter::is_url_blocked(
                                                 url,
                                                 &self.config.ignored_urls,
                                             )
@@ -1707,8 +1723,9 @@ fn evaluate_raw_policy_evidence(
             }
         };
         if let Some(url) = available_url {
-            result.ignored_url |=
-                timed_ignored_url_check(|| crate::url_filter::is_url_blocked(url, ignored_urls));
+            result.ignored_url |= timed_ignored_url_check(|| {
+                screenpipe_capture_policy::url_filter::is_url_blocked(url, ignored_urls)
+            });
             // The downstream DRM gate accepts one URL. Unknown Values do
             // not erase a known URL, and differing known candidates cannot
             // conceal a protected URL behind the selected snapshot URL.
@@ -3109,8 +3126,33 @@ mod tests {
 
     #[test]
     fn test_excluded_apps() {
-        assert!(EXCLUDED_APPS.iter().any(|ex| "1password".contains(ex)));
-        assert!(!EXCLUDED_APPS.iter().any(|ex| "notepad".contains(ex)));
+        assert!(excluded_apps()
+            .iter()
+            .any(|ex| "1password".contains(ex.as_str())));
+        assert!(!excluded_apps()
+            .iter()
+            .any(|ex| "notepad".contains(ex.as_str())));
+    }
+
+    #[test]
+    fn excluded_apps_are_unchanged() {
+        assert_eq!(
+            excluded_apps(),
+            [
+                "1password",
+                "bitwarden",
+                "lastpass",
+                "dashlane",
+                "keepassxc",
+                "credential manager",
+                "logonui",
+                "lockapp",
+                "searchhost",
+                "shellexperiencehost",
+                "pickerhost",
+                "snippingtool",
+            ]
+        );
     }
 
     #[test]

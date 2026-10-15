@@ -18,5 +18,6 @@
 pub mod paired_capture;
 
 pub use paired_capture::{
-    paired_capture, walk_accessibility_tree, CaptureContext, PairedCaptureResult,
+    paired_capture, paired_capture_runs_ocr, run_ocr, walk_accessibility_tree, CaptureContext,
+    PairedCaptureResult,
 };

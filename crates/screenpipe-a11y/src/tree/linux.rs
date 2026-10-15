@@ -22,7 +22,8 @@ use super::{
 use crate::tree::linux_lines::{self, AtspiRef, NormalizeRefs};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::password_managers;
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
 use std::time::Instant;
 use tracing::{debug, warn};
@@ -146,19 +147,13 @@ fn has_state(state_set: &[u32], bit: u32) -> bool {
 // Excluded apps and sensitive titles (matches macOS/Windows lists)
 // ---------------------------------------------------------------------------
 
-const EXCLUDED_APPS: &[&str] = &[
-    "1password",
-    "bitwarden",
-    "lastpass",
-    "dashlane",
-    "keepassxc",
-    "gnome-keyring",
-    "seahorse",
-    "kwalletmanager",
+/// Linux-specific exclusions that follow the canonical password managers and
+/// keyring front-ends: screenpipe itself, network/auth helpers and window
+/// managers / desktop shells (no user content).
+const OTHER_EXCLUDED_APPS: &[&str] = &[
     "screenpipe",
     "nm-connection-editor",
     "polkit",
-    // Window managers / desktop shells — no user content
     "xfwm4",
     "mutter",
     "muffin",
@@ -170,6 +165,24 @@ const EXCLUDED_APPS: &[&str] = &[
     "budgie-panel",
     "budgie-wm",
 ];
+
+/// Lowercased app names excluded outright: the canonical password managers,
+/// the keyring front-ends, then [`OTHER_EXCLUDED_APPS`].
+fn excluded_apps() -> &'static [String] {
+    static APPS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    APPS.get_or_init(|| {
+        password_managers::desktop_process_names()
+            .iter()
+            .cloned()
+            .chain(
+                password_managers::LINUX_KEYRING_APPS
+                    .iter()
+                    .map(|app| app.to_string()),
+            )
+            .chain(OTHER_EXCLUDED_APPS.iter().map(|app| app.to_string()))
+            .collect()
+    })
+}
 
 /// Known browser process names for URL extraction.
 const BROWSER_NAMES: &[&str] = &[
@@ -952,7 +965,10 @@ fn find_focused_window(conn: &Connection) -> Option<(String, String, AccessibleR
         let app_lower = app_name.to_lowercase();
 
         // Skip excluded apps
-        if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
+        if excluded_apps()
+            .iter()
+            .any(|ex| app_lower.contains(ex.as_str()))
+        {
             continue;
         }
 
@@ -1204,9 +1220,45 @@ mod tests {
 
     #[test]
     fn test_excluded_apps() {
-        assert!(EXCLUDED_APPS.iter().any(|ex| "1password".contains(ex)));
-        assert!(EXCLUDED_APPS.iter().any(|ex| "keepassxc".contains(ex)));
-        assert!(!EXCLUDED_APPS.iter().any(|ex| "firefox".contains(ex)));
+        assert!(excluded_apps()
+            .iter()
+            .any(|ex| "1password".contains(ex.as_str())));
+        assert!(excluded_apps()
+            .iter()
+            .any(|ex| "keepassxc".contains(ex.as_str())));
+        assert!(!excluded_apps()
+            .iter()
+            .any(|ex| "firefox".contains(ex.as_str())));
+    }
+
+    #[test]
+    fn excluded_apps_are_unchanged() {
+        assert_eq!(
+            excluded_apps(),
+            [
+                "1password",
+                "bitwarden",
+                "lastpass",
+                "dashlane",
+                "keepassxc",
+                "gnome-keyring",
+                "seahorse",
+                "kwalletmanager",
+                "screenpipe",
+                "nm-connection-editor",
+                "polkit",
+                "xfwm4",
+                "mutter",
+                "muffin",
+                "kwin",
+                "marco",
+                "openbox",
+                "compiz",
+                "cinnamon",
+                "budgie-panel",
+                "budgie-wm",
+            ]
+        );
     }
 
     #[test]

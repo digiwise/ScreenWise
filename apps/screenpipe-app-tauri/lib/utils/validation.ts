@@ -6,7 +6,10 @@ import { z } from "zod";
 import { SettingsStore, AIPreset, EmbeddedLLM } from "./tauri";
 
 // Extended settings type that includes fields not yet in generated SettingsStore
-type ExtendedSettingsKeys = keyof SettingsStore | "ignoredUrls" | "deviceId";
+type ExtendedSettingsKeys =
+  | keyof SettingsStore
+  | "ignoredUrls"
+  | "deviceId";
 
 // Zod schemas for validation
 export const embeddedLLMSchema = z.object({
@@ -52,6 +55,9 @@ export const settingsStoreSchema = z.object({
   ignoredWindows: z.array(z.string()),
   includedWindows: z.array(z.string()),
   ignoredUrls: z.array(z.string()),
+  contentScreeningEnabled: z.boolean().optional(),
+  contentScreeningKeywords: z.array(z.string()).optional(),
+  uiaFailOpenWindows: z.array(z.string()).optional(),
   disableVision: z.boolean(),
   useAllMonitors: z.boolean(),
   fps: z.number().min(0.1, "FPS must be at least 0.1").max(60, "FPS cannot exceed 60"),
@@ -156,6 +162,8 @@ export const sanitizeValue = (field: ExtendedSettingsKeys, value: any): any => {
     case "audioDevices":
     case "monitorIds":
     case "languages":
+    case "contentScreeningKeywords":
+    case "uiaFailOpenWindows":
       return Array.isArray(value) ? value.filter(Boolean) : [];
       
     default:

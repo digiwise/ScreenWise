@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use screenpipe_a11y::{ExtractionThreadPriority, UiCaptureConfig, UiRecorder};
-use screenpipe_core::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use screenpipe_db::{DatabaseManager, InsertUiEvent};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -632,7 +632,7 @@ pub async fn start_ui_recording(
     // Parse user-configured ignore patterns once — the spawned task fires on
     // every UI event, so re-parsing per-event would burn CPU in keystroke
     // storms. Supports both legacy unscoped strings and `App::Title` scoped
-    // patterns (see `screenpipe-core::window_pattern`).
+    // patterns (see `screenpipe-capture-policy::window_pattern`).
     let ignored_patterns = WindowPattern::parse_list(&ignored_windows);
     let diagnostic_rules = ignored_windows
         .iter()
