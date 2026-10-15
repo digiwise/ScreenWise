@@ -390,6 +390,31 @@ alter unrelated rules/services/profiles, or weaken authentication. Rule creation
 and restoration require the agreed owner-run elevated blocks and confirmation;
 do not silently remove rules after a test. Preserve loopback and verify OS state.
 
+## Agent working practices
+
+- Bulk mechanical edits: exclude applied SQL migrations and generated outputs,
+  expect variants of the pattern, and confirm the diff only does what was meant
+  (e.g. only removes lines).
+- Subagent briefs state the privacy rules and the wanted outcome, not
+  implementation shortcuts (a brief's shortcut once weakened a privacy check;
+  only review caught it). Give each subagent a checkpoint file so a usage limit
+  cannot lose its work. Let one agent edit a crate at a time and keep
+  compile-heavy builds in the main session. A focused high-effort review is
+  worth its cost for privacy-relevant changes.
+- Do not edit compiled sources while a build or test run of them is in progress.
+- The standing metrics permission above is the owner's consent, not a tool
+  permission: an agent harness may still refuse or prompt. Do not work around a
+  refusal; ask the owner to approve the command or add a narrow allow rule, and
+  never write a permission rule for yourself.
+- Windows code on shared (e.g. Tokio blocking-pool) threads must balance any COM
+  initialization on every exit path (RAII guard declared before COM objects) and
+  must not assume the thread's apartment; see `crates/screenpipe-a11y/src/tree/windows.rs`.
+- PowerShell: from pwsh, start Windows PowerShell by invoking `powershell.exe`
+  directly (pwsh then drops its own module paths); `Start-Process powershell.exe`
+  inherits them and 5.1 can lose cmdlets such as `Get-FileHash`. After
+  `Start-Process -PassThru` without `-Wait`, read `$process.Handle` at once or
+  5.1 reports a null `ExitCode`.
+
 ## Before committing or publishing
 
 1. Run the canonical launcher's `-Task RootFmt` for Rust changes and
@@ -406,6 +431,10 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
 4. Update concise setup/validation documentation, including failures and limits.
 5. Inspect the exact staged paths; never include private notes, captures, logs,
    databases, recordings, models, generated archives or caches accidentally.
+   Match private folders as path components (`^\.local/`, `^smoke[^/]*/`,
+   `(^|/)target/`), not substrings (`pi_rpc_smoke.py` is source). The inherited
+   `.gitignore` ignores `*.py`: add new ScreenWise Python sources with
+   `git add -f` and confirm they appear in the staged list.
 6. Keep commits reviewable, with explicit provenance and no invented test claims.
 
 Publication preparation is not validation completion. The current firewall/privacy

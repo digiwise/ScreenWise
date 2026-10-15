@@ -272,6 +272,9 @@ $env:SCREENWISE_BUILD_STUB_RELEASE = $Release
     $childArgs = @('-NoProfile', '-File', $childScript, '-Launcher', $launcher, '-Config', $fixtureConfig, '-Evidence', $childEvidence,
         '-WaitScript', $waitScript, '-Shell', $shellPath, '-Ready', $readyFile, '-Release', $releaseFile) | ForEach-Object { '"' + $_ + '"' }
     $child = Start-Process $shellPath -ArgumentList $childArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $fixtureRoot 'child.out') -RedirectStandardError (Join-Path $fixtureRoot 'child.err')
+    # .NET Framework (Windows PowerShell 5.1) reports ExitCode as null for a
+    # Start-Process child unless its handle was opened before it exited.
+    $null = $child.Handle
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         while (-not [IO.File]::Exists($readyFile)) {

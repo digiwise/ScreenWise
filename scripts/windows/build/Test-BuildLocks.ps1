@@ -42,6 +42,8 @@ $shell = (Get-Process -Id $PID).Path
 $arguments = @('-NoProfile', '-File', $holderScript, '-Module', $modulePath, '-Repository', $fixture, '-Cache', $rootCache, '-Ready', $ready, '-Release', $release)
 $quoted = $arguments | ForEach-Object { '"' + $_ + '"' }
 $holder = Start-Process -FilePath $shell -ArgumentList $quoted -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $fixture 'holder.out') -RedirectStandardError (Join-Path $fixture 'holder.err')
+# Windows PowerShell 5.1 reports ExitCode as null unless the handle is opened first.
+$null = $holder.Handle
 $streams = @()
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)

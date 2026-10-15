@@ -170,7 +170,10 @@ and native sidecars in the matching profile directory for deployment packaging;
 the script does not silently replace or compile a missing one. Normal output shows
 deployment milestones; `-Verbose` shows full build output and path details. A
 failed build in normal mode prints the last 80 lines and path of its private
-`.local/deployment/build-*.log`. Full release builds are reserved for explicit
+`.local/deployment/build-*.log`. The started GUI inherits the deploying shell's
+console handles, so a caller that pipes the script's output (e.g. an agent's
+background task) does not see it finish; run it as a separate process with output
+redirected to files and wait for that process only. Full release builds are reserved for explicit
 owner requests or inadequate local-profile performance;
 ordinary deployment does not require them. Dependency provisioning is
 separate. Normal updates request shutdown through the installed app's existing

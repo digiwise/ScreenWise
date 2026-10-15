@@ -29,6 +29,7 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('screenwise-gui-process-monito
 try {
     $quotedTestRoot = '"{0}"' -f $testRoot
     $monitor = Start-Process -FilePath $output -ArgumentList @('--root-pid', "$PID", '--out-dir', $quotedTestRoot, '--duration-ms', '1800') -WindowStyle Hidden -PassThru
+    $null = $monitor.Handle # Windows PowerShell 5.1 otherwise reports a null ExitCode.
     Start-Sleep -Milliseconds 250
     $child = Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', 'ping -n 2 127.0.0.1 >nul') -WindowStyle Hidden -Wait -PassThru
     if (-not $monitor.WaitForExit(5000)) { try { $monitor.Kill() } catch {}; throw 'GUI process monitor integration self-test timed out' }

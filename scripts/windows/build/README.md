@@ -108,6 +108,19 @@ Practical notes (2026-10-15):
   compiling run of each touched variant needs `-AllowColdCache`. A dedicated
   offline lock-refresh preset that verifies the diff is a candidate launcher
   improvement.
+- Memory: with the default `-Jobs 4` and about 6.5 GB free RAM, a cold desktop
+  build was killed for low memory; `-Jobs 2` completed (about 14 min each for the
+  bindings test and the `release-local` build). Use `-Jobs 2` when free RAM is
+  under about 8 GB or other heavy work runs. Agent harnesses may also stop idle
+  background builds under memory pressure; check free RAM before long runs.
+- Cache baselines are per task/selection signature. A focused `RootTest` with
+  `-Package` does not warm a full `RootTest`, and a change to how signatures are
+  computed (e.g. the 2026-10-15 ordinal path ordering, which made Windows
+  PowerShell 5.1 and PowerShell 7 agree) needs one `-AllowColdCache` run per
+  preset afterwards.
+- An unfiltered `-Task RootTest` cannot run offline on Windows: it needs
+  uncached non-Windows packages (`atspi`) and Cargo exits 101. Test the root
+  workspace per package (`-Package <crate>`, optionally `-Lib`/`-TestFilter`).
 
 The explicit `SCREENWISE_DESKTOP_CARGO_TARGET_DIR` override remains supported for
 desktop checks/Clippy/tests. Choose it before warming the cache; do not change it between

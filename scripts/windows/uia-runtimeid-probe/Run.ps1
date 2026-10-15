@@ -19,6 +19,7 @@ for ($pass = 1; $pass -le $Passes; $pass++) {
     $probeArgs = @([string]$hwnd)
     if ($Compare) { $probeArgs += @('--compare', [string]$pass) }
     $child = Start-Process -FilePath $exe -ArgumentList $probeArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+    $null = $child.Handle # Windows PowerShell 5.1 otherwise reports a null ExitCode.
     $watchdogMs = if ($Compare) { 30000 } else { 15000 }
     if (-not $child.WaitForExit($watchdogMs)) {
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
