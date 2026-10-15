@@ -1,5 +1,3 @@
-# screenpipe — AI that knows everything you've seen, said, or heard
-# https://screenpi.pe
 # Owner-run rollback. No acquisition, firewall change, data migration, or forced kill.
 [CmdletBinding()]
 param(

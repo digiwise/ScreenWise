@@ -1,5 +1,3 @@
-# screenpipe — AI that knows everything you've seen, said, or heard
-# https://screenpi.pe
 # Synthetic filesystem/PlanOnly checks; never touches the real installation.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))

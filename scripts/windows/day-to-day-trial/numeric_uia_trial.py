@@ -1,5 +1,3 @@
-# screenpipe — AI that knows everything you've seen, said, or heard
-# https://screenpi.pe
 """Read-only numeric deployment baseline/comparison; never selects capture text.
 
 Uses authenticated loopback health/vision metrics and aggregate SQL expressions

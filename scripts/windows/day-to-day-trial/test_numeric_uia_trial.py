@@ -1,5 +1,3 @@
-# screenpipe — AI that knows everything you've seen, said, or heard
-# https://screenpi.pe
 import json
 import sqlite3
 import unittest

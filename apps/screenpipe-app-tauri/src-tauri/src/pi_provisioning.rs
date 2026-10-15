@@ -1,5 +1,3 @@
-// Screenpipe — AI that knows everything you've seen, said, or heard.
-// https://screenpi.pe
 // Safe promotion and instructions for the explicit Windows Pi provisioner.
 
 use std::fs::{self, OpenOptions};
