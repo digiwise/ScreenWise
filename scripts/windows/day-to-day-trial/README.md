@@ -342,6 +342,20 @@ its receipt or delete its data to turn it into a pass. Prepare a new attempt.
 Firewall restoration remains a separate owner-run operation; this controller
 does not create or remove rules. No readiness timeout starts the GUI automatically.
 
+## Screening and UIA failure metrics
+
+`screening_metrics.py` prints read-only aggregates over exactly the fields of
+the standing metrics permission in AGENTS.md: screening outcomes and costs,
+capture reasons, and UIA processing/cause/phase by sampled app. It groups and
+counts only, and prints any value that is not a fixed code or app basename as
+`other`. Output contains local app names; keep it out of public documents.
+
+```powershell
+python -I .\scripts\windows\day-to-day-trial\screening_metrics.py <db.sqlite> `
+  --since 2026-10-15T07:00:00Z [--until <UTC>] [--section screening|uia]
+python -I -m unittest discover -s .\scripts\windows\day-to-day-trial -p test_screening_metrics.py
+```
+
 ## Synthetic Pi RPC check
 
 Provision Pi explicitly with `Provision-ScreenWisePi.ps1` and provision the default
