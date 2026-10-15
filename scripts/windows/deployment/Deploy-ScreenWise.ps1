@@ -128,12 +128,22 @@ if ($Build) {
         Push-Location $frontend
         try {
             # Export with provisioned packages; skip acquisition-capable prebuild hooks.
-            if ($VerbosePreference -eq 'Continue') {
-                & node node_modules/next/dist/bin/next build
-            } else {
-                & node node_modules/next/dist/bin/next build *> $buildLog
-            }
-            if ($LASTEXITCODE -ne 0) { throw "Frontend export failed (exit $LASTEXITCODE)." }
+            # Windows PowerShell turns redirected native stderr (e.g. Next.js
+            # "Compiled with warnings") into terminating errors under 'Stop';
+            # the exit code decides success instead.
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                if ($VerbosePreference -eq 'Continue') {
+                    & node node_modules/next/dist/bin/next build
+                } else {
+                    & node node_modules/next/dist/bin/next build 2>&1 | ForEach-Object {
+                        if ($_ -is [Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+                    } | Set-Content -LiteralPath $buildLog -Encoding UTF8
+                }
+                $frontendExit = $LASTEXITCODE
+            } finally { $ErrorActionPreference = $previousPreference }
+            if ($frontendExit -ne 0) { throw "Frontend export failed (exit $frontendExit)." }
         } finally { Pop-Location }
         foreach ($task in $buildTasks) {
             Write-Host "Building $task ($BuildProfile)..."
@@ -141,7 +151,9 @@ if ($Build) {
             if ($VerbosePreference -eq 'Continue') {
                 & $builder -Task $task -BuildProfile $BuildProfile
             } else {
-                & $builder -Task $task -BuildProfile $BuildProfile *>> $buildLog
+                # The launcher converts Cargo stderr itself and throws on failure.
+                & $builder -Task $task -BuildProfile $BuildProfile *>&1 | ForEach-Object { [string]$_ } |
+                    Add-Content -LiteralPath $buildLog -Encoding UTF8
             }
         }
     } catch {
