@@ -246,6 +246,42 @@ $quitSource = Join-Path $root 'quit-fixture.exe'
 [IO.File]::WriteAllText($quitSource, ('x' * 65525) + 'ScreenWise.GracefulQuit.v1' + ' synthetic never execute')
 Check (Test-DeploymentQuitCapability $quitSource) 'capability marker spanning read boundary detected without execution'
 Check (!(Test-DeploymentQuitCapability $exe)) 'unsupported binary capability rejected without execution'
+# Source freshness uses a synthetic repository; only file times and git metadata are read.
+$sourceRepo = Join-Path $root 'source-state'
+$null = New-Item -ItemType Directory -Path (Join-Path $sourceRepo 'crates\a'), (Join-Path $sourceRepo 'docs') -Force
+function Invoke-FixtureGit {
+    $ErrorActionPreference = 'Continue'
+    $null = & git -C $sourceRepo -c core.autocrlf=false -c user.name=fixture -c user.email=fixture@example.invalid @args 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Fixture git failed: $($args -join ' ')" }
+}
+$sourceInput = Join-Path $sourceRepo 'crates\a\lib.rs'
+$sourceDoc = Join-Path $sourceRepo 'docs\notes.md'
+[IO.File]::WriteAllText($sourceInput, 'fn a() {}')
+[IO.File]::WriteAllText($sourceDoc, 'notes')
+Invoke-FixtureGit init -q
+Invoke-FixtureGit add -A
+Invoke-FixtureGit commit -q -m fixture
+$sourceBuilt = [DateTime]::UtcNow.AddMinutes(-10)
+foreach ($p in @($sourceInput, $sourceDoc)) { (Get-Item -LiteralPath $p).LastWriteTimeUtc = $sourceBuilt.AddMinutes(-5) }
+$state = Get-DeploymentSourceState -Repository $sourceRepo -BuiltUtc $sourceBuilt
+Check ($state.stale -eq $false -and $state.changed_since_build -eq 0 -and $state.uncommitted_inputs -eq 0 -and
+    $state.commit -match '^[0-9a-f]{40}$') 'GUI built after its inputs is current and records the commit'
+Invoke-FixtureGit commit -q --allow-empty -m later
+Check ((Get-DeploymentSourceState -Repository $sourceRepo -BuiltUtc $sourceBuilt).stale -eq $false) 'commit after build alone is not stale'
+(Get-Item -LiteralPath $sourceDoc).LastWriteTimeUtc = $sourceBuilt.AddMinutes(5)
+Check ((Get-DeploymentSourceState -Repository $sourceRepo -BuiltUtc $sourceBuilt).stale -eq $false) 'non-input edit after build ignored'
+(Get-Item -LiteralPath $sourceInput).LastWriteTimeUtc = $sourceBuilt.AddMinutes(5)
+$state = Get-DeploymentSourceState -Repository $sourceRepo -BuiltUtc $sourceBuilt
+Check ($state.stale -and $state.changed_since_build -eq 1 -and $state.examples -contains 'crates/a/lib.rs') 'input edited after build is stale and named'
+(Get-Item -LiteralPath $sourceInput).LastWriteTimeUtc = $sourceBuilt.AddMinutes(-5)
+[IO.File]::WriteAllText((Join-Path $sourceRepo 'crates\a\new.rs'), 'fn b() {}')
+$state = Get-DeploymentSourceState -Repository $sourceRepo -BuiltUtc $sourceBuilt
+Check ($state.stale -and $state.uncommitted_inputs -eq 1) 'untracked input after build is stale and uncommitted'
+Remove-Item -LiteralPath (Join-Path $sourceRepo 'crates\a\new.rs'), $sourceInput
+$state = Get-DeploymentSourceState -Repository $sourceRepo -BuiltUtc $sourceBuilt
+Check ($state.stale -and $state.examples -contains 'crates/a/lib.rs') 'deleted input after build is stale'
+$state = Get-DeploymentSourceState -Repository (Join-Path $root 'no-repo-here') -BuiltUtc $sourceBuilt
+Check ($null -eq $state.stale -and $null -eq $state.commit) 'missing git repository reports unknown state'
 $quitInfo = Get-Item -LiteralPath $quitSource
 $quitManifest = [pscustomobject]@{binary_directory=$root; gui_executable=$quitSource;
     graceful_quit_protocol='ScreenWise.GracefulQuit.v1'; gui_sha256=(Get-FileHash -LiteralPath $quitSource).Hash;

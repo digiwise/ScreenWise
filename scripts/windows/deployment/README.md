@@ -152,6 +152,14 @@ To rebuild and update later:
 & .\scripts\windows\deployment\Deploy-ScreenWise.ps1 -Build -BuildScope DesktopAndCli
 ```
 
+Without `-Build`, the script deploys the existing GUI artifact. It refuses a GUI
+that lacks the graceful-quit marker, and warns (without refusing) when any file
+feeding the GUI (`apps/screenpipe-app-tauri/`, `crates/`, the embedded
+`scripts/windows/deployment/pi/` extension, `Cargo.toml`/`Cargo.lock`) was edited,
+checked out, added or deleted after that artifact was built; rerun with `-Build`
+then. `deployment.json` records `source_commit`, `source_uncommitted_inputs` and
+`source_changed_since_gui_build` (null without git) as provenance.
+
 `-Build` exports the frontend with provisioned Node/packages, skipping acquisition
 prebuild hooks, and invokes the canonical locked/offline desktop build with the
 selected `-BuildProfile` and `-PlanOnly`. `-BuildScope DesktopAndCli` also builds

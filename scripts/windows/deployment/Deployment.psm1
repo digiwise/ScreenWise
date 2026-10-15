@@ -198,6 +198,30 @@ function Test-DeploymentQuitCapability {
     } finally { $stream.Dispose() }
 }
 
+function Get-DeploymentSourceState {
+    param([Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][DateTime]$BuiltUtc)
+    # Compare a prebuilt GUI with the files that feed it (Rust crates, frontend and
+    # the embedded Pi extension). Commits do not touch file times, so only edits,
+    # checkouts and deletions after the build count. Never reads file contents.
+    $ErrorActionPreference = 'Continue'
+    $inputs = @('apps/screenpipe-app-tauri', 'crates', 'scripts/windows/deployment/pi', 'Cargo.toml', 'Cargo.lock')
+    $unknown = [pscustomobject]@{ commit = $null; uncommitted_inputs = $null; changed_since_build = $null;
+        stale = $null; examples = @() }
+    $commit = try { @(& git -C $Repository rev-parse --verify HEAD 2>$null)[0] } catch { $null }
+    if ($LASTEXITCODE -ne 0 -or !$commit) { return $unknown }
+    $files = @(& git -C $Repository -c core.quotePath=false ls-files --cached --others --exclude-standard -- @inputs 2>$null)
+    $deleted = @(& git -C $Repository -c core.quotePath=false ls-files --deleted -- @inputs 2>$null)
+    $dirty = @(& git -C $Repository status --porcelain=v1 --untracked-files=all -- @inputs 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $unknown }
+    $built = $BuiltUtc.ToUniversalTime()
+    $changed = @($deleted) + @($files | Where-Object { $_ -notin $deleted } | Where-Object {
+        $item = Get-Item -LiteralPath (Join-Path $Repository $_) -Force -ErrorAction SilentlyContinue
+        !$item -or $item.LastWriteTimeUtc -gt $built
+    })
+    [pscustomobject]@{ commit = "$commit".Trim(); uncommitted_inputs = $dirty.Count;
+        changed_since_build = $changed.Count; stale = $changed.Count -gt 0; examples = @($changed | Select-Object -First 5) }
+}
+
 function Get-DeploymentProcesses {
     param([Parameter(Mandatory)][string]$BinaryDirectory)
     $all = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop)
@@ -393,4 +417,4 @@ function Invoke-DeploymentStartup {
 Export-ModuleMember -Function Assert-DeploymentPath, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
     Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, Set-DeploymentUiaComparisonMode, New-DeploymentStaging,
-    Test-DeploymentQuitCapability, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration
+    Test-DeploymentQuitCapability, Get-DeploymentSourceState, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration

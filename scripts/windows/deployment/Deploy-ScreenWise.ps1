@@ -153,20 +153,19 @@ if ($Build) {
         throw
     }
 }
-# Refuse a build that predates the explicit shared-runtime/tool implementation.
 $guiFile = Get-Item -LiteralPath (Join-Path $guiBuild 'screenpipe-app.exe')
-foreach ($input in @('apps\screenpipe-app-tauri\src-tauri\src\pi.rs',
-    'apps\screenpipe-app-tauri\src-tauri\src\pi_runtime.rs',
-    'apps\screenpipe-app-tauri\src-tauri\src\external_quit.rs',
-    'apps\screenpipe-app-tauri\src-tauri\src\main.rs',
-    'apps\screenpipe-app-tauri\src-tauri\src\tray.rs',
-    'scripts\windows\deployment\pi\recording-api.ts','scripts\windows\deployment\pi\recording-api-core.mjs')) {
-    if ((Get-Item -LiteralPath (Join-Path $repo $input)).LastWriteTimeUtc -gt $guiFile.LastWriteTimeUtc) {
-        throw 'The selected GUI predates deployment/shutdown support. Build the settled candidate before deploying (-Build).'
-    }
-}
 if (!(Test-DeploymentQuitCapability $guiFile.FullName)) {
     throw 'The selected GUI does not advertise graceful-quit support. Build the settled candidate before deploying (-Build).'
+}
+# Warn, without refusing, when source feeding the GUI changed after it was built.
+$sourceState = Get-DeploymentSourceState -Repository $repo -BuiltUtc $guiFile.LastWriteTimeUtc
+$guiBuilt = $guiFile.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+if ($null -eq $sourceState.stale) {
+    Write-Warning "Could not compare the GUI (built $guiBuilt) with its source: git is unavailable."
+} elseif ($sourceState.stale) {
+    Write-Warning ("The GUI was built $guiBuilt, but $($sourceState.changed_since_build) source file(s) " +
+        "feeding it changed afterwards, e.g. $($sourceState.examples -join ', '). The deployed app may not " +
+        'match the current source; rerun with -Build to rebuild the frontend and GUI first.')
 }
 $runtime = Get-Content -Raw -LiteralPath $RuntimeManifestPath | ConvertFrom-Json
 if ($runtime.schema -cne 'screenwise.gui-trial-runtime.v1') { throw 'Unsupported prepared WebView2 manifest.' }
@@ -239,7 +238,11 @@ $manifest = [ordered]@{
     ffprobe_executable=(Join-Path $binary 'ffprobe.exe'); webview2_executable=$webview;
     webview2_directory=(Split-Path -Parent $webview); initial_ignored_windows=@($IgnoredWindow); files=$files;
     pi_runtime_directory=$PiRuntimePath; pi_package_version='0.75.4'; pi_tool_mode='recording-api-only';
-    ollama_executables=$ollamaPaths; ollama_directory=$OllamaDirectory; pi_model='ministral-3'
+    ollama_executables=$ollamaPaths; ollama_directory=$OllamaDirectory; pi_model='ministral-3';
+    # Source provenance at deployment time: HEAD, uncommitted build-input changes,
+    # and build-input files changed after the GUI build (null when git is unavailable).
+    source_commit=$sourceState.commit; source_uncommitted_inputs=$sourceState.uncommitted_inputs;
+    source_changed_since_gui_build=$sourceState.changed_since_build
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 if ($RegisterStartup) {
