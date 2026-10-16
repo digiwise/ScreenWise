@@ -8,8 +8,8 @@ No new capture, live UI inspection or captured-content review was performed.
 
 The [validation register](../VALIDATION_REGISTER.md) is the reference record.
 This document explains its open privacy-relevant entries in plain language, with
-their original P1/P2 review priority, and lists newer issues not yet recorded
-there. Where the two disagree, the register wins.
+their original P1/P2 review priority. Where the two disagree, the register
+wins.
 
 ## Existing gaps confirmed in the current source
 
@@ -98,7 +98,7 @@ Sources: [frame responses](../crates/screenpipe-engine/src/routes/frames.rs),
   Not re-checked on macOS for this review. Source:
   [audio stream startup](../crates/screenpipe-audio/src/core/stream.rs).
 
-## Issues not yet in the register
+## Issues found since the original review
 
 ### UIA requests load the target application
 
@@ -108,7 +108,7 @@ its whole tree in one request, and the work runs on the application's own UI
 thread. When ScreenWise's deadline expires it abandons the request, but the
 application keeps building the answer. Repeated walks, plus focus checks on
 keystrokes, can make it noticeably slow. This was observed with one desktop
-application on 16 October 2026.
+application on 16 October 2026. This is register issue **SW-R19**.
 
 Per-window backoff now stops repeated walks and probes after timeouts, and
 property changes to Name and Value no longer restart walks. A single request is
@@ -124,7 +124,7 @@ One deployed build stopped on 16 October 2026 with Windows exception
 capture. It is the only ScreenWise crash recorded in 14 days. The cause has not
 been established: a crash dump exists locally but has not been analysed.
 Corruption in a process that holds captured content is worth treating as a
-security question until explained.
+security question until explained. This is register issue **SW-R20**.
 
 ## Open owner decisions with privacy impact
 

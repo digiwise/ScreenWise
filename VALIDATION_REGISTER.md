@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-15. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-17. **Partial validation, not a completed privacy/firewall certification.**
 
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
@@ -51,6 +51,30 @@ Full cached-decoder integration, provider event delivery, input focus recovery
 and the 70%-within-half-budget target remain unresolved. SW-R18 remains open.
 
 Source-review history and remaining findings: [system-wide source review and owner priorities](#system-wide-source-review-and-owner-priorities-2026-10-09).
+Plain-language summary of open privacy-relevant entries: [privacy and security issues](docs/PRIVACY_SECURITY_ISSUES.md).
+
+## Privacy issues review additions (2026-10-17)
+
+Recorded from the [privacy and security issues](docs/PRIVACY_SECURITY_ISSUES.md)
+review at `68a1be820`. Source and aggregate diagnostics only; no new capture or
+captured-content review.
+
+**SW-R19 — Open: UIA requests load the target application.** A privacy walk asks
+the target for its whole tree in one cached request, built on the target's UI
+thread. Abandoning the request at ScreenWise's deadline does not stop that work.
+On 2026-10-16 repeated timed-out walks and keystroke focus probes coincided with
+one desktop application becoming slow. Per-window backoff for walks and probes,
+and not restarting walks on Name/Value changes, now limit repetition; a single
+request remains unbounded. Follow-up: fetch in bounded steps with a per-request
+node budget, and measure target responsiveness during a controlled trial.
+Sources: [bulk acquisition](crates/screenpipe-a11y/src/tree/windows_bulk.rs),
+[UIA backoff](crates/screenpipe-a11y/src/uia_breaker.rs).
+
+**SW-R20 — Open: Unexplained heap-corruption crash.** A deployed build exited on
+2026-10-16 with exception `0xc0000374` in `ntdll.dll` after about an hour of
+normal capture; the only ScreenWise crash in the preceding 14 days. A local crash
+dump exists but is unanalysed, pending an owner decision to install a debugger.
+Treat as a potential memory-safety issue until attributed.
 
 ## Content screening stage 1 (2026-10-15)
 
