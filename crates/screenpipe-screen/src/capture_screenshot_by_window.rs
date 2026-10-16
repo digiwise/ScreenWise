@@ -1189,6 +1189,11 @@ pub struct WindowsCapturePrivacy {
     /// Only on `no_safe_active_window` decisions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_safe_window: Option<WindowsNoSafeWindowDetail>,
+    /// Only when window enumeration did not list the native foreground window
+    /// (monitor-scoped plan): how it was located natively and whether that
+    /// let this monitor be evaluated without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlisted_foreground: Option<WindowsUnlistedForegroundDetail>,
     /// `topmost_safe_window` when an active-window-only frame captured the
     /// topmost safe window of a monitor without the foreground window.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1312,6 +1317,316 @@ pub struct WindowsNoSafeWindowDetail {
     pub excluded_visible_windows: u32,
 }
 
+/// How a foreground window missing from window enumeration was located
+/// natively. Fixed decision code and flags only: never titles, classes,
+/// handles or geometry.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct WindowsUnlistedForegroundDetail {
+    /// `off_monitor` (neither the window nor its root owner is drawn on this
+    /// monitor, so it is evaluated without them), `foreground_on_monitor`,
+    /// `monitor_unknown`, `window_unreadable`, `overlaps_monitor`,
+    /// `not_locatable` or `changed_during_evaluation`. Only `off_monitor`
+    /// admits; every other code withholds as before.
+    pub decision: &'static str,
+    pub visible: bool,
+    pub cloaked: bool,
+    pub minimized: bool,
+    pub tool_window: bool,
+    pub popup: bool,
+    pub child: bool,
+    /// Shown, but neither the DWM frame nor the window rectangle was readable.
+    pub bounds_unknown: bool,
+    pub overlaps_monitor: bool,
+    /// A distinct root owner exists (popup, dropdown or dialog of a window).
+    pub has_owner: bool,
+    pub owner_listed: bool,
+    pub owner_shown: bool,
+    pub owner_overlaps_monitor: bool,
+}
+
+/// Native placement of one window, read without sending it a message.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeWindowPlacement {
+    visible: bool,
+    cloaked: bool,
+    minimized: bool,
+    tool_window: bool,
+    popup: bool,
+    child: bool,
+    /// Visible DWM frame bounds, else the window rectangle.
+    bounds: Option<Rect>,
+}
+
+#[cfg(target_os = "windows")]
+impl NativeWindowPlacement {
+    /// Drawn on screen: visible, not cloaked by DWM and not minimised.
+    fn shown(&self) -> bool {
+        self.visible && !self.cloaked && !self.minimized
+    }
+
+    fn drawn_bounds(&self) -> Option<Rect> {
+        self.bounds
+            .filter(|bounds| self.shown() && bounds.width != 0 && bounds.height != 0)
+    }
+}
+
+/// The root owner of an unlisted foreground window, when it has one.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnerPlacement {
+    /// `None`: the owner could not be read.
+    placement: Option<NativeWindowPlacement>,
+    listed: bool,
+}
+
+/// Decide whether a foreground window that enumeration did not list can be
+/// shown to be absent from this monitor. Fails closed: the native foreground
+/// monitor must be known and different, nothing shown by the window or its
+/// root owner may overlap this monitor, everything shown must have readable
+/// bounds, and at least one of them must actually be located.
+#[cfg(target_os = "windows")]
+fn unlisted_foreground_detail(
+    window: Option<NativeWindowPlacement>,
+    owner: Option<OwnerPlacement>,
+    foreground_monitor: Option<u32>,
+    monitor_id: u32,
+    monitor_bounds: &Rect,
+) -> WindowsUnlistedForegroundDetail {
+    let mut detail = WindowsUnlistedForegroundDetail {
+        decision: "window_unreadable",
+        visible: false,
+        cloaked: false,
+        minimized: false,
+        tool_window: false,
+        popup: false,
+        child: false,
+        bounds_unknown: false,
+        overlaps_monitor: false,
+        has_owner: owner.is_some(),
+        owner_listed: owner.is_some_and(|owner| owner.listed),
+        owner_shown: false,
+        owner_overlaps_monitor: false,
+    };
+    let Some(window) = window else {
+        return detail;
+    };
+    detail.visible = window.visible;
+    detail.cloaked = window.cloaked;
+    detail.minimized = window.minimized;
+    detail.tool_window = window.tool_window;
+    detail.popup = window.popup;
+    detail.child = window.child;
+    detail.bounds_unknown = window.shown() && window.bounds.is_none();
+    let window_drawn = window.drawn_bounds();
+    detail.overlaps_monitor = window_drawn.is_some_and(|bounds| bounds.overlaps(monitor_bounds));
+    let owner_placement = owner.and_then(|owner| owner.placement);
+    let owner_drawn = owner_placement.and_then(|owner| owner.drawn_bounds());
+    detail.owner_shown = owner_placement.is_some_and(|owner| owner.shown());
+    detail.owner_overlaps_monitor =
+        owner_drawn.is_some_and(|bounds| bounds.overlaps(monitor_bounds));
+    detail.decision = match foreground_monitor {
+        None => "monitor_unknown",
+        Some(id) if id == monitor_id => "foreground_on_monitor",
+        Some(_) if detail.overlaps_monitor || detail.owner_overlaps_monitor => "overlaps_monitor",
+        Some(_)
+            if detail.bounds_unknown
+                || owner.is_some_and(|owner| owner.placement.is_none())
+                || owner_placement.is_some_and(|owner| owner.shown() && owner.bounds.is_none())
+                || (window_drawn.is_none() && owner_drawn.is_none()) =>
+        {
+            "not_locatable"
+        }
+        Some(_) => "off_monitor",
+    };
+    detail
+}
+
+/// Fixed decision codes of [`WindowsUnlistedForegroundDetail`], in counter order.
+#[cfg(target_os = "windows")]
+pub const UNLISTED_FOREGROUND_DECISIONS: [&str; 7] = [
+    "off_monitor",
+    "foreground_on_monitor",
+    "monitor_unknown",
+    "window_unreadable",
+    "overlaps_monitor",
+    "not_locatable",
+    "changed_during_evaluation",
+];
+
+#[cfg(target_os = "windows")]
+static UNLISTED_FOREGROUND_COUNTS: [std::sync::atomic::AtomicU64; 7] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+#[cfg(target_os = "windows")]
+fn record_unlisted_foreground_metrics(detail: Option<&WindowsUnlistedForegroundDetail>) {
+    let Some(detail) = detail else {
+        return;
+    };
+    if let Some(index) = UNLISTED_FOREGROUND_DECISIONS
+        .iter()
+        .position(|code| *code == detail.decision)
+    {
+        UNLISTED_FOREGROUND_COUNTS[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Process-lifetime counts of unlisted-foreground decisions (per monitor
+/// evaluation), as `{code: count}`. Content-free.
+#[cfg(target_os = "windows")]
+pub fn unlisted_foreground_metrics_snapshot() -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (code, count) in UNLISTED_FOREGROUND_DECISIONS
+        .iter()
+        .zip(UNLISTED_FOREGROUND_COUNTS.iter())
+    {
+        map.insert(
+            (*code).to_string(),
+            count.load(std::sync::atomic::Ordering::Relaxed).into(),
+        );
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Two native probes of the same unlisted foreground window must agree.
+#[cfg(target_os = "windows")]
+fn settle_unlisted_foreground(
+    first: Option<WindowsUnlistedForegroundDetail>,
+    last: Option<WindowsUnlistedForegroundDetail>,
+) -> Option<WindowsUnlistedForegroundDetail> {
+    match (first, last) {
+        (Some(first), Some(last)) if first == last => Some(last),
+        (Some(_), Some(mut last)) | (None, Some(mut last)) | (Some(mut last), None) => {
+            last.decision = "changed_during_evaluation";
+            Some(last)
+        }
+        (None, None) => None,
+    }
+}
+
+/// Read a window's placement natively (no window message).
+#[cfg(target_os = "windows")]
+fn probe_window_placement(id: u32) -> Option<NativeWindowPlacement> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct NativeRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn IsWindow(hwnd: isize) -> i32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn IsIconic(hwnd: isize) -> i32;
+        fn GetWindowRect(hwnd: isize, rect: *mut NativeRect) -> i32;
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: isize,
+            attribute: u32,
+            value: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+    const DWMWA_CLOAKED: u32 = 14;
+    const GWL_STYLE: i32 = -16;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+    let hwnd = id as isize;
+    if hwnd == 0 || unsafe { IsWindow(hwnd) } == 0 {
+        return None;
+    }
+    let mut cloaked = 0u32;
+    // An unreadable cloak state counts as shown, which requires bounds.
+    let cloaked = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    } >= 0
+        && cloaked != 0;
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let to_rect = |rect: &NativeRect| Rect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right.saturating_sub(rect.left).max(0) as u32,
+        height: rect.bottom.saturating_sub(rect.top).max(0) as u32,
+    };
+    // Visible frame bounds exclude the invisible resize borders a maximised
+    // window extends onto its neighbour; the window rectangle is the
+    // (larger, so stricter) fallback.
+    let mut frame = NativeRect::default();
+    let frame_ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut frame as *mut NativeRect).cast(),
+            std::mem::size_of::<NativeRect>() as u32,
+        )
+    } >= 0;
+    let bounds = Some(to_rect(&frame))
+        .filter(|rect| frame_ok && rect.width != 0 && rect.height != 0)
+        .or_else(|| {
+            let mut rect = NativeRect::default();
+            (unsafe { GetWindowRect(hwnd, &mut rect) } != 0).then(|| to_rect(&rect))
+        });
+    Some(NativeWindowPlacement {
+        visible: unsafe { IsWindowVisible(hwnd) } != 0,
+        cloaked,
+        minimized: unsafe { IsIconic(hwnd) } != 0,
+        tool_window: ex_style & WS_EX_TOOLWINDOW != 0,
+        popup: style & WS_POPUP != 0,
+        child: style & WS_CHILD != 0,
+        bounds,
+    })
+}
+
+/// The distinct root owner (through parents and owners) of a window.
+#[cfg(target_os = "windows")]
+fn root_owner_of(id: u32) -> Option<u32> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+    }
+    const GA_ROOTOWNER: u32 = 3;
+    let owner = unsafe { GetAncestor(id as isize, GA_ROOTOWNER) };
+    (owner != 0 && owner as u32 != id).then_some(owner as u32)
+}
+
+/// Locate an unlisted native foreground window relative to this monitor.
+#[cfg(target_os = "windows")]
+fn probe_unlisted_foreground(
+    sample: WindowsForegroundSample,
+    enumerated: &HashSet<u32>,
+    monitor_id: u32,
+    monitor_bounds: &Rect,
+) -> (WindowsUnlistedForegroundDetail, Option<u32>) {
+    let owner_id = root_owner_of(sample.window);
+    let owner = owner_id.map(|id| OwnerPlacement {
+        placement: probe_window_placement(id),
+        listed: enumerated.contains(&id),
+    });
+    let detail = unlisted_foreground_detail(
+        probe_window_placement(sample.window),
+        owner,
+        sample.monitor,
+        monitor_id,
+        monitor_bounds,
+    );
+    (detail, owner_id)
+}
+
 /// What window enumeration observed about the maximised-plan target.
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1391,6 +1706,7 @@ impl Default for WindowsCapturePrivacy {
             accessibility: None,
             content_screening: None,
             no_safe_window: None,
+            unlisted_foreground: None,
             active_window_choice: None,
             native_metadata: None,
             foreground_monitor: None,
@@ -2063,12 +2379,17 @@ fn choose_windows_capture_scoped(
     monitor_bounds: &Rect,
     before: Option<WindowsForegroundSample>,
     after: Option<WindowsForegroundSample>,
-    foreground_seen: bool,
+    foreground_accounted: bool,
 ) -> WindowsCaptureChoice {
     // A verified other-monitor foreground is context, not a local exclusion.
     // Geometry still accounts for every excluded window overlapping this monitor.
     // Missing/changed native association cannot establish an unaffected scope.
-    if before != after || !foreground_seen || before.is_none_or(|sample| sample.monitor.is_none()) {
+    // `foreground_accounted`: enumerated, or (unlisted) natively located off
+    // this monitor together with its root owner.
+    if before != after
+        || !foreground_accounted
+        || before.is_none_or(|sample| sample.monitor.is_none())
+    {
         return WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::InconsistentFocus);
     }
     choose_windows_capture(windows, monitor_bounds)
@@ -2583,6 +2904,9 @@ pub fn evaluate_windows_monitor_capture(
     // Diagnostics for `no_safe_active_window` only; never affect the decision.
     let mut selected_observation = selected_window.map(|_| SelectedWindowObservation::default());
     let mut focused_app = None;
+    // Every enumerated window id, to tell whether an unlisted foreground's
+    // root owner was listed (diagnostic only).
+    let mut enumerated = HashSet::new();
 
     for source in Window::all().inspect_err(|error| {
         sensitive_capture_error("window_enumeration", "Window::all", None, error)
@@ -2590,6 +2914,7 @@ pub fn evaluate_windows_monitor_capture(
         let id = source
             .id()
             .inspect_err(|error| sensitive_capture_error("window_metadata", "id", None, error))?;
+        enumerated.insert(id);
         // Do not query non-selected app/title/URL metadata in window-only mode.
         // xcap's own metadata-only validity enumeration remains unchanged.
         if selected_window.is_some_and(|selected| selected.hwnd as u32 != id) {
@@ -2821,7 +3146,28 @@ pub fn evaluate_windows_monitor_capture(
         .iter()
         .map(|window| window.snapshot.clone())
         .collect();
-    if selected_window.is_none() && !foreground_seen {
+    // An unlisted foreground (owned popups, tool or helper windows) is located
+    // natively before and after the final foreground sample; both must agree.
+    let probe_unlisted = |sample: Option<WindowsForegroundSample>| {
+        sample
+            .filter(|_| selected_window.is_none() && !foreground_seen)
+            .map(|sample| {
+                probe_unlisted_foreground(sample, &enumerated, monitor.id(), &monitor_bounds)
+            })
+    };
+    let first_unlisted = probe_unlisted(foreground);
+    let final_foreground = sample_windows_foreground();
+    let final_unlisted = probe_unlisted(final_foreground);
+    let unlisted_owner = final_unlisted.and_then(|(_, owner)| owner);
+    privacy.unlisted_foreground = settle_unlisted_foreground(
+        first_unlisted.map(|(detail, _)| detail),
+        final_unlisted.map(|(detail, _)| detail),
+    );
+    let unlisted_off_monitor = privacy
+        .unlisted_foreground
+        .is_some_and(|detail| detail.decision == "off_monitor");
+    record_unlisted_foreground_metrics(privacy.unlisted_foreground.as_ref());
+    if selected_window.is_none() && !foreground_seen && !unlisted_off_monitor {
         let app = foreground.and_then(|sample| get_process_exe_name(sample.process));
         privacy.add_blocker(
             diagnostic_executable_name(app.as_deref()),
@@ -2829,7 +3175,6 @@ pub fn evaluate_windows_monitor_capture(
             true,
         );
     }
-    let final_foreground = sample_windows_foreground();
     if selected_window.is_none() && foreground.is_none_or(|sample| sample.monitor.is_none()) {
         privacy.foreground_blocked("monitor_unverified");
     }
@@ -2859,7 +3204,7 @@ pub fn evaluate_windows_monitor_capture(
                 &monitor_bounds,
                 foreground,
                 final_foreground,
-                foreground_seen,
+                foreground_seen || unlisted_off_monitor,
             )
         }
     };
@@ -2919,6 +3264,7 @@ pub fn evaluate_windows_monitor_capture(
             serde_json::json!({
                 "monitor_id":monitor.id(), "choice":format!("{choice:?}"), "privacy":privacy,
                 "native_foreground":foreground.map(|f| serde_json::json!({"hwnd":f.window,"pid":f.process,"monitor":f.monitor,"class":window_class_name(f.window),"executable":get_process_exe_name(f.process)})),
+                "unlisted_owner":unlisted_owner.map(|o| serde_json::json!({"hwnd":o,"class":window_class_name(o)})),
                 "final_foreground":format!("{final_foreground:?}"),
                 "candidates":runtime_windows.iter().take(64).map(|w| serde_json::json!({
                     "hwnd":w.snapshot.id,"pid":w.process_id,"app":w.app_name,"title":w.window_name,"url":w.browser_url,
@@ -5859,5 +6205,174 @@ fn foreground_diagnostics_distinguish_missing_sample_enumeration_and_recorder() 
     assert_eq!(
         missing_foreground_reason(Some(sample), 100),
         "foreground_not_enumerated"
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn unlisted_foreground_admits_only_when_window_and_owner_are_located_off_this_monitor() {
+    // Monitor 2 is to the right of monitor 1 (1920 wide).
+    let monitor2 = Rect {
+        x: 1920,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let on_monitor1 = Rect {
+        x: 100,
+        y: 100,
+        width: 400,
+        height: 300,
+    };
+    let on_monitor2 = Rect {
+        x: 2000,
+        y: 100,
+        width: 400,
+        height: 300,
+    };
+    let shown = |bounds: Option<Rect>| NativeWindowPlacement {
+        visible: true,
+        cloaked: false,
+        minimized: false,
+        tool_window: false,
+        popup: true,
+        child: false,
+        bounds,
+    };
+    let hidden = NativeWindowPlacement {
+        visible: false,
+        ..shown(Some(on_monitor2))
+    };
+    let owner = |placement: Option<NativeWindowPlacement>| {
+        Some(OwnerPlacement {
+            placement,
+            listed: true,
+        })
+    };
+    let decide = |window, owner, foreground_monitor| {
+        unlisted_foreground_detail(window, owner, foreground_monitor, 2, &monitor2).decision
+    };
+
+    // A dropdown of a window on monitor 1: monitor 2 is evaluated without it.
+    assert_eq!(
+        decide(
+            Some(shown(Some(on_monitor1))),
+            owner(Some(shown(Some(on_monitor1)))),
+            Some(1)
+        ),
+        "off_monitor"
+    );
+    // A hidden helper window whose owner is located on monitor 1.
+    assert_eq!(
+        decide(Some(hidden), owner(Some(shown(Some(on_monitor1)))), Some(1)),
+        "off_monitor"
+    );
+    // Without an owner, a shown window on monitor 1 is enough.
+    assert_eq!(
+        decide(Some(shown(Some(on_monitor1))), None, Some(1)),
+        "off_monitor"
+    );
+
+    // Anything drawn on this monitor withholds.
+    assert_eq!(
+        decide(
+            Some(shown(Some(on_monitor2))),
+            owner(Some(shown(Some(on_monitor1)))),
+            Some(1)
+        ),
+        "overlaps_monitor"
+    );
+    assert_eq!(
+        decide(
+            Some(shown(Some(on_monitor1))),
+            owner(Some(shown(Some(on_monitor2)))),
+            Some(1)
+        ),
+        "overlaps_monitor"
+    );
+    // The native foreground monitor must be known and different.
+    assert_eq!(
+        decide(Some(shown(Some(on_monitor1))), None, Some(2)),
+        "foreground_on_monitor"
+    );
+    assert_eq!(
+        decide(Some(shown(Some(on_monitor1))), None, None),
+        "monitor_unknown"
+    );
+    // Unreadable or unlocatable windows withhold.
+    assert_eq!(decide(None, None, Some(1)), "window_unreadable");
+    assert_eq!(decide(Some(shown(None)), None, Some(1)), "not_locatable");
+    assert_eq!(decide(Some(hidden), None, Some(1)), "not_locatable");
+    assert_eq!(decide(Some(hidden), owner(None), Some(1)), "not_locatable");
+    assert_eq!(
+        decide(
+            Some(shown(Some(on_monitor1))),
+            owner(Some(shown(None))),
+            Some(1)
+        ),
+        "not_locatable"
+    );
+    assert_eq!(
+        decide(Some(hidden), owner(Some(hidden)), Some(1)),
+        "not_locatable"
+    );
+
+    // A window just touching the monitor edge does not overlap it.
+    let touching = Rect {
+        x: 1520,
+        y: 0,
+        width: 400,
+        height: 300,
+    };
+    assert_eq!(
+        decide(Some(shown(Some(touching))), None, Some(1)),
+        "off_monitor"
+    );
+    let crossing = Rect {
+        x: 1521,
+        ..touching
+    };
+    assert_eq!(
+        decide(Some(shown(Some(crossing))), None, Some(1)),
+        "overlaps_monitor"
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn unlisted_foreground_probes_must_agree_and_detail_is_content_free() {
+    let monitor = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+    };
+    let off = unlisted_foreground_detail(None, None, Some(1), 2, &monitor);
+    let mut other = off;
+    other.visible = true;
+    assert_eq!(settle_unlisted_foreground(Some(off), Some(off)), Some(off));
+    assert_eq!(
+        settle_unlisted_foreground(Some(off), Some(other)).map(|d| d.decision),
+        Some("changed_during_evaluation")
+    );
+    assert_eq!(
+        settle_unlisted_foreground(Some(off), None).map(|d| d.decision),
+        Some("changed_during_evaluation")
+    );
+    assert_eq!(settle_unlisted_foreground(None, None), None);
+    let json = serde_json::to_value(off).unwrap();
+    for (key, value) in json.as_object().unwrap() {
+        if key == "decision" {
+            assert!(UNLISTED_FOREGROUND_DECISIONS.contains(&value.as_str().unwrap()));
+        } else {
+            assert!(value.is_boolean(), "{key}");
+        }
+    }
+    record_unlisted_foreground_metrics(Some(&off));
+    let counts = unlisted_foreground_metrics_snapshot();
+    assert!(counts["window_unreadable"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        counts.as_object().unwrap().len(),
+        UNLISTED_FOREGROUND_DECISIONS.len()
     );
 }

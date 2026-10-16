@@ -26,7 +26,15 @@ use crate::ui_recorder::{
 pub(crate) async fn uia_metrics_handler() -> JsonResponse<serde_json::Value> {
     #[cfg(target_os = "windows")]
     {
-        JsonResponse(screenpipe_a11y::tree::windows_local_uia_metrics_snapshot())
+        let mut metrics = screenpipe_a11y::tree::windows_local_uia_metrics_snapshot();
+        if let Some(map) = metrics.as_object_mut() {
+            // Fixed decision code -> count for unlisted foreground windows.
+            map.insert(
+                "unlisted_foreground".into(),
+                screenpipe_screen::capture_screenshot_by_window::unlisted_foreground_metrics_snapshot(),
+            );
+        }
+        JsonResponse(metrics)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1407,6 +1415,17 @@ mod tests {
                 }
                 assert!(init["apartment_rehomed_walks"].is_number());
                 assert!(init["apartment_rehome_failures"].is_number());
+            } else if key == "unlisted_foreground" {
+                let counts = value.as_object().expect("fixed decision counts");
+                let codes: Vec<_> = counts.keys().map(String::as_str).collect();
+                let mut expected =
+                    screenpipe_screen::capture_screenshot_by_window::UNLISTED_FOREGROUND_DECISIONS
+                        .to_vec();
+                expected.sort();
+                let mut sorted = codes.clone();
+                sorted.sort();
+                assert_eq!(sorted, expected);
+                assert!(counts.values().all(serde_json::Value::is_number));
             } else if key == "timing" {
                 let timing = value.as_object().expect("fixed timing schema");
                 let stage_names = timing

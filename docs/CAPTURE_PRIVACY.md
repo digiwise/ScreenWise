@@ -222,6 +222,42 @@ involve that app's provider. Replacing it with a WinEvent hook (`EVENT_OBJECT_FO
 provider, is an open owner decision. Untested: a live run proving the absence
 of calls into a specific excluded app.
 
+## Unlisted foreground windows (2026-10-16)
+
+The monitor-scoped plan must establish that the native foreground window is
+not on the monitor being captured. Window enumeration does not list every
+foreground window (owned dropdowns, tool and helper windows; mostly Excel in
+the day-to-day trial), and an unlisted foreground used to withhold every
+monitor as `inconsistent_focus` / `foreground_not_enumerated`.
+
+Such a window is now located natively (no window message): its visibility,
+DWM cloak state, minimised state, visible DWM frame bounds (window rectangle
+as the stricter fallback) and those of its root owner. The monitor is
+evaluated without it, by the normal rules for its listed windows, only when
+all of these hold, in both native probes taken around the final foreground
+sample:
+
+- the native foreground monitor is known and is not this monitor;
+- neither the window nor its root owner is drawn overlapping this monitor;
+- everything shown has readable bounds, a readable owner exists if there is
+  one, and at least one of the two is actually located.
+
+Otherwise the frame is withheld as before. The window itself never
+contributes pixels, labels or a tree to the other monitor (the walker skips
+it as a different-monitor foreground). The persisted
+`capture_privacy.unlisted_foreground` holds the decision code
+(`off_monitor`, `foreground_on_monitor`, `monitor_unknown`,
+`window_unreadable`, `overlaps_monitor`, `not_locatable`,
+`changed_during_evaluation`) and content-free flags (visible, cloaked,
+minimized, tool_window, popup, child, bounds_unknown, overlaps_monitor,
+has_owner, owner_listed, owner_shown, owner_overlaps_monitor); no title,
+class, handle or geometry. `foreground_not_enumerated` is recorded as a
+blocker only when the monitor was withheld. Authenticated
+`/vision/uia-metrics` adds `unlisted_foreground`, process-lifetime counts per
+decision code. The sensitive debug decision record adds the root owner's
+class for private diagnosis. Untested: a live run confirming which windows
+are unlisted.
+
 ## Native metadata on UIA-failure placeholders (2026-10-16)
 
 Owner decision: a frame withheld only because UIA could not finish

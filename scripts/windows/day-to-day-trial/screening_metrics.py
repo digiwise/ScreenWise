@@ -126,6 +126,19 @@ SELECT json_extract(capture_privacy, '$.reason') AS reason, COUNT(*) AS frames
 FROM frames WHERE {SINCE} AND text_source = 'privacy_placeholder'
   AND COALESCE(json_array_length(capture_privacy, '$.blockers'), 0) = 0
 GROUP BY 1 ORDER BY frames DESC"""),
+        ("Unlisted foreground decisions", f"""
+SELECT json_extract(capture_privacy, '$.unlisted_foreground.decision') AS decision,
+       json_extract(capture_privacy, '$.outcome') AS outcome,
+       json_extract(capture_privacy, '$.unlisted_foreground.visible') AS visible,
+       json_extract(capture_privacy, '$.unlisted_foreground.cloaked') AS cloaked,
+       json_extract(capture_privacy, '$.unlisted_foreground.tool_window') AS tool,
+       json_extract(capture_privacy, '$.unlisted_foreground.popup') AS popup,
+       json_extract(capture_privacy, '$.unlisted_foreground.has_owner') AS has_owner,
+       json_extract(capture_privacy, '$.unlisted_foreground.owner_listed') AS owner_listed,
+       json_extract(capture_privacy, '$.unlisted_foreground.owner_shown') AS owner_shown,
+       COUNT(*) AS frames
+FROM frames WHERE {SINCE} AND json_extract(capture_privacy, '$.unlisted_foreground') IS NOT NULL
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9 ORDER BY frames DESC"""),
         ("Native metadata on UIA-failure placeholders", f"""
 SELECT json_extract(capture_privacy, '$.native_metadata') AS native_metadata,
        json_extract(capture_privacy, '$.accessibility.cause') AS cause, app_name, COUNT(*) AS frames,

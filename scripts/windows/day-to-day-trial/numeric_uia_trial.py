@@ -32,6 +32,8 @@ UIA_METRICS = ("schema_version", "attempts", "completed", "failed", "denied", "r
                "breaker_text_skips", "breaker_probe_skips", "breaker_open_walk_windows",
                "breaker_open_text_windows", "breaker_open_probe_processes",
                "uia_exclusion_skips")
+UNLISTED_CODES = ("off_monitor", "foreground_on_monitor", "monitor_unknown", "window_unreadable",
+                  "overlaps_monitor", "not_locatable", "changed_during_evaluation")
 TIMING_STAGE_COUNT = 21
 TIMING_RULE_COUNT = 8
 PROCESS_LIMIT = 32
@@ -130,6 +132,10 @@ def uia_projection(source):
     for key, length in (("value_evidence_counts", 5), ("evidence_rejection_counts", 21)):
         result[key] = numeric_vector(source.get(key), length)
     result["process_metrics"] = process_projection(source.get("process_metrics"))
+    # Fixed decision code -> count for foreground windows enumeration did not list.
+    unlisted = source.get("unlisted_foreground")
+    result["unlisted_foreground"] = ({code: numeric(unlisted.get(code)) for code in UNLISTED_CODES}
+                                     if isinstance(unlisted, dict) else None)
     # Rows follow com_changed_mode, com_init_failed, uia_context_failed; columns
     # follow the endpoint's fixed hresult_codes (10 known codes, then other).
     init = source.get("initialization")

@@ -321,7 +321,8 @@ The owner's requested per-frame capture-blocker diagnostics are a separate
 structured database/API field: only verified executable basenames, fixed
 reason codes and sampled foreground-monitor provenance are permitted, plus
 (owner request 2026-10-16) content-free flags and enumerated-window counts in
-the `no_safe_window` detail. Monitor
+the `no_safe_window` detail and content-free flags in the
+`unlisted_foreground` detail. Monitor
 association must remain nullable and must become unknown if sampled phases
 disagree; it is not a continuous activity or privacy guarantee.
 Owner decision (2026-10-16): a frame withheld only for a UIA retrieval failure
