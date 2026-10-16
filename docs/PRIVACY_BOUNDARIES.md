@@ -1,4 +1,4 @@
-# Privacy policy and recording boundaries
+# Privacy design and limits
 
 ScreenWise records local activity for later search and playback. Its privacy
 controls decide which sources may be recorded, which frames may be saved and

@@ -1,7 +1,7 @@
 # Windows capture decision metadata
 
 For a plain-language explanation with common developer scenarios, start with
-[privacy policy and recording boundaries](PRIVACY_BOUNDARIES.md). Potential
+[privacy design and limits](PRIVACY_BOUNDARIES.md). Potential
 privacy/security issues are tracked separately in the
 [companion review](PRIVACY_SECURITY_ISSUES.md).
 

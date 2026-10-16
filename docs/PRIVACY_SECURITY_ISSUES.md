@@ -1,6 +1,6 @@
 # Privacy and security issues
 
-This companion to [privacy policy and recording boundaries](PRIVACY_BOUNDARIES.md)
+This companion to [privacy design and limits](PRIVACY_BOUNDARIES.md)
 separates implementation gaps and review questions from deliberate recording
 policy. Source review date: 17 October 2026, revision `68a1be820`. These entries
 are not evidence that private content was exposed on a particular installation.
