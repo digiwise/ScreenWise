@@ -156,8 +156,13 @@ exception, unresolved required UIA checks withhold its frames. With
 screening pass. This deliberately trades missing accessibility evidence for
 useful capture. It does not make confidential form contents safe to store.
 
-Known exclusions, detected private windows, incomplete-tree decisions and the
-independent identity, focus, monitor, lock and detected DRM gates still block.
+The exception covers only a retrieval failure during the privacy check itself:
+a timeout, node or depth limit, provider error or backoff, as in the Access
+example. A walk whose privacy check passed but whose final verification ran out
+of budget (`accessibility_incomplete`) is always withheld. Known exclusions,
+detected private windows and the independent identity, focus, monitor, lock and
+detected DRM gates still block. With screenshots disabled, a fail-open frame is
+withheld, because its admission depends on screening the stored image.
 UIA backoff reduces repeated requests to expensive providers and can prolong
 the period in which a configured app relies on this exception.
 
