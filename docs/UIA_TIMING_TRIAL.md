@@ -30,6 +30,38 @@ runs on a fresh thread instead and counts in `apartment_rehomed_walks`
 (`apartment_rehome_failures` if that thread could not run it, which fails
 closed).
 
+**Load on target applications (2026-10-16).** A UIA request runs on the target
+application's UI thread, and a client-side timeout does not stop that work; a
+large, frequently changing WPF window (a one-second timer) was slowed to a crawl
+by repeated walks. Since then:
+
+- A per-process circuit breaker follows costly provider outcomes (timeout,
+  node/depth/text limit, provider failure). While open, that process gets no
+  UIA calls of the affected scope; the period doubles from 30 s to a 10 min
+  cap and three consecutive successes reset it. Walk failures withhold the
+  frame as `uia_backoff` (configured fail-open windows still fail open); a
+  failing optional text phase only switches the window to OCR text. The
+  keyboard focus probe (element scope: IsPassword, ProcessId, HasKeyboardFocus)
+  has its own backoff, so a large tree never disables keystroke checks; it is
+  skipped (input denied) only while a walk to the same process has run longer
+  than the probe's 50 ms provider timeout. Counters: `breaker_openings`,
+  `breaker_walk_skips`, `breaker_text_skips`, `breaker_probe_skips` and
+  `breaker_open_{walk,text,probe}_processes` (no process ids).
+- An invalidated walk restarts at most twice: a second attempt only if the
+  first ended within half of the privacy budget, a third only within its first
+  two-thirds; otherwise the walk ends as `uia_walk_timeout`.
+- Name and Value changes no longer restart a walk (structure, ControlType,
+  IsPassword and IsControlElement still do), and are no longer subscribed. This
+  does not widen admission: the recorded tree is re-checked against nested
+  window, raw-policy and URL rules, policy and recording URLs are reconciled by
+  value, the bitmap is acquired before the walk, and persisted pixels and text
+  are both content-screened.
+
+The keyboard probe still polls every 25 ms to keep its 75 ms permit fresh,
+which is a continuous small load on the focused application; reducing it
+(probing only around input) is a separate owner decision because the first
+keystroke after idle would otherwise be suppressed.
+
 The desktop GUI owns the live loopback API and links `screenpipe-a11y` directly.
 Build and deploy the desktop executable as well as the recorder for a live trial;
 updating `screenpipe.exe` alone leaves this endpoint on the previous schema.

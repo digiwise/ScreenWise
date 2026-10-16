@@ -27,6 +27,12 @@ pub(super) fn bulk_metrics_snapshot(include_process_names: bool) -> serde_json::
     metrics["timing"] = timing::metrics_snapshot();
     metrics["process_metrics"] = process_metrics::metrics_snapshot(include_process_names);
     metrics["initialization"] = initialization_metrics_snapshot();
+    if let (Some(metrics), serde_json::Value::Object(breaker)) = (
+        metrics.as_object_mut(),
+        crate::uia_breaker::metrics_snapshot(),
+    ) {
+        metrics.extend(breaker);
+    }
     metrics
 }
 
@@ -102,6 +108,57 @@ fn initialization_metrics_snapshot() -> serde_json::Value {
         "apartment_rehomed_walks": load(&APARTMENT_REHOMED_WALKS),
         "apartment_rehome_failures": load(&APARTMENT_REHOME_FAILURES),
     })
+}
+
+/// After an invalidation, a second attempt is allowed only when the first
+/// ended in the first half of the privacy budget and a third only when the
+/// second ended within its first two-thirds; never a fourth (owner policy
+/// 2026-10-16). Each restart re-requests the window's tree from the target
+/// application, so restarts are bounded by budget used, not only by deadline.
+fn privacy_restart_allowed(restarts: u32, start: Instant, deadline: Instant, now: Instant) -> bool {
+    let budget = deadline.saturating_duration_since(start);
+    let used = now.saturating_duration_since(start);
+    match restarts {
+        0 => used < budget / 2,
+        1 => used < budget * 2 / 3,
+        _ => false,
+    }
+}
+
+/// Costly provider outcomes that open the per-process circuit breaker.
+fn costly_stop(reason: screenpipe_config::capture_diagnostics::AccessibilityStopReason) -> bool {
+    use screenpipe_config::capture_diagnostics::AccessibilityStopReason as R;
+    matches!(
+        reason,
+        R::Timeout | R::Nodes | R::Depth | R::PropertyText | R::AggregateText | R::Provider
+    )
+}
+
+/// `(walk, text)` breaker outcomes of one walk: `Some(true)` a costly failure,
+/// `Some(false)` a success, `None` nothing to record.
+fn breaker_outcomes(result: &Result<TreeWalkResult>) -> (Option<bool>, Option<bool>) {
+    match result {
+        Ok(TreeWalkResult::Found(snapshot)) => {
+            let text = snapshot
+                .windows_capture_verification
+                .as_ref()
+                .and_then(|verification| match &verification.text {
+                    WindowsTextAcquisition::Complete => Some(false),
+                    WindowsTextAcquisition::Unavailable(reason) if costly_stop(*reason) => {
+                        Some(true)
+                    }
+                    _ => None,
+                });
+            (Some(false), text)
+        }
+        Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => {
+            (costly_stop(failure.cause).then_some(true), None)
+        }
+        Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => {
+            (costly_stop(*reason).then_some(true), None)
+        }
+        _ => (None, None),
+    }
 }
 
 /// True when this thread already belongs to a single-threaded or neutral
@@ -689,6 +746,24 @@ impl WindowsTreeWalker {
                 return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
             }
 
+            // A process whose provider recently timed out or overran its limits
+            // gets no UIA calls until its backoff expires (fails like any other
+            // retrieval failure, so configured fail-open windows still apply).
+            if !crate::uia_breaker::allows(pid, crate::uia_breaker::Scope::Walk) {
+                crate::uia_breaker::note_walk_skipped();
+                return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(
+                    AccessibilityFailure::after_native_policy(
+                        screenpipe_config::capture_diagnostics::AccessibilityStopReason::Backoff,
+                        &self.config,
+                        app_name,
+                        window_name,
+                    ),
+                )));
+            }
+            let text_backoff = !crate::uia_breaker::allows(pid, crate::uia_breaker::Scope::Text);
+            // Keyboard probes to this process wait while this walk runs long.
+            let _walk_in_flight = crate::uia_breaker::walk_in_flight(pid);
+
             // Native privacy checks do not depend on UIA initialization or text retrieval.
             stage = "uia_initialization";
             timing::enter(timing::Stage::UiaInitialization);
@@ -810,7 +885,19 @@ impl WindowsTreeWalker {
             }
             // A revision invalidation discards every node, URL and text value.
             // A fresh privacy query must finish before the original deadline.
+            macro_rules! restart {
+                ($restarts:ident, $cause:expr) => {{
+                    if !privacy_restart_allowed($restarts, start, deadline, Instant::now()) {
+                        timing::timeout();
+                        return Err(bulk::Stop::Timeout);
+                    }
+                    $restarts += 1;
+                    bulk::retry($cause);
+                    continue;
+                }};
+            }
             let acquisition = (|| -> Result<TreeWalkResult, bulk::Stop> {
+                let mut restarts = 0u32;
                 loop {
                     attempt.set_deadline(deadline);
                     timing::phase_deadline(timing::Phase::Privacy, deadline);
@@ -824,8 +911,7 @@ impl WindowsTreeWalker {
                         match attempt.acquire(false, applicable_subtree_rules, need_url) {
                             Ok(root) => root,
                             Err(_) if !attempt.current(revision) => {
-                                bulk::retry(timing::RetryCause::PrivacyInvalidation);
-                                continue;
+                                restart!(restarts, timing::RetryCause::PrivacyInvalidation);
                             }
                             Err(reason) => return Err(reason),
                         };
@@ -857,20 +943,17 @@ impl WindowsTreeWalker {
                     ) {
                         Ok(result) => result,
                         Err(_) if !attempt.current(revision) => {
-                            bulk::retry(timing::RetryCause::PrivacyInvalidation);
-                            continue;
+                            restart!(restarts, timing::RetryCause::PrivacyInvalidation);
                         }
                         Err(reason) => return Err(reason),
                     };
                     blocked |= raw_policy.ignored_subtree;
                     if !attempt.current(revision) {
-                        bulk::retry(timing::RetryCause::PrivacyInvalidation);
-                        continue;
+                        restart!(restarts, timing::RetryCause::PrivacyInvalidation);
                     }
                     if blocked {
                         if matches!(attempt.finish(revision), Ok(false)) {
-                            bulk::retry(timing::RetryCause::CleanupInvalidation);
-                            continue;
+                            restart!(restarts, timing::RetryCause::CleanupInvalidation);
                         }
                         return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
                     }
@@ -885,8 +968,7 @@ impl WindowsTreeWalker {
                         })
                     {
                         if matches!(attempt.finish(revision), Ok(false)) {
-                            bulk::retry(timing::RetryCause::CleanupInvalidation);
-                            continue;
+                            restart!(restarts, timing::RetryCause::CleanupInvalidation);
                         }
                         return Ok(TreeWalkResult::Skipped(SkipReason::BlockedUrl));
                     }
@@ -901,7 +983,13 @@ impl WindowsTreeWalker {
                     let mut node_count = 0;
                     let mut recording_url_for_snapshot = None;
                     let mut text_status = WindowsTextAcquisition::SkippedByConfig;
-                    if !self.config.windows_privacy_only {
+                    if !self.config.windows_privacy_only && text_backoff {
+                        crate::uia_breaker::note_text_skipped();
+                        text_status = WindowsTextAcquisition::Unavailable(
+                            screenpipe_config::capture_diagnostics::AccessibilityStopReason::Backoff,
+                        );
+                    }
+                    if !self.config.windows_privacy_only && !text_backoff {
                         timing::text_attempted();
                         let text_deadline = Instant::now() + TEXT_DEADLINE;
                         attempt.set_deadline(text_deadline);
@@ -935,8 +1023,7 @@ impl WindowsTreeWalker {
                                 ) {
                                     Ok(result) => result,
                                     Err(_) if !attempt.current(revision) => {
-                                        bulk::retry(timing::RetryCause::TextInvalidation);
-                                        continue;
+                                        restart!(restarts, timing::RetryCause::TextInvalidation);
                                     }
                                     Err(reason) => return Err(reason),
                                 };
@@ -983,18 +1070,22 @@ impl WindowsTreeWalker {
                                             SkipReason::BlockedUrl
                                         };
                                         if matches!(attempt.finish(revision), Ok(false)) {
-                                            bulk::retry(timing::RetryCause::CleanupInvalidation);
-                                            continue;
+                                            restart!(
+                                                restarts,
+                                                timing::RetryCause::CleanupInvalidation
+                                            );
                                         }
                                         return Ok(TreeWalkResult::Skipped(denied));
                                     }
                                     TextPhaseOutcome::RetryPrivacy => {
-                                        bulk::retry(if attempt.current(revision) {
-                                            timing::RetryCause::UrlReconciliation
-                                        } else {
-                                            timing::RetryCause::TextInvalidation
-                                        });
-                                        continue;
+                                        restart!(
+                                            restarts,
+                                            if attempt.current(revision) {
+                                                timing::RetryCause::UrlReconciliation
+                                            } else {
+                                                timing::RetryCause::TextInvalidation
+                                            }
+                                        );
                                     }
                                     TextPhaseOutcome::Complete => {
                                         if text.len() > self.config.max_text_length {
@@ -1023,8 +1114,7 @@ impl WindowsTreeWalker {
                                 Err(reason),
                             ) {
                                 TextPhaseOutcome::RetryPrivacy => {
-                                    bulk::retry(timing::RetryCause::TextInvalidation);
-                                    continue;
+                                    restart!(restarts, timing::RetryCause::TextInvalidation);
                                 }
                                 TextPhaseOutcome::Unavailable(reason) => {
                                     text_status = WindowsTextAcquisition::Unavailable(reason)
@@ -1033,8 +1123,7 @@ impl WindowsTreeWalker {
                             },
                         }
                         if !attempt.current(revision) {
-                            bulk::retry(timing::RetryCause::TextInvalidation);
-                            continue;
+                            restart!(restarts, timing::RetryCause::TextInvalidation);
                         }
                         timing::text_result(text_status);
                     }
@@ -1093,8 +1182,7 @@ impl WindowsTreeWalker {
                         ));
                     }
                     if !attempt.current(revision) {
-                        bulk::retry(timing::RetryCause::PrivacyInvalidation);
-                        continue;
+                        restart!(restarts, timing::RetryCause::PrivacyInvalidation);
                     }
                     if !identity_is_current(
                         &self.config,
@@ -1123,8 +1211,7 @@ impl WindowsTreeWalker {
                         identity_current,
                     ) {
                         FinalizationOutcome::RetryPrivacy => {
-                            bulk::retry(timing::RetryCause::CleanupInvalidation);
-                            continue;
+                            restart!(restarts, timing::RetryCause::CleanupInvalidation);
                         }
                         FinalizationOutcome::Unknown(reason) => {
                             if reason == bulk::Stop::Timeout {
@@ -1217,6 +1304,15 @@ impl WindowsTreeWalker {
             result = Ok(TreeWalkResult::Skipped(
                 SkipReason::AccessibilityIncomplete(bulk::Stop::Timeout),
             ));
+        }
+        if let Some(pid) = candidate_pid {
+            let (walk, text) = breaker_outcomes(&result);
+            if let Some(costly) = walk {
+                crate::uia_breaker::record(pid, crate::uia_breaker::Scope::Walk, costly);
+            }
+            if let Some(costly) = text {
+                crate::uia_breaker::record(pid, crate::uia_breaker::Scope::Text, costly);
+            }
         }
         if !matches!(&result, Ok(TreeWalkResult::Found(_))) {
             // Capture the decisive exit budget before the diagnostic native
@@ -2302,6 +2398,58 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| row.as_array().map(Vec::len) == Some(INITIALIZATION_HRESULT_SLOTS)));
+    }
+
+    #[test]
+    fn privacy_restarts_are_bounded_by_budget_used() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(750);
+        let at = |ms| start + Duration::from_millis(ms);
+        assert!(privacy_restart_allowed(0, start, deadline, at(374)));
+        assert!(!privacy_restart_allowed(0, start, deadline, at(375)));
+        assert!(privacy_restart_allowed(1, start, deadline, at(499)));
+        assert!(!privacy_restart_allowed(1, start, deadline, at(500)));
+        assert!(!privacy_restart_allowed(2, start, deadline, at(1)));
+    }
+
+    #[test]
+    fn breaker_records_costly_privacy_and_text_outcomes_only() {
+        use screenpipe_config::capture_diagnostics::AccessibilityStopReason as R;
+        let failure = |cause| {
+            Ok(TreeWalkResult::Skipped(
+                SkipReason::AccessibilityRetrievalFailed(
+                    AccessibilityFailure::after_native_policy(
+                        cause,
+                        &TreeWalkerConfig::default(),
+                        "synthetic.exe".into(),
+                        "Synthetic".into(),
+                    ),
+                ),
+            ))
+        };
+        for cause in [
+            R::Timeout,
+            R::Nodes,
+            R::Depth,
+            R::PropertyText,
+            R::AggregateText,
+            R::Provider,
+        ] {
+            assert_eq!(breaker_outcomes(&failure(cause)), (Some(true), None));
+        }
+        for cause in [R::Backoff, R::Initialization] {
+            assert_eq!(breaker_outcomes(&failure(cause)), (None, None));
+        }
+        assert_eq!(
+            breaker_outcomes(&Ok(TreeWalkResult::Skipped(
+                SkipReason::AccessibilityIncomplete(R::Nodes)
+            ))),
+            (Some(true), None)
+        );
+        assert_eq!(
+            breaker_outcomes(&Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored))),
+            (None, None)
+        );
     }
 
     #[test]

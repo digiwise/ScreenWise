@@ -223,6 +223,18 @@ a separate workspace and needs the transient setting. Missing runtime PATH can
 produce STATUS_DLL_NOT_FOUND even after successful linking. Changing to release
 tests does not solve the single-config samplerate layout mismatch.
 
+## Other screen recorders (Windows Recall)
+
+Recommended (owner note, 2026-10-16): turn off Windows Recall snapshots while
+running ScreenWise (Settings > Privacy & security > Recall & snapshots, or remove
+the optional Recall feature). Recall is a second screen recorder: it keeps its own
+copy of the screen, including windows ScreenWise excludes, so it bypasses
+ScreenWise's exclusions, and it competes for capture, OCR and CPU/NPU time. Whether
+it also adds UI Automation load on the same applications is unverified. Other
+accessibility-heavy tools (screen readers, automation agents) add to the UIA load
+an application's UI thread must serve; see
+[UIA load on target applications](UIA_TIMING_TRIAL.md).
+
 ## Local models and recording
 
 Model acquisition is explicit and separate from recording. Runtime code verifies

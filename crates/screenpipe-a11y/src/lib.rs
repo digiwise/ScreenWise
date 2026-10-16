@@ -65,6 +65,8 @@ pub mod events;
 pub mod incognito;
 pub mod platform;
 pub mod tree;
+#[cfg(target_os = "windows")]
+pub(crate) mod uia_breaker;
 
 // Re-exports
 pub use activity_feed::{ActivityFeed, ActivityKind, CaptureParams};

@@ -26,7 +26,11 @@ UIA_METRICS = ("schema_version", "attempts", "completed", "failed", "denied", "r
                "event_cleanup_calls", "event_cleanup_failures",
                "hierarchy_structure_acquisitions", "accessibility_recording_acquisitions",
                "single_cache_acquisitions", "single_cache_privacy_acquisitions",
-               "single_cache_recording_acquisitions", "raw_nodes", "projected_nodes")
+               "single_cache_recording_acquisitions", "raw_nodes", "projected_nodes",
+               # Per-process circuit breaker (2026-10-16): counts only, no process ids.
+               "breaker_openings", "breaker_walk_skips", "breaker_text_skips", "breaker_probe_skips",
+               "breaker_open_walk_processes", "breaker_open_text_processes",
+               "breaker_open_probe_processes")
 TIMING_STAGE_COUNT = 21
 TIMING_RULE_COUNT = 8
 PROCESS_LIMIT = 32

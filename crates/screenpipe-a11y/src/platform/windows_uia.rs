@@ -621,6 +621,26 @@ impl UiaContext {
         // password contents just to diagnose a failed privacy decision.
         let native = native_focus_probe();
         let focus = native.as_ref().ok().copied();
+        // Fail closed without calling the provider while this probe's own
+        // backoff is open, or while a walk to the same process has already
+        // run longer than a probe could wait (it would only queue behind it).
+        if focus.is_some_and(|focus| {
+            !crate::uia_breaker::allows(focus.pid, crate::uia_breaker::Scope::Probe)
+                || crate::uia_breaker::long_walk_in_flight(
+                    focus.pid,
+                    Duration::from_millis(u64::from(PROVIDER_TIMEOUT_MS)),
+                )
+        }) {
+            crate::uia_breaker::note_probe_skipped();
+            privacy.invalidate();
+            return;
+        }
+        let provider_timed_out = std::cell::Cell::new(false);
+        let note_timeout = |error: &windows::core::Error| {
+            if error.code().0 as u32 == UIA_E_TIMEOUT {
+                provider_timed_out.set(true);
+            }
+        };
         let budget = WalkBudget::new(UiaLimits::keyboard_privacy());
         let prepare = || {
             budget
@@ -641,6 +661,7 @@ impl UiaContext {
                 .automation
                 .GetFocusedElementBuildCache(&self.privacy_cache_request)
                 .map_err(|e| {
+                    note_timeout(&e);
                     probe_error(
                         CaptureReason::InputFocusedElementFailed,
                         "GetFocusedElementBuildCache",
@@ -715,6 +736,7 @@ impl UiaContext {
             })?;
             prepare()?;
             let current = self.automation.GetFocusedElement().map_err(|e| {
+                note_timeout(&e);
                 probe_error(
                     CaptureReason::InputFocusVerificationFailed,
                     "GetFocusedElement recheck",
@@ -733,6 +755,7 @@ impl UiaContext {
                 .automation
                 .CompareElements(&element, &current)
                 .map_err(|e| {
+                    note_timeout(&e);
                     probe_error(
                         CaptureReason::InputFocusVerificationFailed,
                         "CompareElements",
@@ -760,6 +783,11 @@ impl UiaContext {
             validated_password_evidence(is_password, evidence_at, checked_at)
         });
         let reason = result.as_ref().err().map(|failure| failure.reason);
+        if provider_timed_out.get() {
+            if let Some(focus) = focus {
+                crate::uia_breaker::record(focus.pid, crate::uia_breaker::Scope::Probe, true);
+            }
+        }
         if let Err(failure) = &result {
             self.backoff.failed();
             screenpipe_config::sensitive_debug::record("input_privacy_probe", || {

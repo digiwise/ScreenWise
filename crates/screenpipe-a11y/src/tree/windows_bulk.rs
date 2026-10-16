@@ -385,10 +385,15 @@ fn cache_properties(full_text: bool, subtree_rules: bool, need_url: bool) -> Vec
 pub(super) fn cache_property_count(full_text: bool, subtree_rules: bool, need_url: bool) -> usize {
     cache_properties(full_text, subtree_rules, need_url).len()
 }
-fn invalidation_properties() -> [UIA_PROPERTY_ID; 5] {
+/// Structure changes and these properties restart a walk. Name and Value are
+/// deliberately not subscribed (owner policy 2026-10-16): a ticking label made
+/// the target raise an event per change and restart every walk. Their values
+/// cannot widen admission: the recorded tree is itself re-checked against
+/// nested-window, raw-policy and URL rules, policy and recording URLs are
+/// reconciled by value, the bitmap is acquired before the walk (events never
+/// aligned it), and persisted pixels and text are both content-screened.
+fn invalidation_properties() -> [UIA_PROPERTY_ID; 3] {
     [
-        UIA_NamePropertyId,
-        UIA_ValueValuePropertyId,
         UIA_ControlTypePropertyId,
         UIA_IsPasswordPropertyId,
         UIA_IsControlElementPropertyId,
@@ -1974,9 +1979,17 @@ mod tests {
             .iter()
             .map(|property| property.0)
             .collect();
-        assert_eq!(subscribed.len(), 5);
+        assert_eq!(subscribed.len(), 3);
+        // Text-only Name/Value changes never restart a walk: the recorded tree
+        // is re-checked against the same rules and URLs are reconciled by value.
+        for text_only in [UIA_NamePropertyId.0, UIA_ValueValuePropertyId.0] {
+            assert!(!subscribed.contains(&text_only));
+        }
         for (subtree_rules, need_url) in [(true, false), (false, true), (true, true)] {
             for property in cache_properties(false, subtree_rules, need_url) {
+                if [UIA_NamePropertyId.0, UIA_ValueValuePropertyId.0].contains(&property.0) {
+                    continue;
+                }
                 assert!(
                     subscribed.contains(&property.0),
                     "mandatory cache property {} lacks invalidation",
