@@ -49,6 +49,8 @@ pub struct VisionManagerConfig {
     /// Window patterns whose UIA evidence-acquisition failures may fail open,
     /// only while content screening is enabled and the frame passes it.
     pub uia_fail_open_windows: Vec<String>,
+    /// Executables whose untitled windows are verified (`untitledSafeApps`).
+    pub untitled_safe_apps: Vec<String>,
     /// Languages for OCR recognition.
     pub languages: Vec<screenpipe_core::Language>,
     /// Single user-facing quality preset that drives both JPEG quality and
@@ -452,6 +454,7 @@ impl VisionManager {
             ignored_windows: self.config.ignored_windows.clone(),
             included_windows: self.config.included_windows.clone(),
             ignored_urls: self.config.ignored_urls.clone(),
+            untitled_safe_apps: self.config.untitled_safe_apps.clone(),
             monitor_x: x,
             monitor_y: y,
             monitor_width: width,
@@ -850,6 +853,7 @@ mod tests {
             content_screening_enabled: true,
             content_screening_keywords: vec![],
             uia_fail_open_windows: vec![],
+            untitled_safe_apps: vec![],
             languages: vec![Language::English],
             video_quality: "balanced".to_string(),
             idle_capture_interval_ms: None,

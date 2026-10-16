@@ -224,6 +224,8 @@ pub struct CapturedWindow {
 }
 
 pub struct WindowFilters {
+    /// Executables (lowercase, no `.exe`) whose untitled windows are verified.
+    untitled_safe_apps: Vec<String>,
     ignore_patterns: Vec<WindowPattern>,
     include_patterns: Vec<WindowPattern>,
     ignored_urls: Vec<String>,
@@ -234,6 +236,7 @@ pub struct WindowFilters {
 impl WindowFilters {
     pub fn new(ignore_list: &[String], include_list: &[String], ignored_urls: &[String]) -> Self {
         Self {
+            untitled_safe_apps: Vec::new(),
             ignore_patterns: WindowPattern::parse_list(ignore_list),
             diagnostic_ignore_rules: ignore_list
                 .iter()
@@ -406,6 +409,27 @@ impl WindowFilters {
             || !self.ignored_urls.is_empty()
     }
 
+    /// Owner-listed executables whose windows may have no title (`untitledSafeApps`).
+    pub fn with_untitled_safe_apps(mut self, apps: &[String]) -> Self {
+        self.untitled_safe_apps = apps
+            .iter()
+            .map(|app| normalized_executable(app))
+            .filter(|app| !app.is_empty())
+            .collect();
+        self
+    }
+
+    /// Whether an untitled window of this app is unverified: some configured
+    /// rule could read its title and the owner has not listed its executable.
+    #[cfg(target_os = "windows")]
+    fn untitled_window_unverified(&self, app_name_lower: &str, executable: Option<&str>) -> bool {
+        self.title_can_affect_exclusion(app_name_lower)
+            && !executable.is_some_and(|executable| {
+                let executable = normalized_executable(executable);
+                self.untitled_safe_apps.iter().any(|app| *app == executable)
+            })
+    }
+
     /// Whether this app's window title could change `exclusion_reason`. When it
     /// cannot (only app-scoped, title-free rules apply), an unavailable title is
     /// not uncertainty: the decision is the same for every possible title.
@@ -462,6 +486,11 @@ impl WindowFilters {
             word_match || no_space_match || boundary_match
         })
     }
+}
+
+fn normalized_executable(value: &str) -> String {
+    let value = value.trim().to_lowercase();
+    value.strip_suffix(".exe").unwrap_or(&value).to_string()
 }
 
 /// Intermediate structure for window data extracted from platform-specific Window types
@@ -1767,6 +1796,153 @@ fn foreground_capture_skip_reason(
     None
 }
 
+/// Explorer's taskbars (owner policy 2026-10-16): their pixels are always
+/// blacked out, and in the background they never decide whether a frame is
+/// withheld. A focused taskbar keeps the existing checks.
+#[cfg(target_os = "windows")]
+const TASKBAR_CLASSES: [&str; 2] = ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
+
+#[cfg(target_os = "windows")]
+fn is_explorer_taskbar(class: Option<&str>, executable: Option<&str>) -> bool {
+    class.is_some_and(|class| TASKBAR_CLASSES.contains(&class))
+        && executable.is_some_and(|executable| normalized_executable(executable) == "explorer")
+}
+
+/// Bounds of every visible Explorer taskbar, in virtual-desktop pixels.
+/// Fails rather than omit a taskbar whose bounds cannot be read.
+#[cfg(target_os = "windows")]
+fn sample_taskbar_bounds() -> Result<Vec<Rect>, Box<dyn Error>> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct NativeRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowExW(
+            parent: isize,
+            after: isize,
+            class: *const u16,
+            title: *const u16,
+        ) -> isize;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, process: *mut u32) -> u32;
+        fn GetWindowRect(hwnd: isize, rect: *mut NativeRect) -> i32;
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: isize,
+            attribute: u32,
+            value: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    let mut bounds = Vec::new();
+    for class in TASKBAR_CLASSES {
+        let class_wide: Vec<u16> = class.encode_utf16().chain([0]).collect();
+        let mut after = 0;
+        for _ in 0..64 {
+            let hwnd = unsafe { FindWindowExW(0, after, class_wide.as_ptr(), std::ptr::null()) };
+            if hwnd == 0 {
+                break;
+            }
+            after = hwnd;
+            if unsafe { IsWindowVisible(hwnd) } == 0 {
+                continue;
+            }
+            let mut process = 0;
+            if unsafe { GetWindowThreadProcessId(hwnd, &mut process) } == 0 || process == 0 {
+                continue;
+            }
+            if !is_explorer_taskbar(Some(class), get_process_exe_name(process).as_deref()) {
+                continue;
+            }
+            let mut rect = NativeRect::default();
+            let read = unsafe {
+                DwmGetWindowAttribute(
+                    hwnd,
+                    9, // DWMWA_EXTENDED_FRAME_BOUNDS
+                    (&mut rect as *mut NativeRect).cast(),
+                    std::mem::size_of::<NativeRect>() as u32,
+                )
+            } >= 0
+                || unsafe { GetWindowRect(hwnd, &mut rect) } != 0;
+            if !read || rect.right < rect.left || rect.bottom < rect.top {
+                return Err(std::io::Error::other("taskbar bounds unavailable").into());
+            }
+            bounds.push(Rect {
+                x: rect.left,
+                y: rect.top,
+                width: (i64::from(rect.right) - i64::from(rect.left)) as u32,
+                height: (i64::from(rect.bottom) - i64::from(rect.top)) as u32,
+            });
+        }
+    }
+    Ok(bounds)
+}
+
+/// Pixel regions `(x, y, width, height)` of a monitor image covered by taskbars.
+#[cfg(target_os = "windows")]
+fn taskbar_mask_regions(
+    monitor: Rect,
+    image_width: u32,
+    image_height: u32,
+    taskbars: &[Rect],
+) -> Vec<(u32, u32, u32, u32)> {
+    if monitor.width == 0 || monitor.height == 0 {
+        return Vec::new();
+    }
+    let scale_x = f64::from(image_width) / f64::from(monitor.width);
+    let scale_y = f64::from(image_height) / f64::from(monitor.height);
+    let monitor_right = i64::from(monitor.x) + i64::from(monitor.width);
+    let monitor_bottom = i64::from(monitor.y) + i64::from(monitor.height);
+    taskbars
+        .iter()
+        .filter_map(|bar| {
+            let left = i64::from(bar.x).max(i64::from(monitor.x));
+            let top = i64::from(bar.y).max(i64::from(monitor.y));
+            let right = (i64::from(bar.x) + i64::from(bar.width)).min(monitor_right);
+            let bottom = (i64::from(bar.y) + i64::from(bar.height)).min(monitor_bottom);
+            if right <= left || bottom <= top {
+                return None;
+            }
+            // Round outwards so no partly covered pixel row or column survives.
+            let x0 = (((left - i64::from(monitor.x)) as f64) * scale_x).floor() as u32;
+            let y0 = (((top - i64::from(monitor.y)) as f64) * scale_y).floor() as u32;
+            let x1 = ((((right - i64::from(monitor.x)) as f64) * scale_x).ceil() as u32)
+                .min(image_width);
+            let y1 = ((((bottom - i64::from(monitor.y)) as f64) * scale_y).ceil() as u32)
+                .min(image_height);
+            (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn black_out_taskbars(image: &mut DynamicImage, monitor: Rect, taskbars: &[Rect]) {
+    let regions = taskbar_mask_regions(monitor, image.width(), image.height(), taskbars);
+    if regions.is_empty() {
+        return;
+    }
+    if image.as_rgba8().is_none() {
+        *image = DynamicImage::ImageRgba8(image.to_rgba8());
+    }
+    let buffer = image
+        .as_mut_rgba8()
+        .expect("converted to RGBA8 immediately above");
+    for (x, y, width, height) in regions {
+        for row in y..y + height {
+            for column in x..x + width {
+                buffer.put_pixel(column, row, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn window_class_name(id: u32) -> Option<String> {
     #[link(name = "user32")]
@@ -2093,6 +2269,8 @@ pub enum WindowsMonitorCapturePlan {
 pub struct WindowsMonitorCaptureEvaluation {
     pub plan: WindowsMonitorCapturePlan,
     pub privacy: WindowsCapturePrivacy,
+    /// Taskbar bounds to black out in any bitmap acquired around this check.
+    taskbars: Vec<Rect>,
 }
 
 /// Exact native target. Selection is sampled, not an atomic visibility proof.
@@ -2387,6 +2565,8 @@ pub fn evaluate_windows_monitor_capture(
     let mut foreground_unsuitable = None;
     let mut foreground_seen = false;
     let mut selected_url_checked = false;
+    // Taskbar pixels are blacked out in every capture of this monitor.
+    let mut taskbars = sample_taskbar_bounds()?;
     // Diagnostics for `no_safe_active_window` only; never affect the decision.
     let mut selected_observation = selected_window.map(|_| SelectedWindowObservation::default());
     let mut focused_app = None;
@@ -2483,6 +2663,14 @@ pub fn evaluate_windows_monitor_capture(
         if is_focused {
             focused_app = diagnostic_app.clone();
         }
+        // Every remaining window overlaps this monitor or is focused; any of
+        // them may be captured alone, so each needs the class-based check.
+        let class = window_class_name(id);
+        if !is_focused && is_explorer_taskbar(class.as_deref(), executable.as_deref()) {
+            // Always blacked out; never a background blocker.
+            taskbars.push(bounds);
+            continue;
+        }
         let app_name_lower = app_name.to_lowercase();
         let is_browser = BROWSER_NAMES
             .iter()
@@ -2518,7 +2706,8 @@ pub fn evaluate_windows_monitor_capture(
         let metadata_uncertain = window_filters.has_configured_privacy_filters()
             && (app_name.is_empty()
                 || (window_name.is_empty()
-                    && window_filters.title_can_affect_exclusion(&app_name_lower)));
+                    && window_filters
+                        .untitled_window_unverified(&app_name_lower, executable.as_deref())));
         let url_excluded = browser_url
             .as_deref()
             .is_some_and(|url| window_filters.is_url_blocked(url));
@@ -2528,15 +2717,12 @@ pub fn evaluate_windows_monitor_capture(
             || url_uncertain
             || url_excluded
             || filter_reason.is_some();
-        // Every remaining window overlaps this monitor or is focused; any of
-        // them may be captured alone, so each needs the class-based check.
-        let class = window_class_name(id);
         let foreground_skip = foreground_capture_skip_reason(
             &app_name,
             &window_name,
             executable.as_deref(),
             class.as_deref(),
-            window_filters.title_can_affect_exclusion(&app_name_lower),
+            window_filters.untitled_window_unverified(&app_name_lower, executable.as_deref()),
         );
         let hides_below = covers_monitor(bounds, monitor_bounds)
             || (overlaps_monitor
@@ -2750,7 +2936,11 @@ pub fn evaluate_windows_monitor_capture(
             })
         }
     };
-    Ok(WindowsMonitorCaptureEvaluation { plan, privacy })
+    Ok(WindowsMonitorCaptureEvaluation {
+        plan,
+        privacy,
+        taskbars,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -2780,6 +2970,7 @@ async fn capture_windows_monitor_privacy_safe_once(
     };
 
     let mut privacy = initial.privacy;
+    let initial_taskbars = initial.taskbars;
     let selected_window = privacy.selected_window;
     let (mut image, mut active_window, initial_was_active_only) = match initial.plan {
         WindowsMonitorCapturePlan::FullMonitor => {
@@ -2854,6 +3045,11 @@ async fn capture_windows_monitor_privacy_safe_once(
         }
     };
     let post_target = post.privacy.selected_window;
+    let taskbars: Vec<Rect> = initial_taskbars
+        .iter()
+        .chain(post.taskbars.iter())
+        .copied()
+        .collect();
     let mut post_privacy = post.privacy;
     if let Some(detail) = post_privacy.no_safe_window.as_mut() {
         detail.phase = "post_capture";
@@ -2883,13 +3079,18 @@ async fn capture_windows_monitor_privacy_safe_once(
         }
         // Keep the original selected-window bitmap. Never switch target and
         // recapture after the post check without another verified acquisition.
-        return WindowsPrivacyCapture {
-            image,
-            active_window,
-            outcome,
-            duration: started_at.elapsed(),
-            privacy: privacy.with_outcome(outcome),
-        };
+        return finish_windows_capture(
+            monitor,
+            WindowsPrivacyCapture {
+                image,
+                active_window,
+                outcome,
+                duration: started_at.elapsed(),
+                privacy: privacy.with_outcome(outcome),
+            },
+            taskbars,
+            started_at,
+        );
     }
     if privacy.foreground_monitor_changed {
         return placeholder_capture(
@@ -2901,7 +3102,7 @@ async fn capture_windows_monitor_privacy_safe_once(
             privacy,
         );
     }
-    match post.plan {
+    let capture = match post.plan {
         WindowsMonitorCapturePlan::FullMonitor if !initial_was_active_only => {
             WindowsPrivacyCapture {
                 image,
@@ -2953,7 +3154,52 @@ async fn capture_windows_monitor_privacy_safe_once(
             started_at,
             privacy,
         ),
+    };
+    finish_windows_capture(monitor, capture, taskbars, started_at)
+}
+
+/// Black out every taskbar sampled around the acquisition, plus a final sample
+/// (an auto-hide taskbar can move). A taskbar that cannot be measured fails
+/// the frame closed. Placeholders are synthetic and returned unchanged.
+#[cfg(target_os = "windows")]
+fn finish_windows_capture(
+    monitor: &SafeMonitor,
+    mut capture: WindowsPrivacyCapture,
+    mut taskbars: Vec<Rect>,
+    started_at: std::time::Instant,
+) -> WindowsPrivacyCapture {
+    if capture.outcome.is_placeholder() {
+        return capture;
     }
+    match sample_taskbar_bounds() {
+        Ok(current) => taskbars.extend(current),
+        Err(error) => {
+            sensitive_capture_error("capture_operation", "taskbar_bounds", None, &error);
+            return placeholder_capture(
+                monitor,
+                WindowsCaptureOutcome::CaptureFailed(
+                    WindowsCaptureFailureStage::PostCapturePrivacyEvaluation,
+                ),
+                started_at,
+                capture.privacy,
+            );
+        }
+    }
+    let bounds = Rect {
+        x: monitor.x(),
+        y: monitor.y(),
+        width: monitor.width(),
+        height: monitor.height(),
+    };
+    black_out_taskbars(&mut capture.image, bounds, &taskbars);
+    if capture.outcome == WindowsCaptureOutcome::BackgroundRedacted {
+        // A taskbar along the top edge must not hide the disclosure banner.
+        if let Some(buffer) = capture.image.as_mut_rgba8() {
+            draw_windows_capture_notice_banner(buffer, WindowsCaptureNotice::BackgroundRedacted);
+        }
+    }
+    capture.duration = started_at.elapsed();
+    capture
 }
 
 #[cfg(target_os = "windows")]
@@ -3649,6 +3895,116 @@ mod tests {
         assert_eq!(
             choose(&[local_unsuitable, excluded_part, safe]),
             WindowsCaptureChoice::Redacted(WindowsCaptureRedactionReason::NoSafeActiveWindow)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn taskbars_are_blacked_out_in_monitor_pixels_at_any_scale() {
+        let monitor = Rect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let bottom_bar = Rect {
+            x: 1920,
+            y: 1032,
+            width: 1920,
+            height: 48,
+        };
+        let other_monitor_bar = Rect {
+            x: 0,
+            y: 1032,
+            width: 1920,
+            height: 48,
+        };
+        assert_eq!(
+            taskbar_mask_regions(monitor, 1920, 1080, &[bottom_bar, other_monitor_bar]),
+            vec![(0, 1032, 1920, 48)]
+        );
+        // Downscaled bitmaps round outwards, never leaving a partial row.
+        assert_eq!(
+            taskbar_mask_regions(monitor, 960, 540, &[bottom_bar]),
+            vec![(0, 516, 960, 24)]
+        );
+        let odd = Rect {
+            x: 1920,
+            y: 1033,
+            width: 1920,
+            height: 47,
+        };
+        assert_eq!(
+            taskbar_mask_regions(monitor, 960, 540, &[odd]),
+            vec![(0, 516, 960, 24)]
+        );
+        // A bar spanning past the monitor edge is clipped to it.
+        let spanning = Rect {
+            x: 1000,
+            y: 0,
+            width: 1500,
+            height: 40,
+        };
+        assert_eq!(
+            taskbar_mask_regions(monitor, 1920, 1080, &[spanning]),
+            vec![(0, 0, 580, 40)]
+        );
+        let mut image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            4,
+            image::Rgb([200, 200, 200]),
+        ));
+        let small = Rect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let bar = Rect {
+            x: 0,
+            y: 3,
+            width: 4,
+            height: 1,
+        };
+        black_out_taskbars(&mut image, small, &[bar]);
+        let image = image.to_rgba8();
+        assert!((0..4).all(|x| image.get_pixel(x, 3).0 == [0, 0, 0, 255]));
+        assert!((0..4).all(|x| image.get_pixel(x, 2).0 == [200, 200, 200, 255]));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn only_explorer_owned_taskbar_classes_are_taskbars() {
+        for class in ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+            assert!(is_explorer_taskbar(Some(class), Some("explorer")));
+            assert!(is_explorer_taskbar(Some(class), Some("EXPLORER.EXE")));
+            assert!(!is_explorer_taskbar(Some(class), Some("impostor")));
+            assert!(!is_explorer_taskbar(Some(class), None));
+        }
+        assert!(!is_explorer_taskbar(
+            Some("CabinetWClass"),
+            Some("explorer")
+        ));
+        assert!(!is_explorer_taskbar(None, Some("explorer")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn listed_untitled_apps_are_verified_but_others_stay_unverified() {
+        let filters = WindowFilters::new(&["password".into()], &[], &[]);
+        assert!(filters.untitled_window_unverified("digitrack", Some("DigiTrack.App")));
+        let listed = WindowFilters::new(&["password".into()], &[], &[])
+            .with_untitled_safe_apps(&["digitrack.app.exe".into(), " ".into()]);
+        assert!(!listed.untitled_window_unverified("digitrack", Some("DigiTrack.App")));
+        assert!(!listed.untitled_window_unverified("digitrack", Some("digitrack.app.exe")));
+        assert!(listed.untitled_window_unverified("other", Some("other")));
+        assert!(listed.untitled_window_unverified("digitrack", None));
+        // The app name itself is still checked against every rule.
+        let named = WindowFilters::new(&["digitrack".into()], &[], &[])
+            .with_untitled_safe_apps(&["digitrack.app".into()]);
+        assert_eq!(
+            named.exclusion_reason("digitrack", ""),
+            Some("configured_exclusion")
         );
     }
 

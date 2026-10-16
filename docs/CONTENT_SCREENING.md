@@ -98,6 +98,7 @@ matched. `REGEX_REDACTOR_VERSION` is 3 (it keys only the in-memory cache).
 | `contentScreeningEnabled` | `true` | Screen every frame in memory before persistence |
 | `contentScreeningKeywords` | `[]` | Extra case-insensitive substrings that withhold the frame |
 | `uiaFailOpenWindows` | `[]` | `App::`/`App::Title` patterns allowed to fail open as above |
+| `untitledSafeApps` | `[]` | Executables whose untitled windows count as verified for window exclusion (see [capture decision metadata](CAPTURE_PRIVACY.md)) |
 
 With screening disabled, capture decisions and decision metadata are unchanged
 from before screening existed.

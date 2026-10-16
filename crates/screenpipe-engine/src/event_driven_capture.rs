@@ -132,6 +132,17 @@ impl ContentScreeningSettings {
     }
 }
 
+/// Window filters for capture-policy decisions, including the owner's
+/// `untitledSafeApps` list.
+fn windows_capture_filters(config: &TreeWalkerConfig) -> WindowFilters {
+    WindowFilters::new(
+        &config.ignored_windows,
+        &config.included_windows,
+        &config.ignored_urls,
+    )
+    .with_untitled_safe_apps(&config.untitled_safe_apps)
+}
+
 async fn capture_with_timeout<F, T>(
     duration: Duration,
     future: F,
@@ -1064,11 +1075,7 @@ pub async fn event_driven_capture_loop(
 
                     #[cfg(target_os = "windows")]
                     {
-                        let filters = WindowFilters::new(
-                            &capture_params.tree_walker_config.ignored_windows,
-                            &capture_params.tree_walker_config.included_windows,
-                            &capture_params.tree_walker_config.ignored_urls,
-                        );
+                        let filters = windows_capture_filters(capture_params.tree_walker_config);
                         let safe = capture_windows_monitor_privacy_safe(&monitor, &filters).await;
                         log_windows_capture_transition(
                             &mut last_windows_capture_outcome,
@@ -1395,11 +1402,7 @@ pub async fn event_driven_capture_loop(
             activity_feed.keyboard_idle_ms(),
         ) {
             last_visual_check = Instant::now();
-            let vc_filters = WindowFilters::new(
-                &capture_params.tree_walker_config.ignored_windows,
-                &capture_params.tree_walker_config.included_windows,
-                &capture_params.tree_walker_config.ignored_urls,
-            );
+            let vc_filters = windows_capture_filters(capture_params.tree_walker_config);
             #[cfg(not(target_os = "windows"))]
             {
                 let mut fresh_ids = get_excluded_sck_window_ids(&vc_filters);
@@ -3382,11 +3385,7 @@ async fn do_capture(
     let _ = walk_budget;
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
 
-    let window_filters = WindowFilters::new(
-        &params.tree_walker_config.ignored_windows,
-        &params.tree_walker_config.included_windows,
-        &params.tree_walker_config.ignored_urls,
-    );
+    let window_filters = windows_capture_filters(params.tree_walker_config);
 
     #[cfg(target_os = "windows")]
     let windows_capture =

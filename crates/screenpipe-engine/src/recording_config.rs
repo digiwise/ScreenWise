@@ -86,6 +86,8 @@ pub struct RecordingConfig {
     /// Window patterns whose UIA evidence-acquisition failures may fail open,
     /// only while content screening is enabled and the frame passes it.
     pub uia_fail_open_windows: Vec<String>,
+    /// Executables whose untitled windows are verified (`untitledSafeApps`).
+    pub untitled_safe_apps: Vec<String>,
     /// Skip persisting clipboard rows/content in the UI recorder. Clipboard
     /// operations can still wake event-driven capture when clipboard-triggered
     /// capture is enabled.
@@ -253,6 +255,7 @@ impl RecordingConfig {
             content_screening_enabled: settings.content_screening_enabled,
             content_screening_keywords: settings.content_screening_keywords.clone(),
             uia_fail_open_windows: settings.uia_fail_open_windows.clone(),
+            untitled_safe_apps: settings.untitled_safe_apps.clone(),
             disable_clipboard_capture: settings.disable_clipboard_capture,
             disable_keyboard_capture: settings.disable_keyboard_capture,
             disable_pointer_capture: settings.disable_pointer_capture,
@@ -402,6 +405,7 @@ impl RecordingConfig {
             content_screening_enabled: self.content_screening_enabled,
             content_screening_keywords: self.content_screening_keywords.clone(),
             uia_fail_open_windows: self.uia_fail_open_windows.clone(),
+            untitled_safe_apps: self.untitled_safe_apps.clone(),
             languages: self.languages.clone(),
             video_quality: self.video_quality.clone(),
             idle_capture_interval_ms: self.idle_capture_interval_ms,

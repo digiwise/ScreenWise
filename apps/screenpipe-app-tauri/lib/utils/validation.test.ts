@@ -34,12 +34,14 @@ describe("content screening settings validation", () => {
   it("validates contentScreeningKeywords and uiaFailOpenWindows as string arrays", () => {
     expect(validateField("contentScreeningKeywords", ["acme", "codename"])).toEqual({ isValid: true });
     expect(validateField("uiaFailOpenWindows", ["MyApp::", "MyApp::Title"])).toEqual({ isValid: true });
+    expect(validateField("untitledSafeApps", ["digitrack.app.exe"])).toEqual({ isValid: true });
     expect(validateField("contentScreeningKeywords", "not-an-array").isValid).toBe(false);
   });
 
   it("sanitizes contentScreeningKeywords and uiaFailOpenWindows by dropping blank entries", () => {
     expect(sanitizeValue("contentScreeningKeywords", ["acme", "", "codename", null])).toEqual(["acme", "codename"]);
     expect(sanitizeValue("uiaFailOpenWindows", ["MyApp::", "", undefined])).toEqual(["MyApp::"]);
+    expect(sanitizeValue("untitledSafeApps", ["digitrack.app.exe", ""])).toEqual(["digitrack.app.exe"]);
     expect(sanitizeValue("contentScreeningKeywords", "not-an-array")).toEqual([]);
   });
 });

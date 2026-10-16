@@ -1999,6 +1999,13 @@ contentScreeningKeywords?: string[];
  */
 uiaFailOpenWindows?: string[];
 /**
+ * Executables (e.g. `digitrack.app.exe`) whose untitled windows count as
+ * verified for window-exclusion checks. Ordinarily an untitled window is
+ * unverified wherever a configured rule could match its title. Their app
+ * name is still checked against every rule. Empty by default.
+ */
+untitledSafeApps?: string[];
+/**
  * Automatically detect and skip incognito / private browsing windows.
  */
 ignoreIncognitoWindows: boolean;

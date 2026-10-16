@@ -328,6 +328,7 @@ let DEFAULT_SETTINGS: Settings = {
 			contentScreeningEnabled: true,
 			contentScreeningKeywords: [],
 			uiaFailOpenWindows: [],
+			untitledSafeApps: [],
 			ignoredMeetingApps: [],
 			audioChunkDuration: 30,
 			languages: [],

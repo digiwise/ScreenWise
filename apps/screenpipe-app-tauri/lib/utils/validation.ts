@@ -58,6 +58,7 @@ export const settingsStoreSchema = z.object({
   contentScreeningEnabled: z.boolean().optional(),
   contentScreeningKeywords: z.array(z.string()).optional(),
   uiaFailOpenWindows: z.array(z.string()).optional(),
+  untitledSafeApps: z.array(z.string()).optional(),
   disableVision: z.boolean(),
   useAllMonitors: z.boolean(),
   fps: z.number().min(0.1, "FPS must be at least 0.1").max(60, "FPS cannot exceed 60"),
@@ -164,6 +165,7 @@ export const sanitizeValue = (field: ExtendedSettingsKeys, value: any): any => {
     case "languages":
     case "contentScreeningKeywords":
     case "uiaFailOpenWindows":
+    case "untitledSafeApps":
       return Array.isArray(value) ? value.filter(Boolean) : [];
       
     default:

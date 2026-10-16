@@ -489,6 +489,8 @@ pub struct TreeWalkerConfig {
     /// User-configured URLs to ignore (domain-level match on the focused
     /// browser tab's URL — see [`screenpipe_capture_policy::url_filter::is_url_blocked`]).
     pub ignored_urls: Vec<String>,
+    /// Executables whose untitled windows are verified by window capture policy.
+    pub untitled_safe_apps: Vec<String>,
     /// Monitor origin X in screen points (virtual desktop coordinate space).
     /// Used to normalize element bounds to monitor-relative 0-1 coords.
     pub monitor_x: f64,
@@ -542,6 +544,7 @@ impl Default for TreeWalkerConfig {
             ignored_windows: Vec::new(),
             included_windows: Vec::new(),
             ignored_urls: Vec::new(),
+            untitled_safe_apps: Vec::new(),
             monitor_x: 0.0,
             monitor_y: 0.0,
             monitor_width: 0.0,

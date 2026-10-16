@@ -318,6 +318,13 @@ pub struct RecordingSettings {
     #[serde(rename = "uiaFailOpenWindows", default)]
     pub uia_fail_open_windows: Vec<String>,
 
+    /// Executables (e.g. `digitrack.app.exe`) whose untitled windows count as
+    /// verified for window-exclusion checks. Ordinarily an untitled window is
+    /// unverified wherever a configured rule could match its title. Their app
+    /// name is still checked against every rule. Empty by default.
+    #[serde(rename = "untitledSafeApps", default)]
+    pub untitled_safe_apps: Vec<String>,
+
     /// Automatically detect and skip incognito / private browsing windows.
     #[serde(rename = "ignoreIncognitoWindows")]
     pub ignore_incognito_windows: bool,
@@ -532,6 +539,7 @@ impl Default for RecordingSettings {
             content_screening_enabled: true,
             content_screening_keywords: vec![],
             uia_fail_open_windows: vec![],
+            untitled_safe_apps: vec![],
             ignore_incognito_windows: true,
             pause_on_drm_content: false,
             disable_clipboard_capture: true,

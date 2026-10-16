@@ -164,6 +164,24 @@ rule decides whether an untitled window may be captured alone (owner request
 match the app or the title, so with any unscoped pattern configured, untitled
 windows remain unverified; `App::` patterns avoid that.
 
+`untitledSafeApps` (Settings → Privacy → Apps with untitled windows, empty by
+default) lists executables, matched exactly (case-insensitive, `.exe`
+optional), whose untitled windows count as verified anyway. Their app name is
+still checked against every rule; titled windows are unaffected.
+
+**Taskbars (owner policy 2026-10-16).** Explorer's taskbars (`Shell_TrayWnd`,
+`Shell_SecondaryTrayWnd` owned by `explorer.exe`) are blacked out in every
+admitted capture: full-monitor, active-window-only and maximised-window frames.
+Their bounds are sampled before and after acquisition and once more before the
+frame is returned, and the union is masked (an auto-hide taskbar can move). If a
+visible taskbar's bounds cannot be read, the frame fails closed
+(`post_capture_privacy_evaluation`). A taskbar in the background is therefore
+never a blocker and never forces active-window-only capture. A focused taskbar
+(just clicked) keeps the existing checks, because its accessibility tree names
+other windows, including excluded ones. Flyouts, previews, the Start menu and
+notifications are separate windows and are not masked; they follow the normal
+rules.
+
 ## Excluded background windows
 
 When the foreground excluded app belongs to monitor A, B/C can retain admitted

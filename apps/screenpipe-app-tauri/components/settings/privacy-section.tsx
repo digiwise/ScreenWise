@@ -12,6 +12,7 @@ export const searchIndex: SettingsField[] = [
   { label: "PII masking", keywords: ["mask", "redact"] },
   { label: "Content screening", keywords: ["screening", "ocr", "password manager", "secrets", "keywords"] },
   { label: "Fail-open windows", keywords: ["uia", "accessibility", "fail open", "fail-open"] },
+  { label: "Untitled windows", keywords: ["untitled", "no title", "window title", "safe apps"] },
 ];
 import {
   Eye,
@@ -689,6 +690,12 @@ export function PrivacySection() {
     handleSettingsChange({ uiaFailOpenWindows: change.next }, true);
   };
 
+  const handleUntitledSafeAppsChange = (values: string[]) => {
+    const change = applyListChange(settings.untitledSafeApps || [], values);
+    if (!change) return;
+    handleSettingsChange({ untitledSafeApps: change.next }, true);
+  };
+
   return (
     <div className="space-y-5">
       <p className="text-muted-foreground text-sm mb-4">
@@ -1350,6 +1357,36 @@ export function PrivacySection() {
               />
               <p className="text-xs text-muted-foreground mt-1.5">
                 Only applies when accessibility inspection fails for a matching window, while content screening is on, and only to frames with no screening hits. Exclusions, private windows, lock, DRM and identity, focus, target and monitor checks still apply. Use the <code>App::</code> or <code>App::Title</code> form; title-only patterns are ignored.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center space-x-2.5 mb-2">
+              <AppWindowMac className="h-4 w-4 text-muted-foreground shrink-0" />
+              <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                Apps with untitled windows
+                <HelpTooltip text="A window without a title is normally treated as unverified whenever an exclusion rule could match a title, which forces active-window-only capture or withholds the monitor. List executables here (for example digitrack.app.exe) whose untitled windows you consider safe. Their app name is still checked against every exclusion rule, and titled windows are unaffected." />
+              </h3>
+            </div>
+            <div className="ml-[26px]">
+              <MultiSelect
+                options={(settings.untitledSafeApps || []).map((app) => ({
+                  value: app,
+                  label: app,
+                  icon: AppWindowMac,
+                  iconUrl: getAppIconUrl(app),
+                }))}
+                defaultValue={settings.untitledSafeApps || []}
+                value={settings.untitledSafeApps || []}
+                onValueChange={handleUntitledSafeAppsChange}
+                placeholder="e.g. digitrack.app.exe"
+                allowCustomValues
+              />
+              <p className="text-xs text-muted-foreground mt-1.5">
+                Executable names, matched exactly (case-insensitive, <code>.exe</code> optional). Only untitled windows of these apps count as verified; exclusions still apply to their app name.
               </p>
             </div>
           </CardContent>
