@@ -308,6 +308,44 @@ pub fn search_result_to_content_item(
     }
 }
 
+fn search_busy() -> (StatusCode, JsonResponse<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        JsonResponse(json!({
+            "error": "search is busy: too many concurrent searches; retry after the Retry-After interval",
+            "retry_after_seconds": 2,
+        })),
+    )
+}
+
+/// Map a search failure: an interrupted (over-budget) statement is a timeout,
+/// an exhausted API read pool is overload, anything else is a server error.
+fn search_failure(error: &sqlx::Error) -> (StatusCode, JsonResponse<serde_json::Value>) {
+    const SQLITE_INTERRUPT: &str = "9";
+    if matches!(error, sqlx::Error::PoolTimedOut) {
+        warn!("search refused: API read pool exhausted");
+        return search_busy();
+    }
+    if error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .is_some_and(|code| code == SQLITE_INTERRUPT)
+    {
+        warn!("search query interrupted after its statement budget");
+        return (
+            StatusCode::REQUEST_TIMEOUT,
+            JsonResponse(
+                json!({"error": "search query timed out — try a narrower time range or add filters"}),
+            ),
+        );
+    }
+    error!("failed to perform search operations: {}", error);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        JsonResponse(json!({"error": format!("failed to perform search operations: {}", error)})),
+    )
+}
+
 /// Compute a cache key for a search query by hashing its parameters
 pub(crate) fn compute_search_cache_key(query: &SearchQuery) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -380,6 +418,12 @@ pub(crate) async fn search(
         }
     }
 
+    // Bounded concurrency: excess searches are refused at once (503 with
+    // Retry-After) rather than queueing behind the API read pool.
+    let Ok(_heavy_read) = state.api_heavy_reads.clone().try_acquire_owned() else {
+        return Err(search_busy());
+    };
+
     let query_str = query.q.as_deref().unwrap_or("");
 
     let content_type = query.content_type.clone();
@@ -438,13 +482,7 @@ pub(crate) async fn search(
             JsonResponse(json!({"error": "search query timed out after 30s — try a narrower time range or add filters"})),
         )
     })?
-    .map_err(|e| {
-        error!("failed to perform search operations: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            JsonResponse(json!({"error": format!("failed to perform search operations: {}", e)})),
-        )
-    })?;
+    .map_err(|e| search_failure(&e))?;
 
     let mut content_items: Vec<ContentItem> = results
         .iter()
@@ -728,6 +766,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_failures_map_overload_and_interrupts_to_retryable_statuses() {
+        assert_eq!(
+            search_failure(&sqlx::Error::PoolTimedOut).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(search_busy().1 .0["retry_after_seconds"], 2);
+        // A statement stopped by the progress handler surfaces as SQLITE_INTERRUPT.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    conn.lock_handle().await?.set_progress_handler(1, || false);
+                    Ok(())
+                })
+            })
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let interrupted = sqlx::query("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c LIMIT 100000) SELECT count(*) FROM c")
+            .fetch_one(&pool)
+            .await
+            .err()
+            .expect("the progress handler interrupts every statement");
+        assert_eq!(search_failure(&interrupted).0, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(
+            search_failure(&sqlx::Error::RowNotFound).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     #[test]
     fn audio_segment_reference_survives_public_api_conversion() {

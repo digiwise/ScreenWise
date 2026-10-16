@@ -306,6 +306,70 @@ pub struct DatabaseManager {
     /// Write coalescing queue. Hot-path writes are submitted here and
     /// batched into single transactions every 100ms.
     write_queue: crate::write_queue::WriteQueue,
+    /// Small read pool reserved for the local HTTP API (see [`Self::api_reads`]),
+    /// so API read bursts cannot exhaust the pool recording relies on. Its
+    /// statements are interrupted after [`API_STATEMENT_BUDGET`].
+    api_read_pool: SqlitePool,
+}
+
+/// Longest an API-pool statement may run before SQLite interrupts it. Below the
+/// API's 30 s request timeout, so a timed-out search also frees its connection
+/// instead of running on after the response (dropping a future does not stop
+/// a running SQLite statement).
+pub const API_STATEMENT_BUDGET: Duration = Duration::from_secs(25);
+/// Callback gap that marks a new statement for [`StatementClock`].
+const STATEMENT_IDLE_GAP: Duration = Duration::from_millis(100);
+/// SQLite VM instructions between progress callbacks.
+const PROGRESS_HANDLER_OPS: i32 = 4000;
+
+/// Pool options whose connections interrupt any statement running longer
+/// than `budget` (see [`StatementClock`]).
+pub(crate) fn statement_budget_pool_options(budget: Duration) -> SqlitePoolOptions {
+    SqlitePoolOptions::new().after_connect(move |conn, _meta| {
+        Box::pin(async move {
+            let mut handle = conn.lock_handle().await?;
+            let mut clock = StatementClock::new(budget);
+            handle.set_progress_handler(PROGRESS_HANDLER_OPS, move || {
+                clock.tick(std::time::Instant::now())
+            });
+            Ok(())
+        })
+    })
+}
+
+/// Per-connection clock driven by SQLite's progress handler, which only runs
+/// while a statement executes. A pause longer than [`STATEMENT_IDLE_GAP`]
+/// between callbacks starts a new measurement, so the clock can restart
+/// early (lenient) but never measures idle time. Statements that follow each
+/// other on one connection with no such pause share one budget.
+#[derive(Debug)]
+pub(crate) struct StatementClock {
+    budget: Duration,
+    started: Option<std::time::Instant>,
+    last_tick: Option<std::time::Instant>,
+}
+
+impl StatementClock {
+    pub(crate) fn new(budget: Duration) -> Self {
+        Self {
+            budget,
+            started: None,
+            last_tick: None,
+        }
+    }
+
+    /// `true` to let SQLite continue, `false` to interrupt the statement.
+    pub(crate) fn tick(&mut self, now: std::time::Instant) -> bool {
+        let new_run = self
+            .last_tick
+            .is_none_or(|last| now.saturating_duration_since(last) > STATEMENT_IDLE_GAP);
+        if new_run {
+            self.started = Some(now);
+        }
+        self.last_tick = Some(now);
+        self.started
+            .is_none_or(|started| now.saturating_duration_since(started) <= self.budget)
+    }
 }
 
 /// One level-0 OCR element row, buffered for bulk insertion.
@@ -358,6 +422,20 @@ async fn flush_level0_bulk(
 }
 
 impl DatabaseManager {
+    /// A handle for the local HTTP API: identical, except that its reads use
+    /// the dedicated API read pool. Writes, the write queue and the heavy-read
+    /// limit are shared with the recording handle.
+    pub fn api_reads(&self) -> Self {
+        Self {
+            pool: self.api_read_pool.clone(),
+            write_pool: self.write_pool.clone(),
+            write_semaphore: Arc::clone(&self.write_semaphore),
+            heavy_read_semaphore: Arc::clone(&self.heavy_read_semaphore),
+            write_queue: self.write_queue.clone(),
+            api_read_pool: self.api_read_pool.clone(),
+        }
+    }
+
     pub async fn new(database_path: &str, config: DbConfig) -> Result<Self, sqlx::Error> {
         debug!(
             "Initializing DatabaseManager with database path: {} (mmap={}MB, cache={}KB, read_pool={})",
@@ -432,6 +510,16 @@ impl DatabaseManager {
             .connect_with(connect_options.clone())
             .await?;
 
+        // API read pool: separate and small, so API bursts never starve
+        // recording's reads. A short acquire timeout lets the API answer 503
+        // promptly instead of queueing; runaway statements are interrupted.
+        let api_read_pool = statement_budget_pool_options(API_STATEMENT_BUDGET)
+            .max_connections((config.read_pool_max / 3).clamp(2, 8))
+            .min_connections(0)
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_with(connect_options.clone())
+            .await?;
+
         // Write pool: dedicated to INSERT/UPDATE/DELETE via begin_immediate_with_retry().
         // Writes are serialized by write_semaphore so only 1 is active
         // at a time; extras absorb connection detach without killing the pool.
@@ -454,6 +542,7 @@ impl DatabaseManager {
             write_semaphore,
             heavy_read_semaphore: Arc::new(Semaphore::new(2)),
             write_queue,
+            api_read_pool,
         };
 
         // Checkpoint any stale WAL before running migrations or starting captures.
@@ -11006,6 +11095,7 @@ mod tests {
         assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 1);
         db.pool.close().await;
         db.write_pool.close().await;
+        db.api_read_pool.close().await;
         drop(db);
         let db = DatabaseManager::new(&database.to_string_lossy(), Default::default())
             .await
@@ -11085,6 +11175,7 @@ mod tests {
         assert_eq!(db.retry_media_deletions(100).await.unwrap().pending, 0);
         db.pool.close().await;
         db.write_pool.close().await;
+        db.api_read_pool.close().await;
         drop(db);
         for path in [
             database.clone(),
@@ -11130,6 +11221,85 @@ mod tests {
         DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn statement_clock_interrupts_only_a_continuously_running_statement() {
+        let start = std::time::Instant::now();
+        let mut clock = StatementClock::new(Duration::from_millis(500));
+        // Continuous callbacks: allowed up to the budget, then interrupted.
+        let mut now = start;
+        while now - start <= Duration::from_millis(500) {
+            assert!(clock.tick(now));
+            now += Duration::from_millis(10);
+        }
+        assert!(!clock.tick(now));
+        // A pause (idle connection or new statement) restarts the measurement.
+        let later = now + STATEMENT_IDLE_GAP + Duration::from_millis(1);
+        assert!(clock.tick(later));
+        assert!(clock.tick(later + Duration::from_millis(400)));
+    }
+
+    #[tokio::test]
+    async fn statement_budget_pool_interrupts_a_runaway_query_and_keeps_the_connection() {
+        let options: SqliteConnectOptions = "sqlite::memory:".parse().unwrap();
+        let pool = statement_budget_pool_options(Duration::from_millis(200))
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let runaway = sqlx::query_scalar::<_, i64>(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c)              SELECT count(*) FROM c",
+        )
+        .fetch_one(&pool)
+        .await;
+        assert!(runaway.is_err(), "an endless statement must be interrupted");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let one: i64 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(one, 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_api_reads_never_block_recording_reads_or_writes() {
+        let db = test_database().await;
+        let api = db.api_reads();
+        let mut held = Vec::new();
+        for _ in 0..api.pool.options().get_max_connections() {
+            held.push(api.pool.acquire().await.unwrap());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), api.pool.acquire())
+                .await
+                .map_or(true, |result| result.is_err()),
+            "the API pool is exhausted"
+        );
+        // Recording keeps reading and writing while every API connection is busy.
+        let one: i64 = tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar("SELECT 1").fetch_one(&db.pool),
+        )
+        .await
+        .expect("recording read must not wait for the API pool")
+        .unwrap();
+        assert_eq!(one, 1);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.insert_audio_chunk("synthetic-isolation.wav", None),
+        )
+        .await
+        .expect("recording write must not wait for the API pool")
+        .unwrap();
+        // The API handle shares the database, not just the configuration.
+        drop(held);
+        let chunks: i64 = sqlx::query_scalar("SELECT count(*) FROM audio_chunks")
+            .fetch_one(&api.pool)
+            .await
+            .unwrap();
+        assert_eq!(chunks, 1);
     }
 
     #[tokio::test]
@@ -11224,6 +11394,7 @@ mod tests {
         assert!(retained.exists());
         db.pool.close().await;
         db.write_pool.close().await;
+        db.api_read_pool.close().await;
         drop(db);
         let db = DatabaseManager::new(&database.to_string_lossy(), Default::default())
             .await
@@ -11264,6 +11435,7 @@ mod tests {
         assert_eq!((frame_count, transcript_count), (3, 1));
         db.pool.close().await;
         db.write_pool.close().await;
+        db.api_read_pool.close().await;
         drop(db);
         std::fs::remove_file(&retained).unwrap();
         // SQLite's Windows worker can release its final handle just after pool

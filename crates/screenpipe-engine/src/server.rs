@@ -115,8 +115,34 @@ pub type FrameImageCache = LruCache<i64, (String, std::time::Instant)>;
 /// Cache key for search results (hash of query parameters)
 pub type SearchCache = MokaCache<u64, Arc<SearchResponse>>;
 
+/// Concurrent heavy API reads (searches) admitted at once. Each search runs
+/// its result and count queries in parallel, so this bounds the API's use of
+/// its read pool; excess requests get 503 instead of queueing.
+pub const API_HEAVY_READ_LIMIT: usize = 2;
+
+/// Overloaded responses tell clients when to retry (`Retry-After`, seconds),
+/// so well-behaved clients back off instead of adding load.
+async fn retry_after_on_unavailable(
+    mut response: axum::response::Response,
+) -> axum::response::Response {
+    use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE
+        && !response.headers().contains_key(RETRY_AFTER)
+    {
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("2"));
+    }
+    response
+}
+
 pub struct AppState {
+    /// API handle: its reads use the dedicated API read pool, so API load
+    /// cannot exhaust the pool recording relies on (writes are shared).
     pub db: Arc<DatabaseManager>,
+    /// Admits at most [`API_HEAVY_READ_LIMIT`] concurrent heavy API reads
+    /// (searches); further requests are answered 503 with `Retry-After`.
+    pub api_heavy_reads: Arc<tokio::sync::Semaphore>,
     pub audio_manager: Arc<AudioManager>,
     pub app_start_time: DateTime<Utc>,
     pub screenpipe_dir: PathBuf,
@@ -338,8 +364,10 @@ impl SCServer {
             });
         }
 
+        let api_db = Arc::new(self.db.api_reads());
         let app_state = Arc::new(AppState {
-            db: self.db.clone(),
+            db: api_db.clone(),
+            api_heavy_reads: Arc::new(tokio::sync::Semaphore::new(API_HEAVY_READ_LIMIT)),
             audio_manager: self.audio_manager.clone(),
             app_start_time: Utc::now(),
             screenpipe_dir: self.screenpipe_dir.clone(),
@@ -347,7 +375,7 @@ impl SCServer {
             audio_disabled: self.audio_disabled,
             frame_cache: match FrameCache::new(
                 self.screenpipe_dir.clone().join("data"),
-                self.db.clone(),
+                api_db.clone(),
             )
             .await
             {
@@ -629,6 +657,7 @@ impl SCServer {
                 }),
             )
             .with_state(app_state.clone())
+            .layer(axum::middleware::map_response(retry_after_on_unavailable))
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),
                 crate::routes::vault::vault_lock_middleware,
@@ -742,6 +771,25 @@ fn minimal_readiness_response() -> axum::response::Response {
 #[cfg(test)]
 mod access_boundary_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn overloaded_responses_carry_retry_after() {
+        use axum::http::{header::RETRY_AFTER, StatusCode};
+        use axum::response::IntoResponse;
+        let busy =
+            retry_after_on_unavailable(StatusCode::SERVICE_UNAVAILABLE.into_response()).await;
+        assert_eq!(busy.headers()[RETRY_AFTER], "2");
+        let ok = retry_after_on_unavailable(StatusCode::OK.into_response()).await;
+        assert!(!ok.headers().contains_key(RETRY_AFTER));
+        let mut explicit = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        explicit
+            .headers_mut()
+            .insert(RETRY_AFTER, "30".parse().unwrap());
+        assert_eq!(
+            retry_after_on_unavailable(explicit).await.headers()[RETRY_AFTER],
+            "30"
+        );
+    }
     #[test]
     fn cors_matches_exact_local_authorities() {
         for origin in [

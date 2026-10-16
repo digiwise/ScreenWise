@@ -46,6 +46,15 @@ an instruction to load every element and full frame context for every period.
   response does not prove earlier capture was complete. Treat 403, 408, 503,
   other errors, cancellation and exhausted query budgets as distinct from an
   empty successful result. Never disable authentication to recover a query.
+- Load limits (2026-10-16, after an API burst exhausted the shared read pool
+  and starved recording): API reads use a dedicated small read pool, separate
+  from recording's. At most two `/search` requests run at once; others get
+  503 at once with `Retry-After` (seconds), as does an exhausted API pool.
+  Any API statement running over 25 s is interrupted and the search answers
+  408, so a timed-out request no longer keeps a connection busy. Send one
+  request at a time, keep OCR ranges short (about 30 minutes on busy days),
+  honour `Retry-After` and stop or back off on the first 408/5xx rather than
+  retrying in a loop. Cached identical searches return without the limit.
 
 ## Routes to use
 
