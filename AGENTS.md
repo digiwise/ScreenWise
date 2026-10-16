@@ -324,6 +324,12 @@ reason codes and sampled foreground-monitor provenance are permitted, plus
 the `no_safe_window` detail. Monitor
 association must remain nullable and must become unknown if sampled phases
 disagree; it is not a continuous activity or privacy guarantee.
+Owner decision (2026-10-16): a frame withheld only for a UIA retrieval failure
+may keep the walker's natively read app name and PII-redacted, screened title
+under the conditions in
+[capture decision metadata](docs/CAPTURE_PRIVACY.md#native-metadata-on-uia-failure-placeholders-2026-10-16)
+(no unchecked URL rule, not a terminal, verified identity). Every other
+withheld frame stores no title, app or URL.
 Unknown identities remain unknown; do not infer an
 app from stale focus or expose excluded titles, URLs, patterns or paths. See
 [capture decision metadata](docs/CAPTURE_PRIVACY.md). Keep generic notices and

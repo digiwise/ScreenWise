@@ -1964,6 +1964,90 @@ fn pre_walk_privacy_outcome(
     }
 }
 
+/// Natively read frame metadata kept on a placeholder withheld for a UIA
+/// retrieval failure (owner decision 2026-10-16).
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativePlaceholderMetadata {
+    app_name: String,
+    /// Redacted title; `None` keeps the app name only.
+    window_name: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+impl NativePlaceholderMetadata {
+    fn code(&self) -> &'static str {
+        if self.window_name.is_some() {
+            "native_title"
+        } else {
+            "native_app"
+        }
+    }
+}
+
+/// What a frame withheld only because UIA could not finish may record:
+/// the walker's own native app name and title, read once in that attempt
+/// after every native rule (protected apps, ignore/include patterns,
+/// private-window titles) passed, for a window whose identity was rechecked
+/// afterwards. Never for an unidentified, protected or unverified window.
+/// The title is dropped (app name kept) when a URL rule was left unchecked
+/// (the page title could name a blocked site), for terminals (titles carry
+/// command lines), when it names a password manager, and on any
+/// content-screening hit on the title text.
+/// Pixels, OCR, tree text and URLs stay withheld.
+#[cfg(target_os = "windows")]
+fn uia_failure_native_metadata(
+    failure: &screenpipe_a11y::tree::AccessibilityFailure,
+    screening: Option<&ContentScreeningConfig>,
+) -> Option<NativePlaceholderMetadata> {
+    use screenpipe_capture_policy::target;
+    use screenpipe_config::capture_diagnostics::{RuleKind, RuleOrigin};
+    if failure.verified_target.is_none()
+        || failure
+            .unresolved_rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::NativeWindowPolicy)
+    {
+        return None;
+    }
+    let app_name = failure.app_name.trim();
+    let app_lc = app_name.to_lowercase();
+    if app_lc.is_empty() || app_lc == "unknown" || target::is_protected_app(&app_lc) {
+        return None;
+    }
+    let app_only = NativePlaceholderMetadata {
+        app_name: app_name.to_string(),
+        window_name: None,
+    };
+    let title = failure.window_name.trim();
+    if title.is_empty()
+        || target::title_may_carry_commands(&app_lc)
+        || target::title_names_password_manager(&title.to_lowercase())
+        || failure
+            .unresolved_rules
+            .iter()
+            .any(|rule| rule.origin == RuleOrigin::IgnoredUrls)
+    {
+        return Some(app_only);
+    }
+    // Always screened, whether or not frame screening is enabled: built-in
+    // password-manager, secret and DRM-domain checks plus configured keywords.
+    let config = ContentScreeningConfig {
+        blocked_url_patterns: Vec::new(),
+        protected_domains: true,
+        keywords: screening.map(|c| c.keywords.clone()).unwrap_or_default(),
+    };
+    if screen_text_plan(&[title], &config).verdict().blocked() {
+        return Some(app_only);
+    }
+    let redacted = screenpipe_core::pii_removal::remove_pii(title);
+    let redacted = redacted.trim();
+    Some(NativePlaceholderMetadata {
+        app_name: app_name.to_string(),
+        window_name: (!redacted.is_empty()).then(|| redacted.to_string()),
+    })
+}
+
 #[cfg(target_os = "windows")]
 async fn persist_windows_placeholder(
     params: &CaptureParams<'_>,
@@ -1973,10 +2057,33 @@ async fn persist_windows_placeholder(
     screenshot_disabled: bool,
     privacy: &WindowsCapturePrivacy,
 ) -> Result<CaptureOutput> {
+    persist_windows_placeholder_with_metadata(
+        params,
+        trigger,
+        captured_at,
+        outcome,
+        screenshot_disabled,
+        privacy,
+        None,
+    )
+    .await
+}
+
+#[cfg(target_os = "windows")]
+async fn persist_windows_placeholder_with_metadata(
+    params: &CaptureParams<'_>,
+    trigger: &CaptureTrigger,
+    captured_at: chrono::DateTime<Utc>,
+    outcome: WindowsCaptureOutcome,
+    screenshot_disabled: bool,
+    privacy: &WindowsCapturePrivacy,
+    native: Option<&NativePlaceholderMetadata>,
+) -> Result<CaptureOutput> {
     let marker = outcome
         .marker_text()
         .expect("placeholder capture outcomes always expose marker text");
     let mut privacy = privacy.clone().with_outcome(outcome);
+    privacy.native_metadata = native.map(NativePlaceholderMetadata::code);
     privacy.attribute_failed_foreground(params.monitor_id);
     report_windows_privacy(params.monitor_id, &privacy);
     let notice = outcome
@@ -2003,8 +2110,8 @@ async fn persist_windows_placeholder(
         captured_at,
         monitor_id: params.monitor_id,
         device_name: params.device_name,
-        app_name: None,
-        window_name: None,
+        app_name: native.map(|native| native.app_name.as_str()),
+        window_name: native.and_then(|native| native.window_name.as_deref()),
         browser_url: None,
         document_path: None,
         focused: false,
@@ -3829,7 +3936,9 @@ async fn do_capture(
                 .as_ref()
                 .is_some_and(|decision| decision.processing == "withheld")
             {
-                return persist_windows_placeholder(
+                let native =
+                    uia_failure_native_metadata(&failure, params.content_screening.as_deref());
+                return persist_windows_placeholder_with_metadata(
                     params,
                     trigger,
                     captured_at,
@@ -3838,6 +3947,7 @@ async fn do_capture(
                     ),
                     screenshot_disabled,
                     &windows_privacy,
+                    native.as_ref(),
                 )
                 .await;
             }
@@ -8230,4 +8340,133 @@ fn screening_metrics_become_additive_decision_fields() {
         json,
         serde_json::json!({"outcome":"passed","reasons":[],"fail_open":false})
     );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn native_metadata_test_failure(
+    app: &str,
+    title: &str,
+    ignored_urls: &[&str],
+) -> screenpipe_a11y::tree::AccessibilityFailure {
+    let mut config = TreeWalkerConfig::default();
+    config.ignored_urls = ignored_urls.iter().map(|url| url.to_string()).collect();
+    config.ignored_windows = vec!["vault".into(), "excel::".into()];
+    let mut failure = screenpipe_a11y::tree::AccessibilityFailure::after_native_policy(
+        screenpipe_config::capture_diagnostics::AccessibilityStopReason::Backoff,
+        &config,
+        app.into(),
+        title.into(),
+    );
+    failure.verified_target = Some(screenpipe_a11y::tree::WindowsTreeTarget {
+        hwnd: 1,
+        process_id: 2,
+    });
+    failure
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn uia_failure_placeholders_keep_only_screened_native_metadata() {
+    let native = |failure: &screenpipe_a11y::tree::AccessibilityFailure| {
+        uia_failure_native_metadata(failure, None)
+    };
+    let app_only = |app: &str| {
+        Some(NativePlaceholderMetadata {
+            app_name: app.into(),
+            window_name: None,
+        })
+    };
+
+    // Ordinary app, no URL rules: app and redacted title, marked native_title.
+    let kept = native(&native_metadata_test_failure(
+        "msedge.exe",
+        "Inbox - jane.doe@example.com - Gmail",
+        &[],
+    ))
+    .expect("verified, identified window keeps metadata");
+    assert_eq!(kept.app_name, "msedge.exe");
+    let title = kept.window_name.as_deref().expect("title kept");
+    assert!(title.contains("Gmail") && !title.contains("jane.doe@example.com"));
+    assert_eq!(kept.code(), "native_title");
+
+    // A URL rule left unchecked: the page title could name a blocked site.
+    assert_eq!(
+        native(&native_metadata_test_failure(
+            "msedge.exe",
+            "Account summary",
+            &["bank.example"]
+        )),
+        app_only("msedge.exe")
+    );
+    // Terminal titles carry command lines.
+    assert_eq!(
+        native(&native_metadata_test_failure(
+            "WindowsTerminal.exe",
+            "mysql -u root",
+            &[]
+        )),
+        app_only("WindowsTerminal.exe")
+    );
+    // A content-screening hit on the title text drops it.
+    assert_eq!(
+        native(&native_metadata_test_failure(
+            "msedge.exe",
+            "1Password - Sign in",
+            &[]
+        )),
+        app_only("msedge.exe")
+    );
+    let keyword = ContentScreeningConfig {
+        blocked_url_patterns: Vec::new(),
+        protected_domains: false,
+        keywords: vec!["salary".into()],
+    };
+    assert_eq!(
+        uia_failure_native_metadata(
+            &native_metadata_test_failure("msedge.exe", "Salary review 2026", &[]),
+            Some(&keyword),
+        ),
+        app_only("msedge.exe")
+    );
+    // Empty title keeps the app name, marked native_app.
+    let empty = native(&native_metadata_test_failure(
+        "digitrack.app.exe",
+        "  ",
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(empty.code(), "native_app");
+
+    // Never for unverified, unidentified or protected windows.
+    let mut unverified = native_metadata_test_failure("msedge.exe", "Calendar", &[]);
+    unverified.verified_target = None;
+    assert_eq!(native(&unverified), None);
+    for app in ["", "Unknown", "1Password.exe"] {
+        assert_eq!(
+            native(&native_metadata_test_failure(app, "Calendar", &[])),
+            None,
+            "{app}"
+        );
+    }
+    let mut incomplete = native_metadata_test_failure("msedge.exe", "Calendar", &[]);
+    incomplete
+        .unresolved_rules
+        .push(screenpipe_config::capture_diagnostics::RuleReference {
+            origin: screenpipe_config::capture_diagnostics::RuleOrigin::Builtin,
+            index: 0,
+            kind: screenpipe_config::capture_diagnostics::RuleKind::NativeWindowPolicy,
+        });
+    assert_eq!(native(&incomplete), None);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn native_metadata_marker_is_a_fixed_code_and_absent_by_default() {
+    let privacy = WindowsCapturePrivacy::default();
+    let json = serde_json::to_value(&privacy).unwrap();
+    assert!(json.get("native_metadata").is_none());
+    let mut privacy = privacy;
+    privacy.native_metadata = Some("native_title");
+    let json = serde_json::to_value(&privacy).unwrap();
+    assert_eq!(json["native_metadata"], "native_title");
 }

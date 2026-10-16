@@ -35,6 +35,40 @@ pub const SYSTEM_UI_APPS: &[&str] = &[
     "snippingtool",
 ];
 
+/// Terminal and console hosts: their window title is often the running
+/// command line, so it is not stored as unverified metadata.
+pub const TERMINAL_APPS: &[&str] = &[
+    "windowsterminal",
+    "openconsole",
+    "conhost",
+    "cmd.exe",
+    "powershell",
+    "pwsh",
+    "wezterm",
+    "alacritty",
+    "mintty",
+    "putty",
+    "kitty",
+    "terminal",
+    "iterm",
+];
+
+/// `true` when the app's window title may be a command line. `app_lc` must be
+/// lowercase.
+pub fn title_may_carry_commands(app_lc: &str) -> bool {
+    TERMINAL_APPS.iter().any(|name| app_lc.contains(name))
+}
+
+/// `true` when a window title names a password manager or credential tool.
+/// Unlike on-screen text, the brand alone suffices: a title is short and names
+/// what is open (a web vault in a browser has no protected process name).
+/// `title_lc` must be lowercase.
+pub fn title_names_password_manager(title_lc: &str) -> bool {
+    password_managers::screen_brand_names()
+        .iter()
+        .any(|brand| title_lc.contains(brand.as_str()))
+}
+
 /// Why a target may not be contacted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exclusion {
@@ -235,6 +269,30 @@ mod tests {
             Some(Exclusion::Unidentified)
         );
         assert!(f.excludes_whole_app(""));
+    }
+
+    #[test]
+    fn terminal_titles_are_recognised() {
+        for app in [
+            "WindowsTerminal.exe",
+            "pwsh.exe",
+            "cmd.exe",
+            "OpenConsole.exe",
+        ] {
+            assert!(title_may_carry_commands(&app.to_lowercase()), "{app}");
+        }
+        for app in ["msedge.exe", "excel.exe", "code.exe", "digitrack.app.exe"] {
+            assert!(!title_may_carry_commands(app), "{app}");
+        }
+    }
+
+    #[test]
+    fn password_manager_brands_in_titles_are_recognised() {
+        assert!(title_names_password_manager("1password - sign in"));
+        assert!(title_names_password_manager(
+            "my vault | bitwarden web vault"
+        ));
+        assert!(!title_names_password_manager("inbox - gmail"));
     }
 
     #[test]

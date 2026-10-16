@@ -222,6 +222,36 @@ involve that app's provider. Replacing it with a WinEvent hook (`EVENT_OBJECT_FO
 provider, is an open owner decision. Untested: a live run proving the absence
 of calls into a specific excluded app.
 
+## Native metadata on UIA-failure placeholders (2026-10-16)
+
+Owner decision: a frame withheld only because UIA could not finish
+(`accessibility_inspection` with a retrieval cause such as `uia_backoff`,
+`uia_walk_timeout` or `uia_provider_failure`) may keep the walker's natively
+read app name and title in `frames.app_name`/`window_name`. Pixels, OCR,
+accessibility text and URLs stay withheld. The title is the one the walker
+read in that attempt after every native rule passed (protected apps,
+ignore/include patterns, private-window titles), for a window whose identity
+was rechecked afterwards.
+
+- No metadata for an unverified, unidentified or protected window, or when
+  native policy metadata was incomplete.
+- App name only (`native_app`) when a URL rule could not be checked (any
+  `ignoredUrls` entry: a page title could name a blocked site), for terminal
+  and console hosts (titles carry command lines), when the title is empty,
+  when it names a password-manager brand (the brand alone suffices for a
+  title), and on any content-screening hit on the title text (secret, DRM
+  domain, configured keyword; screened even when frame screening is
+  disabled).
+- Otherwise app and PII-redacted title (`native_title`).
+
+`capture_privacy.native_metadata` carries only that fixed code. Accepted
+trade-off: rules that inspect content inside the window (ignore patterns
+matching nested windows or documents, Document URLs, DRM URLs) were not
+checked, so a title can be stored for a window whose inner content would have
+blocked the frame; the title itself passed every rule that reads titles.
+Other withheld frames (excluded, focus, monitor, no safe window) store no
+metadata.
+
 ## Excluded background windows
 
 When the foreground excluded app belongs to monitor A, B/C can retain admitted

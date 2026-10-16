@@ -126,6 +126,13 @@ SELECT json_extract(capture_privacy, '$.reason') AS reason, COUNT(*) AS frames
 FROM frames WHERE {SINCE} AND text_source = 'privacy_placeholder'
   AND COALESCE(json_array_length(capture_privacy, '$.blockers'), 0) = 0
 GROUP BY 1 ORDER BY frames DESC"""),
+        ("Native metadata on UIA-failure placeholders", f"""
+SELECT json_extract(capture_privacy, '$.native_metadata') AS native_metadata,
+       json_extract(capture_privacy, '$.accessibility.cause') AS cause, app_name, COUNT(*) AS frames,
+       SUM(window_name IS NOT NULL AND window_name <> '') AS with_title
+FROM frames WHERE {SINCE} AND text_source = 'privacy_placeholder'
+  AND json_extract(capture_privacy, '$.reason') = 'accessibility_inspection'
+GROUP BY 1, 2, 3 ORDER BY frames DESC"""),
         ("Blocker app x reason (top 20)", f"""
 SELECT json_extract(b.value, '$.app') AS app, r.value AS blocker_reason,
        json_extract(b.value, '$.foreground') AS foreground, COUNT(DISTINCT frames.rowid) AS frames

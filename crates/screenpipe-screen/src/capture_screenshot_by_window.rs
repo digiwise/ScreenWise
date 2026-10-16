@@ -1193,6 +1193,12 @@ pub struct WindowsCapturePrivacy {
     /// topmost safe window of a monitor without the foreground window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_window_choice: Option<&'static str>,
+    /// Only on placeholders withheld for a UIA retrieval failure that kept
+    /// natively read, unverified frame metadata: `native_title` (app and
+    /// redacted title) or `native_app` (app only). The values themselves are
+    /// in the frame row, never here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_metadata: Option<&'static str>,
     pub foreground_monitor: Option<String>,
     pub is_active_monitor: Option<bool>,
     pub foreground_monitor_changed: bool,
@@ -1386,6 +1392,7 @@ impl Default for WindowsCapturePrivacy {
             content_screening: None,
             no_safe_window: None,
             active_window_choice: None,
+            native_metadata: None,
             foreground_monitor: None,
             is_active_monitor: None,
             foreground_monitor_changed: false,
