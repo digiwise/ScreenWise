@@ -6,6 +6,11 @@ policy. Source review date: 17 October 2026, revision `68a1be820`. These entries
 are not evidence that private content was exposed on a particular installation.
 No new capture, live UI inspection or captured-content review was performed.
 
+The [validation register](../VALIDATION_REGISTER.md) is the reference record.
+This document explains its open privacy-relevant entries in plain language, with
+their original P1/P2 review priority, and lists newer issues not yet recorded
+there. Where the two disagree, the register wins.
+
 ## Existing gaps confirmed in the current source
 
 ### URL exclusions do not cover every input record
@@ -16,7 +21,7 @@ pasted into that page can still reach input records because their persistence
 path evaluates window ignore patterns without the frame URL policy. Frame
 content screening does not screen input rows.
 
-This is existing issue **SW-R01**. Keep keyboard/clipboard storage disabled or
+This is existing issue **SW-R01** (P1). Keep keyboard/clipboard storage disabled or
 use an app/window exclusion or explicit all-recording stop for that interval;
 URL exclusion alone is insufficient. The fix needs URL-aware input admission
 with failure handling and a synthetic excluded-page regression.
@@ -33,7 +38,7 @@ a compatibility fallback can start all connected displays, including a laptop
 screen intended to remain outside capture. An empty selection is also treated
 as permitting all monitors by the manager.
 
-This is existing issue **SW-R03**. An empty selection is not a reliable stop
+This is existing issue **SW-R03** (P1). An empty selection is not a reliable stop
 control. A future fix should preserve explicit selection, report unavailable
 monitors and require an explicit choice before broadening scope.
 
@@ -46,7 +51,7 @@ to remain unrecorded. The schedule monitor enforces whether the current time is
 inside a rule, but does not apply its audio-only/screen-only modality selection.
 Otherwise enabled sources can therefore remain admitted.
 
-This is existing issue **SW-R02**. Disable unwanted sources explicitly; do not
+This is existing issue **SW-R02** (P1). Disable unwanted sources explicitly; do not
 rely on a schedule's modality label. A fix needs distinct source gates and tests
 at rule transitions. Schedule transitions are also sampled periodically, rather
 than enforced at an exact wall-clock instant.
@@ -61,7 +66,7 @@ copies already held by clients can outlive the source operation. The ordinary
 file-serving helper still emits `Cache-Control: public, max-age=604800`; the
 separate PII-redaction response uses `no-store`.
 
-This is existing issue **SW-R05**. The cache header does not by itself bypass API
+This is existing issue **SW-R05** (P2). The cache header does not by itself bypass API
 authentication or prove that a shared cache stored the response. It does permit
 retention that deserves review for sensitive media. A fix needs consistent
 sensitive-response caching policy, derived-file invalidation and tests of a
@@ -74,6 +79,64 @@ of scoped findings, not proof that every historical finding remains unchanged.
 Sources: [frame responses](../crates/screenpipe-engine/src/routes/frames.rs),
 [manual data operations](../crates/screenpipe-engine/src/routes/data.rs),
 [background retention](../crates/screenpipe-engine/src/retention.rs).
+
+### Other open register issues
+
+- **SW-R09 (P2): delayed audio startup can outlive a capture stop.** Audio
+  starts from an unowned task after a one-second delay, and stopping the session
+  does not cancel it, so devices and workers can start after a quick stop. The
+  manual pause gate still denies samples, so this is not established as content
+  capture. Source: [capture session](../apps/screenpipe-app-tauri/src-tauri/src/capture_session.rs).
+- **SW-R10 (P2): chat deletion can fail silently.** A locked or inaccessible
+  chat file can remain on disk while the UI reports it deleted. Source:
+  [chat storage](../apps/screenpipe-app-tauri/lib/chat-storage.ts).
+- **SW-R11 (P2): an in-flight save can recreate a deleted chat.** Deleting a
+  conversation while a response is streaming can let its autosave write it back.
+  Source: [conversation persistence](../apps/screenpipe-app-tauri/components/hooks/use-chat-conversations.ts).
+- **SW-R13 (macOS): audio fallback drops app exclusions.** If Process Tap
+  startup fails, output audio falls back to a path without per-app exclusions.
+  Not re-checked on macOS for this review. Source:
+  [audio stream startup](../crates/screenpipe-audio/src/core/stream.rs).
+
+## Issues not yet in the register
+
+### UIA requests load the target application
+
+**Scenario:** A developer uses an application with a large or constantly
+updating accessibility tree. Each privacy walk asks that application to build
+its whole tree in one request, and the work runs on the application's own UI
+thread. When ScreenWise's deadline expires it abandons the request, but the
+application keeps building the answer. Repeated walks, plus focus checks on
+keystrokes, can make it noticeably slow. This was observed with one desktop
+application on 16 October 2026.
+
+Per-window backoff now stops repeated walks and probes after timeouts, and
+property changes to Name and Value no longer restart walks. A single request is
+still unbounded work for the target. A fuller fix would fetch the tree in
+bounded steps with a per-request node budget. Sources:
+[bulk acquisition](../crates/screenpipe-a11y/src/tree/windows_bulk.rs),
+[UIA backoff](../crates/screenpipe-a11y/src/uia_breaker.rs).
+
+### Unexplained heap-corruption crash
+
+One deployed build stopped on 16 October 2026 with Windows exception
+`0xc0000374` (heap corruption) in `ntdll.dll`, after about an hour of normal
+capture. It is the only ScreenWise crash recorded in 14 days. The cause has not
+been established: a crash dump exists locally but has not been analysed.
+Corruption in a process that holds captured content is worth treating as a
+security question until explained.
+
+## Open owner decisions with privacy impact
+
+- **One exclusion check for the window walker.** Other UIA contact points use
+  the shared exclusion gate, which checks both the raw and the effective app
+  name. The window walker still checks only the effective name. Source:
+  [shared gate](../crates/screenpipe-capture-policy/src/target.rs).
+- **Remaining separate exclusion lists.** Some components keep their own lists
+  of protected or excluded apps. Separate lists can drift apart.
+- **Broad ignore patterns.** A pattern without `::` matches anywhere in an app
+  name or title, so a short word can exclude far more than intended, or a
+  misspelt one can silently exclude nothing. App-scoped patterns avoid this.
 
 ## Residual contact with excluded applications
 
@@ -99,9 +162,10 @@ the optional recording-text phase can fail or be skipped during backoff.
 The remaining question is whether a realistic document or URL transition can
 hide an actual configured blocker across those paths and cause prohibited
 content to be persisted. No such sequence was established in this review.
-Removing invalidation alone is insufficient evidence of a leak, and a UIA
-failure that merely prevents otherwise permitted capture is not a meaningful
-privacy guarantee.
+Removing invalidation alone is insufficient evidence of a leak. Equally, the old
+behaviour was not a real protection: a UIA failure that happens to withhold a
+frame, and so incidentally prevents a disclosure, is not a privacy improvement.
+The question is whether the policy itself admits prohibited content.
 
 A useful synthetic check must exercise a stable foreground identity, changing
 document Name/Value evidence, optional-text failure/backoff and screening both
