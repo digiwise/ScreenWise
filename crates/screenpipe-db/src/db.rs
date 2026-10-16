@@ -2814,6 +2814,10 @@ impl DatabaseManager {
             accelerator_key: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             access_key: Option<String>,
+            /// Per-visual-line geometry (macOS/Linux; `None` on Windows). Kept
+            /// in `properties` so the tree can be rebuilt from elements.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            lines: Option<serde_json::Value>,
         }
         #[derive(serde::Deserialize, serde::Serialize)]
         struct AxBounds {
@@ -2924,6 +2928,9 @@ impl DatabaseManager {
                 }
                 if let Some(ref v) = node.access_key {
                     props.insert("access_key".into(), serde_json::Value::String(v.clone()));
+                }
+                if let Some(ref v) = node.lines {
+                    props.insert("lines".into(), v.clone());
                 }
                 if props.is_empty() {
                     None
@@ -3097,7 +3104,9 @@ impl DatabaseManager {
                 accessibility_text: accessibility_text.map(String::from),
                 text_source: text_source.map(String::from),
                 capture_privacy: capture_privacy.map(String::from),
-                accessibility_tree_json: accessibility_tree_json.map(String::from),
+                // The tree is stored only as `elements` rows (built from it
+                // below); the JSON copy duplicated them and was ~40% of the DB.
+                accessibility_tree_json: None,
                 content_hash,
                 simhash,
                 ocr_text: ocr_data.map(|(t, _, _)| t.to_string()),
@@ -4764,8 +4773,10 @@ impl DatabaseManager {
         Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
-    /// Get accessibility data for a frame (accessibility_text, accessibility_tree_json).
+    /// Get accessibility data for a frame (accessibility_text, tree JSON).
     /// Used by the /frames/:frame_id/context endpoint for copy-all and URL extraction.
+    /// The tree comes from the legacy `accessibility_tree_json` column when a
+    /// frame still has one, otherwise it is rebuilt from `elements`.
     pub async fn get_frame_accessibility_data(
         &self,
         frame_id: i64,
@@ -4776,8 +4787,47 @@ impl DatabaseManager {
         .bind(frame_id)
         .fetch_optional(&self.pool)
         .await?;
+        let Some((text, legacy_tree)) = row else {
+            return Ok((None, None));
+        };
+        let tree = match legacy_tree.filter(|tree| !tree.is_empty()) {
+            Some(tree) => Some(tree),
+            None => self.accessibility_tree_from_elements(frame_id).await?,
+        };
+        Ok((text, tree))
+    }
 
-        Ok(row.unwrap_or((None, None)))
+    /// Rebuild a frame's accessibility tree JSON (the flat pre-order
+    /// `[{role, text, depth, bounds?, on_screen?, ...properties}]` list the
+    /// walker produced) from its accessibility `elements`, following
+    /// `elements_ref_frame_id`. `None` when the frame has no such elements.
+    pub async fn accessibility_tree_from_elements(
+        &self,
+        frame_id: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        type Row = (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<i64>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT e.role, e.text, e.depth, e.left_bound, e.top_bound, e.width_bound, \
+                    e.height_bound, e.on_screen, e.properties \
+             FROM elements e \
+             WHERE e.frame_id = (SELECT COALESCE(elements_ref_frame_id, id) FROM frames WHERE id = ?1) \
+               AND e.source = 'accessibility' \
+             ORDER BY e.sort_order",
+        )
+        .bind(frame_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(accessibility_tree_json_from_rows(rows))
     }
 
     /// Get all OCR text positions with bounding boxes for a specific frame.
@@ -7853,10 +7903,10 @@ LIMIT ? OFFSET ?
 
         let rows = query_builder.fetch_all(&self.pool).await?;
 
-        Ok(rows
+        let rows = rows
             .iter()
             .map(|row| {
-                let mut positions = if !query.is_empty() {
+                let positions = if !query.is_empty() {
                     let ocr_blocks: Vec<OcrTextBlock> =
                         serde_json::from_str(&row.text_json).unwrap_or_default();
                     find_matching_positions(&ocr_blocks, query)
@@ -7864,27 +7914,36 @@ LIMIT ? OFFSET ?
                     Vec::new()
                 };
 
-                // Fallback: when OCR yields no positions, search accessibility
-                // tree nodes for the query and use their bounding boxes
-                if positions.is_empty() && !query.is_empty() {
-                    if let Some(tree_json) = &row.accessibility_tree_json {
-                        positions = find_matching_a11y_positions(tree_json, query);
-                    }
-                }
-
-                SearchMatch {
-                    frame_id: row.id,
-                    timestamp: row.timestamp,
-                    text_positions: positions.clone(),
-                    app_name: row.app_name.clone(),
-                    window_name: row.window_name.clone(),
-                    confidence: calculate_confidence(&positions),
-                    text: row.ocr_text.clone(),
-                    url: row.url.clone(),
-                    text_source: row.text_source.clone(),
-                }
+                (row, positions)
             })
-            .collect())
+            .collect::<Vec<_>>();
+        let mut matches = Vec::with_capacity(rows.len());
+        for (row, mut positions) in rows {
+            // Fallback: when OCR yields no positions, search accessibility
+            // tree nodes for the query and use their bounding boxes. Frames
+            // without the legacy JSON column use their elements.
+            if positions.is_empty() && !query.is_empty() {
+                let tree_json = match row.accessibility_tree_json.clone() {
+                    Some(tree) if !tree.is_empty() => Some(tree),
+                    _ => self.accessibility_tree_from_elements(row.id).await?,
+                };
+                if let Some(tree_json) = tree_json {
+                    positions = find_matching_a11y_positions(&tree_json, query);
+                }
+            }
+            matches.push(SearchMatch {
+                frame_id: row.id,
+                timestamp: row.timestamp,
+                text_positions: positions.clone(),
+                app_name: row.app_name.clone(),
+                window_name: row.window_name.clone(),
+                confidence: calculate_confidence(&positions),
+                text: row.ocr_text.clone(),
+                url: row.url.clone(),
+                text_source: row.text_source.clone(),
+            });
+        }
+        Ok(matches)
     }
 
     // ========================================================================
@@ -10684,6 +10743,57 @@ fn narrow_bbox_to_needle(
 
 /// Search accessibility tree JSON nodes for a query and return matching positions.
 /// Used as fallback when OCR text_json has no bounding boxes for a frame.
+/// Turn accessibility element rows (in `sort_order`) back into the walker's
+/// flat tree JSON: role, text, depth, optional bounds and `on_screen`, plus
+/// every stored property (automation ids, states, `lines`, ...).
+#[allow(clippy::type_complexity)]
+pub(crate) fn accessibility_tree_json_from_rows(
+    rows: Vec<(
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<i64>,
+        Option<String>,
+    )>,
+) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let nodes: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(
+            |(role, text, depth, left, top, width, height, on_screen, properties)| {
+                let mut node = serde_json::Map::new();
+                if let Some(serde_json::Value::Object(props)) =
+                    properties.and_then(|p| serde_json::from_str(&p).ok())
+                {
+                    node.extend(props);
+                }
+                node.insert("role".into(), role.into());
+                node.insert("text".into(), text.unwrap_or_default().into());
+                node.insert("depth".into(), depth.unwrap_or(0).into());
+                if let (Some(left), Some(top), Some(width), Some(height)) =
+                    (left, top, width, height)
+                {
+                    node.insert(
+                        "bounds".into(),
+                        serde_json::json!({"left": left, "top": top, "width": width, "height": height}),
+                    );
+                }
+                if let Some(on_screen) = on_screen {
+                    node.insert("on_screen".into(), (on_screen != 0).into());
+                }
+                serde_json::Value::Object(node)
+            },
+        )
+        .collect();
+    Some(serde_json::Value::Array(nodes).to_string())
+}
+
 pub fn find_matching_a11y_positions(tree_json: &str, query: &str) -> Vec<TextPosition> {
     let nodes: Vec<serde_json::Value> = match serde_json::from_str(tree_json) {
         Ok(n) => n,
@@ -11221,6 +11331,99 @@ mod tests {
         DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn accessibility_tree_is_stored_once_as_elements_and_rebuilt_exactly() {
+        let db = test_database().await;
+        let tree = serde_json::json!([
+            {"role": "Window", "text": "", "depth": 0,
+             "bounds": {"left": 0.0, "top": 0.0, "width": 1.0, "height": 1.0}, "on_screen": true},
+            {"role": "Edit", "text": "first child", "depth": 1, "automation_id": "editor",
+             "is_password": false,
+             "bounds": {"left": 0.25, "top": 0.25, "width": 0.5, "height": 0.125}, "on_screen": true,
+             "lines": [{"char_start": 0, "char_count": 5,
+                        "bounds": {"left": 0.25, "top": 0.25, "width": 0.25, "height": 0.0625}}]},
+            {"role": "Text", "text": "grandchild", "depth": 2, "on_screen": false},
+            {"role": "Button", "text": "second child", "depth": 1, "class_name": "Button"}
+        ]);
+        let tree_json = tree.to_string();
+        let insert = |reference: Option<i64>| {
+            let db = &db;
+            let tree_json = tree_json.clone();
+            async move {
+                db.insert_snapshot_frame_with_ocr(
+                    "synthetic-monitor",
+                    Utc::now(),
+                    "synthetic.jpg",
+                    Some("synthetic.exe"),
+                    Some("Synthetic"),
+                    None,
+                    None,
+                    true,
+                    Some("test"),
+                    Some("first child grandchild second child"),
+                    Some("accessibility"),
+                    Some(&tree_json),
+                    None,
+                    None,
+                    None,
+                    reference,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let anchor = insert(None).await;
+        // Elements are written by a deferred write op.
+        for _ in 0..100 {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM elements WHERE frame_id = ?1 AND source = 'accessibility'",
+            )
+            .bind(anchor)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if count == 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let referencing = insert(Some(anchor)).await;
+        for frame in [anchor, referencing] {
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT accessibility_tree_json FROM frames WHERE id = ?1")
+                    .bind(frame)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, None, "the JSON copy is no longer stored");
+            let (_, rebuilt) = db.get_frame_accessibility_data(frame).await.unwrap();
+            let rebuilt: serde_json::Value = serde_json::from_str(&rebuilt.unwrap()).unwrap();
+            assert_eq!(
+                rebuilt, tree,
+                "order, depth, bounds, states and lines survive"
+            );
+        }
+        // Hierarchy: the grandchild's parent is the first child, and children
+        // keep their order.
+        let parents: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT c.role, p.role FROM elements c LEFT JOIN elements p ON p.id = c.parent_id              WHERE c.frame_id = ?1 ORDER BY c.sort_order",
+        )
+        .bind(anchor)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            parents,
+            vec![
+                ("Window".to_string(), None),
+                ("Edit".to_string(), Some("Window".to_string())),
+                ("Text".to_string(), Some("Edit".to_string())),
+                ("Button".to_string(), Some("Window".to_string())),
+            ]
+        );
+        assert_eq!(accessibility_tree_json_from_rows(Vec::new()), None);
     }
 
     #[test]
