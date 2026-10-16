@@ -34,6 +34,12 @@ with the hosted Screenpipe service.
 or offline certification. Read [validation status](VALIDATION_REGISTER.md) for
 known issues and untested cases before relying on recording/privacy behavior.
 
+Read [privacy policy and recording boundaries](docs/PRIVACY_BOUNDARIES.md) for
+plain-language examples of exclusions, covered windows, accessibility text,
+screening, audio and local data access. The companion
+[privacy and security issues](docs/PRIVACY_SECURITY_ISSUES.md) separates unresolved
+implementation gaps from deliberate policy choices.
+
 ## Intended scope
 
 The following describes the implemented direction, not a security assurance or

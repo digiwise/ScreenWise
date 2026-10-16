@@ -1,5 +1,10 @@
 # Windows capture decision metadata
 
+For a plain-language explanation with common developer scenarios, start with
+[privacy policy and recording boundaries](PRIVACY_BOUNDARIES.md). Potential
+privacy/security issues are tracked separately in the
+[companion review](PRIVACY_SECURITY_ISSUES.md).
+
 Capture pauses and producer conditions now have independent [all-channel interval diagnostics](CAPTURE_DIAGNOSTICS.md), including safe exclusion-rule references. Per-frame metadata below remains a separate observation surface.
 
 New event-driven Windows frames store a JSON object in `frames.capture_privacy`.
@@ -99,7 +104,7 @@ Old records have no active-monitor provenance and need an unfiltered fallback.
 | Outcome | Meaning |
 |---|---|
 | `full_monitor` | The Windows window-exclusion policy admitted monitor pixels. |
-| `active_window_only` | Allowed foreground-window pixels on this monitor; the rest is blacked out with a disclosure banner. |
+| `active_window_only` | Eligible selected-window pixels on this monitor; the rest is blacked out with a disclosure banner. Selection can be the foreground window, a verified maximised target or the documented other-monitor background fallback. |
 | `redacted` | Source-free disclosure frame; real pixels and text extraction withheld. |
 | `capture_failed` | Source-free failure frame; acquisition or policy evaluation failed. |
 
