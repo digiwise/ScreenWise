@@ -62,6 +62,12 @@ by repeated walks. Since then:
   value, the bitmap is acquired before the walk, and persisted pixels and text
   are both content-screened.
 
+- Excluded apps are not contacted (see
+  [capture decision metadata](CAPTURE_PRIVACY.md#no-contact-with-excluded-apps-2026-10-16)):
+  keyboard probes, click context, clipboard reads and the post-walk focused
+  element first pass the shared native gate; `uia_exclusion_skips` counts the
+  calls not made.
+
 The keyboard probe still polls every 25 ms to keep its 75 ms permit fresh,
 which is a continuous small load on the focused application; reducing it
 (probing only around input) is a separate owner decision because the first

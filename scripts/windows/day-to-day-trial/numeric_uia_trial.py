@@ -30,7 +30,8 @@ UIA_METRICS = ("schema_version", "attempts", "completed", "failed", "denied", "r
                # Per-process circuit breaker (2026-10-16): counts only, no process ids.
                "breaker_openings", "breaker_shrink_releases", "breaker_walk_skips",
                "breaker_text_skips", "breaker_probe_skips", "breaker_open_walk_windows",
-               "breaker_open_text_windows", "breaker_open_probe_processes")
+               "breaker_open_text_windows", "breaker_open_probe_processes",
+               "uia_exclusion_skips")
 TIMING_STAGE_COUNT = 21
 TIMING_RULE_COUNT = 8
 PROCESS_LIMIT = 32

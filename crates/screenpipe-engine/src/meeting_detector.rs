@@ -26,6 +26,7 @@
 use crate::routes::meetings::{emit_meeting_status_changed, resolve_meeting_status_from};
 use chrono::{DateTime, Utc};
 use futures::{FutureExt, StreamExt};
+use screenpipe_capture_policy::target::TargetFilter;
 use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::{DatabaseManager, MEETING_END_REASON_AUTO_END, MEETING_END_REASON_SHUTDOWN};
 use screenpipe_events::subscribe_to_event;
@@ -606,6 +607,9 @@ pub struct MeetingUiScanner {
     /// Timeout for scanning ALL windows of a single process.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     scan_timeout: Duration,
+    /// Shared contact gate: excluded apps and windows are never scanned.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    contact: TargetFilter,
 }
 
 impl Default for MeetingUiScanner {
@@ -622,7 +626,15 @@ impl MeetingUiScanner {
             max_depth: 25,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             scan_timeout: Duration::from_millis(5000),
+            contact: TargetFilter::default(),
         }
+    }
+
+    /// Never scan apps or windows the capture filters exclude (see
+    /// `screenpipe_capture_policy::target`).
+    pub fn with_contact_filter(mut self, contact: TargetFilter) -> Self {
+        self.contact = contact;
+        self
     }
 
     /// Create a scanner with custom settings.
@@ -643,6 +655,7 @@ impl MeetingUiScanner {
             max_depth,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             scan_timeout,
+            contact: TargetFilter::default(),
         }
     }
 
@@ -758,14 +771,38 @@ impl MeetingUiScanner {
     /// Windows: scan a process's windows via UI Automation for call control signals.
     #[cfg(target_os = "windows")]
     pub fn scan_process(&self, pid: i32, profile: &MeetingDetectionProfile) -> ScanResult {
-        let app_name = windows_get_process_name(pid).unwrap_or_else(|| format!("pid:{}", pid));
+        let process_name = windows_get_process_name(pid);
+        let app_name = process_name
+            .clone()
+            .unwrap_or_else(|| format!("pid:{}", pid));
         let max_depth = self.max_depth;
         let scan_timeout = self.scan_timeout;
         let signals = profile.call_signals.clone();
         let min_required = profile.min_signals_required;
 
+        // No UIA call into an unidentified or wholly excluded process.
+        let Some(process_name) = process_name.filter(|name| !self.contact.excludes_whole_app(name))
+        else {
+            debug!("meeting scanner: pid {} skipped by capture exclusions", pid);
+            return ScanResult {
+                app_name,
+                profile_index: 0,
+                signals_found: 0,
+                is_in_call: false,
+                matched_signals: Vec::new(),
+            };
+        };
+
         let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            windows_scan_process_uia(pid, &signals, min_required, max_depth, scan_timeout)
+            windows_scan_process_uia(
+                pid,
+                &process_name,
+                &self.contact,
+                &signals,
+                min_required,
+                max_depth,
+                scan_timeout,
+            )
         }));
 
         let matched_signals = match scan_result {
@@ -1399,6 +1436,8 @@ fn enumerate_windows_for_pid(target_pid: u32) -> Vec<windows::Win32::Foundation:
 #[cfg(target_os = "windows")]
 fn windows_scan_process_uia(
     pid: i32,
+    process_name: &str,
+    contact: &TargetFilter,
     signals: &[CallSignal],
     min_required: usize,
     _max_depth: usize,
@@ -1470,7 +1509,18 @@ fn windows_scan_process_uia(
             }
         }
 
-        let window_handles = enumerate_windows_for_pid(pid as u32);
+        // Per-window contact gate from the native title (GetWindowTextW reads
+        // the system copy for another process's window; no message is sent).
+        let window_handles: Vec<_> = enumerate_windows_for_pid(pid as u32)
+            .into_iter()
+            .filter(|hwnd| {
+                let mut title = [0u16; 512];
+                let len =
+                    windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(*hwnd, &mut title);
+                let title = (len > 0).then(|| String::from_utf16_lossy(&title[..len as usize]));
+                contact.allows_window(&[process_name], title.as_deref())
+            })
+            .collect();
         let start = Instant::now();
         let mut found = Vec::new();
 
@@ -2565,10 +2615,11 @@ pub async fn run_meeting_detection_loop(
     detector: Option<Arc<screenpipe_audio::meeting_detector::MeetingDetector>>,
     close_orphaned_meetings_on_start: bool,
     ignored_meeting_apps: Vec<String>,
+    contact: TargetFilter,
     use_pii_removal: bool,
 ) {
     let profiles = load_detection_profiles();
-    let scanner = Arc::new(MeetingUiScanner::new());
+    let scanner = Arc::new(MeetingUiScanner::new().with_contact_filter(contact.clone()));
     let mut state = MeetingState::Idle;
     let base_interval = scan_interval.unwrap_or(ACTIVE_SCAN_INTERVAL);
     let mut current_interval = base_interval;
@@ -2828,6 +2879,17 @@ pub async fn run_meeting_detection_loop(
             {
                 running_apps.push(hint);
             }
+        }
+
+        // Apps the capture filters exclude as a whole are never scanned
+        // (per-window exclusions are applied inside the scanner).
+        let before = running_apps.len();
+        running_apps.retain(|app| !contact.excludes_whole_app(&app.app_name));
+        if running_apps.len() < before {
+            debug!(
+                "meeting v2: skipped {} running app(s) per capture exclusions",
+                before - running_apps.len()
+            );
         }
 
         // Drop apps the user excluded from detection (settings: ignoredMeetingApps).

@@ -263,6 +263,7 @@ static SHRINK_RELEASES: AtomicU64 = AtomicU64::new(0);
 static WALK_SKIPS: AtomicU64 = AtomicU64::new(0);
 static TEXT_SKIPS: AtomicU64 = AtomicU64::new(0);
 static PROBE_SKIPS: AtomicU64 = AtomicU64::new(0);
+static EXCLUSION_SKIPS: AtomicU64 = AtomicU64::new(0);
 
 fn with_breaker<T>(f: impl FnOnce(&mut Breaker) -> T) -> T {
     let mut guard = BREAKER
@@ -331,6 +332,10 @@ pub(crate) fn note_text_skipped() {
 pub(crate) fn note_probe_skipped() {
     PROBE_SKIPS.fetch_add(1, Ordering::Relaxed);
 }
+/// A UIA call was not made because its target is excluded from capture.
+pub(crate) fn note_exclusion_skip() {
+    EXCLUSION_SKIPS.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Numeric counters only (no process ids or handles).
 pub(crate) fn metrics_snapshot() -> serde_json::Value {
@@ -348,6 +353,7 @@ pub(crate) fn metrics_snapshot() -> serde_json::Value {
         "breaker_walk_skips": WALK_SKIPS.load(Ordering::Relaxed),
         "breaker_text_skips": TEXT_SKIPS.load(Ordering::Relaxed),
         "breaker_probe_skips": PROBE_SKIPS.load(Ordering::Relaxed),
+        "uia_exclusion_skips": EXCLUSION_SKIPS.load(Ordering::Relaxed),
         "breaker_open_walk_windows": open_walk,
         "breaker_open_text_windows": open_text,
         "breaker_open_probe_processes": open_probe,

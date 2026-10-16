@@ -28,8 +28,15 @@ pub fn start_meeting_watcher(
     detector: Option<Arc<MeetingDetector>>,
     close_orphaned_meetings_on_start: bool,
     ignored_meeting_apps: Vec<String>,
+    capture_ignored_windows: Vec<String>,
+    capture_included_windows: Vec<String>,
     use_pii_removal: bool,
 ) -> tokio::task::JoinHandle<()> {
+    // Apps and windows excluded from capture are never scanned.
+    let contact = screenpipe_capture_policy::target::TargetFilter::new(
+        &capture_ignored_windows,
+        &capture_included_windows,
+    );
     tokio::spawn(async move {
         meeting_detector::run_meeting_detection_loop(
             db,
@@ -40,6 +47,7 @@ pub fn start_meeting_watcher(
             detector,
             close_orphaned_meetings_on_start,
             ignored_meeting_apps,
+            contact,
             use_pii_removal,
         )
         .await;

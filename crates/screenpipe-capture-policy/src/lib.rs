@@ -14,11 +14,15 @@
 //!   `screenpipe-engine`'s `drm_detector`.
 //! - [`password_managers`]: the canonical password-manager and credential-tool
 //!   identities used for process exclusion and on-screen brand screening.
+//! - [`target`]: the shared gate deciding, from native identity alone, whether
+//!   an app or window may be contacted at all (protected apps plus the
+//!   configured ignore/include lists).
 //!
 //! Helpers return plain booleans or borrowed data and never retain or log the
 //! text, URLs or titles they are given.
 
 pub mod drm;
 pub mod password_managers;
+pub mod target;
 pub mod url_filter;
 pub mod window_pattern;

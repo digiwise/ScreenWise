@@ -182,6 +182,46 @@ other windows, including excluded ones. Flyouts, previews, the Start menu and
 notifications are separate windows and are not masked; they follow the normal
 rules.
 
+## No contact with excluded apps (2026-10-16)
+
+An app or window excluded from capture is also not contacted: no UIA call,
+URL lookup or clipboard render is directed at it. One shared gate,
+`screenpipe_capture_policy::target`, answers this from native identity alone
+(executable name and window title, read without calling into the target). It
+covers protected apps (canonical password managers, credential viewers and
+system UI hosts), the configured ignore list and the include list. An
+unidentified process is not contacted. Each capture path adds its own
+evidence-based rules (URLs, private windows, DRM, nested windows) on top.
+
+Callers on Windows:
+
+- accessibility tree walk: the protected-app list now comes from the shared
+  gate (unchanged entries, plus the macOS/Linux keychain names);
+- keyboard privacy probe: judged on the foreground window's raw and
+  normalised app names before any UIA call; an excluded app denies input
+  (its keystrokes were already discarded by the hook);
+- click context: read only when the click lies inside the foreground window
+  and that window passes the gate (no `WindowFromPoint`, which messages the
+  window);
+- focused element after a tree capture: read only while focus is still the
+  window that passed the filters;
+- clipboard text: read only when the clipboard owner's process passes the
+  gate. The owner is usually a hidden window, so only rules that need no title
+  apply to it; title-scoped rules (`App::Title`) rely on the copy-time check;
+- browser URL lookup: skipped for an excluded browser (its exclusion already
+  withholds it);
+- meeting detection: apps excluded whatever their title are dropped before
+  scanning, and each window is checked by its native title before
+  `ElementFromHandle`. The include list applies here too, so with an include
+  list only included meeting windows are scanned.
+
+Residual contact: the recorder's global UIA focus-changed subscription. Its
+handler makes no calls and only invalidates state, but UIA delivers every focus
+change, including in excluded apps, and preparing the event's element can
+involve that app's provider. Replacing it with a WinEvent hook (`EVENT_OBJECT_FOCUS`), which needs no
+provider, is an open owner decision. Untested: a live run proving the absence
+of calls into a specific excluded app.
+
 ## Excluded background windows
 
 When the foreground excluded app belongs to monitor A, B/C can retain admitted

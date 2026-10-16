@@ -282,7 +282,7 @@ impl UiRecorder {
                 &content_events,
                 &content_stop,
                 &content_config,
-                get_clipboard_text,
+                || get_clipboard_text(&content_config),
                 || {
                     if !content_config.skip_password_fields {
                         Some(0)
@@ -1641,7 +1641,18 @@ fn vk_to_char(vk: u16, mods: u8) -> Option<char> {
     Some(c)
 }
 
-fn get_clipboard_text() -> Result<Option<String>, ClipboardReadFailure> {
+/// Reads clipboard text only when the clipboard's owner may be contacted.
+/// Delayed-rendered clipboard data is produced by the owning application
+/// when read, and the text came from it; an excluded, protected or
+/// unidentified owner (including no owner) yields no content. The owner is
+/// usually a hidden window, so only rules that need no window title can match
+/// it; title-scoped exclusions rely on the copy-time check in the key hook.
+fn get_clipboard_text(config: &UiCaptureConfig) -> Result<Option<String>, ClipboardReadFailure> {
+    let owner = unsafe { windows::Win32::System::DataExchange::GetClipboardOwner() };
+    if !owner.is_ok_and(|owner| windows_uia::uia_target_allowed(config, owner)) {
+        crate::uia_breaker::note_exclusion_skip();
+        return Ok(None);
+    }
     windows_uia::get_clipboard_text_impl()
 }
 

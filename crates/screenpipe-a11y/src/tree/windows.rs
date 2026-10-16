@@ -184,7 +184,6 @@ fn is_extension_url(value: &str) -> bool {
 
 use anyhow::Result;
 use chrono::Utc;
-use screenpipe_capture_policy::password_managers;
 use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -321,32 +320,6 @@ fn identity_is_current(
         && get_monitor_rect(hwnd).as_ref() == monitor_rect.as_ref()
         && native_window_title(hwnd) == window_name
         && crate::platform::windows::get_effective_app_name(hwnd, fresh_pid) == app_name
-}
-
-/// Windows system-UI processes that produce noise (logon/lock screen, search,
-/// notifications, pickers, snipping). Not password managers; excluded from
-/// capture by app name together with [`excluded_apps`]' credential tools.
-const SYSTEM_UI_APPS: &[&str] = &[
-    "logonui",
-    "lockapp",
-    "searchhost",
-    "shellexperiencehost",
-    "pickerhost",
-    "snippingtool",
-];
-
-/// Lowercased app names excluded outright: the canonical password managers,
-/// the Windows credential viewer, then [`SYSTEM_UI_APPS`].
-fn excluded_apps() -> &'static [String] {
-    static APPS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    APPS.get_or_init(|| {
-        password_managers::desktop_process_names()
-            .iter()
-            .cloned()
-            .chain([password_managers::CREDENTIAL_MANAGER.to_lowercase()])
-            .chain(SYSTEM_UI_APPS.iter().map(|app| app.to_string()))
-            .collect()
-    })
 }
 
 /// UIA control types that should be skipped (decorative, not text-bearing).
@@ -683,10 +656,7 @@ impl WindowsTreeWalker {
 
             // Skip excluded apps
             let app_lower = app_name.to_lowercase();
-            if excluded_apps()
-                .iter()
-                .any(|ex| app_lower.contains(ex.as_str()))
-            {
+            if screenpipe_capture_policy::target::is_protected_app(&app_lower) {
                 debug!("a11y: hardcoded app exclusion");
                 return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
             }
@@ -3512,33 +3482,30 @@ mod tests {
 
     #[test]
     fn test_excluded_apps() {
-        assert!(excluded_apps()
-            .iter()
-            .any(|ex| "1password".contains(ex.as_str())));
-        assert!(!excluded_apps()
-            .iter()
-            .any(|ex| "notepad".contains(ex.as_str())));
+        use screenpipe_capture_policy::target::is_protected_app;
+        assert!(is_protected_app("1password"));
+        assert!(!is_protected_app("notepad"));
     }
 
     #[test]
-    fn excluded_apps_are_unchanged() {
-        assert_eq!(
-            excluded_apps(),
-            [
-                "1password",
-                "bitwarden",
-                "lastpass",
-                "dashlane",
-                "keepassxc",
-                "credential manager",
-                "logonui",
-                "lockapp",
-                "searchhost",
-                "shellexperiencehost",
-                "pickerhost",
-                "snippingtool",
-            ]
-        );
+    fn walker_protected_apps_still_include_former_list() {
+        let protected = screenpipe_capture_policy::target::protected_app_names();
+        for former in [
+            "1password",
+            "bitwarden",
+            "lastpass",
+            "dashlane",
+            "keepassxc",
+            "credential manager",
+            "logonui",
+            "lockapp",
+            "searchhost",
+            "shellexperiencehost",
+            "pickerhost",
+            "snippingtool",
+        ] {
+            assert!(protected.iter().any(|name| name == former), "{former}");
+        }
     }
 
     #[test]

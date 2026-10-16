@@ -4,7 +4,7 @@
 
 use image::DynamicImage;
 use once_cell::sync::Lazy;
-use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::window_pattern::WindowPattern;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -375,7 +375,13 @@ impl WindowFilters {
         }
 
         // Check ignore list first — always reject ignored windows
-        if window_pattern::matches_any(&self.ignore_patterns, &app_name_lower, &title_lower) {
+        let configured = screenpipe_capture_policy::target::configured_exclusion(
+            &self.ignore_patterns,
+            &self.include_patterns,
+            &app_name_lower,
+            &title_lower,
+        );
+        if configured == Some(screenpipe_capture_policy::target::Exclusion::Ignored) {
             return Some("configured_exclusion");
         }
 
@@ -386,7 +392,7 @@ impl WindowFilters {
         }
 
         // Include list: empty = pass; non-empty applies scoped/legacy semantics.
-        if !window_pattern::passes_includes(&self.include_patterns, &app_name_lower, &title_lower) {
+        if configured == Some(screenpipe_capture_policy::target::Exclusion::OutsideIncludes) {
             return Some("outside_include_filter");
         }
         None
@@ -2676,9 +2682,14 @@ pub fn evaluate_windows_monitor_capture(
             .iter()
             .any(|browser| app_name_lower.contains(browser));
 
+        // Decided by app/title alone; an excluded browser is never asked for
+        // its URL (that lookup reads the browser's UIA tree).
+        let filter_reason = window_filters.exclusion_reason(&app_name, &window_name);
+        let may_contact = filter_reason.is_none()
+            && !screenpipe_capture_policy::target::is_protected_app(&app_name.to_lowercase());
         let mut browser_url = None;
         let mut url_uncertain = false;
-        if is_browser && actually_focused {
+        if is_browser && actually_focused && may_contact {
             selected_url_checked |= selected_window.is_some();
             match create_url_detector().get_active_url(&app_name, process_id, &window_name) {
                 Ok(url) => browser_url = url,
@@ -2696,9 +2707,10 @@ pub fn evaluate_windows_monitor_capture(
             if browser_url.is_none() && window_filters.has_ignored_urls() {
                 url_uncertain = true;
             }
-        } else if is_browser && window_filters.has_ignored_urls() {
+        } else if is_browser && may_contact && window_filters.has_ignored_urls() {
             // Background browser URLs cannot be verified without activating
-            // them, so they force the active-window-only path.
+            // them, so they force the active-window-only path. (An excluded
+            // browser is already blocked by its exclusion.)
             url_uncertain = true;
         }
 
@@ -2711,7 +2723,6 @@ pub fn evaluate_windows_monitor_capture(
         let url_excluded = browser_url
             .as_deref()
             .is_some_and(|url| window_filters.is_url_blocked(url));
-        let filter_reason = window_filters.exclusion_reason(&app_name, &window_name);
         let is_excluded = is_screenpipe_ui
             || metadata_uncertain
             || url_uncertain

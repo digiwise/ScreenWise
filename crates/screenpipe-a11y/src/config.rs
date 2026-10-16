@@ -346,11 +346,34 @@ impl UiCaptureConfig {
         // Scoped ignore patterns (e.g. `Slack::#general`) are evaluated here —
         // they require both app and title context, which is only present at
         // this layer.
-        if window_pattern::matches_any(&self.resolved_ignored(), &app_lower, &title_lower) {
-            return false;
-        }
+        screenpipe_capture_policy::target::configured_exclusion(
+            &self.resolved_ignored(),
+            &self.resolved_included(),
+            &app_lower,
+            &title_lower,
+        )
+        .is_none()
+    }
 
-        window_pattern::passes_includes(&self.resolved_included(), &app_lower, &title_lower)
+    /// Whether a window may be contacted at all (any UIA call into its
+    /// process): the shared protected-app gate plus these capture filters,
+    /// for every name the process is known by. An unidentified app (no
+    /// names, or only empty ones) may not be contacted.
+    pub fn may_contact(&self, app_names: &[&str], window_title: Option<&str>) -> bool {
+        let mut identified = false;
+        for app in app_names {
+            let app_lower = app.trim().to_lowercase();
+            if app_lower.is_empty() {
+                continue;
+            }
+            identified = true;
+            if screenpipe_capture_policy::target::is_protected_app(&app_lower)
+                || !self.should_capture_target(app, window_title)
+            {
+                return false;
+            }
+        }
+        identified
     }
 
     /// Check if element appears to be a password field
@@ -495,6 +518,23 @@ mod tests {
         assert!(config.should_capture_target("Chrome", Some("Docs")));
         assert!(config.should_capture_target("Terminal", Some("ScreenPipe logs")));
         assert!(!config.should_capture_target("Slack", Some("DM")));
+    }
+
+    #[test]
+    fn may_contact_applies_shared_gate_to_every_name() {
+        let mut config = UiCaptureConfig::new();
+        config.ignored_windows = vec!["excel::".to_string(), "msedge::".to_string()];
+
+        assert!(config.may_contact(&["notepad.exe"], Some("notes")));
+        assert!(!config.may_contact(&["EXCEL.EXE"], Some("Budget")));
+        assert!(!config.may_contact(&["EXCEL.EXE"], None));
+        // A shell-hosted window is judged by its raw and normalised names.
+        assert!(!config.may_contact(&["explorer.exe", "msedge.exe"], Some("Widgets")));
+        // Protected apps are never contacted, even when not configured.
+        assert!(!config.may_contact(&["SearchHost.exe"], Some("Search")));
+        // Unidentified processes are never contacted.
+        assert!(!config.may_contact(&[], Some("x")));
+        assert!(!config.may_contact(&[""], Some("x")));
     }
 
     #[test]

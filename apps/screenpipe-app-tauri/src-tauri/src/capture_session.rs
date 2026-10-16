@@ -270,6 +270,8 @@ impl CaptureSession {
                 Some(meeting_detector),
                 close_orphaned_meetings_on_start,
                 config.ignored_meeting_apps.clone(),
+                config.ignored_windows.clone(),
+                config.included_windows.clone(),
                 config.use_pii_removal,
             );
             info!("meeting watcher started (v2 UI scanning)");

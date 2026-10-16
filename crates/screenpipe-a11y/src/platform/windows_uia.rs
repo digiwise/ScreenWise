@@ -610,7 +610,7 @@ impl UiaContext {
     /// Refresh keyboard privacy independently of tree capture/debouncing. Query
     /// the actual focused element, explicitly disallowing UIA default values:
     /// an unsupported IsPassword property must not become a false permission.
-    fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy) {
+    fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy, config: &UiCaptureConfig) {
         if !self.provider_ready() {
             privacy.invalidate();
             return;
@@ -621,6 +621,15 @@ impl UiaContext {
         // password contents just to diagnose a failed privacy decision.
         let native = native_focus_probe();
         let focus = native.as_ref().ok().copied();
+        // Never contact an excluded (or unidentifiable) application through
+        // UIA. Keystrokes there are already discarded by the hook; deny them.
+        if focus.is_some_and(|focus| {
+            !uia_target_allowed(config, HWND(focus.foreground as *mut std::ffi::c_void))
+        }) {
+            crate::uia_breaker::note_exclusion_skip();
+            privacy.invalidate();
+            return;
+        }
         // Fail closed without calling the provider while this probe's own
         // backoff is open, or while a walk to the same process has already
         // run longer than a probe could wait (it would only queue behind it).
@@ -1525,7 +1534,7 @@ pub(crate) fn run_keyboard_privacy_thread(
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
             continue;
         }
-        uia.refresh_keyboard_privacy(&keyboard_privacy);
+        uia.refresh_keyboard_privacy(&keyboard_privacy, &config);
         unsafe {
             MsgWaitForMultipleObjects(None, false, KEYBOARD_PRIVACY_POLL_MS as u32, QS_ALLINPUT);
         }
@@ -1796,6 +1805,11 @@ pub fn run_uia_thread(
             if !screenpipe_config::audio_privacy::visual_capture_allowed() {
                 break;
             }
+            // Native identity first: never call into an excluded application.
+            if !click_target_allowed(&config, req.x, req.y) {
+                crate::uia_breaker::note_exclusion_skip();
+                continue;
+            }
             if let Some(ctx) = uia.element_from_point(req.x, req.y) {
                 match element_tx.try_send((req, ctx)) {
                     Ok(()) => {}
@@ -1958,9 +1972,13 @@ fn capture_and_send(
         }
     }
 
-    // Also update the focused element
-    if let Some(ctx) = uia.get_focused_element() {
-        *focused_element.lock() = Some(ctx);
+    // Also update the focused element, only while focus is still the window
+    // that passed the capture filters above (never an application focus
+    // moved to in the meantime).
+    if unsafe { GetForegroundWindow() } == hwnd {
+        if let Some(ctx) = uia.get_focused_element() {
+            *focused_element.lock() = Some(ctx);
+        }
     }
 }
 
@@ -1980,6 +1998,42 @@ fn hash_node(node: &AccessibilityNode, hasher: &mut DefaultHasher) {
     for child in &node.children {
         hash_node(child, hasher);
     }
+}
+
+/// Native-only check (no UIA call, and no window message: reading another
+/// process's window title uses the system copy) that a window may be inspected
+/// through UIA: its process is identified and passes the shared contact gate
+/// (`screenpipe_capture_policy::target`) and the capture filters.
+pub(crate) fn uia_target_allowed(config: &UiCaptureConfig, hwnd: HWND) -> bool {
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let (raw_name, title, pid) = get_window_info(hwnd);
+    if pid == 0 || raw_name == "Unknown" {
+        return false;
+    }
+    // The tree walker judges the normalised name (WebView2/shell-hosted
+    // windows map to their logical app); judge both so neither can admit.
+    let effective = super::windows::get_effective_app_name(hwnd, pid);
+    config.may_contact(&[&raw_name, &effective], title.as_deref())
+}
+
+/// A click's UIA context is read only when the click lies inside the current
+/// foreground window and that window may be inspected. Clicks elsewhere
+/// (another window, an owned popup outside it) get no context.
+fn click_target_allowed(config: &UiCaptureConfig, x: i32, y: i32) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let foreground = unsafe { GetForegroundWindow() };
+    let mut rect = RECT::default();
+    if foreground.is_invalid() || unsafe { GetWindowRect(foreground, &mut rect) }.is_err() {
+        return false;
+    }
+    x >= rect.left
+        && x < rect.right
+        && y >= rect.top
+        && y < rect.bottom
+        && uia_target_allowed(config, foreground)
 }
 
 /// Get window info (app name, title, pid) from HWND

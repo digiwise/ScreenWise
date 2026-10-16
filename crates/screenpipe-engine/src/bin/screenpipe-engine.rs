@@ -1280,6 +1280,8 @@ async fn main() -> anyhow::Result<()> {
             Some(meeting_detector),
             true,
             config.ignored_meeting_apps.clone(),
+            config.ignored_windows.clone(),
+            config.included_windows.clone(),
             config.use_pii_removal,
         ))
     } else {
