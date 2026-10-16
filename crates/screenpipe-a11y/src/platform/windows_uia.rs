@@ -625,7 +625,7 @@ impl UiaContext {
         // backoff is open, or while a walk to the same process has already
         // run longer than a probe could wait (it would only queue behind it).
         if focus.is_some_and(|focus| {
-            !crate::uia_breaker::allows(focus.pid, crate::uia_breaker::Scope::Probe)
+            !crate::uia_breaker::allows_probe(focus.pid)
                 || crate::uia_breaker::long_walk_in_flight(
                     focus.pid,
                     Duration::from_millis(u64::from(PROVIDER_TIMEOUT_MS)),
@@ -785,7 +785,7 @@ impl UiaContext {
         let reason = result.as_ref().err().map(|failure| failure.reason);
         if provider_timed_out.get() {
             if let Some(focus) = focus {
-                crate::uia_breaker::record(focus.pid, crate::uia_breaker::Scope::Probe, true);
+                crate::uia_breaker::record_probe(focus.pid, true);
             }
         }
         if let Err(failure) = &result {

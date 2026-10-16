@@ -1,17 +1,25 @@
-//! Per-process UIA circuit breaker (owner policy 2026-10-16).
+//! UIA circuit breaker (owner policy 2026-10-16).
 //!
 //! A UIA request is served on the target application's UI thread, and a
 //! client-side timeout does not stop that work. After a costly failure
-//! (timeout, node/depth/text limit or provider failure) the target process
-//! receives no UIA calls of that scope for an increasing period — 30 s, 60 s,
-//! 120 s ... capped at 10 min — and three consecutive successes reset it.
-//! `Walk` covers capture-time tree walks; `Text` covers only their optional
-//! text phase, so a slow text phase degrades a window to OCR text without
-//! withholding its frames. `Probe` covers the cheap keyboard focus probe, so a
-//! large tree never disables keystroke privacy checks; a probe is instead
-//! skipped while a walk to the same process has run longer than a probe's own
-//! provider timeout (it would only queue behind it). Keys are process ids
-//! only and the tables are bounded.
+//! (timeout, node/depth/text limit or provider failure) the target receives no
+//! UIA calls of that scope for an increasing period — 30 s, 60 s, 120 s ...
+//! capped at 10 min — and three consecutive successes reset it.
+//!
+//! `Walk` (capture-time tree walks) and `Text` (only their optional text phase,
+//! so a slow text phase degrades a window to OCR text without withholding its
+//! frames) are keyed by window: process id plus window handle, so one large
+//! window does not stop walks of the same application's small windows. The
+//! window's area is recorded at each failure; when the window has shrunk by at
+//! least a quarter (a list collapsed back into a bar) its backoff is released
+//! but its failure count is kept, so a window that regrows and fails again
+//! continues the doubling instead of starting over.
+//!
+//! `Probe` (the cheap keyboard focus probe) is keyed by process: a large tree
+//! never disables keystroke privacy checks, and a probe is instead skipped
+//! while a walk to the same process has run longer than a probe's own
+//! provider timeout (it would only queue behind it on the shared UI thread).
+//! Keys are process ids and window handles only; the tables are bounded.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +29,7 @@ use std::time::{Duration, Instant};
 const BASE_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
 const RESET_AFTER_SUCCESSES: u32 = 3;
-const MAX_TRACKED_PROCESSES: usize = 64;
+const MAX_TRACKED_TARGETS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scope {
@@ -30,10 +38,22 @@ pub(crate) enum Scope {
     Probe,
 }
 
+/// Process-level targets (`Probe`) use window handle 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Target {
+    pid: u32,
+    hwnd: isize,
+}
+
 /// Backoff after `failures` consecutive costly failures (>= 1).
 pub(crate) fn backoff(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(5);
     BASE_BACKOFF.saturating_mul(1 << doublings).min(MAX_BACKOFF)
+}
+
+/// Whether `area` is at most three quarters of `failed_at`.
+fn shrunk_enough(area: u64, failed_at: u64) -> bool {
+    area.saturating_mul(4) <= failed_at.saturating_mul(3)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,12 +83,14 @@ impl Gate {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Entry {
     walk: Gate,
     text: Gate,
     probe: Gate,
-    last_seen: Instant,
+    /// Window area when it last failed (window targets only).
+    failure_area: Option<u64>,
+    last_seen: Option<Instant>,
 }
 
 impl Entry {
@@ -77,6 +99,13 @@ impl Entry {
             Scope::Walk => &self.walk,
             Scope::Text => &self.text,
             Scope::Probe => &self.probe,
+        }
+    }
+    fn gate_mut(&mut self, scope: Scope) -> &mut Gate {
+        match scope {
+            Scope::Walk => &mut self.walk,
+            Scope::Text => &mut self.text,
+            Scope::Probe => &mut self.probe,
         }
     }
     fn all_allow(&self, now: Instant) -> bool {
@@ -89,55 +118,66 @@ impl Entry {
 
 #[derive(Debug, Default)]
 pub(crate) struct Breaker {
-    entries: HashMap<u32, Entry>,
+    entries: HashMap<Target, Entry>,
 }
 
 impl Breaker {
-    pub(crate) fn allows(&self, pid: u32, scope: Scope, now: Instant) -> bool {
-        self.entries
-            .get(&pid)
-            .is_none_or(|entry| entry.gate(scope).allows(now))
+    /// Whether `scope` calls to the target may be made now. A window that has
+    /// shrunk enough since its last failure has its backoff released first.
+    fn allows(&mut self, target: Target, scope: Scope, area: Option<u64>, now: Instant) -> bool {
+        let Some(entry) = self.entries.get_mut(&target) else {
+            return true;
+        };
+        if let (Some(area), Some(failed_at)) = (area, entry.failure_area) {
+            if shrunk_enough(area, failed_at) {
+                entry.walk.open_until = None;
+                entry.text.open_until = None;
+                entry.failure_area = None;
+                SHRINK_RELEASES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        entry.gate(scope).allows(now)
     }
 
-    pub(crate) fn record(&mut self, pid: u32, scope: Scope, costly_failure: bool, now: Instant) {
-        if !costly_failure && !self.entries.contains_key(&pid) {
+    fn record(
+        &mut self,
+        target: Target,
+        scope: Scope,
+        costly_failure: bool,
+        area: Option<u64>,
+        now: Instant,
+    ) {
+        if !costly_failure && !self.entries.contains_key(&target) {
             return;
         }
         self.evict(now);
-        let entry = self.entries.entry(pid).or_insert(Entry {
-            walk: Gate::default(),
-            text: Gate::default(),
-            probe: Gate::default(),
-            last_seen: now,
-        });
-        entry.last_seen = now;
-        let gate = match scope {
-            Scope::Walk => &mut entry.walk,
-            Scope::Text => &mut entry.text,
-            Scope::Probe => &mut entry.probe,
-        };
+        let entry = self.entries.entry(target).or_default();
+        entry.last_seen = Some(now);
         if costly_failure {
-            gate.fail(now);
+            entry.gate_mut(scope).fail(now);
+            if area.is_some() {
+                entry.failure_area = area;
+            }
             OPENINGS.fetch_add(1, Ordering::Relaxed);
         } else {
-            gate.succeed();
+            entry.gate_mut(scope).succeed();
         }
         if entry.idle(now) {
-            self.entries.remove(&pid);
+            self.entries.remove(&target);
         }
     }
 
     fn evict(&mut self, now: Instant) {
-        if self.entries.len() < MAX_TRACKED_PROCESSES {
+        if self.entries.len() < MAX_TRACKED_TARGETS {
             return;
         }
         self.entries.retain(|_, entry| !entry.all_allow(now));
-        while self.entries.len() >= MAX_TRACKED_PROCESSES {
+        while self.entries.len() >= MAX_TRACKED_TARGETS {
             let Some(oldest) = self
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_seen)
-                .map(|(pid, _)| *pid)
+                .map(|(target, _)| *target)
             else {
                 break;
             };
@@ -161,7 +201,7 @@ pub(crate) struct InFlight {
 
 impl InFlight {
     fn start(&mut self, pid: u32, now: Instant) {
-        if self.walks.len() < MAX_TRACKED_PROCESSES || self.walks.contains_key(&pid) {
+        if self.walks.len() < MAX_TRACKED_TARGETS || self.walks.contains_key(&pid) {
             self.walks.entry(pid).or_default().push(now);
         }
     }
@@ -219,6 +259,7 @@ pub(crate) fn long_walk_in_flight(pid: u32, age: Duration) -> bool {
 
 static BREAKER: OnceLock<Mutex<Breaker>> = OnceLock::new();
 static OPENINGS: AtomicU64 = AtomicU64::new(0);
+static SHRINK_RELEASES: AtomicU64 = AtomicU64::new(0);
 static WALK_SKIPS: AtomicU64 = AtomicU64::new(0);
 static TEXT_SKIPS: AtomicU64 = AtomicU64::new(0);
 static PROBE_SKIPS: AtomicU64 = AtomicU64::new(0);
@@ -231,15 +272,53 @@ fn with_breaker<T>(f: impl FnOnce(&mut Breaker) -> T) -> T {
     f(&mut guard)
 }
 
-/// Whether UIA calls of `scope` may be made to `pid` now. Pid 0 is unknown
-/// and never tracked (callers already fail such targets closed).
-pub(crate) fn allows(pid: u32, scope: Scope) -> bool {
-    pid == 0 || with_breaker(|breaker| breaker.allows(pid, scope, Instant::now()))
+/// Whether `Walk`/`Text` calls may be made to this window now. `area` is its
+/// current native window area (pixels), when known. Pid 0 is never tracked
+/// (callers already fail unknown targets closed).
+pub(crate) fn allows_window(pid: u32, hwnd: isize, area: Option<u64>, scope: Scope) -> bool {
+    pid == 0
+        || with_breaker(|breaker| breaker.allows(Target { pid, hwnd }, scope, area, Instant::now()))
 }
 
-pub(crate) fn record(pid: u32, scope: Scope, costly_failure: bool) {
+pub(crate) fn record_window(
+    pid: u32,
+    hwnd: isize,
+    area: Option<u64>,
+    scope: Scope,
+    costly_failure: bool,
+) {
     if pid != 0 {
-        with_breaker(|breaker| breaker.record(pid, scope, costly_failure, Instant::now()));
+        with_breaker(|breaker| {
+            breaker.record(
+                Target { pid, hwnd },
+                scope,
+                costly_failure,
+                area,
+                Instant::now(),
+            )
+        });
+    }
+}
+
+/// Whether keyboard probes may call the provider of process `pid` now.
+pub(crate) fn allows_probe(pid: u32) -> bool {
+    pid == 0
+        || with_breaker(|breaker| {
+            breaker.allows(Target { pid, hwnd: 0 }, Scope::Probe, None, Instant::now())
+        })
+}
+
+pub(crate) fn record_probe(pid: u32, costly_failure: bool) {
+    if pid != 0 {
+        with_breaker(|breaker| {
+            breaker.record(
+                Target { pid, hwnd: 0 },
+                Scope::Probe,
+                costly_failure,
+                None,
+                Instant::now(),
+            )
+        });
     }
 }
 
@@ -253,7 +332,7 @@ pub(crate) fn note_probe_skipped() {
     PROBE_SKIPS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Numeric counters only (no process ids): openings, skips and open gates.
+/// Numeric counters only (no process ids or handles).
 pub(crate) fn metrics_snapshot() -> serde_json::Value {
     let now = Instant::now();
     let (open_walk, open_text, open_probe) = with_breaker(|breaker| {
@@ -265,11 +344,12 @@ pub(crate) fn metrics_snapshot() -> serde_json::Value {
     });
     serde_json::json!({
         "breaker_openings": OPENINGS.load(Ordering::Relaxed),
+        "breaker_shrink_releases": SHRINK_RELEASES.load(Ordering::Relaxed),
         "breaker_walk_skips": WALK_SKIPS.load(Ordering::Relaxed),
         "breaker_text_skips": TEXT_SKIPS.load(Ordering::Relaxed),
         "breaker_probe_skips": PROBE_SKIPS.load(Ordering::Relaxed),
-        "breaker_open_walk_processes": open_walk,
-        "breaker_open_text_processes": open_text,
+        "breaker_open_walk_windows": open_walk,
+        "breaker_open_text_windows": open_text,
         "breaker_open_probe_processes": open_probe,
     })
 }
@@ -278,6 +358,10 @@ pub(crate) fn metrics_snapshot() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    fn window(pid: u32, hwnd: isize) -> Target {
+        Target { pid, hwnd }
+    }
+
     #[test]
     fn backoff_doubles_from_thirty_seconds_and_caps_at_ten_minutes() {
         let secs: Vec<u64> = (1..=8).map(|n| backoff(n).as_secs()).collect();
@@ -285,41 +369,62 @@ mod tests {
     }
 
     #[test]
-    fn costly_failures_open_per_process_and_three_successes_reset() {
+    fn costly_failures_back_off_one_window_and_three_successes_reset() {
         let mut breaker = Breaker::default();
+        let big = window(10, 0x100);
         let t0 = Instant::now();
-        breaker.record(10, Scope::Walk, true, t0);
-        assert!(!breaker.allows(10, Scope::Walk, t0 + Duration::from_secs(29)));
+        breaker.record(big, Scope::Walk, true, Some(1_000), t0);
+        assert!(!breaker.allows(big, Scope::Walk, None, t0 + Duration::from_secs(29)));
         assert!(
-            breaker.allows(10, Scope::Text, t0),
+            breaker.allows(big, Scope::Text, None, t0),
             "scopes are independent"
         );
         assert!(
-            breaker.allows(10, Scope::Probe, t0),
-            "walk failures never block probes"
+            breaker.allows(window(10, 0x200), Scope::Walk, None, t0),
+            "the same application's other windows are unaffected"
         );
         assert!(
-            breaker.allows(11, Scope::Walk, t0),
-            "other processes unaffected"
+            breaker.allows(window(10, 0), Scope::Probe, None, t0),
+            "walk failures never block probes"
         );
         let t1 = t0 + Duration::from_secs(30);
-        assert!(breaker.allows(10, Scope::Walk, t1));
-        breaker.record(10, Scope::Walk, true, t1);
-        assert!(!breaker.allows(10, Scope::Walk, t1 + Duration::from_secs(59)));
+        assert!(breaker.allows(big, Scope::Walk, None, t1));
+        breaker.record(big, Scope::Walk, true, Some(1_000), t1);
+        assert!(!breaker.allows(big, Scope::Walk, None, t1 + Duration::from_secs(59)));
         let t2 = t1 + Duration::from_secs(60);
-        assert!(breaker.allows(10, Scope::Walk, t2));
         // Two successes do not forget the failure streak...
-        breaker.record(10, Scope::Walk, false, t2);
-        breaker.record(10, Scope::Walk, false, t2);
-        breaker.record(10, Scope::Walk, true, t2);
-        assert!(!breaker.allows(10, Scope::Walk, t2 + Duration::from_secs(119)));
+        breaker.record(big, Scope::Walk, false, None, t2);
+        breaker.record(big, Scope::Walk, false, None, t2);
+        breaker.record(big, Scope::Walk, true, Some(1_000), t2);
+        assert!(!breaker.allows(big, Scope::Walk, None, t2 + Duration::from_secs(119)));
         // ...three in a row do.
         let t3 = t2 + Duration::from_secs(120);
         for _ in 0..3 {
-            breaker.record(10, Scope::Walk, false, t3);
+            breaker.record(big, Scope::Walk, false, None, t3);
         }
-        breaker.record(10, Scope::Walk, true, t3);
-        assert!(breaker.allows(10, Scope::Walk, t3 + Duration::from_secs(30)));
+        breaker.record(big, Scope::Walk, true, Some(1_000), t3);
+        assert!(breaker.allows(big, Scope::Walk, None, t3 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn shrinking_releases_the_backoff_but_regrowth_keeps_doubling() {
+        let mut breaker = Breaker::default();
+        let list = window(20, 0x300);
+        let t0 = Instant::now();
+        breaker.record(list, Scope::Walk, true, Some(1_000), t0);
+        breaker.record(list, Scope::Text, true, Some(1_000), t0);
+        // Shrinking by less than a quarter keeps it backed off.
+        assert!(!breaker.allows(list, Scope::Walk, Some(751), t0));
+        // Collapsed to the bar: released at once, both scopes.
+        assert!(breaker.allows(list, Scope::Walk, Some(750), t0));
+        assert!(breaker.allows(list, Scope::Text, Some(750), t0));
+        // Expanded again and failing again: the second failure's 60 s applies.
+        breaker.record(list, Scope::Walk, true, Some(1_000), t0);
+        assert!(!breaker.allows(list, Scope::Walk, None, t0 + Duration::from_secs(59)));
+        assert!(breaker.allows(list, Scope::Walk, None, t0 + Duration::from_secs(60)));
+        // Unknown size never releases.
+        breaker.record(list, Scope::Walk, true, Some(1_000), t0);
+        assert!(!breaker.allows(list, Scope::Walk, None, t0));
     }
 
     #[test]
@@ -342,14 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn healthy_processes_are_not_tracked_and_the_table_is_bounded() {
+    fn healthy_targets_are_not_tracked_and_the_table_is_bounded() {
         let mut breaker = Breaker::default();
         let now = Instant::now();
-        breaker.record(1, Scope::Walk, false, now);
+        breaker.record(window(1, 1), Scope::Walk, false, None, now);
         assert!(breaker.entries.is_empty());
-        for pid in 1..=(MAX_TRACKED_PROCESSES as u32 * 2) {
-            breaker.record(pid, Scope::Walk, true, now);
+        for pid in 1..=(MAX_TRACKED_TARGETS as u32 * 2) {
+            breaker.record(window(pid, 1), Scope::Walk, true, Some(10), now);
         }
-        assert!(breaker.entries.len() <= MAX_TRACKED_PROCESSES);
+        assert!(breaker.entries.len() <= MAX_TRACKED_TARGETS);
     }
 }

@@ -35,18 +35,23 @@ application's UI thread, and a client-side timeout does not stop that work; a
 large, frequently changing WPF window (a one-second timer) was slowed to a crawl
 by repeated walks. Since then:
 
-- A per-process circuit breaker follows costly provider outcomes (timeout,
-  node/depth/text limit, provider failure). While open, that process gets no
-  UIA calls of the affected scope; the period doubles from 30 s to a 10 min
-  cap and three consecutive successes reset it. Walk failures withhold the
+- A circuit breaker follows costly provider outcomes (timeout, node/depth/text
+  limit, provider failure) per window (process id plus window handle). While
+  open, that window gets no UIA calls of the affected scope; the period doubles
+  from 30 s to a 10 min cap and three consecutive successes reset it. When the
+  window's native area has shrunk by at least a quarter since its last failure
+  (a list collapsed back into a bar) the backoff is released at once, but the
+  failure count is kept, so regrowing and failing again continues the doubling. Walk failures withhold the
   frame as `uia_backoff` (configured fail-open windows still fail open); a
   failing optional text phase only switches the window to OCR text. The
   keyboard focus probe (element scope: IsPassword, ProcessId, HasKeyboardFocus)
   has its own backoff, so a large tree never disables keystroke checks; it is
   skipped (input denied) only while a walk to the same process has run longer
   than the probe's 50 ms provider timeout. Counters: `breaker_openings`,
-  `breaker_walk_skips`, `breaker_text_skips`, `breaker_probe_skips` and
-  `breaker_open_{walk,text,probe}_processes` (no process ids).
+  `breaker_shrink_releases`, `breaker_walk_skips`, `breaker_text_skips`,
+  `breaker_probe_skips`, `breaker_open_walk_windows`,
+  `breaker_open_text_windows` and `breaker_open_probe_processes` (no process
+  ids or window handles).
 - An invalidated walk restarts at most twice: a second attempt only if the
   first ended within half of the privacy budget, a third only within its first
   two-thirds; otherwise the walk ends as `uia_walk_timeout`.

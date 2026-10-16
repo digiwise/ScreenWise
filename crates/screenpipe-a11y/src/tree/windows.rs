@@ -623,6 +623,7 @@ impl WindowsTreeWalker {
         let mut candidate_pid = None;
         let mut candidate_app = None;
         let mut candidate_title = None;
+        let mut candidate_area = None;
         let mut published_privacy_elapsed = None;
         let mut metrics_basename = None;
         let mut result = (|| -> Result<TreeWalkResult> {
@@ -749,7 +750,18 @@ impl WindowsTreeWalker {
             // A process whose provider recently timed out or overran its limits
             // gets no UIA calls until its backoff expires (fails like any other
             // retrieval failure, so configured fail-open windows still apply).
-            if !crate::uia_breaker::allows(pid, crate::uia_breaker::Scope::Walk) {
+            // Breaker state is per window; its native area lets a collapsed
+            // window (a list folded back into a bar) be walked again at once.
+            let window_area =
+                get_window_rect(hwnd).map(|rect| (rect.width * rect.height).max(0.0) as u64);
+            candidate_area = window_area;
+            let breaker_hwnd = hwnd.0 as isize;
+            if !crate::uia_breaker::allows_window(
+                pid,
+                breaker_hwnd,
+                window_area,
+                crate::uia_breaker::Scope::Walk,
+            ) {
                 crate::uia_breaker::note_walk_skipped();
                 return Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(
                     AccessibilityFailure::after_native_policy(
@@ -760,7 +772,12 @@ impl WindowsTreeWalker {
                     ),
                 )));
             }
-            let text_backoff = !crate::uia_breaker::allows(pid, crate::uia_breaker::Scope::Text);
+            let text_backoff = !crate::uia_breaker::allows_window(
+                pid,
+                breaker_hwnd,
+                window_area,
+                crate::uia_breaker::Scope::Text,
+            );
             // Keyboard probes to this process wait while this walk runs long.
             let _walk_in_flight = crate::uia_breaker::walk_in_flight(pid);
 
@@ -1308,10 +1325,22 @@ impl WindowsTreeWalker {
         if let Some(pid) = candidate_pid {
             let (walk, text) = breaker_outcomes(&result);
             if let Some(costly) = walk {
-                crate::uia_breaker::record(pid, crate::uia_breaker::Scope::Walk, costly);
+                crate::uia_breaker::record_window(
+                    pid,
+                    candidate_hwnd.unwrap_or_default(),
+                    candidate_area,
+                    crate::uia_breaker::Scope::Walk,
+                    costly,
+                );
             }
             if let Some(costly) = text {
-                crate::uia_breaker::record(pid, crate::uia_breaker::Scope::Text, costly);
+                crate::uia_breaker::record_window(
+                    pid,
+                    candidate_hwnd.unwrap_or_default(),
+                    candidate_area,
+                    crate::uia_breaker::Scope::Text,
+                    costly,
+                );
             }
         }
         if !matches!(&result, Ok(TreeWalkResult::Found(_))) {
