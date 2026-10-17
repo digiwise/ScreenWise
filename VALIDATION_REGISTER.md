@@ -100,7 +100,9 @@ deferred by the owner: it would lengthen queues and could add timeouts.
   `tsc --noEmit` passed.
 - **Window walker:** native ignore, include and protected-app checks judge both
   the raw executable and the logical app name through the shared contact gate.
-  Tests: walker 46 passed.
+  Tests: walker 46 passed. Frontend export and `release-local` DesktopBuild
+  (`20261017T003502074Z-Desktop-Build-659f90c5`, 3m53s, 1,080 artifacts reused)
+  passed; not deployed.
 
 ## Content screening stage 1 (2026-10-15)
 
