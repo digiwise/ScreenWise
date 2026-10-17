@@ -5,6 +5,11 @@ import screening_metrics as metrics
 
 
 class ScreeningMetricsTests(unittest.TestCase):
+    def test_decision_and_native_metadata_codes_are_reported(self):
+        self.assertEqual(metrics.safe("decision", "off_monitor"), "off_monitor")
+        self.assertEqual(metrics.safe("native_metadata", "native_title"), "native_title")
+        self.assertEqual(metrics.safe("decision", "Not A Code"), "other")
+
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
         self.db.execute("CREATE TABLE frames(timestamp TEXT, app_name TEXT, text_source TEXT, "

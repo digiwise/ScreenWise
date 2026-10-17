@@ -125,18 +125,32 @@ fn privacy_restart_allowed(restarts: u32, start: Instant, deadline: Instant, now
     }
 }
 
-/// Costly provider outcomes that open the per-process circuit breaker.
-fn costly_stop(reason: screenpipe_config::capture_diagnostics::AccessibilityStopReason) -> bool {
+/// A provider error returned faster than this cost the target almost
+/// nothing, so it does not open the breaker (owner decision 2026-10-17: quick
+/// errors from one window kept a whole editor withheld for minutes).
+const QUICK_PROVIDER_ERROR: Duration = Duration::from_millis(250);
+
+/// Costly provider outcomes that open the per-process circuit breaker. Work
+/// limits always count; a provider error counts only when it was slow (for
+/// example a .NET provider timing out), measured over the whole walk.
+fn costly_stop(
+    reason: screenpipe_config::capture_diagnostics::AccessibilityStopReason,
+    elapsed: Duration,
+) -> bool {
     use screenpipe_config::capture_diagnostics::AccessibilityStopReason as R;
-    matches!(
-        reason,
-        R::Timeout | R::Nodes | R::Depth | R::PropertyText | R::AggregateText | R::Provider
-    )
+    match reason {
+        R::Timeout | R::Nodes | R::Depth | R::PropertyText | R::AggregateText => true,
+        R::Provider => elapsed >= QUICK_PROVIDER_ERROR,
+        _ => false,
+    }
 }
 
 /// `(walk, text)` breaker outcomes of one walk: `Some(true)` a costly failure,
 /// `Some(false)` a success, `None` nothing to record.
-fn breaker_outcomes(result: &Result<TreeWalkResult>) -> (Option<bool>, Option<bool>) {
+fn breaker_outcomes(
+    result: &Result<TreeWalkResult>,
+    elapsed: Duration,
+) -> (Option<bool>, Option<bool>) {
     match result {
         Ok(TreeWalkResult::Found(snapshot)) => {
             let text = snapshot
@@ -144,7 +158,9 @@ fn breaker_outcomes(result: &Result<TreeWalkResult>) -> (Option<bool>, Option<bo
                 .as_ref()
                 .and_then(|verification| match &verification.text {
                     WindowsTextAcquisition::Complete => Some(false),
-                    WindowsTextAcquisition::Unavailable(reason) if costly_stop(*reason) => {
+                    WindowsTextAcquisition::Unavailable(reason)
+                        if costly_stop(*reason, elapsed) =>
+                    {
                         Some(true)
                     }
                     _ => None,
@@ -152,10 +168,10 @@ fn breaker_outcomes(result: &Result<TreeWalkResult>) -> (Option<bool>, Option<bo
             (Some(false), text)
         }
         Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => {
-            (costly_stop(failure.cause).then_some(true), None)
+            (costly_stop(failure.cause, elapsed).then_some(true), None)
         }
         Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => {
-            (costly_stop(*reason).then_some(true), None)
+            (costly_stop(*reason, elapsed).then_some(true), None)
         }
         _ => (None, None),
     }
@@ -1340,7 +1356,7 @@ impl WindowsTreeWalker {
             ));
         }
         if let Some(pid) = candidate_pid {
-            let (walk, text) = breaker_outcomes(&result);
+            let (walk, text) = breaker_outcomes(&result, start.elapsed());
             if let Some(costly) = walk {
                 crate::uia_breaker::record_window(
                     pid,
@@ -2481,19 +2497,42 @@ mod tests {
             R::AggregateText,
             R::Provider,
         ] {
-            assert_eq!(breaker_outcomes(&failure(cause)), (Some(true), None));
+            assert_eq!(
+                breaker_outcomes(&failure(cause), Duration::from_secs(1)),
+                (Some(true), None)
+            );
         }
         for cause in [R::Backoff, R::Initialization] {
-            assert_eq!(breaker_outcomes(&failure(cause)), (None, None));
+            assert_eq!(
+                breaker_outcomes(&failure(cause), Duration::from_secs(1)),
+                (None, None)
+            );
         }
+        // A quick provider error records nothing; work limits always count.
+        let quick = Duration::from_millis(40);
+        assert_eq!(breaker_outcomes(&failure(R::Provider), quick), (None, None));
         assert_eq!(
-            breaker_outcomes(&Ok(TreeWalkResult::Skipped(
-                SkipReason::AccessibilityIncomplete(R::Nodes)
-            ))),
+            breaker_outcomes(&failure(R::Timeout), quick),
             (Some(true), None)
         );
         assert_eq!(
-            breaker_outcomes(&Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored))),
+            breaker_outcomes(&failure(R::Nodes), quick),
+            (Some(true), None)
+        );
+        assert_eq!(
+            breaker_outcomes(
+                &Ok(TreeWalkResult::Skipped(
+                    SkipReason::AccessibilityIncomplete(R::Nodes)
+                )),
+                Duration::from_secs(1),
+            ),
+            (Some(true), None)
+        );
+        assert_eq!(
+            breaker_outcomes(
+                &Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored)),
+                Duration::from_secs(1)
+            ),
             (None, None)
         );
     }

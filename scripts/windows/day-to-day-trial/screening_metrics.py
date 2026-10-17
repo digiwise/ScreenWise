@@ -15,7 +15,7 @@ import sys
 
 CODE = re.compile(r"^[a-z0-9_]{1,48}$")
 APP = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
-CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason", "path", "foreground_skip", "window_choice"}
+CODE_COLUMNS = {"text_source", "outcome", "reason", "processing", "cause", "phase", "blocker_reason", "path", "foreground_skip", "window_choice", "decision", "native_metadata"}
 APP_COLUMNS = {"app_name", "sampled_app", "app", "window_app"}
 GENERATED_COLUMNS = {"utc_bucket"}
 

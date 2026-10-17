@@ -120,6 +120,12 @@ open until it does not recur in use.
   offset after shared captures. `/vision/uia-metrics` reports `walk_lease`
   deferred/retried/expired counts. Tests: event-driven capture 91, health 9,
   breaker 5 passed.
+- **Quick provider errors no longer open the UIA backoff** (owner decision,
+  2026-10-17): a provider error returned in under 250 ms records nothing; slow
+  provider errors and work limits still count. In use, 16 quick Notepad errors
+  had kept 716 Notepad frames withheld. Metrics scripts now report unlisted
+  foreground and native-metadata codes (previously shown as `other`) and the
+  `walk_lease` counters. Tests: walker 46, metrics scripts 19.
 - **Window walker:** native ignore, include and protected-app checks judge both
   the raw executable and the logical app name through the shared contact gate.
   Tests: walker 46 passed. Frontend export and `release-local` DesktopBuild

@@ -34,6 +34,8 @@ UIA_METRICS = ("schema_version", "attempts", "completed", "failed", "denied", "r
                "uia_exclusion_skips")
 UNLISTED_CODES = ("off_monitor", "foreground_on_monitor", "monitor_unknown", "window_unreadable",
                   "overlaps_monitor", "not_locatable", "changed_during_evaluation")
+# Captures deferred because another walked the same process (2026-10-17).
+WALK_LEASE_CODES = ("deferred", "retried", "expired")
 TIMING_STAGE_COUNT = 21
 TIMING_RULE_COUNT = 8
 PROCESS_LIMIT = 32
@@ -136,6 +138,9 @@ def uia_projection(source):
     unlisted = source.get("unlisted_foreground")
     result["unlisted_foreground"] = ({code: numeric(unlisted.get(code)) for code in UNLISTED_CODES}
                                      if isinstance(unlisted, dict) else None)
+    lease = source.get("walk_lease")
+    result["walk_lease"] = ({code: numeric(lease.get(code)) for code in WALK_LEASE_CODES}
+                            if isinstance(lease, dict) else None)
     # Rows follow com_changed_mode, com_init_failed, uia_context_failed; columns
     # follow the endpoint's fixed hresult_codes (10 known codes, then other).
     init = source.get("initialization")

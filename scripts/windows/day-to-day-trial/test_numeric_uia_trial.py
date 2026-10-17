@@ -6,6 +6,11 @@ import numeric_uia_trial as trial
 
 
 class NumericTrialTests(unittest.TestCase):
+    def test_walk_lease_counts_are_projected_as_numbers_only(self):
+        projected = trial.uia_projection({"walk_lease": {"deferred": 3, "retried": 2, "expired": 1, "pid": "x"}})
+        self.assertEqual(projected["walk_lease"], {"deferred": 3, "retried": 2, "expired": 1})
+        self.assertIsNone(trial.uia_projection({})["walk_lease"])
+
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
         self.db.execute("CREATE TABLE frames(timestamp TEXT, capture_privacy TEXT, captured_text TEXT)")
