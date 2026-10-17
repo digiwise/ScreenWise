@@ -282,6 +282,28 @@ pub(crate) fn try_walk_lease(pid: u32) -> Option<WalkInFlight> {
         .then_some(WalkInFlight { pid, started })
 }
 
+/// A walk lease reserved before the screenshot and held through the walk, so
+/// a capture never takes pixels it must then discard because its walk target
+/// is busy. The walk itself uses it via `TreeWalkerConfig::windows_walk_lease_pid`.
+pub struct WalkLease {
+    _in_flight: WalkInFlight,
+    pid: u32,
+}
+
+impl WalkLease {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+/// Reserve the one walk of `pid`; `None` while another walk of it runs.
+pub fn reserve_walk_target(pid: u32) -> Option<WalkLease> {
+    try_walk_lease(pid).map(|in_flight| WalkLease {
+        _in_flight: in_flight,
+        pid,
+    })
+}
+
 /// Whether a walk of `pid` is running now.
 pub fn walk_target_busy(pid: u32) -> bool {
     pid != 0 && with_in_flight(|in_flight| in_flight.busy(pid))
@@ -493,6 +515,15 @@ mod tests {
         in_flight.finish(9, t0);
         assert!(!in_flight.busy(9));
         assert!(in_flight.try_start(9, t0));
+        let lease = reserve_walk_target(4343).expect("free target");
+        assert_eq!(lease.pid(), 4343);
+        assert!(walk_target_busy(4343));
+        assert!(
+            reserve_walk_target(4343).is_none(),
+            "reserved until dropped"
+        );
+        drop(lease);
+        assert!(!walk_target_busy(4343));
         let guard = walk_in_flight(4242);
         std::thread::sleep(Duration::from_millis(5));
         assert!(long_walk_in_flight(4242, Duration::from_millis(1)));

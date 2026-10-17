@@ -3664,8 +3664,27 @@ async fn do_capture(
     let window_filters = windows_capture_filters(params.tree_walker_config);
 
     #[cfg(target_os = "windows")]
-    let windows_capture =
-        capture_windows_monitor_privacy_safe(params.monitor, &window_filters).await;
+    let (windows_capture, walk_reservation) =
+        screenpipe_screen::capture_screenshot_by_window::capture_windows_monitor_for_walk(
+            params.monitor,
+            &window_filters,
+        )
+        .await;
+    // Another monitor's capture is walking this process: no pixels were taken.
+    // Store nothing and let the loop retry once that walk ends.
+    #[cfg(target_os = "windows")]
+    if let screenpipe_screen::capture_screenshot_by_window::WalkReservation::Busy(pid) =
+        walk_reservation
+    {
+        *busy_target = Some(pid);
+        return Ok(CaptureOutput {
+            result: None,
+            image: windows_capture.image,
+            elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
+            windows_outcome: windows_capture.outcome,
+        });
+    }
     #[cfg(target_os = "windows")]
     let selected_window = windows_capture.privacy.selected_window;
     #[cfg(target_os = "windows")]
@@ -3806,6 +3825,9 @@ async fn do_capture(
     );
     #[cfg(target_os = "windows")]
     {
+        // The walk of the reserved process uses the lease held since before
+        // the screenshot.
+        config.windows_walk_lease_pid = walk_reservation.held_pid();
         // Request the same fresh Document URL evidence that the engine requires
         // on a retrieval failure. Never discharge DRM from an earlier attempt.
         config.windows_require_browser_url = windows_requires_fresh_drm_url(
@@ -3920,6 +3942,9 @@ async fn do_capture(
         screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
     })
     .await?;
+    // The walk has finished: release this process for other captures.
+    #[cfg(target_os = "windows")]
+    drop(walk_reservation);
 
     // Retain retrieval diagnostics before any later target/privacy check can return.
     #[cfg(target_os = "windows")]

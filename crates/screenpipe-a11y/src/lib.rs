@@ -68,7 +68,7 @@ pub mod tree;
 #[cfg(target_os = "windows")]
 pub(crate) mod uia_breaker;
 #[cfg(target_os = "windows")]
-pub use uia_breaker::walk_target_busy;
+pub use uia_breaker::{reserve_walk_target, walk_target_busy, WalkLease};
 
 // Re-exports
 pub use activity_feed::{ActivityFeed, ActivityKind, CaptureParams};

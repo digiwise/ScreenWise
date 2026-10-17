@@ -112,7 +112,7 @@ open until it does not recur in use.
   (which also stops it reading another window's address bar). Tests:
   browser utils 15 passed.
 - **Per-process walk lease (SW-R19/SW-R20 mitigation):** one walk per target
-  process. A capture whose target is already being walked stores nothing and
+  process, reserved after the native capture plan and before the screenshot, and held through the walk; a busy target defers the capture before any pixels are taken (the walker's own busy check remains for a foreground that changed in between). A deferred capture stores nothing and
   is retried with a fresh screenshot once that walk ends, within 1 s of its
   first request; triggers that arrive meanwhile merge (user actions over visual
   change over idle, ties to the newer, all correlation ids kept). Timer-driven

@@ -491,6 +491,10 @@ pub struct TreeWalkerConfig {
     pub ignored_urls: Vec<String>,
     /// Executables whose untitled windows are verified by window capture policy.
     pub untitled_safe_apps: Vec<String>,
+    /// Windows: the process whose walk lease the caller already holds (taken
+    /// before the screenshot). A walk of that process uses it instead of
+    /// taking its own; a walk of any other process takes one as usual.
+    pub windows_walk_lease_pid: Option<u32>,
     /// Monitor origin X in screen points (virtual desktop coordinate space).
     /// Used to normalize element bounds to monitor-relative 0-1 coords.
     pub monitor_x: f64,
@@ -545,6 +549,7 @@ impl Default for TreeWalkerConfig {
             included_windows: Vec::new(),
             ignored_urls: Vec::new(),
             untitled_safe_apps: Vec::new(),
+            windows_walk_lease_pid: None,
             monitor_x: 0.0,
             monitor_y: 0.0,
             monitor_width: 0.0,

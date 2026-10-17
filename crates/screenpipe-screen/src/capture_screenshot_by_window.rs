@@ -3308,9 +3308,62 @@ pub fn evaluate_windows_monitor_capture(
 }
 
 #[cfg(target_os = "windows")]
+/// The walk lease for a capture that will walk accessibility, reserved after
+/// the native capture plan and before the bitmap.
+#[cfg(target_os = "windows")]
+pub enum WalkReservation {
+    /// No walk will follow (redacted plan, or the foreground is elsewhere).
+    NotNeeded,
+    /// Held through the walk; drop it once the walk has finished.
+    Held(screenpipe_a11y::WalkLease),
+    /// Another capture is walking this process; no bitmap was taken.
+    Busy(u32),
+}
+
+#[cfg(target_os = "windows")]
+impl WalkReservation {
+    pub fn held_pid(&self) -> Option<u32> {
+        match self {
+            Self::Held(lease) => Some(lease.pid()),
+            _ => None,
+        }
+    }
+}
+
+/// The process the following walk will target: the selected window, or the
+/// foreground window when it is on this monitor. `None` when no walk follows.
+#[cfg(target_os = "windows")]
+fn planned_walk_pid(
+    plan: &WindowsMonitorCapturePlan,
+    selected_window: Option<WindowsCaptureTarget>,
+    privacy: &WindowsCapturePrivacy,
+) -> Option<u32> {
+    if matches!(plan, WindowsMonitorCapturePlan::Redacted(_)) {
+        return None;
+    }
+    if let Some(target) = selected_window {
+        return Some(target.process_id);
+    }
+    if privacy.is_active_monitor != Some(true) {
+        return None;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowThreadProcessId(hwnd: isize, process: *mut u32) -> u32;
+    }
+    let hwnd = unsafe { GetForegroundWindow() };
+    let mut pid = 0u32;
+    if hwnd != 0 {
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    }
+    (pid != 0).then_some(pid)
+}
+
 async fn capture_windows_monitor_privacy_safe_once(
     monitor: &SafeMonitor,
     window_filters: &WindowFilters,
+    reservation: Option<&mut WalkReservation>,
 ) -> WindowsPrivacyCapture {
     let started_at = std::time::Instant::now();
     let initial = match evaluate_windows_monitor_capture(monitor, window_filters) {
@@ -3336,6 +3389,26 @@ async fn capture_windows_monitor_privacy_safe_once(
     let mut privacy = initial.privacy;
     let initial_taskbars = initial.taskbars;
     let selected_window = privacy.selected_window;
+    // Reserve the walk before any pixels are taken: a busy target defers the
+    // whole capture instead of discarding a screenshot after it.
+    if let Some(reservation) = reservation {
+        if let Some(pid) = planned_walk_pid(&initial.plan, selected_window, &privacy) {
+            match screenpipe_a11y::reserve_walk_target(pid) {
+                Some(lease) => *reservation = WalkReservation::Held(lease),
+                None => {
+                    *reservation = WalkReservation::Busy(pid);
+                    return placeholder_capture(
+                        monitor,
+                        WindowsCaptureOutcome::CaptureFailed(
+                            WindowsCaptureFailureStage::AccessibilityInspection,
+                        ),
+                        started_at,
+                        privacy,
+                    );
+                }
+            }
+        }
+    }
     let (mut image, mut active_window, initial_was_active_only) = match initial.plan {
         WindowsMonitorCapturePlan::FullMonitor => {
             match crate::utils::capture_monitor_image(monitor, &[]).await {
@@ -3583,10 +3656,38 @@ pub async fn capture_windows_monitor_privacy_safe(
     window_filters: &WindowFilters,
 ) -> WindowsPrivacyCapture {
     for attempt in 0..2 {
-        let capture = capture_windows_monitor_privacy_safe_once(monitor, window_filters).await;
+        let capture =
+            capture_windows_monitor_privacy_safe_once(monitor, window_filters, None).await;
         if !should_retry_windows_capture(capture.outcome, attempt) {
             return capture;
         }
+        tokio::task::yield_now().await;
+    }
+    unreachable!("bounded Windows capture retry always returns")
+}
+
+/// [`capture_windows_monitor_privacy_safe`] for a capture that walks
+/// accessibility next: the walk target's lease is reserved before the bitmap
+/// and returned with the capture. A busy target returns `Busy` without pixels.
+#[cfg(target_os = "windows")]
+pub async fn capture_windows_monitor_for_walk(
+    monitor: &SafeMonitor,
+    window_filters: &WindowFilters,
+) -> (WindowsPrivacyCapture, WalkReservation) {
+    for attempt in 0..2 {
+        let mut reservation = WalkReservation::NotNeeded;
+        let capture = capture_windows_monitor_privacy_safe_once(
+            monitor,
+            window_filters,
+            Some(&mut reservation),
+        )
+        .await;
+        if matches!(reservation, WalkReservation::Busy(_))
+            || !should_retry_windows_capture(capture.outcome, attempt)
+        {
+            return (capture, reservation);
+        }
+        drop(reservation);
         tokio::task::yield_now().await;
     }
     unreachable!("bounded Windows capture retry always returns")
@@ -4337,6 +4438,27 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    #[test]
+    fn walk_reservation_needs_a_walk_target_on_this_monitor() {
+        let redacted = WindowsMonitorCapturePlan::Redacted(
+            WindowsCaptureRedactionReason::ActiveWindowExcluded,
+        );
+        let privacy = WindowsCapturePrivacy {
+            is_active_monitor: Some(true),
+            ..WindowsCapturePrivacy::default()
+        };
+        // A redacted plan walks nothing, so nothing is reserved.
+        assert_eq!(planned_walk_pid(&redacted, None, &privacy), None);
+        // The foreground on another monitor is not walked from here.
+        let elsewhere = WindowsCapturePrivacy {
+            is_active_monitor: Some(false),
+            ..WindowsCapturePrivacy::default()
+        };
+        assert_eq!(
+            planned_walk_pid(&WindowsMonitorCapturePlan::FullMonitor, None, &elsewhere),
+            None
+        );
+    }
     #[test]
     fn only_explorer_owned_taskbar_classes_are_taskbars() {
         for class in ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
