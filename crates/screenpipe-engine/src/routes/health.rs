@@ -33,6 +33,11 @@ pub(crate) async fn uia_metrics_handler() -> JsonResponse<serde_json::Value> {
                 "unlisted_foreground".into(),
                 screenpipe_screen::capture_screenshot_by_window::unlisted_foreground_metrics_snapshot(),
             );
+            // Captures deferred because another walked the same process.
+            map.insert(
+                "walk_lease".into(),
+                crate::event_driven_capture::walk_lease_metrics_snapshot(),
+            );
         }
         JsonResponse(metrics)
     }
@@ -1415,6 +1420,12 @@ mod tests {
                 }
                 assert!(init["apartment_rehomed_walks"].is_number());
                 assert!(init["apartment_rehome_failures"].is_number());
+            } else if key == "walk_lease" {
+                let counts = value.as_object().expect("fixed walk lease counts");
+                let mut codes: Vec<_> = counts.keys().map(String::as_str).collect();
+                codes.sort_unstable();
+                assert_eq!(codes, ["deferred", "expired", "retried"]);
+                assert!(counts.values().all(serde_json::Value::is_number));
             } else if key == "unlisted_foreground" {
                 let counts = value.as_object().expect("fixed decision counts");
                 let codes: Vec<_> = counts.keys().map(String::as_str).collect();

@@ -421,6 +421,10 @@ pub struct EventDrivenCapture {
     last_idle_reference: Instant,
     /// Last known idle_ms from ActivityFeed
     last_idle_ms: u64,
+    /// This monitor's offset for timer-driven captures (see
+    /// [`monitor_timer_stagger`]); kept after every capture so a capture
+    /// shared by all monitors does not realign their idle timers.
+    timer_stagger: Duration,
 }
 
 impl EventDrivenCapture {
@@ -431,7 +435,12 @@ impl EventDrivenCapture {
             last_capture: now,
             last_idle_reference: now,
             last_idle_ms: 0,
+            timer_stagger: Duration::ZERO,
         }
+    }
+
+    pub fn set_timer_stagger(&mut self, stagger: Duration) {
+        self.timer_stagger = stagger;
     }
 
     /// Check if enough time has passed since the last capture (debounce).
@@ -443,7 +452,8 @@ impl EventDrivenCapture {
     pub fn mark_captured(&mut self) {
         let now = Instant::now();
         self.last_capture = now;
-        self.last_idle_reference = now;
+        // A future reference delays the next idle capture by the stagger.
+        self.last_idle_reference = now + self.timer_stagger;
     }
 
     /// Phase the next idle capture without changing the normal debounce clock.
@@ -648,6 +658,101 @@ fn idle_phase_delay(
     Duration::from_millis(delay_ms.max(1))
 }
 
+/// Offset between monitors' timer-driven checks, so visual-change checks and
+/// idle captures on different monitors do not start together.
+const MONITOR_TIMER_STAGGER: Duration = Duration::from_millis(250);
+
+/// This monitor's timer offset: its position (left to right) times
+/// [`MONITOR_TIMER_STAGGER`]. User-triggered captures are never delayed.
+fn monitor_timer_stagger(monitor: &SafeMonitor, monitors: &[SafeMonitor]) -> Duration {
+    let mut ordered = monitors.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|monitor| (monitor.x(), monitor.y(), monitor.id()));
+    let index = ordered
+        .iter()
+        .position(|candidate| candidate.id() == monitor.id())
+        .unwrap_or(0);
+    MONITOR_TIMER_STAGGER * index as u32
+}
+
+/// How long a capture deferred by a busy walk target may wait, counted from
+/// its first request; newer merged triggers never extend it.
+const BUSY_TARGET_WAIT_LIMIT: Duration = Duration::from_secs(1);
+const BUSY_TARGET_POLL: Duration = Duration::from_millis(25);
+
+/// A capture deferred because its walk target was already being walked by
+/// another monitor's capture (one walk per process). It is retried once that
+/// walk ends, with a fresh screenshot and walk.
+#[cfg(target_os = "windows")]
+struct PendingRetry {
+    trigger: CaptureTrigger,
+    correlation_ids: Vec<crate::frame_linker::CorrelationId>,
+    first_requested: Instant,
+    pid: u32,
+}
+
+#[cfg(target_os = "windows")]
+static WALK_LEASE_DEFERRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+static WALK_LEASE_RETRIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+static WALK_LEASE_EXPIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Content-free counts for deferred captures (`/vision/uia-metrics`).
+#[cfg(target_os = "windows")]
+pub fn walk_lease_metrics_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "deferred": WALK_LEASE_DEFERRED.load(Ordering::Relaxed),
+        "retried": WALK_LEASE_RETRIED.load(Ordering::Relaxed),
+        "expired": WALK_LEASE_EXPIRED.load(Ordering::Relaxed),
+    })
+}
+
+/// Rank for merging a deferred capture with triggers that arrived while it
+/// waited: the user's own actions, then visual change, then the idle timer.
+#[cfg(target_os = "windows")]
+fn deferred_merge_rank(trigger: &CaptureTrigger) -> u8 {
+    match trigger {
+        CaptureTrigger::Idle => 1,
+        CaptureTrigger::VisualChange => 2,
+        _ => 3,
+    }
+}
+
+/// Merge a deferred trigger with triggers that arrived while it waited.
+/// The higher-ranked trigger wins, ties go to the newer one, and every
+/// correlation id is kept.
+#[cfg(target_os = "windows")]
+fn merge_deferred_trigger(
+    pending: CaptureTrigger,
+    pending_ids: Vec<crate::frame_linker::CorrelationId>,
+    arrived: Vec<CaptureTriggerMsg>,
+) -> (CaptureTrigger, Vec<crate::frame_linker::CorrelationId>) {
+    let mut trigger = pending;
+    let mut ids = pending_ids;
+    for msg in arrived {
+        ids.extend(msg.correlation_id);
+        if deferred_merge_rank(&msg.trigger) >= deferred_merge_rank(&trigger) {
+            trigger = msg.trigger;
+        }
+    }
+    (trigger, ids)
+}
+
+/// Wait until no walk of the deferred target runs, or the wait limit from the
+/// first request passes. Returns whether the capture may be retried.
+#[cfg(target_os = "windows")]
+async fn wait_for_walk_target(pid: u32, first_requested: Instant) -> bool {
+    loop {
+        if !screenpipe_a11y::walk_target_busy(pid) {
+            return true;
+        }
+        if first_requested.elapsed() >= BUSY_TARGET_WAIT_LIMIT {
+            return false;
+        }
+        tokio::time::sleep(BUSY_TARGET_POLL).await;
+    }
+}
+
 /// Main event-driven capture loop for a single monitor.
 ///
 /// This replaces `continuous_capture` for event-driven mode.
@@ -731,7 +836,10 @@ pub async fn event_driven_capture_loop(
     } else {
         None
     };
-    let mut last_visual_check = Instant::now();
+    let timer_stagger = monitor_timer_stagger(&monitor, &current_monitors);
+    state.set_timer_stagger(timer_stagger);
+    // Offset this monitor's visual-change checks from the other monitors'.
+    let mut last_visual_check = Instant::now() + timer_stagger;
     // Focus-aware Warm cadence: cheap visual-diff only every 5s. Tracked
     // separately from `last_visual_check` to avoid colliding with the Active
     // visual-change detector semantics below.
@@ -807,8 +915,9 @@ pub async fn event_driven_capture_loop(
                 last_db_write,
                 None, // first capture — no elements ref
                 &mut walk_budget,
-                false, // screenshot enabled on startup
-                false, // hd not active at startup (Manual is dedup-exempt anyway)
+                false,     // screenshot enabled on startup
+                false,     // hd not active at startup (Manual is dedup-exempt anyway)
+                &mut None, // a busy target skips this one-off frame
             ),
         )
         .await
@@ -891,6 +1000,9 @@ pub async fn event_driven_capture_loop(
     // reader for the entire pause window — defeating the whole point of
     // pausing for battery / lock-screen / DRM reasons.
     let mut was_in_pause_state = false;
+    // A capture deferred by a busy walk target, retried on a later pass.
+    #[cfg(target_os = "windows")]
+    let mut pending_retry: Option<PendingRetry> = None;
 
     loop {
         if stop_signal.load(Ordering::Relaxed) {
@@ -1276,7 +1388,46 @@ pub async fn event_driven_capture_loop(
         // their frame_id link.
         let mut correlation_ids: Vec<crate::frame_linker::CorrelationId> = Vec::new();
         let mut trigger: Option<CaptureTrigger>;
-        if let Some(warm) = warm_trigger_override.take() {
+        // When this capture was first requested; a deferred retry keeps the
+        // original time so merged triggers never extend its wait.
+        #[allow(unused_mut, unused_variables)]
+        let mut request_started = Instant::now();
+        #[cfg(target_os = "windows")]
+        let retry = match pending_retry.take() {
+            Some(pending) => {
+                if wait_for_walk_target(pending.pid, pending.first_requested).await {
+                    let mut arrived = Vec::new();
+                    while let Ok(msg) = trigger_rx.try_recv() {
+                        arrived.push(msg);
+                    }
+                    arrived.retain(|msg| {
+                        trigger_applies_to_monitor(&msg.trigger, &monitor, &all_monitor_bounds)
+                    });
+                    WALK_LEASE_RETRIED.fetch_add(1, Ordering::Relaxed);
+                    request_started = pending.first_requested;
+                    Some(merge_deferred_trigger(
+                        pending.trigger,
+                        pending.correlation_ids,
+                        arrived,
+                    ))
+                } else {
+                    WALK_LEASE_EXPIRED.fetch_add(1, Ordering::Relaxed);
+                    report_triggers_dropped(
+                        linker_tx.as_ref(),
+                        pending.correlation_ids,
+                        crate::frame_linker::DropReason::Other,
+                    );
+                    None
+                }
+            }
+            None => None,
+        };
+        #[cfg(not(target_os = "windows"))]
+        let retry: Option<(CaptureTrigger, Vec<crate::frame_linker::CorrelationId>)> = None;
+        if let Some((retry_trigger, retry_ids)) = retry {
+            trigger = Some(retry_trigger);
+            correlation_ids = retry_ids;
+        } else if let Some(warm) = warm_trigger_override.take() {
             trigger = Some(warm);
         } else if trigger_channel_closed {
             trigger = state.poll_activity(&activity_feed);
@@ -1530,6 +1681,7 @@ pub async fn event_driven_capture_loop(
                 // if the DB is truly stuck. 15s is generous — normal captures take
                 // 1-3s on debug builds. The semaphore serializes writes so they
                 // don't pile up, but each write still needs time.
+                let mut busy_target: Option<u32> = None;
                 let capture_result = capture_with_timeout(
                     CAPTURE_OPERATION_TIMEOUT,
                     do_capture(
@@ -1541,11 +1693,25 @@ pub async fn event_driven_capture_loop(
                         &mut walk_budget,
                         screenshot_disabled,
                         hd_active,
+                        &mut busy_target,
                     ),
                 )
                 .await;
 
                 match capture_result {
+                    #[cfg(target_os = "windows")]
+                    Ok(Ok(_)) if busy_target.is_some() => {
+                        // Another monitor's capture is walking this process.
+                        // Nothing was stored; retry once that walk ends.
+                        WALK_LEASE_DEFERRED.fetch_add(1, Ordering::Relaxed);
+                        pending_retry = Some(PendingRetry {
+                            trigger: trigger.clone(),
+                            correlation_ids: std::mem::take(&mut correlation_ids),
+                            first_requested: request_started,
+                            pid: busy_target.unwrap_or_default(),
+                        });
+                        continue;
+                    }
                     Ok(Ok(output)) => {
                         report_monitor_operation(monitor_id, true);
                         state.mark_captured();
@@ -3486,8 +3652,11 @@ async fn do_capture(
     walk_budget: &mut screenpipe_a11y::budget::AppWalkBudget,
     screenshot_disabled: bool,
     hd_active: bool,
+    busy_target: &mut Option<u32>,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
+    #[cfg(not(target_os = "windows"))]
+    let _ = &busy_target;
     #[cfg(target_os = "windows")]
     let _ = walk_budget;
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
@@ -3841,6 +4010,22 @@ async fn do_capture(
         ).await;
     }
 
+    // Another capture is already walking this process: store nothing and let
+    // the loop retry with a fresh screenshot once that walk ends.
+    #[cfg(target_os = "windows")]
+    if let TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::TargetBusy(pid)) =
+        tree_walk_result
+    {
+        *busy_target = Some(pid);
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            content_redacted: ContentRedacted::default(),
+            windows_outcome,
+        });
+    }
+
     // If the window was skipped (incognito/private browsing or user filter),
     // bail out entirely — don't OCR the screenshot.
 
@@ -3909,6 +4094,8 @@ async fn do_capture(
                     S::UserIgnored | S::ExcludedApp | S::BlockedUrl => {
                         CaptureReason::ExcludedForeground
                     }
+                    // Returned before this point on Windows; never persisted.
+                    S::TargetBusy(_) => CaptureReason::CaptureCheckFailed,
                 },
             ),
         };
@@ -3998,6 +4185,7 @@ async fn do_capture(
                         failure.cause.code()
                     }
                     screenpipe_a11y::tree::SkipReason::DifferentMonitor => "different_monitor",
+                    screenpipe_a11y::tree::SkipReason::TargetBusy(_) => "target_busy",
                 });
                 let outcome = WindowsCaptureOutcome::CaptureRedacted(
                     screenpipe_screen::capture_screenshot_by_window::WindowsCaptureRedactionReason::ActiveWindowExcluded,
@@ -5069,6 +5257,91 @@ mod tests {
             ),
             Some(Some(redacted))
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn deferred_trigger_merge_prefers_priority_then_newest_and_keeps_ids() {
+        let id = |n: u64| n;
+        // A later idle tick does not downgrade a deferred click.
+        let (trigger, ids) = merge_deferred_trigger(
+            CaptureTrigger::AppSwitch {
+                app_name: "a".into(),
+                target: None,
+            },
+            vec![id(1)],
+            vec![CaptureTriggerMsg::new(CaptureTrigger::Idle)],
+        );
+        assert!(matches!(trigger, CaptureTrigger::AppSwitch { .. }));
+        assert_eq!(ids, vec![id(1)]);
+        // A later checkpoint upgrades a deferred idle capture; all ids kept.
+        let (trigger, ids) = merge_deferred_trigger(
+            CaptureTrigger::Idle,
+            Vec::new(),
+            vec![CaptureTriggerMsg::with_correlation(
+                CaptureTrigger::AppSwitch {
+                    app_name: "b".into(),
+                    target: None,
+                },
+                id(2),
+            )],
+        );
+        assert!(matches!(trigger, CaptureTrigger::AppSwitch { .. }));
+        assert_eq!(ids, vec![id(2)]);
+        // Visual change beats idle; a click beats a later idle tick.
+        let (trigger, _) = merge_deferred_trigger(
+            CaptureTrigger::Idle,
+            Vec::new(),
+            vec![CaptureTriggerMsg::new(CaptureTrigger::VisualChange)],
+        );
+        assert_eq!(trigger, CaptureTrigger::VisualChange);
+        let (trigger, _) = merge_deferred_trigger(
+            CaptureTrigger::Click { x: 1, y: 2 },
+            Vec::new(),
+            vec![CaptureTriggerMsg::new(CaptureTrigger::Idle)],
+        );
+        assert_eq!(trigger, CaptureTrigger::Click { x: 1, y: 2 });
+        // Ties go to the newer trigger.
+        let (trigger, _) = merge_deferred_trigger(
+            CaptureTrigger::Click { x: 1, y: 2 },
+            Vec::new(),
+            vec![CaptureTriggerMsg::new(CaptureTrigger::Click { x: 3, y: 4 })],
+        );
+        assert_eq!(trigger, CaptureTrigger::Click { x: 3, y: 4 });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn deferred_wait_is_bounded_from_the_first_request() {
+        // A free target is retried at once, however old the request.
+        assert!(wait_for_walk_target(0, Instant::now()).await);
+        let old = Instant::now() - BUSY_TARGET_WAIT_LIMIT - Duration::from_millis(5);
+        assert!(
+            wait_for_walk_target(0, old).await,
+            "a free target never waits"
+        );
+    }
+
+    #[test]
+    fn idle_stagger_survives_shared_captures() {
+        let mut state = EventDrivenCapture::new(EventDrivenCaptureConfig {
+            idle_capture_interval_ms: 50,
+            ..Default::default()
+        });
+        state.set_timer_stagger(Duration::from_millis(250));
+        state.mark_captured();
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(
+            !state.needs_idle_capture(),
+            "stagger delays the idle capture"
+        );
+        let mut plain = EventDrivenCapture::new(EventDrivenCaptureConfig {
+            idle_capture_interval_ms: 50,
+            ..Default::default()
+        });
+        plain.mark_captured();
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(plain.needs_idle_capture());
     }
 
     #[test]

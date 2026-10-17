@@ -693,6 +693,9 @@ pub enum SkipReason {
     AccessibilityIncomplete(screenpipe_config::capture_diagnostics::AccessibilityStopReason),
     /// Retrieval failed after native window checks; admission depends on unresolved rules.
     AccessibilityRetrievalFailed(AccessibilityFailure),
+    /// Another walk of this process is running; no UIA call was made. The
+    /// capture is retried once that walk finishes, with fresh pixels.
+    TargetBusy(u32),
 }
 
 impl std::fmt::Display for SkipReason {
@@ -716,6 +719,7 @@ impl std::fmt::Display for SkipReason {
                     failure.cause.code()
                 )
             }
+            SkipReason::TargetBusy(_) => write!(f, "another walk of this process is running"),
             SkipReason::MonitorUnverified => {
                 write!(f, "foreground monitor association unavailable")
             }

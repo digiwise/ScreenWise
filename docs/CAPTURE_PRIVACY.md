@@ -189,6 +189,10 @@ rules.
 
 ## No contact with excluded apps (2026-10-16)
 
+**Correction (2026-10-17):** the browser URL lookup below contacted other
+apps, excluded ones included, until it was repaired (SW-R21). Frames recorded
+before that repair were captured with this contact.
+
 An app or window excluded from capture is also not contacted: no UIA call,
 URL lookup or clipboard render is directed at it. One shared gate,
 `screenpipe_capture_policy::target`, answers this from native identity alone
@@ -214,7 +218,11 @@ Callers on Windows:
   gate. The owner is usually a hidden window, so only rules that need no title
   apply to it; title-scoped rules (`App::Title`) rely on the copy-time check;
 - browser URL lookup: skipped for an excluded browser (its exclusion already
-  withholds it);
+  withholds it). Until 2026-10-17 the lookup searched the desktop root's whole
+  subtree for the browser's process, which visited every window stacked above
+  the browser (taskbars, always-on-top windows, other apps' trees), including
+  excluded apps (SW-R21). It now opens only the foreground window, after
+  checking that it belongs to the browser's process, and searches inside it;
 - meeting detection: apps excluded whatever their title are dropped before
   scanning, and each window is checked by its native title before
   `ElementFromHandle`. The include list applies here too, so with an include

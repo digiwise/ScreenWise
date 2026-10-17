@@ -84,6 +84,12 @@ fits a UI Automation race between connection teardown and data delivery under
 concurrent walks, but one dump cannot attribute it, and earlier corruption by
 ScreenWise is not excluded. Serialising walks process-wide was considered and
 deferred by the owner: it would lengthen queues and could add timeouts.
+Full-dump follow-up (owner-authorised for one session): WinDbg buckets it as
+`BlockNotBusy_DOUBLE_FREE`; the three waiting threads were all in ScreenWise's
+browser URL lookup (`FindFirst` from the desktop root), one per monitor, and the
+connection being destroyed followed a `0x80131505` (.NET timeout) on a keystroke
+focus probe. Mitigated by the SW-R21 repair and the per-process walk lease below;
+open until it does not recur in use.
 
 **Repairs 2026-10-17 (focused synthetic tests; no live or hardware validation):**
 - **SW-R05:** frame images are served `private, no-store`; the database row is
@@ -98,6 +104,22 @@ deferred by the owner: it would lengthen queues and could add timeouts.
   panel keep the chat and report the failure, and bulk deletion's existing
   failure report now triggers. Tests: chat storage and save race 24 passed;
   `tsc --noEmit` passed.
+- **SW-R21 (new, P1): the Windows browser URL lookup contacted other apps.**
+  Inherited code (Screenpipe PR #1489) searched the desktop root's subtree for
+  the browser's process, visiting every window stacked above it with its tree,
+  excluded apps included, and ran once per monitor at the same time. It now
+  opens only the foreground window, checks its process, and searches inside it
+  (which also stops it reading another window's address bar). Tests:
+  browser utils 15 passed.
+- **Per-process walk lease (SW-R19/SW-R20 mitigation):** one walk per target
+  process. A capture whose target is already being walked stores nothing and
+  is retried with a fresh screenshot once that walk ends, within 1 s of its
+  first request; triggers that arrive meanwhile merge (user actions over visual
+  change over idle, ties to the newer, all correlation ids kept). Timer-driven
+  visual checks and idle captures are offset 250 ms per monitor and keep that
+  offset after shared captures. `/vision/uia-metrics` reports `walk_lease`
+  deferred/retried/expired counts. Tests: event-driven capture 91, health 9,
+  breaker 5 passed.
 - **Window walker:** native ignore, include and protected-app checks judge both
   the raw executable and the logical app name through the shared contact gate.
   Tests: walker 46 passed. Frontend export and `release-local` DesktopBuild

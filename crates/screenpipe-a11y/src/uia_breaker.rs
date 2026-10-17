@@ -215,6 +215,23 @@ impl InFlight {
             }
         }
     }
+    /// Start a walk only when none to `pid` is running (an exclusive lease).
+    fn try_start(&mut self, pid: u32, now: Instant) -> bool {
+        if self
+            .walks
+            .get(&pid)
+            .is_some_and(|starts| !starts.is_empty())
+        {
+            return false;
+        }
+        self.start(pid, now);
+        true
+    }
+    fn busy(&self, pid: u32) -> bool {
+        self.walks
+            .get(&pid)
+            .is_some_and(|starts| !starts.is_empty())
+    }
     fn longer_than(&self, pid: u32, age: Duration, now: Instant) -> bool {
         self.walks.get(&pid).is_some_and(|starts| {
             starts
@@ -250,6 +267,24 @@ pub(crate) fn walk_in_flight(pid: u32) -> WalkInFlight {
     let started = Instant::now();
     with_in_flight(|in_flight| in_flight.start(pid, started));
     WalkInFlight { pid, started }
+}
+
+/// One walk per target process: returns the lease, or `None` while another
+/// walk of `pid` is running. Concurrent requests to one provider made it
+/// slower and coincided with a UI Automation heap failure (SW-R20). An
+/// unknown process (`pid == 0`) is never leased exclusively.
+pub(crate) fn try_walk_lease(pid: u32) -> Option<WalkInFlight> {
+    let started = Instant::now();
+    if pid == 0 {
+        return Some(walk_in_flight(pid));
+    }
+    with_in_flight(|in_flight| in_flight.try_start(pid, started))
+        .then_some(WalkInFlight { pid, started })
+}
+
+/// Whether a walk of `pid` is running now.
+pub fn walk_target_busy(pid: u32) -> bool {
+    pid != 0 && with_in_flight(|in_flight| in_flight.busy(pid))
 }
 
 /// Whether a walk to `pid` has been running for longer than `age`.
@@ -445,6 +480,19 @@ mod tests {
         in_flight.finish(7, t0);
         assert!(!in_flight.longer_than(7, limit, t0 + Duration::from_secs(1)));
         assert!(in_flight.walks.is_empty());
+        assert!(in_flight.try_start(9, t0));
+        assert!(
+            !in_flight.try_start(9, t0),
+            "a second walk of the same process waits"
+        );
+        assert!(
+            in_flight.try_start(10, t0),
+            "other processes are unaffected"
+        );
+        assert!(in_flight.busy(9));
+        in_flight.finish(9, t0);
+        assert!(!in_flight.busy(9));
+        assert!(in_flight.try_start(9, t0));
         let guard = walk_in_flight(4242);
         std::thread::sleep(Duration::from_millis(5));
         assert!(long_walk_in_flight(4242, Duration::from_millis(1)));

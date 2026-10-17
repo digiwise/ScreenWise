@@ -132,11 +132,14 @@ been established: a crash dump exists locally but has not been analysed.
 Corruption in a process that holds captured content is worth treating as a
 security question until explained. This is register issue **SW-R20**.
 
-Dump analysis found the failure inside Windows UI Automation's own I/O thread
-while several ScreenWise walks were opening provider connections at once and
-another was being torn down. That points to a race inside UI Automation under
-concurrent walks, but a single dump cannot prove it. Allowing only one walk at a
-time was considered and deferred, because queued walks could time out more.
+Dump analysis classified it as a double free inside Windows UI Automation's
+own I/O thread. At that moment ScreenWise's browser URL lookup was running three
+times at once (once per monitor), each searching from the desktop root, while a
+keystroke check tore down a provider connection after a .NET timeout. The
+lookup now searches only the browser's own window, and a second walk of a
+process already being walked waits for it instead of overlapping. A single dump
+cannot prove the race, so SW-R20 stays open until it has gone without
+recurring.
 
 ## Open owner decisions with privacy impact
 
@@ -148,8 +151,12 @@ time was considered and deferred, because queued walks could time out more.
 
 ## Residual contact with excluded applications
 
-Native checks now prevent explicit UIA probes and other covered calls into
-recognised excluded targets. However, the global UIA focus-changed subscription
+Until 17 October 2026 the browser URL lookup searched from the desktop root
+for the browser's process, so it walked the accessibility trees of every
+window stacked above the browser, excluded apps included (register issue
+**SW-R21**). It now opens only the foreground browser window. With that
+repaired, native checks prevent explicit UIA probes and other covered calls
+into recognised excluded targets. However, the global UIA focus-changed subscription
 can still involve an excluded app's provider when Windows prepares an event,
 even though the handler only invalidates state. This is a limit on a strict
 "no provider contact" claim, not evidence that the subscription stores that

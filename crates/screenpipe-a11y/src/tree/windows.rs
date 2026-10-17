@@ -787,8 +787,10 @@ impl WindowsTreeWalker {
                 window_area,
                 crate::uia_breaker::Scope::Text,
             );
-            // Keyboard probes to this process wait while this walk runs long.
-            let _walk_in_flight = crate::uia_breaker::walk_in_flight(pid);
+            // One walk per process; keyboard probes to it wait while it runs long.
+            let Some(_walk_in_flight) = crate::uia_breaker::try_walk_lease(pid) else {
+                return Ok(TreeWalkResult::Skipped(SkipReason::TargetBusy(pid)));
+            };
 
             // Native privacy checks do not depend on UIA initialization or text retrieval.
             stage = "uia_initialization";
