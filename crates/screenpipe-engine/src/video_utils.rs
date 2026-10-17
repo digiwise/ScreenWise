@@ -746,6 +746,54 @@ impl VideoMetadataOverride {
     }
 }
 
+/// Directory holding single frames extracted from video chunks. Every file in
+/// it is a derived copy of recorded media, so it is deleted when its cache
+/// entry goes, when media is deleted or evicted, and at startup (SW-R05).
+pub fn extracted_frames_dir() -> PathBuf {
+    PathBuf::from("/tmp/screenpipe_frames")
+}
+
+/// Whether `path` names a file created by [`extract_frame_from_video`].
+/// Snapshot media and anything else are never treated as extracted copies.
+pub fn is_extracted_frame(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    path.parent() == Some(extracted_frames_dir().as_path())
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("frame_") && name.ends_with(".jpg"))
+}
+
+/// Delete one extracted copy. Anything that is not an extracted copy is left
+/// alone. Best effort: a file still open elsewhere is swept later.
+pub async fn remove_extracted_frame(path: &str) {
+    if is_extracted_frame(path) {
+        if let Err(e) = tokio::fs::remove_file(path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                debug!("could not remove extracted frame copy: {}", e);
+            }
+        }
+    }
+}
+
+/// Delete every extracted copy; returns how many were removed.
+pub async fn purge_extracted_frames() -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(extracted_frames_dir()).await else {
+        return 0;
+    };
+    let mut removed = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(path) = path.to_str() else {
+            continue;
+        };
+        if is_extracted_frame(path) && tokio::fs::remove_file(path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub async fn extract_frame_from_video(
     file_path: &str,
     offset_index: i64,
@@ -829,7 +877,7 @@ pub async fn extract_frame_from_video(
     let offset_str = format!("{:.3}", offset_seconds);
 
     // Create a temporary directory for frames if it doesn't exist
-    let frames_dir = PathBuf::from("/tmp/screenpipe_frames");
+    let frames_dir = extracted_frames_dir();
     tokio::fs::create_dir_all(&frames_dir).await?;
 
     // Generate unique filename for the frame

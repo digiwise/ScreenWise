@@ -8,6 +8,7 @@
 //! Borrows shared `Arc`s from `ServerCore` (DB, AudioManager, etc.)
 //! without taking ownership — the server stays alive across capture cycles.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,8 @@ use crate::server_core::ServerCore;
 pub struct CaptureSession {
     shutdown_tx: broadcast::Sender<()>,
     vision_task: Option<tokio::task::JoinHandle<()>>,
+    /// Delayed audio start; `stop()` cancels or joins it before stopping audio.
+    audio_start_task: Option<tokio::task::JoinHandle<()>>,
     ui_recorder_handle: Option<screenpipe_engine::UiRecorderHandle>,
     audio_manager: Arc<screenpipe_audio::audio_manager::AudioManager>,
     audio_disabled: bool,
@@ -198,21 +201,26 @@ impl CaptureSession {
         }
 
         // --- Audio recording ---
-        if !config.disable_audio {
+        let audio_start_task = if !config.disable_audio {
             let audio_manager_clone = server.audio_manager.clone();
             let drm_pause = config.pause_on_drm_content;
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                if let Err(e) = audio_manager_clone.start().await {
-                    error!("Failed to start audio manager: {}", e);
-                }
-                if drm_pause && screenpipe_engine::drm_detector::drm_content_paused() {
-                    if let Err(e) = audio_manager_clone.stop_output_devices().await {
-                        warn!("failed to stop SCK audio after late DRM detection: {:?}", e);
+            Some(spawn_delayed_start(
+                AUDIO_START_DELAY,
+                shutdown_tx.subscribe(),
+                move || async move {
+                    if let Err(e) = audio_manager_clone.start().await {
+                        error!("Failed to start audio manager: {}", e);
                     }
-                }
-            });
-        }
+                    if drm_pause && screenpipe_engine::drm_detector::drm_content_paused() {
+                        if let Err(e) = audio_manager_clone.stop_output_devices().await {
+                            warn!("failed to stop SCK audio after late DRM detection: {:?}", e);
+                        }
+                    }
+                },
+            ))
+        } else {
+            None
+        };
 
         // --- UI event recording ---
         // Gate on accessibility permission before calling start_ui_recording.
@@ -300,6 +308,7 @@ impl CaptureSession {
         Ok(Self {
             shutdown_tx,
             vision_task,
+            audio_start_task,
             ui_recorder_handle,
             audio_manager: server.audio_manager.clone(),
             audio_disabled: config.disable_audio,
@@ -321,6 +330,22 @@ impl CaptureSession {
 
         // Broadcast shutdown to VisionManager, meeting watcher, schedule monitor, compaction
         let _ = self.shutdown_tx.send(());
+
+        // The shutdown signal cancels a start still waiting out its delay. One
+        // already running must finish before stop(), or devices could start
+        // after this session has stopped (SW-R09).
+        if let Some(mut audio_start) = self.audio_start_task.take() {
+            match tokio::time::timeout(AUDIO_START_JOIN_TIMEOUT, &mut audio_start).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("audio start task failed: {}", e),
+                Err(_) => {
+                    crate::crash_recovery::note_shutdown_incomplete();
+                    warn!("audio start did not finish within 10s; aborting it before stop");
+                    audio_start.abort();
+                    let _ = audio_start.await;
+                }
+            }
+        }
 
         // Stop audio recording (but don't shutdown — keep the Arc valid for queries)
         if !self.audio_disabled {
@@ -367,6 +392,30 @@ impl CaptureSession {
 
         info!("Capture session stopped");
     }
+}
+
+const AUDIO_START_DELAY: Duration = Duration::from_secs(1);
+const AUDIO_START_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `start` after `delay`, unless a shutdown signal arrives first (or the
+/// session's sender is gone). Once started, `start` runs to completion; the
+/// returned handle lets the session wait for it.
+fn spawn_delayed_start<F, Fut>(
+    delay: Duration,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    start: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.recv() => {}
+            _ = tokio::time::sleep(delay) => start().await,
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -448,4 +497,61 @@ async fn reconfigure_audio_manager(
         .map_err(|e| format!("Failed to apply audio options: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn delayed_start_is_cancelled_by_shutdown_during_the_delay() {
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = started.clone();
+        let task = spawn_delayed_start(
+            Duration::from_millis(200),
+            shutdown_tx.subscribe(),
+            move || async move { flag.store(true, Ordering::SeqCst) },
+        );
+        shutdown_tx.send(()).unwrap();
+        task.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn joining_waits_for_a_start_already_in_progress() {
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let task = spawn_delayed_start(
+            Duration::from_millis(10),
+            shutdown_tx.subscribe(),
+            move || async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                flag.store(true, Ordering::SeqCst);
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Stop arrives while the start is running: it is not interrupted, and
+        // joining returns only after it has finished.
+        let _ = shutdown_tx.send(());
+        task.await.unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn delayed_start_does_not_run_once_the_session_is_gone() {
+        let (shutdown_tx, rx) = broadcast::channel::<()>(1);
+        drop(shutdown_tx);
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = started.clone();
+        spawn_delayed_start(Duration::from_millis(10), rx, move || async move {
+            flag.store(true, Ordering::SeqCst)
+        })
+        .await
+        .unwrap();
+        assert!(!started.load(Ordering::SeqCst));
+    }
 }

@@ -49,11 +49,13 @@ import {
   __resetChatStorageCachesForTests,
   conversationDedupKey,
   dedupeConversationMetas,
+  deleteConversationFile,
   listConversations,
   searchConversations,
   type ConversationDedupCandidate,
   type ConversationMeta,
 } from "../chat-storage";
+import { remove } from "@tauri-apps/plugin-fs";
 
 const CHATS_DIR = "/Users/test/.screenpipe/chats";
 
@@ -392,5 +394,29 @@ describe("listConversations duplicate collapsing", () => {
 
     const rows = await listConversations({ limit: CHAT_HISTORY_INITIAL_LIMIT });
     expect(rows.map((r) => r.id).sort()).toEqual(["evening", "morning"]);
+  });
+});
+
+describe("deleteConversationFile", () => {
+  beforeEach(() => {
+    fsMock.files.clear();
+    vi.mocked(remove).mockClear();
+  });
+
+  it("rejects when the file cannot be removed so callers keep the chat", async () => {
+    putConversation("locked", { updatedAt: 1 });
+    vi.mocked(remove).mockRejectedValueOnce(new Error("file is locked"));
+    await expect(deleteConversationFile("locked")).rejects.toThrow("file is locked");
+  });
+
+  it("resolves after removing the file", async () => {
+    putConversation("gone", { updatedAt: 1 });
+    await expect(deleteConversationFile("gone")).resolves.toBeUndefined();
+    expect(remove).toHaveBeenCalledWith(`${CHATS_DIR}/gone.json`);
+  });
+
+  it("treats an already-absent file as deleted", async () => {
+    await expect(deleteConversationFile("never-saved")).resolves.toBeUndefined();
+    expect(remove).not.toHaveBeenCalled();
   });
 });

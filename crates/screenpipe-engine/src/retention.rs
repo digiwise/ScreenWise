@@ -180,6 +180,7 @@ pub async fn retention_configure(
                     runtime.config.clone(),
                     state.retention_state.inner.clone(),
                     run_now,
+                    state.frame_image_cache.clone(),
                 );
                 info!(
                     "retention: re-enabled with {}d ({:?})",
@@ -218,6 +219,7 @@ pub async fn retention_configure(
                 config.clone(),
                 state.retention_state.inner.clone(),
                 run_now.clone(),
+                state.frame_image_cache.clone(),
             );
 
             let runtime = RetentionRuntime {
@@ -315,6 +317,7 @@ fn spawn_retention_loop(
     config: RetentionConfig,
     state: Arc<RwLock<Option<RetentionRuntime>>>,
     run_now: Arc<tokio::sync::Notify>,
+    frame_image_cache: Option<Arc<tokio::sync::Mutex<crate::server::FrameImageCache>>>,
 ) -> tokio::task::JoinHandle<()> {
     let _ = config; // retention_days read from state each iteration
     tokio::spawn(async move {
@@ -349,7 +352,15 @@ fn spawn_retention_loop(
                 mode
             );
 
-            match do_local_cleanup(&db, cutoff, mode).await {
+            let result = do_local_cleanup(&db, cutoff, mode).await;
+            // Cached extracted copies must not outlive deleted or evicted media
+            // (SW-R05); a failed run may still have removed some batches.
+            if result.as_ref().map_or(true, |deleted| *deleted > 0) {
+                if let Some(cache) = &frame_image_cache {
+                    crate::routes::frames::clear_frame_image_cache(cache).await;
+                }
+            }
+            match result {
                 Ok(deleted) => {
                     if deleted > 0 {
                         info!("retention: deleted {} records", deleted);

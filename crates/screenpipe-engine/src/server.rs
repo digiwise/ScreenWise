@@ -364,6 +364,18 @@ impl SCServer {
             });
         }
 
+        // Extracted frame copies from a previous run may belong to media
+        // deleted since; none are referenced by the new, empty cache.
+        tokio::spawn(async {
+            let removed = crate::video_utils::purge_extracted_frames().await;
+            if removed > 0 {
+                tracing::info!(
+                    "removed {} extracted frame copies from a previous run",
+                    removed
+                );
+            }
+        });
+
         let api_db = Arc::new(self.db.api_reads());
         let app_state = Arc::new(AppState {
             db: api_db.clone(),

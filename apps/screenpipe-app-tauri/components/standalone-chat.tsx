@@ -2084,6 +2084,11 @@ function ChatTitleMenu({
       await startNewConversation();
     } catch (e) {
       console.warn("[chat] delete failed:", e);
+      toast({
+        title: "chat could not be deleted",
+        description: "the file may be locked or inaccessible; try again",
+        variant: "destructive",
+      });
     }
   };
 

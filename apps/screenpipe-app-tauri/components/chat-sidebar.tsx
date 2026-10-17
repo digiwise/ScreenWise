@@ -60,6 +60,7 @@ import {
   updateConversationFlags,
 } from "@/lib/chat-storage";
 import { commands } from "@/lib/utils/tauri";
+import { toast } from "@/components/ui/use-toast";
 import { isConversationHistorySyncPrompt } from "@/lib/chat-utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -392,12 +393,19 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   };
 
   const handleDeleteConfirmed = async (id: string) => {
-    actions.drop(id);
+    // Delete the file first: if it survives, the chat must stay listed.
     try {
       await deleteConversationFile(id);
-    } catch {
-      // ignore
+    } catch (e) {
+      console.warn("[chat] delete failed:", e);
+      toast({
+        title: "chat could not be deleted",
+        description: "the file may be locked or inaccessible; try again",
+        variant: "destructive",
+      });
+      return;
     }
+    actions.drop(id);
     try {
       await emit("chat-deleted", { id });
     } catch {

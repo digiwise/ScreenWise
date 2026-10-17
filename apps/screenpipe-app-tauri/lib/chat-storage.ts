@@ -139,6 +139,12 @@ export async function loadConversationFile(
   }
 }
 
+/**
+ * Delete a conversation's file. Rejects when the file could not be removed
+ * (e.g. locked or inaccessible) so callers can keep showing it and report
+ * the failure instead of treating it as deleted. An already-absent file is
+ * success.
+ */
 export async function deleteConversationFile(id: string): Promise<void> {
   try {
     const dir = await getChatsDir();
@@ -148,8 +154,6 @@ export async function deleteConversationFile(id: string): Promise<void> {
       await remove(filePath);
       forgetConversationEntry(dir, filename);
     }
-  } catch {
-    // ignore
   } finally {
     deleteCachedBrowserState(id);
   }

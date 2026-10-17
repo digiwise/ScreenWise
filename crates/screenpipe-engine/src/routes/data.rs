@@ -89,7 +89,7 @@ pub(crate) async fn delete_time_range_handler(
 
     state.search_cache.invalidate_all();
     if let Some(cache) = &state.frame_image_cache {
-        cache.lock().await.clear();
+        super::frames::clear_frame_image_cache(cache).await;
     }
 
     // Jobs survive the committed record removal and retry on startup/requests.
@@ -219,7 +219,7 @@ pub(crate) async fn evict_media_handler(
 
     state.search_cache.invalidate_all();
     if let Some(cache) = &state.frame_image_cache {
-        cache.lock().await.clear();
+        super::frames::clear_frame_image_cache(cache).await;
     }
 
     Ok(JsonResponse(EvictMediaResponse {

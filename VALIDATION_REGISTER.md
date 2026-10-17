@@ -72,9 +72,35 @@ Sources: [bulk acquisition](crates/screenpipe-a11y/src/tree/windows_bulk.rs),
 
 **SW-R20 — Open: Unexplained heap-corruption crash.** A deployed build exited on
 2026-10-16 with exception `0xc0000374` in `ntdll.dll` after about an hour of
-normal capture; the only ScreenWise crash in the preceding 14 days. A local crash
-dump exists but is unanalysed, pending an owner decision to install a debugger.
-Treat as a potential memory-safety issue until attributed.
+normal capture; the only ScreenWise crash in the preceding 14 days. Dump analysis
+(2026-10-17, WinDbg; stacks, exception record and module list only, no memory
+contents): the heap failure was detected while `uiautomationcore.dll`'s own I/O
+thread freed memory handling incoming provider data
+(`ChannelBasedClientConnection::OnData` →
+`SetSupportedRemoteOperationOpcodes`). No ScreenWise frame was on that stack.
+Three ScreenWise workers were concurrently inside UIA `UiaNode_Find` waiting to
+open provider connections, and another thread was destroying a connection. This
+fits a UI Automation race between connection teardown and data delivery under
+concurrent walks, but one dump cannot attribute it, and earlier corruption by
+ScreenWise is not excluded. Serialising walks process-wide was considered and
+deferred by the owner: it would lengthen queues and could add timeouts.
+
+**Repairs 2026-10-17 (focused synthetic tests; no live or hardware validation):**
+- **SW-R05:** frame images are served `private, no-store`; the database row is
+  read before any cached copy, and a cached extracted copy is reused only while
+  its source chunk exists. Extracted copies are deleted when their entry expires
+  or is displaced, after PII-redacted and OCR use, on manual deletion, eviction
+  and background retention, and at startup. Tests: frame routes 4 passed.
+- **SW-R09:** the delayed audio start is owned by the capture session; stop
+  cancels it during the delay or joins a start in progress (10 s bound) before
+  stopping audio. Tests: capture session 3 passed.
+- **SW-R10:** chat deletion propagates file-removal failures; the sidebar and chat
+  panel keep the chat and report the failure, and bulk deletion's existing
+  failure report now triggers. Tests: chat storage and save race 24 passed;
+  `tsc --noEmit` passed.
+- **Window walker:** native ignore, include and protected-app checks judge both
+  the raw executable and the logical app name through the shared contact gate.
+  Tests: walker 46 passed.
 
 ## Content screening stage 1 (2026-10-15)
 

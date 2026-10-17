@@ -66,7 +66,11 @@ copies already held by clients can outlive the source operation. The ordinary
 file-serving helper still emits `Cache-Control: public, max-age=604800`; the
 separate PII-redaction response uses `no-store`.
 
-This is existing issue **SW-R05** (P2). The cache header does not by itself bypass API
+This is existing issue **SW-R05** (P2). **Repaired 2026-10-17, synthetic
+tests only:** frames are now served `private, no-store`, the database is checked
+before any cached copy, and extracted copies are deleted with their cache entry,
+on deletion, eviction and retention, and at startup. Copies already delivered to
+a client are unaffected. The cache header does not by itself bypass API
 authentication or prove that a shared cache stored the response. It does permit
 retention that deserves review for sensitive media. A fix needs consistent
 sensitive-response caching policy, derived-file invalidation and tests of a
@@ -86,9 +90,11 @@ Sources: [frame responses](../crates/screenpipe-engine/src/routes/frames.rs),
   starts from an unowned task after a one-second delay, and stopping the session
   does not cancel it, so devices and workers can start after a quick stop. The
   manual pause gate still denies samples, so this is not established as content
-  capture. Source: [capture session](../apps/screenpipe-app-tauri/src-tauri/src/capture_session.rs).
+  capture. **Repaired 2026-10-17 (synthetic tests):** stop now cancels or joins the
+  start. Source: [capture session](../apps/screenpipe-app-tauri/src-tauri/src/capture_session.rs).
 - **SW-R10 (P2): chat deletion can fail silently.** A locked or inaccessible
-  chat file can remain on disk while the UI reports it deleted. Source:
+  chat file can remain on disk while the UI reports it deleted. **Repaired
+  2026-10-17:** failures now keep the chat listed and are reported. Source:
   [chat storage](../apps/screenpipe-app-tauri/lib/chat-storage.ts).
 - **SW-R11 (P2): an in-flight save can recreate a deleted chat.** Deleting a
   conversation while a response is streaming can let its autosave write it back.
@@ -126,12 +132,14 @@ been established: a crash dump exists locally but has not been analysed.
 Corruption in a process that holds captured content is worth treating as a
 security question until explained. This is register issue **SW-R20**.
 
+Dump analysis found the failure inside Windows UI Automation's own I/O thread
+while several ScreenWise walks were opening provider connections at once and
+another was being torn down. That points to a race inside UI Automation under
+concurrent walks, but a single dump cannot prove it. Allowing only one walk at a
+time was considered and deferred, because queued walks could time out more.
+
 ## Open owner decisions with privacy impact
 
-- **One exclusion check for the window walker.** Other UIA contact points use
-  the shared exclusion gate, which checks both the raw and the effective app
-  name. The window walker still checks only the effective name. Source:
-  [shared gate](../crates/screenpipe-capture-policy/src/target.rs).
 - **Remaining separate exclusion lists.** Some components keep their own lists
   of protected or excluded apps. Separate lists can drift apart.
 - **Broad ignore patterns.** A pattern without `::` matches anywhere in an app

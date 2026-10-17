@@ -27,8 +27,11 @@ use tokio_util::io::ReaderStream;
 use tracing::{debug, error, warn};
 
 use crate::{
-    server::AppState,
-    video_utils::{extract_frame_from_video, pii_redaction_failure_frame, redact_frame_pii},
+    server::{AppState, FrameImageCache},
+    video_utils::{
+        extract_frame_from_video, pii_redaction_failure_frame, redact_frame_pii,
+        remove_extracted_frame,
+    },
 };
 
 use tokio::time::timeout;
@@ -50,56 +53,8 @@ pub async fn get_frame_data(
     let start_time = Instant::now();
 
     match timeout(Duration::from_secs(5), async {
-        // Skip cache if redact_pii is requested (need fresh processing)
-        if !query.redact_pii {
-            // Try to get frame from cache if enabled
-            if let Some(cache) = &state.frame_image_cache {
-                let cache_result = cache.try_lock();
-                match cache_result {
-                    Ok(mut cache) => {
-                        if let Some((file_path, timestamp)) = cache.get(&frame_id) {
-                            // Increased TTL from 5 minutes to 30 minutes.
-                            // Frames are immutable once captured, so longer caching is safe
-                            // and significantly improves timeline scrolling performance.
-                            if timestamp.elapsed() < Duration::from_secs(1800) {
-                                let path_owned = file_path.clone();
-                                drop(cache);
-                                match serve_file(&path_owned).await {
-                                    Ok(resp) => {
-                                        debug!(
-                                            "Cache hit for frame_id: {}. Retrieved in {:?}",
-                                            frame_id,
-                                            start_time.elapsed()
-                                        );
-                                        return Ok(resp);
-                                    }
-                                    Err(_) => {
-                                        // File was deleted (e.g. by compaction) — evict stale entry
-                                        // and fall through to DB lookup for updated path
-                                        debug!(
-                                            "Cache stale for frame_id: {} (file gone), evicting",
-                                            frame_id
-                                        );
-                                        if let Ok(mut cache) =
-                                            state.frame_image_cache.as_ref().unwrap().try_lock()
-                                        {
-                                            cache.pop(&frame_id);
-                                        }
-                                    }
-                                }
-                            } else {
-                                cache.pop(&frame_id);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        debug!("Cache lock contention for frame_id: {}", frame_id);
-                    }
-                }
-            }
-        }
-
-        // If not in cache or cache disabled, get from database
+        // The database is consulted before any cached copy, so a deleted frame
+        // or evicted media is never served from the cache (SW-R05).
         match state.db.get_frame(frame_id).await {
             Ok(Some((file_path, offset_index, is_snapshot))) => {
                 if is_snapshot {
@@ -108,12 +63,6 @@ pub async fn get_frame_data(
                         Ok(resp) => {
                             if query.redact_pii {
                                 return apply_pii_redaction(&state, frame_id, &file_path).await;
-                            }
-                            // Cache snapshot path
-                            if let Some(cache) = &state.frame_image_cache {
-                                if let Ok(mut cache) = cache.try_lock() {
-                                    cache.put(frame_id, (file_path.clone(), Instant::now()));
-                                }
                             }
                             debug!(
                                 "Snapshot frame {} served in {:?}",
@@ -142,6 +91,17 @@ pub async fn get_frame_data(
                                 })),
                             ));
                         }
+                    }
+                }
+
+                if !query.redact_pii {
+                    if let Some(resp) = serve_cached_extract(&state, frame_id, &file_path).await {
+                        debug!(
+                            "Cache hit for frame_id: {}. Retrieved in {:?}",
+                            frame_id,
+                            start_time.elapsed()
+                        );
+                        return Ok(resp);
                     }
                 }
 
@@ -244,6 +204,54 @@ pub async fn get_frame_data(
     }
 }
 
+/// How long an extracted copy of a video-chunk frame may be reused.
+const EXTRACT_CACHE_TTL: Duration = Duration::from_secs(1800);
+
+/// Serve a previously extracted copy of a video-chunk frame whose database row
+/// was just read, only while the entry is fresh and its source chunk still
+/// exists. A stale entry is dropped and its copy deleted.
+async fn serve_cached_extract(
+    state: &AppState,
+    frame_id: i64,
+    source_path: &str,
+) -> Option<Response<Body>> {
+    let cache = state.frame_image_cache.as_ref()?;
+    let (path, stored) = cache.try_lock().ok()?.get(&frame_id)?.clone();
+    if stored.elapsed() >= EXTRACT_CACHE_TTL || !std::path::Path::new(source_path).exists() {
+        forget_cached_extract(cache, frame_id).await;
+        return None;
+    }
+    match serve_file(&path).await {
+        Ok(response) => Some(response),
+        Err(_) => {
+            forget_cached_extract(cache, frame_id).await;
+            None
+        }
+    }
+}
+
+async fn forget_cached_extract(cache: &tokio::sync::Mutex<FrameImageCache>, frame_id: i64) {
+    let popped = cache.lock().await.pop(&frame_id);
+    if let Some((path, _)) = popped {
+        remove_extracted_frame(&path).await;
+    }
+}
+
+/// Drop every cached frame and delete the extracted copies, after media is
+/// deleted or evicted (SW-R05). Copies that could not be removed (for
+/// example while being served) are swept at the next startup.
+pub(crate) async fn clear_frame_image_cache(cache: &tokio::sync::Mutex<FrameImageCache>) {
+    let paths: Vec<String> = {
+        let mut cache = cache.lock().await;
+        let paths = cache.iter().map(|(_, (path, _))| path.clone()).collect();
+        cache.clear();
+        paths
+    };
+    for path in paths {
+        remove_extracted_frame(&path).await;
+    }
+}
+
 /// Query parameters for finding the next valid frame
 /// Try to extract a single frame and optionally cache the result.
 /// Returns the served image response on success, or the extraction error on failure.
@@ -265,16 +273,24 @@ async fn try_extract_and_serve_frame(
     let frame_path = extract_frame_from_video(file_path, offset_index, jpeg_q).await?;
 
     if redact_pii {
-        return apply_pii_redaction(state, frame_id, &frame_path)
-            .await
-            .map_err(|(status, _)| anyhow::anyhow!("PII redaction failed: {}", status));
+        // The redacted response is built in memory; the copy is not reused.
+        let response = apply_pii_redaction(state, frame_id, &frame_path).await;
+        remove_extracted_frame(&frame_path).await;
+        return response.map_err(|(status, _)| anyhow::anyhow!("PII redaction failed: {}", status));
     }
 
-    // Store in cache if enabled
+    // Store in cache if enabled; a displaced entry's copy is deleted.
+    let mut displaced = None;
     if let Some(cache) = &state.frame_image_cache {
         if let Ok(mut cache) = cache.try_lock() {
-            cache.put(frame_id, (frame_path.clone(), Instant::now()));
+            displaced = cache
+                .push(frame_id, (frame_path.clone(), Instant::now()))
+                .map(|(_, (path, _))| path)
+                .filter(|path| *path != frame_path);
         }
+    }
+    if let Some(path) = displaced {
+        remove_extracted_frame(&path).await;
     }
 
     serve_file(&frame_path)
@@ -915,12 +931,16 @@ pub async fn run_frame_ocr(
     } else {
         // Legacy video-chunk frame — extract via ffmpeg
         match extract_frame_from_video(&file_path, offset_index, "95").await {
-            Ok(temp_path) => match tokio::task::spawn_blocking({
-                let p = temp_path.clone();
-                move || image::open(&p)
-            })
-            .await
-            {
+            Ok(temp_path) => match {
+                let opened = tokio::task::spawn_blocking({
+                    let p = temp_path.clone();
+                    move || image::open(&p)
+                })
+                .await;
+                // Decoded into memory; the extracted copy is not kept.
+                remove_extracted_frame(&temp_path).await;
+                opened
+            } {
                 Ok(Ok(img)) => img,
                 _ => {
                     return Err((
@@ -1123,7 +1143,8 @@ pub(crate) async fn serve_file(path: &str) -> Result<Response, (StatusCode, Json
 
             let response = Response::builder()
                 .header("content-type", "image/jpeg")
-                .header("cache-control", "public, max-age=604800") // Cache for 7 days
+                // Recorded media must not outlive deletion in an HTTP cache (SW-R05).
+                .header("cache-control", "private, no-store")
                 .body(body)
                 .map_err(|e| {
                     (
@@ -1157,6 +1178,58 @@ pub use crate::video_utils::extract_high_quality_frame as extract_hq_frame;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn served_frames_are_never_stored_by_http_caches() {
+        let path = std::env::temp_dir().join(format!("sw-r05-{}.jpg", uuid::Uuid::new_v4()));
+        std::fs::write(&path, [0xFF, 0xD8, 0xFF]).unwrap();
+        let response = serve_file(path.to_str().unwrap()).await.unwrap();
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clearing_the_cache_deletes_extracted_copies_but_not_media() {
+        use crate::video_utils::extracted_frames_dir;
+        let dir = extracted_frames_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let extracted = dir.join(format!("frame_7_{}.jpg", uuid::Uuid::new_v4()));
+        std::fs::write(&extracted, b"x").unwrap();
+        let media = std::env::temp_dir().join(format!("snapshot-{}.jpg", uuid::Uuid::new_v4()));
+        std::fs::write(&media, b"x").unwrap();
+
+        let cache = tokio::sync::Mutex::new(FrameImageCache::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+        ));
+        {
+            let mut guard = cache.lock().await;
+            guard.put(1, (extracted.to_str().unwrap().to_string(), Instant::now()));
+            guard.put(2, (media.to_str().unwrap().to_string(), Instant::now()));
+        }
+        clear_frame_image_cache(&cache).await;
+
+        assert!(cache.lock().await.is_empty());
+        assert!(!extracted.exists());
+        assert!(media.exists(), "only extracted copies are deleted");
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn only_extract_output_counts_as_an_extracted_copy() {
+        use crate::video_utils::{extracted_frames_dir, is_extracted_frame};
+        let dir = extracted_frames_dir();
+        assert!(is_extracted_frame(
+            dir.join("frame_3_abc.jpg").to_str().unwrap()
+        ));
+        for path in [
+            dir.join("other.jpg"),
+            dir.join("frame_3_abc.png"),
+            dir.join("nested").join("frame_3_abc.jpg"),
+            std::env::temp_dir().join("frame_3_abc.jpg"),
+        ] {
+            assert!(!is_extracted_frame(path.to_str().unwrap()), "{path:?}");
+        }
+    }
 
     #[test]
     fn pii_image_responses_disclose_clear_redacted_and_failed_states() {

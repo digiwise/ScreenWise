@@ -202,6 +202,41 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
 };
 
+/// The walker's skip reason for a window the shared contact gate refuses,
+/// over every name the process is known by. Ignore and include rules are
+/// checked (and timed) separately, in that order.
+fn native_window_exclusion(
+    ignored: &[WindowPattern],
+    included: &[WindowPattern],
+    app_names: &[&str],
+    window_name: &str,
+) -> Option<SkipReason> {
+    use screenpipe_capture_policy::target::{Exclusion, TargetFilter};
+    let mut exclusion = None;
+    for (group, filter) in [
+        (
+            timing::RuleGroup::NativeIgnoredWindow,
+            TargetFilter::from_patterns(ignored.to_vec(), Vec::new()),
+        ),
+        (
+            timing::RuleGroup::NativeIncludedWindow,
+            TargetFilter::from_patterns(Vec::new(), included.to_vec()),
+        ),
+    ] {
+        if timing::rule_check(group, || {
+            exclusion = filter.window_exclusion(app_names, Some(window_name));
+            exclusion.is_some()
+        }) {
+            break;
+        }
+    }
+    Some(match exclusion? {
+        Exclusion::Unidentified | Exclusion::ProtectedApp => SkipReason::ExcludedApp,
+        Exclusion::Ignored => SkipReason::UserIgnored,
+        Exclusion::OutsideIncludes => SkipReason::NotInIncludeList,
+    })
+}
+
 fn native_window_title(hwnd: HWND) -> String {
     unsafe {
         let mut buf = [0u16; 512];
@@ -654,9 +689,18 @@ impl WindowsTreeWalker {
             let app_name = crate::platform::windows::get_effective_app_name(hwnd, pid);
             candidate_app = Some(app_name.clone());
 
+            // The raw executable is judged as well as the logical name, as at
+            // every other UIA contact point: either name can exclude.
+            let raw_app_name = crate::platform::windows::get_process_name(pid);
+            let app_names: Vec<&str> = std::iter::once(app_name.as_str())
+                .chain(raw_app_name.as_deref())
+                .collect();
+
             // Skip excluded apps
             let app_lower = app_name.to_lowercase();
-            if screenpipe_capture_policy::target::is_protected_app(&app_lower) {
+            if app_names.iter().any(|name| {
+                screenpipe_capture_policy::target::is_protected_app(&name.to_lowercase())
+            }) {
                 debug!("a11y: hardcoded app exclusion");
                 return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
             }
@@ -696,25 +740,20 @@ impl WindowsTreeWalker {
                 return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
             }
 
-            // Apply user-configured ignored windows. Supports both legacy
-            // unscoped patterns ("Slack") and scoped `App::Title` patterns.
-            let window_lower = window_name.to_lowercase();
+            // Apply user-configured ignored and included windows through the
+            // shared contact gate, over every name the process is known by.
+            // Supports legacy unscoped ("Slack") and scoped `App::Title` patterns;
+            // scoped includes act as per-app whitelists (`passes_includes`).
             let ignored_patterns = WindowPattern::parse_list(&self.config.ignored_windows);
             let included_patterns = WindowPattern::parse_list(&self.config.included_windows);
-            if timing::rule_check(timing::RuleGroup::NativeIgnoredWindow, || {
-                window_pattern::matches_any(&ignored_patterns, &app_lower, &window_lower)
-            }) {
-                debug!("a11y: skipped — matched user ignored pattern");
-                return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
-            }
-
-            // Scoped includes act as per-app whitelists; other apps fall back to
-            // global semantics — see `window_pattern::passes_includes`.
-            if timing::rule_check(timing::RuleGroup::NativeIncludedWindow, || {
-                !window_pattern::passes_includes(&included_patterns, &app_lower, &window_lower)
-            }) {
-                debug!("a11y: skipped — not in include list");
-                return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
+            if let Some(reason) = native_window_exclusion(
+                &ignored_patterns,
+                &included_patterns,
+                &app_names,
+                &window_name,
+            ) {
+                debug!("a11y: skipped — {:?}", reason);
+                return Ok(TreeWalkResult::Skipped(reason));
             }
 
             // A process whose provider recently timed out or overran its limits
@@ -3478,6 +3517,30 @@ mod tests {
                 "ignored descendant entered serialized tree nodes for {raw_pattern}"
             );
         }
+    }
+
+    #[test]
+    fn walker_gate_judges_raw_and_logical_names() {
+        let patterns = |list: &[&str]| {
+            WindowPattern::parse_list(&list.iter().map(|p| p.to_string()).collect::<Vec<_>>())
+        };
+        let ignore = patterns(&["msedgewebview2::"]);
+        // The logical name alone passes; the raw host executable excludes it.
+        assert!(native_window_exclusion(&ignore, &[], &["teams.exe"], "Chat").is_none());
+        assert!(matches!(
+            native_window_exclusion(&ignore, &[], &["teams.exe", "msedgewebview2.exe"], "Chat"),
+            Some(SkipReason::UserIgnored)
+        ));
+        assert!(matches!(
+            native_window_exclusion(&[], &[], &["teams.exe", "1password.exe"], "Vault"),
+            Some(SkipReason::ExcludedApp)
+        ));
+        let include = patterns(&["code"]);
+        assert!(matches!(
+            native_window_exclusion(&[], &include, &["notepad.exe"], "draft"),
+            Some(SkipReason::NotInIncludeList)
+        ));
+        assert!(native_window_exclusion(&[], &include, &["code.exe"], "draft").is_none());
     }
 
     #[test]
