@@ -38,9 +38,12 @@ a compatibility fallback can start all connected displays, including a laptop
 screen intended to remain outside capture. An empty selection is also treated
 as permitting all monitors by the manager.
 
-This is existing issue **SW-R03** (P1). An empty selection is not a reliable stop
-control. A future fix should preserve explicit selection, report unavailable
-monitors and require an explicit choice before broadening scope.
+This is existing issue **SW-R03** (P1). The 2026-10-18 candidate removes desktop
+monitor selection in favour of all monitors or screen-off. Legacy selective
+settings become off until all monitors are explicitly enabled. Lower-level
+filters no longer treat an empty selection as all displays or fall back after
+startup failure. See [scope and validation](RESOURCE_MEASUREMENTS.md#screen-scope);
+live migration and hot-plug validation remain pending.
 
 Source: [monitor admission and startup fallback](../crates/screenpipe-engine/src/vision_manager/manager.rs).
 
@@ -51,10 +54,13 @@ to remain unrecorded. The schedule monitor enforces whether the current time is
 inside a rule, but does not apply its audio-only/screen-only modality selection.
 Otherwise enabled sources can therefore remain admitted.
 
-This is existing issue **SW-R02** (P1). Disable unwanted sources explicitly; do not
-rely on a schedule's modality label. A fix needs distinct source gates and tests
-at rule transitions. Schedule transitions are also sampled periodically, rather
-than enforced at an exact wall-clock instant.
+This is existing issue **SW-R02** (P1). The owner selected simple on/off windows
+in the 2026-10-18 candidate. New windows apply to all otherwise-enabled sources;
+the source-mode selector is removed. Legacy source-specific windows block all
+recording during their hours until explicitly converted or replaced, including
+when overlapping an all-source window. Source and privacy preferences still
+apply. Schedule transitions remain polled every 30 seconds, rather than enforced
+at an exact wall-clock instant; live transition validation remains pending.
 
 Source: [schedule monitor](../crates/screenpipe-engine/src/schedule_monitor.rs).
 
@@ -140,6 +146,13 @@ lookup now searches only the browser's own window, and a second walk of a
 process already being walked waits for it instead of overlapping. A single dump
 cannot prove the race, so SW-R20 stays open until it has gone without
 recurring.
+
+A separate worker cleanup defect was repaired in the 2026-10-18 candidate:
+both input UIA workers previously called `CoUninitialize` while their UIA
+interfaces were still alive. A thread-bound scope guard now releases those
+interfaces first, including error and panic cleanup. Synthetic COM-apartment
+tests passed without contacting app providers. This does not attribute the
+recorded heap corruption or close SW-R20; see [cleanup scope](RESOURCE_MEASUREMENTS.md#uia-worker-cleanup).
 
 ## Open owner decisions with privacy impact
 

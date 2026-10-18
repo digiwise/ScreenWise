@@ -60,6 +60,29 @@ const KEYBOARD_PRIVACY_DENIAL_REASONS: usize = 5;
 const PASSWORD_FIELD_MARKER: &str = "[REDACTED: password field]";
 const UNVERIFIED_FIELD_MARKER: &str = "[REDACTED: UIA password state unavailable]";
 
+/// Own exactly one successful COM initialization on this worker's thread.
+/// Declare before COM interfaces so they are released before apartment teardown,
+/// including initialization failures, early returns and unwinding.
+struct StaComGuard(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl StaComGuard {
+    fn initialize() -> Result<Self, windows::core::HRESULT> {
+        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if result.is_err() {
+            Err(result)
+        } else {
+            // S_FALSE also owns one matching CoUninitialize call.
+            Ok(Self(std::marker::PhantomData))
+        }
+    }
+}
+
+impl Drop for StaComGuard {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyboardPrivacyDenial {
     DecisionUnavailable,
@@ -1423,9 +1446,9 @@ pub(crate) fn run_keyboard_privacy_thread(
     }
     debug!("UIA keyboard privacy worker starting");
 
-    unsafe {
-        let result = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        if result.is_err() {
+    let _com = match StaComGuard::initialize() {
+        Ok(guard) => guard,
+        Err(result) => {
             screenpipe_config::sensitive_debug::record(
                 "input_worker_init",
                 || serde_json::json!({"stage":"CoInitializeEx","error":format!("{result:?}")}),
@@ -1441,16 +1464,14 @@ pub(crate) fn run_keyboard_privacy_thread(
             keyboard_privacy.invalidate();
             return;
         }
-    }
+    };
 
     let uia = 'outer: loop {
         if stop.load(Ordering::Relaxed) {
-            unsafe { CoUninitialize() };
             return;
         }
         for attempt in 0..4 {
             if stop.load(Ordering::Relaxed) {
-                unsafe { CoUninitialize() };
                 return;
             }
             match UiaContext::new() {
@@ -1480,7 +1501,6 @@ pub(crate) fn run_keyboard_privacy_thread(
         warn!("UIA keyboard privacy initialization failed after four attempts; retrying in 30 seconds with input fail closed");
         for _ in 0..30 {
             if stop.load(Ordering::Relaxed) {
-                unsafe { CoUninitialize() };
                 return;
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -1507,7 +1527,6 @@ pub(crate) fn run_keyboard_privacy_thread(
             Some(CaptureReason::InputWorkerInitializationFailed),
         );
         keyboard_privacy.invalidate();
-        unsafe { CoUninitialize() };
         return;
     }
 
@@ -1542,7 +1561,6 @@ pub(crate) fn run_keyboard_privacy_thread(
 
     keyboard_privacy.invalidate();
     let _ = uia.unsubscribe_focus_changes(&handler_interface);
-    unsafe { CoUninitialize() };
     debug!("UIA keyboard privacy worker stopped");
 }
 
@@ -1567,14 +1585,14 @@ pub fn run_uia_thread(
         super::windows::apply_extraction_thread_priority(config.extraction_thread_priority);
     }
 
-    // Initialize COM (STA for event handler delivery)
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        if hr.is_err() {
+    // Declare before UIA so interfaces are released before apartment teardown.
+    let _com = match StaComGuard::initialize() {
+        Ok(guard) => guard,
+        Err(hr) => {
             error!("Failed to initialize COM for UIA thread: {:?}", hr);
             return;
         }
-    }
+    };
 
     // Initialize UIA context with retries — COM services may not be ready
     // immediately after system boot or when resuming from sleep.
@@ -1583,7 +1601,6 @@ pub fn run_uia_thread(
     let uia = 'outer: loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             debug!("Stop flag set before UIA init, exiting");
-            unsafe { CoUninitialize() };
             return;
         }
 
@@ -1592,7 +1609,6 @@ pub fn run_uia_thread(
         for attempt in 0..4 {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 debug!("Stop flag set during UIA init attempts, exiting");
-                unsafe { CoUninitialize() };
                 return;
             }
             match UiaContext::new() {
@@ -1624,7 +1640,6 @@ pub fn run_uia_thread(
                 for _ in 0..30 {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         debug!("Stop flag set during UIA retry backoff, exiting");
-                        unsafe { CoUninitialize() };
                         return;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1845,7 +1860,6 @@ pub fn run_uia_thread(
 
     // Cleanup
     let _ = uia.unsubscribe_focus_changes(&handler_interface);
-    unsafe { CoUninitialize() };
     debug!("UIA worker thread stopped");
 }
 
@@ -2142,6 +2156,90 @@ pub(crate) fn control_type_id_to_name(id: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_apartment() -> Option<windows::Win32::System::Com::APTTYPE> {
+        use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+        let mut kind = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        unsafe { CoGetApartmentType(&mut kind, &mut qualifier) }.ok()?;
+        Some(kind)
+    }
+
+    fn test_sta_apartment_active() -> bool {
+        use windows::Win32::System::Com::{APTTYPE_MAINSTA, APTTYPE_STA};
+        matches!(test_apartment(), Some(kind) if kind == APTTYPE_STA || kind == APTTYPE_MAINSTA)
+    }
+
+    #[test]
+    fn sta_com_guard_balances_success_and_nested_initialization() {
+        std::thread::spawn(|| {
+            assert!(test_apartment().is_none());
+            {
+                let _outer = StaComGuard::initialize().unwrap();
+                assert!(test_sta_apartment_active());
+                let apartment = test_apartment();
+                {
+                    let _nested = StaComGuard::initialize().unwrap();
+                    assert_eq!(test_apartment(), apartment);
+                }
+                assert_eq!(test_apartment(), apartment);
+            }
+            assert!(test_apartment().is_none());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn sta_com_guard_failure_does_not_uninitialize_existing_mta() {
+        std::thread::spawn(|| {
+            use windows::Win32::System::Com::{APTTYPE_MTA, COINIT_MULTITHREADED};
+            assert!(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok());
+            let result = StaComGuard::initialize();
+            assert_eq!(result.err().unwrap().0 as u32, 0x8001_0106);
+            assert_eq!(test_apartment(), Some(APTTYPE_MTA));
+            unsafe { CoUninitialize() };
+            assert!(test_apartment().is_none());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn sta_com_guard_keeps_apartment_alive_during_normal_error_and_panic_cleanup() {
+        std::thread::spawn(|| {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            struct InterfaceDropProbe(Rc<RefCell<Vec<bool>>>);
+            impl Drop for InterfaceDropProbe {
+                fn drop(&mut self) {
+                    self.0.borrow_mut().push(test_sta_apartment_active());
+                }
+            }
+            fn work(mode: u8, observations: Rc<RefCell<Vec<bool>>>) -> Result<(), ()> {
+                let _com = StaComGuard::initialize().unwrap();
+                let _interface = InterfaceDropProbe(observations);
+                if mode == 1 {
+                    return Err(());
+                }
+                if mode == 2 {
+                    panic!("synthetic COM cleanup unwind");
+                }
+                Ok(())
+            }
+            for mode in 0..3 {
+                let observations = Rc::new(RefCell::new(Vec::new()));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    work(mode, observations.clone())
+                }));
+                assert_eq!(result.is_err(), mode == 2);
+                assert_eq!(*observations.borrow(), vec![true]);
+                assert!(test_apartment().is_none());
+            }
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn successful_null_navigation_is_distinct_from_provider_error() {

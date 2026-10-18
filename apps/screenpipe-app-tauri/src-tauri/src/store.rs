@@ -883,7 +883,7 @@ Rules:
                 audio_transcription_engine: "disabled".to_string(),
                 meeting_live_transcription_enabled: false,
                 meeting_live_transcription_provider: "disabled".to_string(),
-                monitor_ids: vec!["default".to_string()],
+                monitor_ids: vec![],
                 audio_devices: vec!["default".to_string()],
                 use_pii_removal: true,
                 ignored_windows,
@@ -965,9 +965,14 @@ impl SettingsStore {
             true => Ok(None),
             false => {
                 let raw = store.get("settings").unwrap_or(Value::Null);
-                let settings = serde_json::from_value(raw);
+                let settings = serde_json::from_value::<Option<Self>>(raw);
                 match settings {
-                    Ok(settings) => Ok(settings),
+                    Ok(mut settings) => {
+                        if let Some(settings) = settings.as_mut() {
+                            settings.recording.normalize_desktop_monitor_scope();
+                        }
+                        Ok(settings)
+                    }
                     Err(e) => {
                         error!("Failed to deserialize settings: {}", e);
                         Err(e.to_string())
@@ -981,7 +986,9 @@ impl SettingsStore {
     ///
     /// Since RecordingSettings is now embedded via flatten, this is a clone.
     pub fn to_recording_settings(&self) -> screenpipe_config::RecordingSettings {
-        self.recording.clone()
+        let mut recording = self.recording.clone();
+        recording.normalize_desktop_monitor_scope();
+        recording
     }
 
     /// Build a unified `RecordingConfig` from this settings store.
@@ -1202,6 +1209,26 @@ mod tests {
     use serde_json::json;
 
     const FALLBACK_ENGINE: &str = "disabled";
+
+    #[test]
+    fn desktop_monitor_scope_reaches_runtime_without_changing_other_modalities() {
+        for all in [false, true] {
+            for disabled in [false, true] {
+                let mut store = SettingsStore::default();
+                store.recording.use_all_monitors = all;
+                store.recording.disable_vision = disabled;
+                store.recording.monitor_ids = vec!["old-display".into()];
+                store.recording.disable_audio = true;
+                store.recording.disable_keyboard_capture = false;
+                let config = store.to_recording_config("synthetic-recordings".into());
+                assert_eq!(config.disable_vision, disabled || !all);
+                assert!(config.use_all_monitors);
+                assert!(config.monitor_ids.is_empty());
+                assert!(config.disable_audio);
+                assert!(!config.disable_keyboard_capture);
+            }
+        }
+    }
 
     #[test]
     fn unsupported_engines_fall_back() {

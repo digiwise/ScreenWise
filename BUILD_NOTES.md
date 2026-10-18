@@ -1,5 +1,27 @@
 # ScreenWise Windows build notes
 
+The 2026-10-18 [resource measurement preparation](docs/RESOURCE_MEASUREMENTS.md)
+adds an external CPU/RAM sampler, all-monitors/off desktop settings, simple on/off
+time windows with explicit legacy conversion, and correct COM teardown ordering
+in the input workers. Keyboard/clipboard history remains available. Source and
+synthetic validation are in the [register](VALIDATION_REGISTER.md#resource-measurement-and-settings-preparation-2026-10-18).
+The requested desktop `release` build passed in **8m31s** through the canonical
+launcher (`-Task DesktopBuild -BuildProfile release -Jobs 1`, locked/offline).
+Profile: size optimization, full LTO, one code-generation unit, stripped.
+Artifact: `apps/screenpipe-app-tauri/src-tauri/target/release/screenpipe-app.exe`,
+47,800,832 bytes; SHA256
+`345AB920697828F26733034DE661FD4A5992F31B2B7DBCE6476255178B53DA46`.
+Private build evidence: `target/build-diagnostics/20261017T235240232Z-Desktop-Build-dc43dc9c`.
+The successful run reused 1,080 external artifacts and rebuilt none; workspace
+artifacts: 18 reused, one rebuilt. The first attempt compiled two previously
+absent external variants and 12 workspace artifacts, then failed during an LTO
+temporary-archive rename inside the sandbox (`Access is denied`). An unchanged
+retry under the normal user context reused those outputs and succeeded. No
+cache clean/move, dependency update or profile change was needed. Existing
+release-cache adoption used the documented one-time `-AllowColdCache` flag;
+the successful matching baseline is now recorded.
+No recording, deployment or measured performance result is included.
+
 The [privacy-only UIA comparison](docs/UIA_PRIVACY_ONLY_COMPARISON.md) adds an
 opt-in desktop startup mode and separates per-process failed/completed stage
 costs, retry causes, remaining budgets and native timeout counts. Normal launch

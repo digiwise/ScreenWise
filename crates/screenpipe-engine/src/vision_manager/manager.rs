@@ -34,7 +34,7 @@ pub struct VisionManagerConfig {
     pub vision_metrics: Arc<PipelineMetrics>,
     pub use_pii_removal: bool,
     /// Stable IDs of monitors the user selected for recording (e.g. "MSI G271_1920x1080_2002,-1080").
-    /// Empty means no explicit selection — honour `use_all_monitors` instead.
+    /// Empty selects no monitors unless `use_all_monitors` is true.
     pub monitor_ids: Vec<String>,
     /// When true, record every connected monitor regardless of `monitor_ids`.
     pub use_all_monitors: bool,
@@ -74,6 +74,27 @@ pub struct VisionManagerConfig {
 
 fn media_output_directory(output_path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(output_path)
+}
+
+fn monitor_selection_allows(
+    use_all: bool,
+    selected: &[String],
+    stable_id: &str,
+    numeric_id: u32,
+    primary: bool,
+) -> bool {
+    if use_all {
+        return true;
+    }
+    if selected == ["default"] {
+        return primary;
+    }
+    fn prefix(id: &str) -> &str {
+        id.rsplit_once('_').map_or(id, |(prefix, _)| prefix)
+    }
+    selected.iter().any(|id| {
+        id == stable_id || *id == numeric_id.to_string() || prefix(id) == prefix(stable_id)
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -138,9 +159,6 @@ pub struct VisionManager {
     /// Fixed when this recording manager is created, across monitor restarts.
     #[cfg(target_os = "windows")]
     windows_privacy_only: bool,
-    /// Set when the user's monitor allowlist matched zero connected displays and
-    /// we fell back to recording every monitor. Clears the filter for hot-plug too.
-    stale_allowlist_fallback: Arc<AtomicBool>,
 }
 
 impl VisionManager {
@@ -210,7 +228,6 @@ impl VisionManager {
             high_fps_controller: None,
             #[cfg(target_os = "windows")]
             windows_privacy_only,
-            stale_allowlist_fallback: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -258,28 +275,13 @@ impl VisionManager {
     /// Uses prefix matching (name + resolution) so that position changes after
     /// reconnect don't break the filter.
     pub fn is_monitor_allowed(&self, monitor: &screenpipe_screen::monitor::SafeMonitor) -> bool {
-        if self
-            .stale_allowlist_fallback
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return true;
-        }
-        if self.config.use_all_monitors || self.config.monitor_ids.is_empty() {
-            return true;
-        }
-        // "default" means only the primary monitor
-        if self.config.monitor_ids == vec!["default"] {
-            return monitor.is_primary();
-        }
-        let stable_id = monitor.stable_id();
-        let numeric_id = monitor.id().to_string();
-        fn prefix(sid: &str) -> &str {
-            sid.rsplitn(2, '_').last().unwrap_or(sid)
-        }
-        let monitor_prefix = prefix(&stable_id);
-        self.config.monitor_ids.iter().any(|allowed| {
-            *allowed == stable_id || *allowed == numeric_id || prefix(allowed) == monitor_prefix
-        })
+        monitor_selection_allows(
+            self.config.use_all_monitors,
+            &self.config.monitor_ids,
+            &monitor.stable_id(),
+            monitor.id(),
+            monitor.is_primary(),
+        )
     }
 
     /// Start recording on all currently connected monitors
@@ -315,48 +317,21 @@ impl VisionManager {
             }
         }
 
-        let mut task_count = self.recording_tasks.len();
-        if task_count == 0 && total_monitors > 0 && !self.config.use_all_monitors {
-            warn!(
-                "VisionManager: allowlist {:?} matched 0/{} display(s) — \
-                 falling back to all connected monitors (stale monitor_ids?)",
-                self.config.monitor_ids, total_monitors
-            );
-            self.stale_allowlist_fallback
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            for monitor in list_monitors().await {
-                let monitor_id = monitor.id();
-                if let Err(e) = self.start_monitor(monitor_id).await {
-                    warn!(
-                        "Failed to start recording on monitor {} during stale-id fallback: {:?}",
-                        monitor_id, e
-                    );
-                }
-            }
-            task_count = self.recording_tasks.len();
-            if task_count > 0 {
-                info!(
-                    "VisionManager started via stale monitor_ids fallback ({}/{} monitor(s))",
-                    task_count, total_monitors
-                );
-                return Ok(());
-            }
-            self.stale_allowlist_fallback
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-        }
+        // Empty/unavailable selections and capture failures never broaden scope.
+        let task_count = self.recording_tasks.len();
 
         if task_count == 0 {
             // Roll status back so the next .start() attempt isn't blocked by the
             // idempotency guard above.
             *self.status.write().await = VisionManagerStatus::Stopped;
             warn!(
-                "VisionManager: no monitors matched the allowed list \
-                 ({} enumerated, 0 started) — stale monitor_ids?",
+                "VisionManager: no selected monitors started \
+                 ({} enumerated, 0 started); capture scope preserved",
                 total_monitors
             );
             return Err(anyhow::anyhow!(
-                "no monitors matched the allowed list (monitorIds may be stale: \
-                 {} enumerated, 0 started)",
+                "no selected monitors started (selection empty, unavailable or capture failed: \
+                 {} enumerated, 0 started); check screen-recording configuration",
                 total_monitors
             ));
         }
@@ -891,30 +866,64 @@ mod tests {
         assert!(vm.recording_tasks.is_empty());
     }
 
-    /// When the allowlist is stale but physical monitors exist, fall back to
-    /// recording all connected displays instead of failing capture start.
+    /// An unavailable selection must not start any capture on connected displays.
     #[tokio::test]
-    async fn start_with_stale_allowlist_falls_back_to_all_monitors() {
-        let monitors = list_monitors().await;
-        if monitors.is_empty() {
-            // Headless CI — nothing to fall back to.
-            return;
-        }
-
+    async fn start_with_stale_allowlist_preserves_scope() {
         let stale = vec!["Display 999_9999x9999_0,0".to_string()];
         let vm = make_vm_with_monitor_ids(stale).await;
 
-        vm.start()
-            .await
-            .expect("expected Ok via stale-id fallback when monitors exist");
+        assert!(vm.start().await.is_err());
+        assert!(vm.recording_tasks.is_empty());
+        assert_eq!(vm.status().await, VisionManagerStatus::Stopped);
+    }
 
-        assert!(
-            !vm.recording_tasks.is_empty(),
-            "fallback should start at least one monitor task"
-        );
-        assert_eq!(vm.status().await, VisionManagerStatus::Running);
-
-        vm.stop().await.expect("stop after fallback start");
+    #[test]
+    fn monitor_selection_never_expands_empty_or_unavailable_scope() {
+        let stable = "Display 1_1920x1080_0,0";
+        assert!(!monitor_selection_allows(false, &[], stable, 1, true));
+        assert!(!monitor_selection_allows(
+            false,
+            &["missing".into()],
+            stable,
+            1,
+            true
+        ));
+        assert!(monitor_selection_allows(true, &[], stable, 1, false));
+        assert!(monitor_selection_allows(
+            false,
+            &[stable.into()],
+            stable,
+            1,
+            false
+        ));
+        assert!(monitor_selection_allows(
+            false,
+            &["Display 1_1920x1080_2000,0".into()],
+            stable,
+            1,
+            false
+        ));
+        assert!(monitor_selection_allows(
+            false,
+            &["1".into()],
+            stable,
+            1,
+            false
+        ));
+        assert!(monitor_selection_allows(
+            false,
+            &["default".into()],
+            stable,
+            1,
+            true
+        ));
+        assert!(!monitor_selection_allows(
+            false,
+            &["default".into()],
+            stable,
+            1,
+            false
+        ));
     }
 
     /// With zero physical monitors, a stale allowlist still fails cleanly.

@@ -5,7 +5,6 @@
 "use client";
 
 import { useRecordingMonitors } from "@/lib/hooks/use-recording-monitors";
-import { monitorDisplayLabel } from "@/lib/recording-monitor-names";
 import { MonitorAliases } from "./monitor-aliases";
 import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
@@ -27,10 +26,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Microphone echo cancellation", keywords: ["echo", "voiceprocessingio"], conditional: true },
   { label: "CoreAudio system audio capture", keywords: ["coreaudio", "system audio"], conditional: true },
   { label: "Screen recording", keywords: ["screen", "video"] },
-  { label: "Use all monitors", keywords: ["monitor", "display"] },
   { label: "Recording quality", keywords: ["fps", "quality"] },
-  // conditional: monitor picker only renders when "Use all monitors" is off.
-  { label: "Monitors", conditional: true },
   { label: "HD recording for meetings", keywords: ["hd", "meeting"] },
 ];
 import { Label } from "@/components/ui/label";
@@ -1613,7 +1609,7 @@ export function RecordingSettings() {
   const [availableMonitors, setAvailableMonitors] = useState<MonitorDevice[]>(
     []
   );
-  const { monitors: liveMonitors, aliases: monitorAliases } = useRecordingMonitors(undefined);
+  const { monitors: liveMonitors } = useRecordingMonitors(undefined);
   useEffect(() => { setAvailableMonitors(liveMonitors); }, [liveMonitors]);
   const [availableAudioDevices, setAvailableAudioDevices] = useState<
     AudioDeviceInfo[]
@@ -1861,49 +1857,6 @@ export function RecordingSettings() {
         const audioDevices = audioResult.data;
         setAvailableAudioDevices(audioDevices);
 
-        // Update monitors — match by stable ID, with backward compat for old numeric IDs
-        // and fuzzy fallback when only position changed (name+resolution still match)
-        const availableStableIds = monitors.map((m) => m.stableId);
-
-        // Helper: extract name+resolution prefix from a stable ID ("Name_WxH_X,Y" -> "Name_WxH")
-        const stableIdPrefix = (sid: string) => {
-          const lastUnderscore = sid.lastIndexOf("_");
-          return lastUnderscore > 0 ? sid.substring(0, lastUnderscore) : sid;
-        };
-
-        const findMonitorForStoredId = (id: string) => {
-          if (id === "default") return null;
-          // 1. Exact stable ID match
-          const exact = monitors.find((m) => m.stableId === id);
-          if (exact) return exact;
-          // 2. Legacy numeric ID match
-          const byNumeric = monitors.find((m) => m.id.toString() === id);
-          if (byNumeric) return byNumeric;
-          // 3. Fuzzy: name+resolution match (position may have changed across reboot)
-          const prefix = stableIdPrefix(id);
-          if (prefix !== id) {
-            const byPrefix = monitors.find((m) => stableIdPrefix(m.stableId) === prefix);
-            if (byPrefix) return byPrefix;
-          }
-          return null;
-        };
-
-        let updatedMonitorIds = settings.monitorIds.filter((id) =>
-          id === "default" || findMonitorForStoredId(id) !== null
-        );
-
-        // Migrate all matched IDs to current stable IDs
-        updatedMonitorIds = updatedMonitorIds.map((id) => {
-          if (id === "default") return id;
-          const monitor = findMonitorForStoredId(id);
-          return monitor ? monitor.stableId : id;
-        });
-
-        if (updatedMonitorIds.length === 0) {
-          const defaultMonitor = monitors.find((monitor) => monitor.isDefault);
-          updatedMonitorIds = [defaultMonitor ? defaultMonitor.stableId : monitors[0].stableId];
-        }
-
         // Update audio devices
         const availableAudioDeviceNames = audioDevices.map(
           (device) => device.name
@@ -1925,7 +1878,6 @@ export function RecordingSettings() {
 
         handleSettingsChange(
           {
-            monitorIds: updatedMonitorIds,
             audioDevices: updatedAudioDevices,
           },
           false
@@ -2983,31 +2935,13 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
                   <h3 className="text-sm font-medium text-foreground">Screen recording</h3>
-                  <p className="text-xs text-muted-foreground">Capture screenshots and interface text using accessibility and OCR</p>
+                  <p className="text-xs text-muted-foreground">Capture screenshots and interface text from all connected monitors. Turn off to capture no screens.</p>
                 </div>
               </div>
-              <Switch id="disableVision" checked={!settings.disableVision} onCheckedChange={(checked) => handleSettingsChange({ disableVision: !checked }, true)} />
+              <Switch id="disableVision" checked={!settings.disableVision} onCheckedChange={(checked) => handleSettingsChange({ disableVision: !checked, useAllMonitors: true, monitorIds: [] }, true)} />
             </div>
           </CardContent>
         </Card>
-
-        {/* Use All Monitors - right below disable screen recording */}
-        {!settings.disableVision && (
-          <Card className="border-border bg-card">
-            <CardContent className="px-3 py-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <div>
-                    <h3 className="text-sm font-medium text-foreground">Use all monitors</h3>
-                    <p className="text-xs text-muted-foreground">Take screenshot from all available monitors</p>
-                  </div>
-                </div>
-                <Switch id="useAllMonitors" checked={settings.useAllMonitors} onCheckedChange={(checked) => handleSettingsChange({ useAllMonitors: checked }, true)} />
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
         {/* Recording quality — single knob for crispness + disk cost */}
         {!settings.disableVision && (
@@ -3054,75 +2988,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
           />
         )}
 
-        {/* Monitor Selection */}
-        {!settings.disableVision && !settings.useAllMonitors && (
-          <Card className="border-border bg-card overflow-hidden">
-            <CardContent className="px-3 py-2.5">
-              <div className="flex items-center space-x-2.5 mb-3">
-                <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
-                <h3 className="text-sm font-medium text-foreground">Monitors</h3>
-              </div>
-
-              <div className="flex items-end justify-center gap-6 py-2">
-                {/* Default option as a monitor */}
-                <button
-                  className="flex flex-col items-center gap-1.5 group"
-                  onClick={() => {
-                    const isDefaultSelected = settings.monitorIds.includes("default");
-                    if (isDefaultSelected) { handleSettingsChange({ monitorIds: settings.monitorIds.filter(id => id !== "default") }, true); }
-                    else { handleSettingsChange({ monitorIds: ["default"] }, true); }
-                  }}
-                >
-                  {/* Monitor SVG */}
-                  <svg width="80" height="56" viewBox="0 0 80 56" fill="none" className={cn("transition-opacity", settings.monitorIds.includes("default") ? "opacity-100" : "opacity-40 group-hover:opacity-60")}>
-                    <rect x="4" y="2" width="72" height="42" rx="3" className="fill-muted stroke-border" strokeWidth="1.5" />
-                    <rect x="8" y="6" width="64" height="34" rx="1" className={cn(settings.monitorIds.includes("default") ? "fill-foreground/10" : "fill-background")} />
-                    <path d="M30 44 L30 50 L50 50 L50 44" className="stroke-border" strokeWidth="1.5" fill="none" />
-                    <line x1="24" y1="50" x2="56" y2="50" className="stroke-border" strokeWidth="1.5" strokeLinecap="round" />
-                    {settings.monitorIds.includes("default") && (
-                      <path d="M32 20 L37 25 L48 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-foreground" />
-                    )}
-                  </svg>
-                  <span className={cn("text-[11px] font-medium", settings.monitorIds.includes("default") ? "text-foreground" : "text-muted-foreground")}>
-                    Default
-                  </span>
-                </button>
-
-                {availableMonitors.map((monitor) => {
-                  const isSelected = settings.monitorIds.includes(monitor.stableId);
-                  return (
-                    <button
-                      key={monitor.stableId}
-                      className="flex flex-col items-center gap-1.5 group"
-                      onClick={() => {
-                        const newIds = isSelected
-                          ? settings.monitorIds.filter(id => id !== monitor.stableId)
-                          : [...settings.monitorIds.filter(id => id !== "default"), monitor.stableId];
-                        handleSettingsChange({ monitorIds: newIds }, true);
-                      }}
-                    >
-                      <svg width="80" height="56" viewBox="0 0 80 56" fill="none" className={cn("transition-opacity", isSelected ? "opacity-100" : "opacity-40 group-hover:opacity-60")}>
-                        <rect x="4" y="2" width="72" height="42" rx="3" className="fill-muted stroke-border" strokeWidth="1.5" />
-                        <rect x="8" y="6" width="64" height="34" rx="1" className={cn(isSelected ? "fill-foreground/10" : "fill-background")} />
-                        <path d="M30 44 L30 50 L50 50 L50 44" className="stroke-border" strokeWidth="1.5" fill="none" />
-                        <line x1="24" y1="50" x2="56" y2="50" className="stroke-border" strokeWidth="1.5" strokeLinecap="round" />
-                        {isSelected && (
-                          <path d="M32 20 L37 25 L48 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-foreground" />
-                        )}
-                      </svg>
-                      <div className="text-center">
-                        <span className={cn("text-[11px] font-medium block", isSelected ? "text-foreground" : "text-muted-foreground")}>
-                          {monitorDisplayLabel(monitor, availableMonitors, monitorAliases)}
-                        </span>
-                        <p className="text-[10px] text-muted-foreground">{monitor.width}x{monitor.height}</p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
       </div>
               </>

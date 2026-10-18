@@ -1,5 +1,5 @@
 // Content-free high-frequency descendant-process sampler for short GUI trials.
-// Uses Toolhelp snapshots only; it does not inspect command lines, windows,
+// Default audit mode uses Toolhelp snapshots only; it does not inspect command lines, windows,
 // captured content, the clipboard, audio devices, files outside its output
 // directory, or the network.
 using System;
@@ -10,7 +10,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
-internal static class GuiProcessTreeMonitor
+internal static partial class GuiProcessTreeMonitor
 {
     private const uint SnapshotProcesses = 0x00000002;
     private static readonly IntPtr InvalidHandle = new IntPtr(-1);
@@ -61,12 +61,13 @@ internal static class GuiProcessTreeMonitor
     {
         List<Entry> result = new List<Entry>();
         IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
-        if (snapshot == InvalidHandle) throw new InvalidOperationException("process_snapshot_failed");
+        if (snapshot == InvalidHandle) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         try
         {
             ProcessEntry32 native = new ProcessEntry32();
             native.dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry32));
-            if (!Process32First(snapshot, ref native)) return result;
+            if (!Process32First(snapshot, ref native))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             do
             {
                 result.Add(new Entry
@@ -77,6 +78,9 @@ internal static class GuiProcessTreeMonitor
                 });
             }
             while (Process32Next(snapshot, ref native));
+            int error = Marshal.GetLastWin32Error();
+            if (error != 18) // ERROR_NO_MORE_FILES is the only successful end of enumeration.
+                throw new System.ComponentModel.Win32Exception(error);
             return result;
         }
         finally { CloseHandle(snapshot); }
@@ -181,6 +185,8 @@ internal static class GuiProcessTreeMonitor
     {
         try
         {
+            if (args.Length > 0 && args[0] == "--resources") return RunResources(args);
+            if (args.Length == 1 && args[0] == "--resource-self-test") return ResourceSelfTest();
             if (args.Length == 1 && args[0] == "--self-test")
                 return IsUnexpectedShell("PowerShell.exe") && IsUnexpectedShell("setx.exe") &&
                     IsUnexpectedShell("where.exe") && !IsUnexpectedShell("screenpipe-app.exe") ? 0 : 3;
@@ -196,6 +202,13 @@ internal static class GuiProcessTreeMonitor
             }
             return Run(rootProcessId, outputDirectory, durationMilliseconds);
         }
-        catch { return 2; }
+        catch (Exception error)
+        {
+            // Fixed type/code only; exception messages can contain private paths.
+            Console.Error.WriteLine("process_monitor_failed:" + error.GetType().Name);
+            System.ComponentModel.Win32Exception native = error as System.ComponentModel.Win32Exception;
+            if (native != null) Console.Error.WriteLine("native_error_code:" + native.NativeErrorCode);
+            return 2;
+        }
     }
 }

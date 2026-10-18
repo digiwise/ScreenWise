@@ -1,6 +1,6 @@
 # ScreenWise validation and issue register
 
-Updated 2026-10-17. **Partial validation, not a completed privacy/firewall certification.**
+Updated 2026-10-18. **Partial validation, not a completed privacy/firewall certification.**
 
 > [!WARNING]
 > **No privacy or security guarantees.** These bounded results do not establish
@@ -11,9 +11,39 @@ This sanitized public summary preserves the scope and unresolved issues. Raw
 captures, logs, stores, machine identities and owner interaction records are
 private. Historical authored notes are preserved locally under ignored `.local/`.
 
+## Resource measurement and settings preparation (2026-10-18)
+
+The [measurement guide](docs/RESOURCE_MEASUREMENTS.md) records the opt-in external
+CPU/RAM sampler, working-set/private-commit interpretation, process-identity and
+missing-sample limits, source/artifact provenance, and outstanding live checks.
+No application performance benchmark, recording or deployment was run.
+
+The owner selected all-monitors/off desktop screen settings (SW-R03), simple
+on/off scheduling (SW-R02), and retaining keyboard/clipboard history. Legacy
+selective monitor settings become screen-off. Active legacy source-specific
+schedule windows block recording until explicitly converted, including overlaps;
+time edits do not convert them. New Always On windows cover the final minute
+(SW-R14); saved hours remain unchanged. Existing source/privacy gates still apply.
+
+Both input UIA workers now release their COM interfaces before apartment teardown
+using a thread-bound scope guard. This fixes a concrete cleanup defect but does
+not attribute the heap-corruption incident, bound provider work or close SW-R20.
+SW-R01 (URL exclusions for stored input), SW-R19 and SW-R20 remain open.
+
+Final configuration tests: **67 passed**. Accessibility: **289 passed, 23 live
+ignored**, including normal/nested/failed/panic COM cleanup. Settings: **16
+passed**; the 16-page frontend export and type validation passed, with the
+existing unpdf import.meta warning. The external sampler's synthetic math,
+PID-reuse/ancestry, counter, evidence-overwrite and process-start checks passed.
+Earlier preparation also passed 11 monitor tests. Final simple-schedule tests
+passed **5**, native binding consistency passed **1**, and native desktop scope
+passed **1**. The requested desktop **release** build passed in **8m31s**, reusing
+all 1,080 external artifacts; [artifact and build details](BUILD_NOTES.md) include
+the recovered sandbox archive-rename failure. Both Rust lockfiles remain unchanged.
+
 Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
-Current candidate: [privacy-only comparison and targeted failure diagnostics](docs/UIA_PRIVACY_ONLY_COMPARISON.md).
+Earlier comparison candidate: [privacy-only comparison and targeted failure diagnostics](docs/UIA_PRIVACY_ONLY_COMPARISON.md).
 It adds an opt-in startup selector without changing normal-mode admission.
 Failure stage costs, retry causes, budget checkpoints and native timeout counts
 are separated by verified process in authenticated local metrics. The preceding

@@ -28,7 +28,8 @@ pub struct ScheduleRule {
     pub start_time: String,
     /// End time in "HH:MM" (24h format, local time)
     pub end_time: String,
-    /// What to record: "all", "audio_only", "screen_only"
+    /// New time windows use "all". Legacy source-specific/unknown values block
+    /// their windows until explicitly converted, rather than broadening capture.
     pub record_mode: String,
 }
 
@@ -447,6 +448,16 @@ pub struct RecordingSettings {
 }
 
 impl RecordingSettings {
+    /// Desktop screen recording offers all displays or off. Legacy selective
+    /// settings become off until the user explicitly enables all displays.
+    pub fn normalize_desktop_monitor_scope(&mut self) {
+        if !self.use_all_monitors {
+            self.disable_vision = true;
+        }
+        self.use_all_monitors = true;
+        self.monitor_ids.clear();
+    }
+
     /// The local engine that may be started for this persisted setting.
     ///
     /// Unsupported identifiers fail closed to disabled transcription.
@@ -606,6 +617,26 @@ fn default_hd_recording_interval_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_monitor_scope_is_all_or_off_without_expanding_legacy_selection() {
+        for all in [false, true] {
+            for disabled in [false, true] {
+                let mut settings = RecordingSettings {
+                    use_all_monitors: all,
+                    disable_vision: disabled,
+                    monitor_ids: vec!["old-selection".into()],
+                    ..Default::default()
+                };
+                settings.normalize_desktop_monitor_scope();
+                assert!(settings.use_all_monitors);
+                assert!(settings.monitor_ids.is_empty());
+                assert_eq!(settings.disable_vision, disabled || !all);
+                settings.normalize_desktop_monitor_scope();
+                assert_eq!(settings.disable_vision, disabled || !all);
+            }
+        }
+    }
 
     #[test]
     fn default_round_trips_through_json() {

@@ -68,6 +68,7 @@ if ("$($processMonitorRuntime.schema)" -ne 'screenwise.gui-process-tree-runtime.
 $processMonitorSource = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'GuiProcessTreeMonitor.cs')).Path
 $processMonitorExecutable = (Resolve-Path -LiteralPath ([string]$processMonitorRuntime.executable_path)).Path
 if ((Get-FileHash -Algorithm SHA256 -LiteralPath $processMonitorSource).Hash -ne [string]$processMonitorRuntime.source_sha256 -or
+    (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'GuiProcessResources.cs')).Hash -ne [string]$processMonitorRuntime.resource_source_sha256 -or
     (Get-FileHash -Algorithm SHA256 -LiteralPath $processMonitorExecutable).Hash -ne [string]$processMonitorRuntime.executable_sha256) {
     throw 'The GUI process monitor no longer matches its prepared, self-tested manifest.'
 }

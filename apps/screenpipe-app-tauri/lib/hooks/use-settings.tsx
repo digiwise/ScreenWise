@@ -311,7 +311,7 @@ let DEFAULT_SETTINGS: Settings = {
 			meetingLiveTranscriptionProvider: "disabled",
 			appendTypedTextToMeetingNote: true,
 			ocrEngine: "default",
-			monitorIds: ["default"],
+			monitorIds: [],
 			audioDevices: ["default"],
 			useSystemDefaultAudio: true,
 			// Match the Rust SettingsStore first-run default. The renderer can be
@@ -419,13 +419,18 @@ export function normalizeSettings(value?: Partial<Settings> | null): Settings {
 	const present = Object.fromEntries(
 		Object.entries(value ?? {}).filter(([, entry]) => entry !== undefined),
 	);
-	return {
+	const settings = {
 		...defaults,
 		...present,
 		disabledShortcuts: Array.isArray(value?.disabledShortcuts)
 			? value.disabledShortcuts.filter((entry) => typeof entry === "string")
 			: [],
 	} as Settings;
+	// Retired selective capture must not silently expand to every display.
+	if (value?.useAllMonitors === false) settings.disableVision = true;
+	settings.useAllMonitors = true;
+	settings.monitorIds = [];
+	return settings;
 }
 
 export const getStore = async () => {

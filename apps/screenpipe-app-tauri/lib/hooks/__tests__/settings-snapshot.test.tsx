@@ -19,6 +19,20 @@ vi.mock("@/lib/api", () => ({ configureApi: vi.fn() }));
 
 import { SettingsProvider, useSettings, normalizeSettings } from "../use-settings";
 
+it.each([false, true])("migrates selective screen capture to off (disabled=%j)", (disableVision) => {
+  const settings = normalizeSettings({ useAllMonitors: false, monitorIds: ["old-display"], disableVision });
+  expect(settings.disableVision).toBe(true);
+  expect(settings.useAllMonitors).toBe(true);
+  expect(settings.monitorIds).toEqual([]);
+  expect(normalizeSettings(settings).disableVision).toBe(true);
+});
+
+it.each([false, true])("preserves all-monitor screen toggle (disabled=%j)", (disableVision) => {
+  const settings = normalizeSettings({ useAllMonitors: true, disableVision });
+  expect(settings.disableVision).toBe(disableVision);
+  expect(settings.useAllMonitors).toBe(true);
+});
+
 beforeEach(() => {
   state.set.mockClear();
   state.load.mockImplementation(async () => ({

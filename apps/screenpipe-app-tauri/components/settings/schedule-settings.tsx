@@ -8,13 +8,6 @@ import { Clock, Plus, Trash2, Calendar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
 
@@ -22,7 +15,7 @@ export interface ScheduleRule {
   dayOfWeek: number; // 0=Mon, 6=Sun
   startTime: string; // "HH:MM"
   endTime: string; // "HH:MM"
-  recordMode: string; // "all" | "audio_only" | "screen_only"
+  recordMode: string; // New windows use "all"; legacy modes require explicit conversion.
 }
 
 interface ScheduleSettingsProps {
@@ -43,12 +36,6 @@ const DAY_NAMES_FULL = [
 ];
 const HOUR_MARKERS = [0, 6, 12, 18, 24];
 
-const MODE_LABELS: Record<string, string> = {
-  all: "All",
-  audio_only: "Audio",
-  screen_only: "Screen",
-};
-
 const WEEKDAY_9_TO_5: ScheduleRule[] = Array.from({ length: 5 }, (_, i) => ({
   dayOfWeek: i,
   startTime: "09:00",
@@ -59,7 +46,7 @@ const WEEKDAY_9_TO_5: ScheduleRule[] = Array.from({ length: 5 }, (_, i) => ({
 const ALWAYS_ON: ScheduleRule[] = Array.from({ length: 7 }, (_, i) => ({
   dayOfWeek: i,
   startTime: "00:00",
-  endTime: "23:59",
+  endTime: "24:00",
   recordMode: "all",
 }));
 
@@ -69,6 +56,7 @@ function timeToPercent(time: string): number {
 }
 
 function formatTime(time: string): string {
+  if (time === "24:00") return "midnight";
   const [h, m] = time.split(":").map(Number);
   const suffix = h >= 12 ? "pm" : "am";
   const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
@@ -171,12 +159,13 @@ export function ScheduleSettings({
                 </span>
               </h3>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Define when recording is active
+                Time windows for all enabled recording sources
               </p>
             </div>
-            <HelpTooltip text="Set specific time ranges per day when screen and audio recording should be active. Outside these hours, recording pauses automatically." />
+            <HelpTooltip text="Time windows allow your enabled recording sources; source preferences and privacy checks still apply. Outside these hours, recording pauses. Schedule changes are checked every 30 seconds." />
           </div>
           <Switch
+            aria-label="Enable recording schedule"
             checked={enabled}
             onCheckedChange={setScheduleEnabled}
           />
@@ -184,6 +173,11 @@ export function ScheduleSettings({
 
         {enabled && (
           <div className="space-y-3 mt-3">
+            {rules.some((rule) => rule.recordMode !== "all") && (
+              <p role="status" className="text-xs text-amber-600 dark:text-amber-400">
+                Source-specific time windows are paused until you convert them to all enabled sources or replace them with a preset.
+              </p>
+            )}
             {/* Presets */}
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Presets:</span>
@@ -319,7 +313,7 @@ function DayRow({
                 key={idx}
                 className="absolute top-0.5 bottom-0.5 bg-foreground/20 transition-all duration-150"
                 style={{ left: `${left}%`, width: `${width}%` }}
-                title={`${formatTime(rule.startTime)} - ${formatTime(rule.endTime)} (${MODE_LABELS[rule.recordMode] || "All"})`}
+                title={`${formatTime(rule.startTime)} - ${formatTime(rule.endTime)}${rule.recordMode === "all" ? "" : " (paused until converted)"}`}
               >
                 {width > 15 && (
                   <span className="absolute inset-0 flex items-center justify-center text-[9px] text-foreground font-mono truncate px-1">
@@ -384,6 +378,7 @@ function RuleEditor({ rule, onUpdate, onRemove }: RuleEditorProps) {
 
       <input
         type="time"
+        aria-label="Start time"
         value={startInput}
         onChange={(e) => {
           const validated = validateTimeInput(e.target.value);
@@ -396,27 +391,22 @@ function RuleEditor({ rule, onUpdate, onRemove }: RuleEditorProps) {
 
       <input
         type="time"
-        value={endInput}
+        aria-label="End time"
+        title={endInput === "24:00" ? "Midnight at the end of this day" : undefined}
+        value={endInput === "24:00" ? "00:00" : endInput}
         onChange={(e) => {
           const validated = validateTimeInput(e.target.value);
-          if (validated) onUpdate({ endTime: validated });
+          if (validated) onUpdate({ endTime: validated === "00:00" ? "24:00" : validated });
         }}
         className="w-24 h-6 text-xs font-mono px-1.5 text-center rounded border border-input bg-background"
       />
 
-      <Select
-        value={rule.recordMode}
-        onValueChange={(value) => onUpdate({ recordMode: value })}
-      >
-        <SelectTrigger className="w-24 h-6 text-xs font-mono">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All</SelectItem>
-          <SelectItem value="audio_only">Audio only</SelectItem>
-          <SelectItem value="screen_only">Screen only</SelectItem>
-        </SelectContent>
-      </Select>
+      {rule.recordMode !== "all" && (
+        <Button variant="outline" size="sm" className="h-6 text-xs"
+          onClick={() => onUpdate({ recordMode: "all" })}>
+          Use all enabled sources
+        </Button>
+      )}
 
       <button
         className="text-muted-foreground hover:text-destructive transition-colors duration-100"

@@ -1738,7 +1738,8 @@ startTime: string;
  */
 endTime: string;
 /**
- * What to record: "all", "audio_only", "screen_only"
+ * New time windows use "all". Legacy source-specific/unknown values block
+ * their windows until explicitly converted, rather than broadening capture.
  */
 recordMode: string }
 export type SettingsStore =

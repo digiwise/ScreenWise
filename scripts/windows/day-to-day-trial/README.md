@@ -468,3 +468,9 @@ test and its evidence unchanged. Before a future Pi trial:
    Check the exact resolved targets and active use first. Preserve all logs,
    databases, chats, captures and evidence; never remove a whole trial directory
    or clean anything active or whose non-use cannot be established.
+
+## Resource measurement preparation
+
+The opt-in external CPU/RAM sampler, interpretation limits and release benchmark
+workflow are documented in [resource measurements](../../../docs/RESOURCE_MEASUREMENTS.md).
+It does not start recording or replace the interactive readiness gate.

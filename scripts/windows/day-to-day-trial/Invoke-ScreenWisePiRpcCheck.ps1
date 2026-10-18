@@ -75,7 +75,8 @@ try {
 $monitorMetadata=Get-Content -LiteralPath (Join-Path $repo '.local\gui-trial-runtime\tools\gui-process-tree-monitor.json') -Raw | ConvertFrom-Json
 if ($monitorMetadata.schema -ne 'screenwise.gui-process-tree-runtime.v1' -or
     (Get-FileHash -LiteralPath $monitorMetadata.executable_path).Hash -cne $monitorMetadata.executable_sha256 -or
-    (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'GuiProcessTreeMonitor.cs')).Hash -cne $monitorMetadata.source_sha256) { throw 'Provisioned process monitor pin mismatch.' }
+    (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'GuiProcessTreeMonitor.cs')).Hash -cne $monitorMetadata.source_sha256 -or
+    (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'GuiProcessResources.cs')).Hash -cne $monitorMetadata.resource_source_sha256) { throw 'Provisioned process monitor pin mismatch.' }
 # CREATE_NO_WINDOW can create the OS console host even for a minimal Bun script.
 # Verify the exact system image; do not allow other children by executable name.
 $consoleImage=Join-Path ([Environment]::SystemDirectory) 'conhost.exe'

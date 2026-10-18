@@ -287,16 +287,10 @@ pub fn apply_tier_defaults(settings: &mut RecordingSettings, tier: DeviceTier) {
         DeviceTier::Mid => {
             settings.video_quality = "balanced".to_string();
             settings.power_mode = Some("auto".to_string());
-            // Only record the primary monitor to reduce CPU/GPU load
-            settings.use_all_monitors = false;
-            settings.monitor_ids = vec!["default".to_string()];
         }
         DeviceTier::Low => {
             settings.video_quality = "low".to_string();
             settings.power_mode = Some("battery_saver".to_string());
-            // Only record the primary monitor to reduce CPU/GPU load
-            settings.use_all_monitors = false;
-            settings.monitor_ids = vec!["default".to_string()];
         }
     }
 }
@@ -319,8 +313,8 @@ mod tests {
         assert_eq!(settings.video_quality, "low");
         assert_eq!(settings.power_mode.as_deref(), Some("battery_saver"));
         assert_eq!(settings.audio_transcription_engine, "disabled");
-        assert!(!settings.use_all_monitors);
-        assert_eq!(settings.monitor_ids, vec!["default"]);
+        assert!(settings.use_all_monitors);
+        assert!(settings.monitor_ids.is_empty());
     }
 
     #[test]
