@@ -414,6 +414,9 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
   compile-heavy builds in the main session. A focused high-effort review is
   worth its cost for privacy-relevant changes.
 - Do not edit compiled sources while a build or test run of them is in progress.
+- When UI changed, run the frontend export before `DesktopBuild`: the desktop
+  executable embeds `apps/screenpipe-app-tauri/out`, and the launcher does not
+  regenerate it.
 - The standing metrics permission above is the owner's consent, not a tool
   permission: an agent harness may still refuse or prompt. Do not work around a
   refusal; ask the owner to approve the command or add a narrow allow rule, and

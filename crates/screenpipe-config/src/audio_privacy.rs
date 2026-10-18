@@ -480,6 +480,7 @@ mod tests {
 
     #[test]
     fn privacy_permit_roundtrip_cannot_revive_old_generation_or_session() {
+        let _lock = crate::test_support::global_state_lock();
         let permit = AudioPrivacyPermit::current().unwrap();
         let decoded: AudioPrivacyPermit =
             serde_json::from_value(serde_json::to_value(permit).unwrap()).unwrap();
@@ -581,6 +582,7 @@ mod tests {
     }
     #[test]
     fn privacy_newer_pause_wins_over_pending_start_completion() {
+        let _lock = crate::test_support::global_state_lock();
         set_all_recording_paused(true);
         let pending_start = begin_all_recording_resume();
         set_all_recording_paused(true);
@@ -592,6 +594,7 @@ mod tests {
     }
     #[test]
     fn privacy_automatic_device_switch_back_preserves_user_pause_and_revocation() {
+        let _lock = crate::test_support::global_state_lock();
         let a = DeviceAudioPrivacy::for_device(AudioCaptureKind::Microphone, u64::MAX - 10);
         let b = DeviceAudioPrivacy::for_device(AudioCaptureKind::Microphone, u64::MAX - 11);
         let old_a = a.current().unwrap();
@@ -617,6 +620,7 @@ mod tests {
     }
     #[test]
     fn device_disable_revokes_queued_serialized_work_only_for_that_device() {
+        let _lock = crate::test_support::global_state_lock();
         let mic = DeviceAudioPrivacy::for_device(AudioCaptureKind::Microphone, u64::MAX - 1);
         let other = DeviceAudioPrivacy::for_device(AudioCaptureKind::Microphone, u64::MAX - 2);
         let permit = mic.current().unwrap();

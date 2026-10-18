@@ -379,9 +379,7 @@ mod tests {
     use crate::capture_diagnostics::{self as diagnostics, CaptureCondition, CaptureReason};
     #[test]
     fn monitor_topology_retires_lock_state_and_preserves_history_on_reconnect() {
-        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap();
+        let _lock = crate::test_support::global_state_lock();
         start_session();
         let scope = CaptureScope::Monitor(900_001);
         let source = DiagnosticSource::MonitorCapture;
@@ -474,9 +472,7 @@ mod tests {
     }
     #[test]
     fn monitor_topology_distinguishes_failure_empty_enumeration_and_dead_producers() {
-        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap();
+        let _lock = crate::test_support::global_state_lock();
         start_session();
         observe_monitor_topology(&[900_003]);
         monitor_topology_unavailable();
@@ -527,9 +523,7 @@ mod tests {
     }
     #[test]
     fn monitor_topology_reconciles_retained_diagnostics_after_session_restart() {
-        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap();
+        let _lock = crate::test_support::global_state_lock();
         start_session();
         let scope = CaptureScope::Monitor(900_006);
         diagnostics::observe(
@@ -557,9 +551,7 @@ mod tests {
     }
     #[test]
     fn live_evidence_separates_stages_and_resets_session() {
-        let _lock = crate::audio_activity::tests::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap();
+        let _lock = crate::test_support::global_state_lock();
         start_session();
         captured(CaptureChannel::Microphone, CaptureScope::Device(42));
         let snapshot_before = snapshot();

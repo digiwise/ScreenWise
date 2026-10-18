@@ -28,6 +28,8 @@ mod persistence;
 mod recording;
 pub mod screen_lock;
 pub mod sensitive_debug;
+#[cfg(test)]
+mod test_support;
 
 pub use defaults::*;
 pub use persistence::*;

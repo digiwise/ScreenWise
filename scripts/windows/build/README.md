@@ -167,6 +167,8 @@ profile actually tested. Required tests, formatting, frontend export and affecte
 native checks/builds remain. Full release is expensive and has its own cached artifacts.
 This launcher does not stage sidecars, package, start capture, change firewall rules
 or refresh runtime manifests; use the existing trial preparation for those actions.
+It also does not run the frontend export: `DesktopBuild` embeds the existing
+`apps/screenpipe-app-tauri/out`, so export first when UI source changed.
 
 ## Distinguish missing variants from invalidation
 

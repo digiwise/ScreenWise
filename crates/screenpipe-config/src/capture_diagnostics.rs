@@ -1319,6 +1319,7 @@ mod tests {
     }
     #[test]
     fn pressure_warns_before_rejection_without_polling_and_reports_recovery_and_loss() {
+        let _lock = crate::test_support::global_state_lock();
         set_delivery_reporter(record_delivery_notice);
         drain();
         DELIVERY_NOTICES.lock().unwrap().clear();

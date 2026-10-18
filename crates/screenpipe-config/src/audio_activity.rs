@@ -386,9 +386,8 @@ pub fn pending(channel: CaptureChannel, device: u64, speech_ms: u64) -> Option<A
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    pub(crate) static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
     #[test]
     fn many_fractional_callbacks_coalesce_without_flooring_each_buffer_or_losing_results() {
         let now = Instant::now();
@@ -585,7 +584,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn pending_guard_clears_on_error_and_last_clone_drop_and_does_not_cross_session() {
-        let _lock = GLOBAL_TEST_LOCK.lock().unwrap();
+        let _lock = crate::test_support::global_state_lock();
         start_session();
         vad(
             CaptureChannel::Microphone,

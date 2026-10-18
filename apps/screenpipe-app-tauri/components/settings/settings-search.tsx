@@ -80,10 +80,10 @@ export type SettingsField = {
   label: string;
   keywords?: string[];
   anchor?: string;
-  // Set true when this field only renders under certain state (e.g. "Monitors"
-  // only shows when `useAllMonitors` is off). The dev drift guard then won't
-  // flag it as a phantom while it happens to be hidden. Co-located with the
-  // field so there's no separate hardcoded list to maintain.
+  // Set true when this field only renders under certain state (e.g. the
+  // platform-specific "Microphone echo cancellation"). The dev drift guard then
+  // won't flag it as a phantom while it happens to be hidden. Co-located with
+  // the field so there's no separate hardcoded list to maintain.
   conditional?: boolean;
 };
 

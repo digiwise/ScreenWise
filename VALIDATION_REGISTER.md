@@ -71,8 +71,9 @@ Validation: renderer **680 passed** (65 files; 27 in the notice, schedule and
 settings files) and TypeScript checking passed. Configuration **67 passed**
 when run serially; two parallel runs failed different, unchanged
 `live_capture_status`, `capture_diagnostics` and `audio_privacy` tests that
-mutate process-global state without a shared lock (pre-existing, recorded as a
-follow-up, not fixed here). Accessibility **289 passed, 23 live ignored**;
+mutate process-global state without a shared lock (pre-existing). A follow-up
+commit gave those tests one crate-wide, poison-tolerant test lock; three
+consecutive parallel runs then passed **67**. Accessibility **289 passed, 23 live ignored**;
 engine library **642 passed, 2 ignored**; CLI binary target **1 passed**;
 desktop store **12 passed**; native binding consistency passed. The sampler's
 compile, synthetic, integration and overwrite-refusal self-tests passed. The
