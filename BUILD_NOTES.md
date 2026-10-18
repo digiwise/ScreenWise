@@ -1,5 +1,24 @@
 # ScreenWise Windows build notes
 
+The 2026-10-18 [review follow-up](VALIDATION_REGISTER.md#review-follow-up-2026-10-18)
+(main-window notices, schedule validation, COM test and sampler corrections)
+was built as a full desktop `release` at the owner's request, because resource
+measurements use that profile. The frontend export ran first
+(`NEXT_TELEMETRY_DISABLED=1`, `next build`; existing `unpdf` warning) so the
+executable embeds the changed UI; an earlier release build in this session
+preceded the export and is superseded. The canonical launcher
+(`-Task DesktopBuild -BuildProfile release`, locked/offline) passed in **9m32s**,
+reusing all 1,080 external artifacts (workspace: 18 reused, one rebuilt).
+Artifact: `apps/screenpipe-app-tauri/src-tauri/target/release/screenpipe-app.exe`,
+47,797,760 bytes; SHA256
+`B207EDF44D0D99B1553E5A0DBAE526A75D75511A1D872DE4E5423D9C84C9D1EE`.
+Private build evidence: `target/build-diagnostics/20261018T012019689Z-Desktop-Build-c3095cac`.
+The standalone CLI binary target was compiled and tested
+(`RootTest -Package screenpipe-engine -Bin screenpipe`, first use of that
+selection with `-AllowColdCache`: 685 external artifacts reused, none rebuilt);
+its change is startup-table text only, so no CLI release build was made.
+No recording, deployment or measured performance result is included.
+
 The 2026-10-18 [resource measurement preparation](docs/RESOURCE_MEASUREMENTS.md)
 adds an external CPU/RAM sampler, all-monitors/off desktop settings, simple on/off
 time windows with explicit legacy conversion, and correct COM teardown ordering

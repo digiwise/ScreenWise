@@ -450,12 +450,15 @@ pub struct RecordingSettings {
 impl RecordingSettings {
     /// Desktop screen recording offers all displays or off. Legacy selective
     /// settings become off until the user explicitly enables all displays.
-    pub fn normalize_desktop_monitor_scope(&mut self) {
+    /// Returns true when this turned previously enabled screen recording off.
+    pub fn normalize_desktop_monitor_scope(&mut self) -> bool {
+        let turned_off = !self.use_all_monitors && !self.disable_vision;
         if !self.use_all_monitors {
             self.disable_vision = true;
         }
         self.use_all_monitors = true;
         self.monitor_ids.clear();
+        turned_off
     }
 
     /// The local engine that may be started for this persisted setting.
@@ -628,11 +631,14 @@ mod tests {
                     monitor_ids: vec!["old-selection".into()],
                     ..Default::default()
                 };
-                settings.normalize_desktop_monitor_scope();
+                assert_eq!(
+                    settings.normalize_desktop_monitor_scope(),
+                    !all && !disabled
+                );
                 assert!(settings.use_all_monitors);
                 assert!(settings.monitor_ids.is_empty());
                 assert_eq!(settings.disable_vision, disabled || !all);
-                settings.normalize_desktop_monitor_scope();
+                assert!(!settings.normalize_desktop_monitor_scope());
                 assert_eq!(settings.disable_vision, disabled || !all);
             }
         }

@@ -678,6 +678,14 @@ pub struct SettingsStore {
     #[serde(rename = "uiTheme", default = "default_ui_theme")]
     pub ui_theme: String,
 
+    /// Fixed codes of main-window notices shown until dismissed. Never content.
+    #[serde(rename = "pendingNotices", default)]
+    pub pending_notices: Vec<String>,
+
+    /// Content-free keys of dismissed notices derived from current settings.
+    #[serde(rename = "dismissedNotices", default)]
+    pub dismissed_notices: Vec<String>,
+
     /// Catch-all for fields added by the frontend (e.g. chatHistory)
     /// that the Rust struct doesn't know about. Without this, `save()` would
     /// serialize only known fields and silently wipe frontend-only data.
@@ -952,10 +960,15 @@ Rules:
             hide_thinking_blocks: true,
             ui_theme: "system".to_string(),
             minimize_to_tray_on_close: false,
+            pending_notices: vec![],
+            dismissed_notices: vec![],
             extra: std::collections::HashMap::new(),
         }
     }
 }
+
+/// Pending notice: legacy selective monitor settings turned screen recording off.
+pub const SCREEN_SCOPE_OFF_NOTICE: &str = "screen_scope_migrated_off";
 
 impl SettingsStore {
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
@@ -969,7 +982,7 @@ impl SettingsStore {
                 match settings {
                     Ok(mut settings) => {
                         if let Some(settings) = settings.as_mut() {
-                            settings.recording.normalize_desktop_monitor_scope();
+                            settings.normalize_monitor_scope();
                         }
                         Ok(settings)
                     }
@@ -979,6 +992,20 @@ impl SettingsStore {
                     }
                 }
             }
+        }
+    }
+
+    /// Apply the all-or-off screen scope. Any caller that saves afterwards also
+    /// persists the notice, so the migration is never silent.
+    fn normalize_monitor_scope(&mut self) {
+        if self.recording.normalize_desktop_monitor_scope()
+            && !self
+                .pending_notices
+                .iter()
+                .any(|notice| notice == SCREEN_SCOPE_OFF_NOTICE)
+        {
+            self.pending_notices
+                .push(SCREEN_SCOPE_OFF_NOTICE.to_string());
         }
     }
 
@@ -1209,6 +1236,29 @@ mod tests {
     use serde_json::json;
 
     const FALLBACK_ENGINE: &str = "disabled";
+
+    #[test]
+    fn screen_scope_migration_records_one_notice_only_when_turning_screen_off() {
+        for all in [false, true] {
+            for disabled in [false, true] {
+                let mut store = SettingsStore::default();
+                store.recording.use_all_monitors = all;
+                store.recording.disable_vision = disabled;
+                store.normalize_monitor_scope();
+                store.normalize_monitor_scope();
+                let expected: &[&str] = if !all && !disabled {
+                    &[SCREEN_SCOPE_OFF_NOTICE]
+                } else {
+                    &[]
+                };
+                assert_eq!(store.pending_notices, expected);
+                let saved: SettingsStore =
+                    serde_json::from_value(serde_json::to_value(&store).unwrap()).unwrap();
+                assert_eq!(saved.pending_notices, expected);
+                assert!(saved.dismissed_notices.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn desktop_monitor_scope_reaches_runtime_without_changing_other_modalities() {

@@ -47,6 +47,7 @@ import {
 import { ChatHistoryView } from "@/components/chat/chat-history-view";
 import { mountPiEventRouter } from "@/lib/stores/pi-event-router";
 import { RecordingStatusButton } from "@/components/status/recording-status-dialog";
+import { MainNotices } from "@/components/main-notices";
 import { NotificationBell } from "@/components/notification-bell";
 import Timeline from "@/components/rewind/timeline";
 import { useQueryState } from "nuqs";
@@ -464,22 +465,9 @@ function HomeContent() {
         ]) => {
           if (cancelled) return;
           const devices: RecordingDevice[] = [];
-          // Parse monitors — filter to only those actually being recorded
+          // Desktop screen recording covers every connected monitor or none.
           if (health?.monitors) {
-            const monitorIds: string[] = settings.monitorIds ?? ["default"];
-            const useAll = settings.useAllMonitors ?? true;
             for (const name of health.monitors) {
-              // If user selected specific monitors, filter to only those
-              if (!useAll && monitorIds.length > 0 && monitorIds[0] !== "default") {
-                // Health format: "Display 3 (1920x1080)"
-                // Stable ID format: "Display 3_1920x1080_0,0"
-                const healthName = name.split(" (")[0];
-                const matched = monitorIds.some((id) => {
-                  const idName = id.split("_")[0];
-                  return healthName === idName;
-                });
-                if (!matched) continue;
-              }
               devices.push({ name, fullName: name, kind: "monitor", active: true });
             }
           }
@@ -526,7 +514,7 @@ function HomeContent() {
     fetchDevices();
     const interval = setInterval(fetchDevices, 10000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [settings.monitorIds, settings.useAllMonitors]);
+  }, []);
 
   // Active meeting state — lights up the phone icon for ANY active meeting
   // (manual OR auto-detected: Teams, Zoom, etc.).
@@ -1250,6 +1238,7 @@ function HomeContent() {
 
           {/* Content */}
           <div className={cn("flex-1 flex flex-col h-full bg-background min-h-0 relative", isTranslucent ? "rounded-none" : "rounded-tr-lg")}>
+            <MainNotices onOpenSettings={openSettings} />
             {/* ALWAYS-MOUNTED chat layer.
                 Hidden via CSS (display:none) when the user is on a non-chat
                 section, so the StandaloneChat component never unmounts. This

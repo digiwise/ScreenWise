@@ -8,10 +8,10 @@ results are useful for iteration but are not release benchmarks. The current
 release profile uses size optimization (`opt-level = "s"`), LTO and one codegen
 unit; this measurement preparation does not change that profile.
 
-The prepared desktop release executable, SHA256 and successful build evidence
-are recorded in [the build notes](../BUILD_NOTES.md). It includes uncommitted
-source changes on `7187795ad7554f403a2fa12b65036aa1f99ecaee`; the private candidate
-manifest records their hashes. It has not been deployed or benchmarked.
+The latest prepared desktop release executable, SHA256 and successful build
+evidence are recorded at the top of [the build notes](../BUILD_NOTES.md); it was
+built from the source committed with that entry. It has not been deployed or
+benchmarked.
 
 The external resource sampler is opt-in and does not start or modify ScreenWise,
 recording, authentication, models or firewall rules. Compile and self-test it:
@@ -59,6 +59,9 @@ readings at 4,096 processes and reports truncation.
   count shared pages more than once; do not call them unique physical RAM use.
 - `root_present`, `unavailable_count` and `truncated` expose incomplete samples.
   PID plus creation time prevents a reused PID being counted as the old process.
+  Candidates found through the root or a stale parent PID are identity-checked
+  by start time first; CPU and memory counters are read only for verified tree
+  members.
   Previously observed surviving children remain tracked after parent exit.
   A missed/inaccessible ancestry link can leave descendants unobserved. A
   process that starts and exits between snapshots is missed. External model
@@ -79,8 +82,13 @@ Desktop settings now offer screen recording on **all connected monitors** or
 off. Enabling it also includes displays connected later, under the existing
 capture/privacy gates. Monitor aliases remain available for timeline labels.
 Old selective-monitor preferences become screen-off until the user enables
-all-monitor recording; audio and input settings are preserved. Hardware tier
-defaults no longer select a primary display. Lower-level explicit monitor
+all-monitor recording; audio and input settings are preserved. Stored settings
+cannot distinguish an explicit choice from the former mid/low hardware-tier
+default of the primary display, so both are migrated to off. When migration
+turns screen recording off, settings normalization (native and renderer) records
+the fixed `screen_scope_migrated_off` notice; the main window shows it until
+dismissed and links to Recording settings. Hardware tier defaults no longer
+select a primary display. Lower-level explicit monitor
 filters still fail closed on empty/unavailable selection and cannot fall back
 to all displays after capture-start failure. Hardware hot-plug and installed
 settings UI behaviour still require live validation.
@@ -93,7 +101,10 @@ released before `CoUninitialize` on normal exit, failed initialization paths,
 early returns and panic unwinding. Nested successful initialization is balanced;
 a failed attempt to join a different apartment does not uninitialize it.
 Tests cover these cases without creating UIA contexts or contacting application
-providers. The accessibility suite passed 289 tests; 23 live tests stayed ignored.
+providers. They ignore the implicit-MTA apartment that Windows reports for an
+uninitialized thread while another thread (such as a parallel test) is in the
+MTA, so they do not depend on test scheduling. They check the guard, not each
+worker's declaration order; comments at both declarations protect that.
 
 This repairs a concrete teardown-order defect. It does not establish the cause
 of SW-R20, bound provider work, cancel hung COM calls or prove crash recurrence
@@ -112,6 +123,13 @@ even when overlapping an all-source window. Its settings warning and explicit
 **Use all enabled sources** action let the owner convert it deliberately.
 Changing its time or merely enabling scheduling does not convert it. Replacing
 rules with a preset is also an explicit choice. Invalid windows block their day.
+The editor keeps an edit that would end at or before its start as an unsaved
+draft with an error, so new overnight or inverted windows cannot be saved.
+Already-saved invalid windows, such as a legacy end of `00:00`, are flagged in
+the editor and day bar, and are not converted. While scheduling is enabled, the
+main window lists blocking windows (invalid or legacy-mode) until dismissed;
+the dismissal key is a content-free hash of those windows, so a different
+blocking configuration is shown again.
 
 The new **Always On** preset ends at `24:00`, fixing the old preset's missing
 23:59 minute (SW-R14). The editor displays this as end-of-day midnight. Existing

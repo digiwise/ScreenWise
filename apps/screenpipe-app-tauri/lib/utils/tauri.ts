@@ -2167,6 +2167,14 @@ hideThinkingBlocks?: boolean;
  */
 uiTheme?: string;
 /**
+ * Fixed codes of main-window notices shown until dismissed. Never content.
+ */
+pendingNotices?: string[];
+/**
+ * Content-free keys of dismissed notices derived from current settings.
+ */
+dismissedNotices?: string[];
+/**
  * Windows-only: when true, clicking the X on the Home window hides it to
  * the system tray (and removes it from the taskbar) instead of minimizing.
  * Read by the CloseRequested handler in main.rs. Default off (historical

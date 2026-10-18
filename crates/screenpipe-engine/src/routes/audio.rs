@@ -47,6 +47,9 @@ mod privacy_policy_tests {
     #[tokio::test]
     async fn explicit_all_recording_pause_does_not_clear_schedule_or_device_disablement() {
         use screenpipe_config::audio_privacy::*;
+        let _flag_guard = crate::schedule_monitor::SCHEDULE_FLAG_TEST_LOCK
+            .lock()
+            .await;
         let _ = set_recording_privacy(Json(RecordingPrivacy {
             all_recording_paused: true,
         }))

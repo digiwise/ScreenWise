@@ -657,38 +657,8 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
             // returns stale results. The app now subscribes to `permission_lost`
             // / `permission_restored` events via /ws/events (see engine_events.rs).
 
-            // Parse device info from health response, filtered by monitor settings
+            // Desktop screen recording covers every connected monitor or none.
             let mut devices = parse_devices_from_health(&health_result);
-
-            // Filter monitors to only show actively recording ones
-            if let Ok(Some(store)) = crate::store::SettingsStore::get(&app) {
-                if !store.recording.use_all_monitors
-                    && !store.recording.monitor_ids.is_empty()
-                    && store.recording.monitor_ids != vec!["default".to_string()]
-                {
-                    devices.retain(|d| {
-                        if d.kind != DeviceKind::Monitor {
-                            return true;
-                        }
-                        store.recording.monitor_ids.iter().any(|allowed| {
-                            // Stable ID format: "Display 3_1920x1080_0,0"
-                            // Extract name prefix before last '_' (position coords)
-                            let allowed_name = allowed.rsplitn(2, '_').last().unwrap_or(allowed);
-                            // Health monitor format: "Display 3 (1920x1080)"
-                            // Extract just the display name
-                            let health_name = d.name.split(" (").next().unwrap_or(&d.name);
-                            let allowed_short =
-                                allowed_name.split('_').next().unwrap_or(allowed_name);
-                            // Also match numeric monitor IDs from CLI -m flag
-                            // e.g. allowed="3" should match health_name="Display 3"
-                            let numeric_match = health_name
-                                .strip_prefix("Display ")
-                                .map_or(false, |id| id == *allowed);
-                            health_name == allowed_short || numeric_match
-                        })
-                    });
-                }
-            }
 
             // Fetch all audio devices (including user-disabled) for tray display
             let api = local_api_context_from_app(&app);

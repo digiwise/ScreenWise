@@ -1446,6 +1446,7 @@ pub(crate) fn run_keyboard_privacy_thread(
     }
     debug!("UIA keyboard privacy worker starting");
 
+    // Declare before UIA so interfaces are released before apartment teardown.
     let _com = match StaComGuard::initialize() {
         Ok(guard) => guard,
         Err(result) => {
@@ -2157,12 +2158,16 @@ pub(crate) fn control_type_id_to_name(id: i32) -> &'static str {
 mod tests {
     use super::*;
 
+    /// This thread's own apartment. While any other thread (e.g. a parallel
+    /// test) is in the MTA, uninitialized threads report an implicit MTA.
     fn test_apartment() -> Option<windows::Win32::System::Com::APTTYPE> {
-        use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+        use windows::Win32::System::Com::{
+            CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPEQUALIFIER_IMPLICIT_MTA,
+        };
         let mut kind = APTTYPE::default();
         let mut qualifier = APTTYPEQUALIFIER::default();
         unsafe { CoGetApartmentType(&mut kind, &mut qualifier) }.ok()?;
-        Some(kind)
+        (qualifier != APTTYPEQUALIFIER_IMPLICIT_MTA).then_some(kind)
     }
 
     fn test_sta_apartment_active() -> bool {
@@ -2206,7 +2211,9 @@ mod tests {
     }
 
     #[test]
-    fn sta_com_guard_keeps_apartment_alive_during_normal_error_and_panic_cleanup() {
+    // Covers values declared after the guard; it cannot check the workers'
+    // declaration order, which the comments at each `let _com` protect.
+    fn sta_com_guard_outlives_later_values_on_return_error_and_panic() {
         std::thread::spawn(|| {
             use std::cell::RefCell;
             use std::rc::Rc;

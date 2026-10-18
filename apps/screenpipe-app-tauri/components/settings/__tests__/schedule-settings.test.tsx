@@ -50,6 +50,26 @@ describe("simple recording schedule", () => {
     expect(screen.getByRole("status")).toHaveTextContent("paused until you convert");
   });
 
+  it("does not save a window that ends at or before its start", () => {
+    const valid: ScheduleRule = { ...legacy, recordMode: "all" };
+    const changed = fixture([valid]);
+    fireEvent.click(screen.getByText("Mon"));
+    fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "18:00" } });
+    expect(changed).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Not saved: the end must be after the start");
+    expect(screen.getByLabelText("Start time")).toHaveValue("18:00");
+    fireEvent.change(screen.getByLabelText("End time"), { target: { value: "20:00" } });
+    expect(changed).toHaveBeenLastCalledWith(true, [{ ...valid, startTime: "18:00", endTime: "20:00" }]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("flags a saved window that pauses its whole day", () => {
+    const changed = fixture([{ ...legacy, endTime: "00:00", recordMode: "all" }]);
+    fireEvent.click(screen.getByText("Mon"));
+    expect(screen.getByRole("alert")).toHaveTextContent("pauses recording for this whole day");
+    expect(changed).not.toHaveBeenCalled();
+  });
+
   it("makes Always On cover every complete day and round-trips end-of-day midnight", () => {
     const changed = fixture();
     fireEvent.click(screen.getByRole("button", { name: "Always On" }));

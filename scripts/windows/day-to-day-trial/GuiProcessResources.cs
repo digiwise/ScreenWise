@@ -110,26 +110,54 @@ internal static partial class GuiProcessTreeMonitor
                 int unavailable = 0;
                 bool truncated = false;
                 Dictionary<int, ResourceReading> readings = new Dictionary<int, ResourceReading>();
-                foreach (int id in potential)
+                Dictionary<int, Process> handles = new Dictionary<int, Process>();
+                HashSet<int> selected;
+                try
                 {
-                    Entry entry;
-                    if (!candidates.TryGetValue(id, out entry)) continue;
-                    if (readings.Count >= 4096) { truncated = true; break; }
-                    try
+                    // Identity first: a reused root or stale parent PID can add an
+                    // unrelated process here, so only its start time is read.
+                    foreach (int id in potential)
                     {
-                        using (Process process = Process.GetProcessById(id))
+                        Entry entry;
+                        if (!candidates.TryGetValue(id, out entry)) continue;
+                        if (readings.Count >= 4096) { truncated = true; break; }
+                        Process process = null;
+                        try
                         {
+                            process = Process.GetProcessById(id);
                             readings[id] = new ResourceReading { Id = id, ParentId = entry.ParentId,
-                                Started = process.StartTime.ToUniversalTime().Ticks,
-                                CpuTicks = process.TotalProcessorTime.Ticks, ClockTicks = Stopwatch.GetTimestamp(),
-                                WorkingSet = process.WorkingSet64, PrivateBytes = process.PrivateMemorySize64 };
+                                Started = process.StartTime.ToUniversalTime().Ticks };
+                            handles[id] = process;
+                            process = null;
                         }
+                        catch (ArgumentException) { unavailable++; }
+                        catch (InvalidOperationException) { unavailable++; }
+                        catch (System.ComponentModel.Win32Exception) { unavailable++; }
+                        finally { if (process != null) process.Dispose(); }
                     }
-                    catch (ArgumentException) { unavailable++; }
-                    catch (InvalidOperationException) { unavailable++; }
-                    catch (System.ComponentModel.Win32Exception) { unavailable++; }
+                    // Counters only for processes verified as part of the tree.
+                    HashSet<int> verified = SelectResourceTree(readings, previous, rootId, rootStarted);
+                    foreach (int id in verified)
+                    {
+                        try
+                        {
+                            Process process = handles[id];
+                            ResourceReading item = readings[id];
+                            item.CpuTicks = process.TotalProcessorTime.Ticks;
+                            item.ClockTicks = Stopwatch.GetTimestamp();
+                            item.WorkingSet = process.WorkingSet64;
+                            item.PrivateBytes = process.PrivateMemorySize64;
+                        }
+                        catch (InvalidOperationException) { readings.Remove(id); unavailable++; }
+                        catch (System.ComponentModel.Win32Exception) { readings.Remove(id); unavailable++; }
+                    }
+                    verified.IntersectWith(readings.Keys);
+                    selected = verified;
                 }
-                HashSet<int> selected = SelectResourceTree(readings, previous, rootId, rootStarted);
+                finally
+                {
+                    foreach (Process process in handles.Values) process.Dispose();
+                }
                 Dictionary<int, ResourceReading> current = new Dictionary<int, ResourceReading>();
                 StringBuilder processes = new StringBuilder();
                 long workingSet = 0, privateBytes = 0;

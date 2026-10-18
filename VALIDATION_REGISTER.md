@@ -41,6 +41,45 @@ passed **1**. The requested desktop **release** build passed in **8m31s**, reusi
 all 1,080 external artifacts; [artifact and build details](BUILD_NOTES.md) include
 the recovered sandbox archive-rename failure. Both Rust lockfiles remain unchanged.
 
+### Review follow-up (2026-10-18)
+
+A review of `595e68bf8` led to these owner-directed corrections:
+
+- **Visible migrations.** A generic main-window notice list now shows banners
+  until dismissed. The screen-scope migration records a fixed pending notice in
+  both native and renderer normalization whenever it turns enabled screen
+  recording off, including the former mid/low-tier primary-display default,
+  which stored settings cannot distinguish from a user choice. Nothing is
+  re-enabled automatically.
+- **Schedule windows.** The editor no longer saves a window ending at or before
+  its start (for example overnight); saved ones, including legacy `00:00` ends,
+  are flagged and not converted. While scheduling is enabled, a main-window
+  banner lists blocking windows (invalid or legacy-mode) until dismissed, keyed
+  by a content-free hash so a new blocking configuration is shown again.
+- **COM guard tests.** The apartment helper ignores Windows' implicit-MTA report,
+  removing a dependence on parallel test scheduling. The drop-order test was
+  renamed to its actual scope; worker declaration order is protected by comments.
+- **Test isolation.** Engine tests that change the global schedule pause share
+  one lock. Dead monitor-selection filters were removed from the desktop health
+  check and home page; the CLI startup table no longer lists every monitor for
+  an empty selection without `use_all_monitors`.
+- **Resource sampler.** Candidates are identity-checked by start time before any
+  CPU/memory counter is read, so a reused root or stale parent PID cannot add an
+  unrelated process's counters.
+
+Validation: renderer **680 passed** (65 files; 27 in the notice, schedule and
+settings files) and TypeScript checking passed. Configuration **67 passed**
+when run serially; two parallel runs failed different, unchanged
+`live_capture_status`, `capture_diagnostics` and `audio_privacy` tests that
+mutate process-global state without a shared lock (pre-existing, recorded as a
+follow-up, not fixed here). Accessibility **289 passed, 23 live ignored**;
+engine library **642 passed, 2 ignored**; CLI binary target **1 passed**;
+desktop store **12 passed**; native binding consistency passed. The sampler's
+compile, synthetic, integration and overwrite-refusal self-tests passed. The
+frontend export passed with the existing `unpdf` warning, and the desktop
+**release** build is recorded in [the build notes](BUILD_NOTES.md). No recording,
+deployment or live UI validation was run; both Rust lockfiles are unchanged.
+
 Latest owner-reported deployment: [14:46 on 2026-10-13](docs/CONSUMER_REPORT_20261013.md), followed by renewed keyboard capture but continued Screen/OCR loss. The earlier [accessibility/privacy deployment](docs/CAPTURE_PRIVACY.md#accessibility-retrieval-versus-privacy-verification-2026-10-13), including [timeout-setting and native error classification corrections](docs/CAPTURE_PRIVACY.md#deployed-timeout-diagnosis-2026-10-13), was independently verified against its GUI and recorder hashes. The [budget-regression investigation](docs/UIA_CAPTURE_REGRESSION_20261013.md) records that earlier report and source defects. Useful live Screen/OCR coverage remains unresolved. Earlier hashes below belong to their historical candidates.
 
 Earlier comparison candidate: [privacy-only comparison and targeted failure diagnostics](docs/UIA_PRIVACY_ONLY_COMPARISON.md).

@@ -1026,6 +1026,9 @@ mod tests {
             .unwrap(),
         );
         let writer = test_writer(db.clone());
+        let _flag_guard = crate::schedule_monitor::SCHEDULE_FLAG_TEST_LOCK
+            .lock()
+            .await;
         let was_paused = screenpipe_config::audio_privacy::schedule_paused();
         screenpipe_config::audio_privacy::set_schedule_paused(true);
         observe(

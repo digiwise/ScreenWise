@@ -32,18 +32,19 @@ Sources: [input admission](../crates/screenpipe-engine/src/ui_recorder.rs),
 
 ### Monitor selection can expand instead of stopping capture
 
-**Scenario:** A developer selects only an external display, then its identity
-changes or it disconnects. When recording starts, if no selected monitor starts,
-a compatibility fallback can start all connected displays, including a laptop
-screen intended to remain outside capture. An empty selection is also treated
-as permitting all monitors by the manager.
+**Scenario (before 2026-10-18):** A developer selected only an external display,
+then its identity changed or it disconnected. When recording started and no
+selected monitor started, a compatibility fallback could start all connected
+displays, including a laptop screen intended to remain outside capture. The
+manager also treated an empty selection as permitting all monitors.
 
 This is existing issue **SW-R03** (P1). The 2026-10-18 candidate removes desktop
 monitor selection in favour of all monitors or screen-off. Legacy selective
-settings become off until all monitors are explicitly enabled. Lower-level
-filters no longer treat an empty selection as all displays or fall back after
-startup failure. See [scope and validation](RESOURCE_MEASUREMENTS.md#screen-scope);
-live migration and hot-plug validation remain pending.
+settings become off until all monitors are explicitly enabled, and a main-window
+notice announces the change until dismissed. Lower-level filters no longer treat
+an empty selection as all displays or fall back after startup failure. See
+[scope and validation](RESOURCE_MEASUREMENTS.md#screen-scope); live migration
+and hot-plug validation remain pending.
 
 Source: [monitor admission and startup fallback](../crates/screenpipe-engine/src/vision_manager/manager.rs).
 
@@ -58,8 +59,10 @@ This is existing issue **SW-R02** (P1). The owner selected simple on/off windows
 in the 2026-10-18 candidate. New windows apply to all otherwise-enabled sources;
 the source-mode selector is removed. Legacy source-specific windows block all
 recording during their hours until explicitly converted or replaced, including
-when overlapping an all-source window. Source and privacy preferences still
-apply. Schedule transitions remain polled every 30 seconds, rather than enforced
+when overlapping an all-source window. A saved window that ends at or before its
+start blocks its whole day; the editor no longer saves such windows, and a
+main-window notice lists saved blocking windows. Source and privacy preferences
+still apply. Schedule transitions remain polled every 30 seconds, rather than enforced
 at an exact wall-clock instant; live transition validation remains pending.
 
 Source: [schedule monitor](../crates/screenpipe-engine/src/schedule_monitor.rs).

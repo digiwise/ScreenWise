@@ -666,7 +666,9 @@ async fn main() -> anyhow::Result<()> {
 
     let warning_audio_transcription_engine_clone =
         format!("{:?}", config.audio_transcription_engine);
-    let monitor_ids: Vec<u32> = if config.use_all_monitors || config.monitor_ids.is_empty() {
+    // Display only; VisionManager applies the selection. An empty selection
+    // without use_all_monitors records no monitors.
+    let monitor_ids: Vec<u32> = if config.use_all_monitors {
         all_monitors.iter().map(|m| m.id()).collect::<Vec<_>>()
     } else if config.monitor_ids == vec!["default"] {
         // "default" means primary monitor only — show all for display, VisionManager filters
@@ -1172,6 +1174,8 @@ async fn main() -> anyhow::Result<()> {
 
     if config.disable_vision {
         println!("│ {:<22} │ {:<34} │", "", "vision disabled");
+    } else if monitor_ids.is_empty() && !config.use_all_monitors && config.monitor_ids.is_empty() {
+        println!("│ {:<22} │ {:<34} │", "", "none selected");
     } else if monitor_ids.is_empty() {
         println!("│ {:<22} │ {:<34} │", "", "no monitors available");
     } else {

@@ -10,6 +10,11 @@ use screenpipe_config::ScheduleRule;
 use tokio::sync::broadcast;
 use tracing::info;
 
+/// Serializes engine tests that change the process-global schedule pause.
+#[cfg(test)]
+pub(crate) static SCHEDULE_FLAG_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 pub fn schedule_paused() -> bool {
     screenpipe_config::audio_privacy::schedule_paused()
 }
@@ -186,6 +191,7 @@ mod tests {
                 set_schedule_paused(self.0);
             }
         }
+        let _flag_guard = SCHEDULE_FLAG_TEST_LOCK.lock().await;
         let _restore = Restore(schedule_paused());
         let day = chrono::Local::now().weekday().num_days_from_monday() as u8;
         let (shutdown, receiver) = broadcast::channel(1);

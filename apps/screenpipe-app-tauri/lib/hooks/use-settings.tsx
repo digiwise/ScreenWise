@@ -9,6 +9,7 @@ import { Store } from "@tauri-apps/plugin-store";
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { SettingsStore } from "../utils/tauri";
 import type { SourceCitation } from "@/lib/source-citations";
+import { SCREEN_SCOPE_OFF_NOTICE } from "@/lib/main-notices";
 import { type FontSize, applyFontSize } from "@/lib/utils/font-size";
 export type VadSensitivity = "low" | "medium" | "high";
 
@@ -426,8 +427,15 @@ export function normalizeSettings(value?: Partial<Settings> | null): Settings {
 			? value.disabledShortcuts.filter((entry) => typeof entry === "string")
 			: [],
 	} as Settings;
-	// Retired selective capture must not silently expand to every display.
-	if (value?.useAllMonitors === false) settings.disableVision = true;
+	// Retired selective capture must not silently expand to every display, and
+	// turning it off is announced (mirrors SettingsStore::normalize_monitor_scope).
+	if (value?.useAllMonitors === false) {
+		const pending = Array.isArray(settings.pendingNotices) ? settings.pendingNotices : [];
+		if (!settings.disableVision && !pending.includes(SCREEN_SCOPE_OFF_NOTICE)) {
+			settings.pendingNotices = [...pending, SCREEN_SCOPE_OFF_NOTICE];
+		}
+		settings.disableVision = true;
+	}
 	settings.useAllMonitors = true;
 	settings.monitorIds = [];
 	return settings;

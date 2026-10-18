@@ -25,6 +25,10 @@ it.each([false, true])("migrates selective screen capture to off (disabled=%j)",
   expect(settings.useAllMonitors).toBe(true);
   expect(settings.monitorIds).toEqual([]);
   expect(normalizeSettings(settings).disableVision).toBe(true);
+  // Only turning enabled screen recording off is announced, once.
+  const expected = disableVision ? [] : ["screen_scope_migrated_off"];
+  expect(settings.pendingNotices ?? []).toEqual(expected);
+  expect(normalizeSettings({ ...settings, useAllMonitors: false }).pendingNotices ?? []).toEqual(expected);
 });
 
 it.each([false, true])("preserves all-monitor screen toggle (disabled=%j)", (disableVision) => {
