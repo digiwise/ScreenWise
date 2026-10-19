@@ -11,7 +11,11 @@ use std::time::Duration;
 const MAX_PROCESSES: usize = 32;
 const MAX_BASENAME_BYTES: usize = 128;
 const MODE_NAMES: [&str; 2] = ["privacy_and_text", "privacy_only"];
-const REASON_CODES: [&str; 10] = [
+// `unknown` must stay last: the lookup below searches every entry except the
+// final one and falls back to it. A new code therefore goes immediately before
+// it, which shifts only `unknown`'s index. Consumers read `reason_codes`
+// alongside `reason_counts`, so the vector stays self-describing.
+const REASON_CODES: [&str; 11] = [
     "uia_walk_timeout",
     "uia_node_limit",
     "uia_depth_limit",
@@ -21,6 +25,7 @@ const REASON_CODES: [&str; 10] = [
     "uia_backoff",
     "uia_initialization_failed",
     "uia_monitor_unverified",
+    "uia_walk_disabled",
     "unknown",
 ];
 

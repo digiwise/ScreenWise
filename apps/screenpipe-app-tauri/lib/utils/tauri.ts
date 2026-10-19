@@ -2000,6 +2000,21 @@ contentScreeningKeywords?: string[];
  */
 uiaFailOpenWindows?: string[];
 /**
+ * Stop walking accessibility trees entirely. No UIA hierarchy acquisition is
+ * attempted for any window, so no application pays the cost of building an
+ * accessibility tree for ScreenWise. The narrow keyboard focus probe still
+ * runs, OCR and every non-UIA recording path are unaffected.
+ *
+ * This is a deliberate privacy reduction and has no settings UI: UIA evidence
+ * is what verifies a window's identity and content before a frame is stored,
+ * so with it off every frame falls back to in-memory content screening, which
+ * is heuristic. It therefore only takes effect while `contentScreeningEnabled`
+ * is true, and the exclusions, URL rules, incognito/private, DRM, lock and
+ * monitor/focus/identity gates all still apply and still fail closed.
+ * The main window shows a standing banner while it is on. Default false.
+ */
+accessibilityWalkDisabled?: boolean;
+/**
  * Executables (e.g. `digitrack.app.exe`) whose untitled windows count as
  * verified for window-exclusion checks. Ordinarily an untitled window is
  * unverified wherever a configured rule could match its title. Their app

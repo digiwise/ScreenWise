@@ -3991,6 +3991,7 @@ async fn do_capture(
                 failure,
                 params.uia_fail_open_windows,
                 params.content_screening.is_some(),
+                params.tree_walker_config.walk_disabled,
             );
         }
         use screenpipe_config::capture_diagnostics::*;
@@ -6162,13 +6163,22 @@ fn windows_uia_fail_open_applies(
     app: &str,
     title: &str,
     screening_enabled: bool,
+    walk_disabled: bool,
 ) -> bool {
-    if !screening_enabled || patterns.is_empty() {
+    if !screening_enabled || (patterns.is_empty() && !walk_disabled) {
         return false;
     }
     let app = app.trim().to_lowercase();
     if app.is_empty() || app == "unknown" {
         return false;
+    }
+    // With walking switched off, no window can ever produce UIA evidence, so the
+    // per-window pattern list is moot: every verified window falls back to
+    // screening. The caller's other preconditions (a verified target, no
+    // unresolved native window policy) still gate this, and the exclusion, URL,
+    // incognito, DRM, lock and monitor/focus/identity checks are untouched.
+    if walk_disabled {
+        return true;
     }
     // Only `App::` / `App::Title` patterns count: a pattern without an app part
     // would match on the page-controlled window title alone.
@@ -6194,6 +6204,7 @@ fn windows_uia_failure_may_fail_open(
     failure: &screenpipe_a11y::tree::AccessibilityFailure,
     patterns: &[WindowPattern],
     screening_enabled: bool,
+    walk_disabled: bool,
 ) -> bool {
     use screenpipe_config::capture_diagnostics::RuleKind;
     failure.verified_target.is_some()
@@ -6206,6 +6217,7 @@ fn windows_uia_failure_may_fail_open(
             &failure.app_name,
             &failure.window_name,
             screening_enabled,
+            walk_disabled,
         )
 }
 
@@ -6218,13 +6230,14 @@ fn apply_windows_uia_fail_open(
     failure: &screenpipe_a11y::tree::AccessibilityFailure,
     patterns: &[WindowPattern],
     screening_enabled: bool,
+    walk_disabled: bool,
 ) -> bool {
     let Some(decision) = privacy.accessibility.as_mut() else {
         return false;
     };
     if decision.phase != "privacy_admission"
         || decision.processing != "withheld"
-        || !windows_uia_failure_may_fail_open(failure, patterns, screening_enabled)
+        || !windows_uia_failure_may_fail_open(failure, patterns, screening_enabled, walk_disabled)
     {
         return false;
     }
@@ -7214,12 +7227,36 @@ fn windows_uia_fail_open_helper_matrix() {
         ("unknown", "legacyapp", false),
     ] {
         assert_eq!(
-            windows_uia_fail_open_applies(&patterns, app, title, true),
+            windows_uia_fail_open_applies(&patterns, app, title, true, false),
             expected,
             "{app}/{title}"
         );
-        assert!(!windows_uia_fail_open_applies(&patterns, app, title, false));
-        assert!(!windows_uia_fail_open_applies(&[], app, title, true));
+        assert!(!windows_uia_fail_open_applies(
+            &patterns, app, title, false, false
+        ));
+        assert!(!windows_uia_fail_open_applies(&[], app, title, true, false));
+    }
+}
+
+/// With walking switched off, no window can produce UIA evidence, so the
+/// pattern list stops being the gate — but screening and a usable app identity
+/// are still required, and screening off still withholds everything.
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn walk_disabled_fails_open_for_every_identified_window_only_while_screening() {
+    for (app, title) in [
+        ("msedge.exe", "Gmail"),
+        ("excel.exe", "budget"),
+        ("somethingelse.exe", ""),
+    ] {
+        // No patterns configured at all, yet an identified window fails open.
+        assert!(windows_uia_fail_open_applies(&[], app, title, true, true));
+        // Screening is still mandatory: it is the only remaining check.
+        assert!(!windows_uia_fail_open_applies(&[], app, title, false, true));
+    }
+    // An unidentified app is never admitted, walk disabled or not.
+    for app in ["", "unknown"] {
+        assert!(!windows_uia_fail_open_applies(&[], app, "any", true, true));
     }
 }
 
@@ -7230,10 +7267,10 @@ fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
     let patterns = WindowPattern::parse_list(&["notepad.exe::".into()]);
     let eligible = fail_open_test_failure(AccessibilityStopReason::Timeout, "notepad.exe", "draft");
     assert!(windows_uia_failure_may_fail_open(
-        &eligible, &patterns, true
+        &eligible, &patterns, true, false
     ));
     assert!(!windows_uia_failure_may_fail_open(
-        &eligible, &patterns, false
+        &eligible, &patterns, false, false
     ));
 
     let mut unverified = eligible.clone();
@@ -7241,7 +7278,8 @@ fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
     assert!(!windows_uia_failure_may_fail_open(
         &unverified,
         &patterns,
-        true
+        true,
+        false
     ));
 
     let mut native_policy = eligible.clone();
@@ -7253,7 +7291,8 @@ fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
     assert!(!windows_uia_failure_may_fail_open(
         &native_policy,
         &patterns,
-        true
+        true,
+        false
     ));
     let mut privacy = WindowsCapturePrivacy::default();
     assert!(apply_windows_accessibility_failure_with_target_app(
@@ -7266,7 +7305,8 @@ fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
         &mut privacy,
         &native_policy,
         &patterns,
-        true
+        true,
+        false
     ));
     assert_eq!(
         privacy.accessibility.as_ref().unwrap().processing,
@@ -7279,7 +7319,7 @@ fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
         &anyhow::anyhow!("synthetic"),
     );
     assert!(!windows_uia_failure_may_fail_open(
-        &provider, &patterns, true
+        &provider, &patterns, true, false
     ));
 
     // A proceeding decision (no unresolved rules) is never rewritten.
@@ -7296,7 +7336,8 @@ fn windows_uia_fail_open_requires_reverified_identity_and_native_policy() {
         &mut proceeding,
         &ordinary,
         &patterns,
-        true
+        true,
+        false
     ));
     assert_eq!(
         proceeding.accessibility.as_ref().unwrap().processing,
@@ -7336,7 +7377,8 @@ fn windows_uia_fail_open_is_inert_without_list_or_screening() {
                     &mut privacy,
                     &failure,
                     patterns,
-                    screening_enabled
+                    screening_enabled,
+                    false
                 ));
                 assert_eq!(privacy.accessibility, baseline.accessibility);
                 for outcome in [
@@ -7389,7 +7431,8 @@ fn windows_uia_fail_open_decision_json_and_diagnostics() {
         &mut privacy,
         &failure,
         &patterns,
-        true
+        true,
+        false
     ));
     let decision = privacy.accessibility.as_ref().unwrap();
     assert_eq!(decision.processing, "screening_required");

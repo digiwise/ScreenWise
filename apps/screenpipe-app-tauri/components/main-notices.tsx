@@ -18,13 +18,15 @@ export function MainNotices({ onOpenSettings }: { onOpenSettings: (section: stri
       {notices.map((notice) => (
         <Alert key={notice.key} className="border-amber-500/50 py-3">
           {/* Before the icon: the Alert indents every element after its svg. */}
-          <button
-            className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label={`Dismiss: ${notice.title}`}
-            onClick={() => void updateSettings(dismissMainNotice(settings, notice))}
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+          {notice.dismissible !== false && (
+            <button
+              className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+              aria-label={`Dismiss: ${notice.title}`}
+              onClick={() => void updateSettings(dismissMainNotice(settings, notice))}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
           <AlertTriangle className="h-4 w-4 !text-amber-600" aria-hidden="true" />
           <AlertTitle className="pr-6">{notice.title}</AlertTitle>
           <AlertDescription className="text-xs text-muted-foreground">

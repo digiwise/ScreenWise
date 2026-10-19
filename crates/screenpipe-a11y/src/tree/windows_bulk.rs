@@ -173,7 +173,7 @@ struct Metrics {
     privacy_acquisitions: AtomicU64,
     recording_acquisitions: AtomicU64,
     histogram: [AtomicU64; 7],
-    reasons: [AtomicU64; 8],
+    reasons: [AtomicU64; 9],
 }
 static METRICS: Metrics = Metrics {
     attempts: AtomicU64::new(0),
@@ -193,7 +193,7 @@ static METRICS: Metrics = Metrics {
     privacy_acquisitions: AtomicU64::new(0),
     recording_acquisitions: AtomicU64::new(0),
     histogram: [const { AtomicU64::new(0) }; 7],
-    reasons: [const { AtomicU64::new(0) }; 8],
+    reasons: [const { AtomicU64::new(0) }; 9],
 };
 // UIA registration/removal must not run concurrently in one process. This
 // mutex guards subscriptions only, never trees, evaluation or admission.
@@ -710,6 +710,7 @@ pub(super) fn record_attempt(
             Stop::Provider => 5,
             Stop::Backoff => 6,
             Stop::Initialization => 7,
+            Stop::WalkDisabled => 8,
         };
         METRICS.reasons[index].fetch_add(1, Ordering::Relaxed);
     }
@@ -729,7 +730,8 @@ pub(super) fn metrics_snapshot() -> serde_json::Value {
         "histogram_upper_us":[25000,50000,100000,150000,250000,500000,null],
         "histogram_counts":METRICS.histogram.iter().map(load).collect::<Vec<_>>(),
         "reason_codes":["uia_walk_timeout","uia_node_limit","uia_depth_limit","uia_property_text_limit",
-            "uia_aggregate_text_limit","uia_provider_failure","uia_backoff","uia_initialization_failed"],
+            "uia_aggregate_text_limit","uia_provider_failure","uia_backoff","uia_initialization_failed",
+            "uia_walk_disabled"],
         "reason_counts":METRICS.reasons.iter().map(load).collect::<Vec<_>>(),
         "evidence_rejection_codes":EVIDENCE_REJECTION_CODES,
         "evidence_rejection_counts":EVIDENCE_REJECTIONS.iter().map(load).collect::<Vec<_>>(),

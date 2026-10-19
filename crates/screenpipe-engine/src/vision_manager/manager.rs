@@ -49,6 +49,8 @@ pub struct VisionManagerConfig {
     /// Window patterns whose UIA evidence-acquisition failures may fail open,
     /// only while content screening is enabled and the frame passes it.
     pub uia_fail_open_windows: Vec<String>,
+    /// `accessibilityWalkDisabled`: make no UIA hierarchy call for any window.
+    pub accessibility_walk_disabled: bool,
     /// Executables whose untitled windows are verified (`untitledSafeApps`).
     pub untitled_safe_apps: Vec<String>,
     /// Languages for OCR recognition.
@@ -435,6 +437,7 @@ impl VisionManager {
             monitor_width: width,
             monitor_height: height,
             ignore_incognito_windows: self.config.ignore_incognito_windows,
+            walk_disabled: self.config.accessibility_walk_disabled,
             #[cfg(target_os = "windows")]
             windows_privacy_only: self.windows_privacy_only,
             ..TreeWalkerConfig::default()
@@ -828,6 +831,7 @@ mod tests {
             content_screening_enabled: true,
             content_screening_keywords: vec![],
             uia_fail_open_windows: vec![],
+            accessibility_walk_disabled: false,
             untitled_safe_apps: vec![],
             languages: vec![Language::English],
             video_quality: "balanced".to_string(),

@@ -772,6 +772,25 @@ impl WindowsTreeWalker {
                 return Ok(TreeWalkResult::Skipped(reason));
             }
 
+            // Tree walking switched off by configuration. Reported here, after
+            // the native window-policy checks above, so exclusions still decide
+            // first and the failure carries a verified target like any other
+            // retrieval failure. No provider is contacted, so the target
+            // application never builds an accessibility tree for this attempt.
+            if self.config.walk_disabled {
+                crate::uia_breaker::note_walk_skipped();
+                return Ok(TreeWalkResult::Skipped(
+                    SkipReason::AccessibilityRetrievalFailed(
+                        AccessibilityFailure::after_native_policy(
+                            screenpipe_config::capture_diagnostics::AccessibilityStopReason::WalkDisabled,
+                            &self.config,
+                            app_name,
+                            window_name,
+                        ),
+                    ),
+                ));
+            }
+
             // A process whose provider recently timed out or overran its limits
             // gets no UIA calls until its backoff expires (fails like any other
             // retrieval failure, so configured fail-open windows still apply).

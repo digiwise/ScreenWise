@@ -112,6 +112,7 @@ pub enum CaptureReason {
     UiaProviderFailure,
     UiaBackoff,
     UiaInitializationFailed,
+    UiaWalkDisabled,
     AccessibilityPrivacyUnverified,
     AccessibilityProcessingContinues,
     PasswordField,
@@ -200,6 +201,7 @@ impl CaptureReason {
             Self::UiaProviderFailure => "capture_uia_provider_failure",
             Self::UiaBackoff => "capture_uia_backoff",
             Self::UiaInitializationFailed => "capture_uia_initialization_failed",
+            Self::UiaWalkDisabled => "capture_uia_walk_disabled",
             Self::AccessibilityPrivacyUnverified => "capture_accessibility_privacy_unverified",
             Self::AccessibilityProcessingContinues => "capture_accessibility_processing_continues",
             Self::PasswordField => "capture_password_field",
@@ -244,6 +246,9 @@ pub enum AccessibilityStopReason {
     Provider,
     Backoff,
     Initialization,
+    /// Tree walking is switched off by configuration. No provider call was made,
+    /// so the target application paid nothing for this attempt.
+    WalkDisabled,
 }
 impl AccessibilityStopReason {
     pub fn code(self) -> &'static str {
@@ -256,6 +261,7 @@ impl AccessibilityStopReason {
             Self::Provider => "uia_provider_failure",
             Self::Backoff => "uia_backoff",
             Self::Initialization => "uia_initialization_failed",
+            Self::WalkDisabled => "uia_walk_disabled",
         }
     }
     pub fn from_code(code: &str) -> Option<Self> {
@@ -268,6 +274,7 @@ impl AccessibilityStopReason {
             "uia_provider_failure" => Self::Provider,
             "uia_backoff" => Self::Backoff,
             "uia_initialization_failed" => Self::Initialization,
+            "uia_walk_disabled" => Self::WalkDisabled,
             _ => return None,
         })
     }
@@ -281,6 +288,7 @@ impl AccessibilityStopReason {
             Self::Provider => CaptureReason::UiaProviderFailure,
             Self::Backoff => CaptureReason::UiaBackoff,
             Self::Initialization => CaptureReason::UiaInitializationFailed,
+            Self::WalkDisabled => CaptureReason::UiaWalkDisabled,
         }
     }
 }

@@ -11,6 +11,9 @@ export type MainNotice = {
   /** Pending code, or the dismissal key of a notice derived from current settings. */
   key: string;
   pending: boolean;
+  /** Defaults to true. False for a standing condition that must stay visible
+   * while it holds, so dismissing it would misrepresent the current state. */
+  dismissible?: boolean;
   title: string;
   body: string;
   settingsSection: string;
@@ -37,6 +40,22 @@ function fnv1a(text: string): string {
 
 export function mainNotices(settings: Settings): MainNotice[] {
   const notices: MainNotice[] = [];
+  // `accessibilityWalkDisabled` has no settings control on purpose, so this
+  // banner is the only place the mode is visible. It is a standing privacy
+  // reduction rather than a one-off event, so it is not dismissible: it shows
+  // for as long as the setting is on, and therefore on every activation.
+  if (settings.accessibilityWalkDisabled) {
+    notices.push({
+      key: "accessibility_walk_disabled",
+      pending: false,
+      dismissible: false,
+      title: "Accessibility checks are turned off",
+      body:
+        "Screen text is being recorded from OCR alone. ScreenWise is not reading any application's accessibility tree, so it cannot verify what a window is showing before a frame is stored, and in-memory content screening is the only check left — that is heuristic and can miss things. Exclusions, URL rules, private windows, protected content, screen lock and monitor checks all still apply. Remove accessibilityWalkDisabled from settings to restore the full checks.",
+      settingsSection: "privacy",
+      actionLabel: "Open privacy settings",
+    });
+  }
   for (const code of settings.pendingNotices ?? []) {
     const notice = PENDING[code];
     if (notice && !notices.some((item) => item.key === code)) notices.push({ key: code, pending: true, ...notice });

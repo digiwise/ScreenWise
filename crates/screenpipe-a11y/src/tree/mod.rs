@@ -506,6 +506,12 @@ pub struct TreeWalkerConfig {
     pub monitor_height: f64,
     /// Automatically detect and skip incognito / private browsing windows.
     pub ignore_incognito_windows: bool,
+    /// Make no accessibility-hierarchy call at all. Every walk reports a
+    /// retrieval failure with `uia_walk_disabled` after the native window-policy
+    /// checks, so exclusions still decide first and no provider is ever
+    /// contacted — the target application builds no accessibility tree for us.
+    /// Narrow focus probes are a separate path and are unaffected.
+    pub walk_disabled: bool,
     /// Per-walk override for `max_nodes` (set by adaptive budget, takes precedence).
     pub max_nodes_override: Option<usize>,
     /// Per-walk override for `walk_timeout` (set by adaptive budget, takes precedence).
@@ -555,6 +561,7 @@ impl Default for TreeWalkerConfig {
             monitor_width: 0.0,
             monitor_height: 0.0,
             ignore_incognito_windows: true,
+            walk_disabled: false,
             max_nodes_override: None,
             walk_timeout_override: None,
             enable_line_bounds: true,
