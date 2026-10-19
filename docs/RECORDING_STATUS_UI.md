@@ -184,6 +184,23 @@ NoCallbacks as a failure. That is the identified interpretation mismatch. No
 callbacks differs from received silent samples; microphone timeout and explicit
 stream failure follow different backend paths.
 
+A sustained case has since been observed on a production installation (SW-V45):
+output capture stopped delivering callbacks and stayed stopped for over four
+hours across repeated device restarts, while the recovery monitor reported the
+device restored on each cycle. The classifier's failure interpretation is
+therefore correct for a sustained condition, and the backend's benign handling is
+correct for a quiet device; what is missing is a duration threshold separating the
+two, and a recovery path whose success depends on observed callbacks rather than
+on a device having started. Until that exists, a consumer cannot distinguish a
+quiet output device from a dead output stream from status alone.
+
+Retained coverage is a separate gap (SW-V46). The per-device audio activity and
+transcription throughput observations are a rolling live window and are not
+retained, so they describe the recorder now and cannot establish whether a past
+meeting was transcribed in full. No notice compares a completed meeting against
+the transcript stored for it, so a meeting whose transcript covers far less of
+its length than its recorded audio produces no notice at any layer.
+
 ### Monitor metadata and dashboard details
 
 Existing `MonitorInfo` includes `id`, `stable_id`, `name`, width, height and primary

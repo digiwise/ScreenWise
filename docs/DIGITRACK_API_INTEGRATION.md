@@ -41,7 +41,9 @@ an instruction to load every element and full frame context for every period.
 - Use URL-encoded RFC3339 timestamps with an explicit offset, preferably `Z`.
   On the client, include the start time and exclude the end time. `/search` and `/meetings` use inclusive
   upper bounds; `/capture-events` uses an exclusive upper bound. Post-filter
-  and deduplicate records at adjoining period boundaries.
+  and deduplicate records at adjoining period boundaries, using each content
+  type's own record identity. For audio that identity is `transcription_id`
+  alone; see the audio caution below before deduplicating transcripts.
 - `GET /health` describes current health, not historical coverage. A healthy
   response does not prove earlier capture was complete. Treat 403, 408, 503,
   other errors, cancellation and exhausted query budgets as distinct from an
@@ -62,7 +64,7 @@ an instruction to load every element and full frame context for every period.
 |---|---|---|
 | Screen text and frame references | `/search?content_type=ocr` | `{data:[{type:"OCR",content:{...}}],pagination:{limit,offset,total}}`; `frame_id`, `timestamp`, `text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused`, `device_name`, `capture_privacy`; optional `active_monitor=true` for known active-monitor frames, including redactions |
 | Individual retained accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence`; add visibility/source filters when needed |
-| Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; optional `transcription_id`, `chunk_id`, `offset_index`, `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
+| Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; optional `transcription_id` (the only segment identity — see the audio caution below), `chunk_id`, `offset_index` (not a segment index), `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
 | Optional retained input events | `/search?content_type=input` | `type:"Input"`; `id`, `timestamp`, `event_type`, optional app/window/context, `text_content` and `frame_id` |
 | Frame timestamp for a reference | `/frames/{frame_id}/metadata` | `{frame_id,timestamp}`; returns 404 when the frame is absent |
 | Full retained frame context on demand | `/frames/{frame_id}/context` | `{frame_id,text,nodes,urls,text_source,capture_privacy}`; accessibility first, OCR fallback |
@@ -76,6 +78,30 @@ whole responses into an LLM: project only the evidence necessary for the task.
 `transcription` and `text` are aliases, not two separate observations.
 Do not assume audio `device_type` casing matches the meeting transcript's string
 field; decode each response contract separately.
+
+**Audio segment identity (SW-V44).** `transcription_id` is the only stable
+identity of an audio segment. Deduplicate transcripts on it alone. `offset_index`
+is **not** a segment index on the live transcription path: every segment of a
+capture chunk is written with the same value, so one chunk of continuous speech
+yields many segments sharing a single `(chunk_id, offset_index)` pair. `timestamp`
+is shared the same way, because it is the chunk's capture instant. Collapsing on
+either, or on any combination of the two, discards most of the transcript of an
+active conversation and reports no error, no empty result and no notice; the
+response looks successful and merely short. Segment times (`start_time`,
+`end_time`) are offsets within the chunk and legitimately overlap between
+adjacent segments, so neither are they a deduplication key. If a client needs to
+drop fully redundant text it must compare the text itself, not these fields.
+
+**A short transcript is not evidence of a quiet period (SW-V45, SW-V46).**
+System/output audio capture can stop delivering callbacks and stay stopped for
+hours while microphone capture continues normally, so one side of a conversation
+can be absent from a period that otherwise looks healthy. No notice compares a
+completed meeting against the transcript actually stored for it, and the rolling
+per-device activity and throughput fields describe the recorder now, not the
+period being retrieved. A client that needs confidence in transcript coverage
+must derive it itself — compare the retrieved transcript's span and per-device
+segment distribution against the meeting's duration from `/meetings` — and treat
+a large shortfall as unexplained rather than as silence.
 
 ### Explain redactions and prioritise the active monitor
 
