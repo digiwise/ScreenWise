@@ -10,16 +10,8 @@ import { extractDomain, FaviconImg } from "./favicon-utils";
 import { format } from "date-fns";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { commands } from "@/lib/utils/tauri";
-import { localFetch } from "@/lib/api";
+import { getActivityUiEvents, type UiEventSummary } from "@/lib/api/activity";
 import { NativeAppIcon } from "@/components/native-app-icon";
-
-interface UiEventSummary {
-	event_type: string;
-	text_content: string | null;
-	app_name: string | null;
-	window_title: string | null;
-	timestamp: string;
-}
 
 function formatUiEvent(ev: UiEventSummary): { icon: string; label: string } | null {
 	const truncate = (s: string, max = 40) => s.length > max ? s.slice(0, max) + "\u2026" : s;
@@ -82,21 +74,21 @@ export function AppContextPopover({
 	}, [frames]);
 
 	// fetch UI events for this time range
+	// Bug fix: this used to strip "T"/"Z" to build a SQLite datetime()-style
+	// bound ("YYYY-MM-DD HH:MM:SS"), which never matches ui_events.timestamp's
+	// stored RFC 3339 "...T...Z" form — so this list was always empty. The
+	// endpoint takes RFC 3339 and binds typed timestamps server-side, so the
+	// ISO strings are passed through unchanged.
 	const [uiEvents, setUiEvents] = useState<UiEventSummary[]>([]);
 	useEffect(() => {
 		if (!timeRange) return;
-		const start = timeRange.start.toISOString().replace("T", " ").replace("Z", "");
-		const end = timeRange.end.toISOString().replace("T", " ").replace("Z", "");
-		const query = `SELECT event_type, text_content, app_name, window_title, timestamp FROM ui_events WHERE timestamp BETWEEN '${start}' AND '${end}' ORDER BY timestamp DESC LIMIT 30`;
-		localFetch("/raw_sql", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ query }),
+		getActivityUiEvents({
+			start: timeRange.start.toISOString(),
+			end: timeRange.end.toISOString(),
+			limit: 30,
+			order: "desc",
 		})
-			.then((r) => r.json())
-			.then((rows: UiEventSummary[]) => {
-				if (Array.isArray(rows)) setUiEvents(rows);
-			})
+			.then(({ events }) => setUiEvents(events))
 			.catch(() => {});
 	}, [timeRange]);
 

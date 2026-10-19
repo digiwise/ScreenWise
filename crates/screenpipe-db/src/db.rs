@@ -32,14 +32,16 @@ use zerocopy::AsBytes;
 use futures::future::try_join_all;
 
 use crate::{
-    text_similarity::is_similar_transcription, AudioChunkProcessingSnapshot, AudioChunksResponse,
-    AudioDevice, AudioEntry, AudioResult, AudioResultRaw, ChunkOutcome, ContentType, DeviceType,
+    text_similarity::is_similar_transcription, ActivityCoverage, AppFrameCount, AppMatchCount,
+    AppWindowUsage, AudioChunkProcessingSnapshot, AudioChunksResponse, AudioDevice, AudioEntry,
+    AudioResult, AudioResultRaw, ChunkOutcome, ContentType, DayMatchCount, DeviceType, DomainCount,
     Element, ElementRow, ElementSource, FrameData, FrameRow, FrameRowLight, FrameWindowData,
-    InsertUiEvent, MeetingRecord, MeetingTranscriptSegment, MemoryRecord, NewDiarizationSegment,
-    OCREntry, OCRResult, OCRResultRaw, OcrEngine, OcrTextBlock, Order,
-    ReplacementAudioTranscription, SearchMatch, SearchMatchGroup, SearchResult, Speaker,
-    TagContentType, TextBounds, TextPosition, TimeSeriesChunk, UiContent, UiEventRecord,
-    UiEventRow, VideoMetadata, MAX_TRANSCRIPTION_ATTEMPTS,
+    InsertUiEvent, MeetingRecord, MeetingTranscriptSegment, MemoryRecord, NearbyFrame,
+    NewDiarizationSegment, OCREntry, OCRResult, OCRResultRaw, OcrEngine, OcrTextBlock, Order,
+    ReplacementAudioTranscription, SearchFacets, SearchMatch, SearchMatchGroup, SearchResult,
+    Speaker, TagContentType, TaggedFrame, TextBounds, TextPosition, TextSnippetPage,
+    TextSnippetRow, TextSnippetSource, TimeSeriesChunk, UiContent, UiEventRecord, UiEventRow,
+    UiEventSummary, UrlMatchCount, VideoMetadata, VisionTagCount, MAX_TRANSCRIPTION_ATTEMPTS,
 };
 
 /// Time window (in seconds) to check for similar transcriptions across devices.
@@ -310,6 +312,10 @@ pub struct DatabaseManager {
     /// so API read bursts cannot exhaust the pool recording relies on. Its
     /// statements are interrupted after [`API_STATEMENT_BUDGET`].
     api_read_pool: SqlitePool,
+    /// Connections opened with SQLITE_OPEN_READONLY for caller-supplied SQL
+    /// (see [`Self::execute_read_only_sql`]). Opened lazily; SQLite itself
+    /// rejects writes on them, independent of any query-text checks.
+    read_only_sql_pool: SqlitePool,
 }
 
 /// Longest an API-pool statement may run before SQLite interrupts it. Below the
@@ -433,6 +439,7 @@ impl DatabaseManager {
             heavy_read_semaphore: Arc::clone(&self.heavy_read_semaphore),
             write_queue: self.write_queue.clone(),
             api_read_pool: self.api_read_pool.clone(),
+            read_only_sql_pool: self.read_only_sql_pool.clone(),
         }
     }
 
@@ -520,6 +527,14 @@ impl DatabaseManager {
             .connect_with(connect_options.clone())
             .await?;
 
+        // Read-only pool for caller-supplied SQL: same budget as the API pool,
+        // opened lazily so existing startup and in-memory tests are unchanged.
+        let read_only_sql_pool = statement_budget_pool_options(API_STATEMENT_BUDGET)
+            .max_connections(2)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_lazy_with(connect_options.clone().read_only(true));
+
         // Write pool: dedicated to INSERT/UPDATE/DELETE via begin_immediate_with_retry().
         // Writes are serialized by write_semaphore so only 1 is active
         // at a time; extras absorb connection detach without killing the pool.
@@ -543,6 +558,7 @@ impl DatabaseManager {
             heavy_read_semaphore: Arc::new(Semaphore::new(2)),
             write_queue,
             api_read_pool,
+            read_only_sql_pool,
         };
 
         // Checkpoint any stale WAL before running migrations or starting captures.
@@ -5589,9 +5605,27 @@ impl DatabaseManager {
         tx.commit().await?;
         Ok(())
     }
+    /// Internal SQL built by ScreenWise itself. Caller-supplied SQL must use
+    /// [`Self::execute_read_only_sql`].
     pub async fn execute_raw_sql(&self, query: &str) -> Result<serde_json::Value, sqlx::Error> {
         let rows = sqlx::query(query).fetch_all(&self.pool).await?;
+        Ok(Self::rows_to_json(&rows))
+    }
 
+    /// Run caller-supplied SQL on a connection SQLite opened read-only, so
+    /// any write, schema change or new file is refused by SQLite itself.
+    /// Callers must still pass exactly one statement.
+    pub async fn execute_read_only_sql(
+        &self,
+        query: &str,
+    ) -> Result<serde_json::Value, sqlx::Error> {
+        let rows = sqlx::query(query)
+            .fetch_all(&self.read_only_sql_pool)
+            .await?;
+        Ok(Self::rows_to_json(&rows))
+    }
+
+    fn rows_to_json(rows: &[sqlx::sqlite::SqliteRow]) -> serde_json::Value {
         let result: Vec<serde_json::Map<String, serde_json::Value>> = rows
             .iter()
             .map(|row| {
@@ -5622,9 +5656,7 @@ impl DatabaseManager {
             })
             .collect();
 
-        Ok(serde_json::Value::Array(
-            result.into_iter().map(serde_json::Value::Object).collect(),
-        ))
+        serde_json::Value::Array(result.into_iter().map(serde_json::Value::Object).collect())
     }
 
     pub async fn find_video_chunks(
@@ -6242,6 +6274,537 @@ impl DatabaseManager {
             .await?;
 
         Ok(rows)
+    }
+
+    // ─── Dedicated read endpoints (replacing the app's own `/raw_sql` use) ───
+    //
+    // These methods back the typed `GET` routes in
+    // `routes/activity.rs`/`routes/tags.rs`/`routes/search.rs`/`routes/frames.rs`
+    // that replace fixed SQL the frontend previously built as strings and sent
+    // to `/raw_sql`. See `.local/plans/dedicated-endpoints-contract-20261019.md`.
+    // Every caller-supplied value is bound, never interpolated into SQL text —
+    // that is the whole point of this migration.
+
+    /// First/last captured-activity timestamps and the local-calendar days
+    /// with any data, across `frames`, `audio_transcriptions` and
+    /// `privacy_notice` UI events. Mirrors the union the frontend's
+    /// `listDaysWithFrames`/`getStartDate` used, so the calendar keeps
+    /// lighting up audio-only and notice-only days, and the boundary
+    /// timestamps cover notices too (deliberate — the timeline can display
+    /// them). `days` is capped at 10000 rows (~27 years of recording days).
+    pub async fn get_activity_coverage(&self) -> Result<ActivityCoverage, sqlx::Error> {
+        let (first_timestamp, last_timestamp): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+            sqlx::query_as(
+                r#"
+                SELECT MIN(ts), MAX(ts) FROM (
+                    SELECT timestamp AS ts FROM frames WHERE timestamp IS NOT NULL
+                    UNION ALL
+                    SELECT timestamp AS ts FROM audio_transcriptions WHERE timestamp IS NOT NULL
+                    UNION ALL
+                    SELECT timestamp AS ts FROM ui_events
+                        WHERE event_type = 'privacy_notice' AND timestamp IS NOT NULL
+                )
+                "#,
+            )
+            .fetch_one(&self.pool)
+            .await?;
+
+        let days: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT DISTINCT DATE(ts, 'localtime') AS day FROM (
+                SELECT timestamp AS ts FROM frames WHERE timestamp IS NOT NULL
+                UNION ALL
+                SELECT timestamp AS ts FROM audio_transcriptions WHERE timestamp IS NOT NULL
+                UNION ALL
+                SELECT timestamp AS ts FROM ui_events
+                    WHERE event_type = 'privacy_notice' AND timestamp IS NOT NULL
+            )
+            ORDER BY day
+            LIMIT 10000
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(ActivityCoverage {
+            first_timestamp,
+            last_timestamp,
+            days,
+        })
+    }
+
+    /// App frame counts since `since`, descending. Excludes NULL/empty
+    /// `app_name`. Does NOT filter ScreenWise's own app names — that's a
+    /// suggestion-quality rule the caller (`suggestions.rs`) applies, not a
+    /// data rule that belongs in the DB layer.
+    pub async fn get_app_frame_counts(
+        &self,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<AppFrameCount>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT app_name, COUNT(*) AS frame_count
+            FROM frames
+            WHERE timestamp > ?1 AND app_name IS NOT NULL AND app_name != ''
+            GROUP BY app_name
+            ORDER BY frame_count DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Bare frame ids with `timestamp >= since`, newest first, limited to
+    /// `limit`. Backs `GET /frames/recent`, the last in-app `/raw_sql` caller
+    /// (`suggestions.rs::store_tags`), which only ever needed an id list to
+    /// tag — not the richer rows the other activity/frame endpoints return.
+    pub async fn get_recent_frame_ids(
+        &self,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<i64>, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM frames
+            WHERE timestamp >= ?1
+            ORDER BY timestamp DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Flat (app, window) rows behind the app/window usage tree: each row is
+    /// one window of one app, already limited to `windows_per_app` windows
+    /// per app via a `ROW_NUMBER() OVER (PARTITION BY app_name ...)` CTE
+    /// (same shape as the old `useAppWindowTree` hook built client-side).
+    /// Deliberately NOT pre-nested here — the HTTP route
+    /// (`routes/activity.rs::activity_app_windows_handler`) assembles the
+    /// per-app tree from these flat rows itself, so this method's shape
+    /// must match that consumer exactly: `app_name`, `window_name`,
+    /// `window_frame_count` (this window's frames), `app_frame_count` (all
+    /// of this app's frames in the window), `window_count` (distinct
+    /// windows for this app, uncapped).
+    pub async fn get_app_window_tree(
+        &self,
+        since: DateTime<Utc>,
+        app_limit: i64,
+        windows_per_app: i64,
+    ) -> Result<Vec<AppWindowUsage>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            WITH per_window AS (
+                SELECT
+                    app_name,
+                    NULLIF(window_name, '') AS window_name,
+                    COUNT(*) AS window_frame_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY app_name ORDER BY COUNT(*) DESC
+                    ) AS rn
+                FROM frames
+                WHERE timestamp > ?1 AND app_name IS NOT NULL AND app_name != ''
+                GROUP BY app_name, COALESCE(window_name, '')
+            ),
+            per_app AS (
+                SELECT
+                    app_name,
+                    SUM(window_frame_count) AS app_frame_count,
+                    COUNT(*) AS window_count,
+                    ROW_NUMBER() OVER (ORDER BY SUM(window_frame_count) DESC) AS app_rn
+                FROM per_window
+                GROUP BY app_name
+            )
+            SELECT
+                w.app_name,
+                w.window_name,
+                w.window_frame_count,
+                a.app_frame_count,
+                a.window_count
+            FROM per_window w
+            JOIN per_app a ON w.app_name = a.app_name
+            WHERE w.rn <= ?2 AND a.app_rn <= ?3
+            -- Total order required: the handler (routes/activity.rs::
+            -- activity_app_windows_handler) assembles nested apps by
+            -- appending to `apps.last_mut()`, assuming all of one app's
+            -- rows are contiguous. `app_rn`/`rn` are unique ranks (unlike
+            -- app_frame_count/window_frame_count, which tie constantly in
+            -- the long tail), so ordering by them keeps rows for the same
+            -- app contiguous while preserving "busiest first".
+            ORDER BY a.app_rn, w.rn
+            "#,
+        )
+        .bind(since)
+        .bind(windows_per_app)
+        .bind(app_limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Browser domain frame counts since `since`, descending. Keeps the
+    /// existing host-extraction SQL (the `https://`/`http://` `INSTR`/`SUBSTR`
+    /// CASE over `frames.browser_url`) rather than a regex SQLite doesn't
+    /// have; excludes empty/NULL results. Does NOT strip `www.` — the caller
+    /// doesn't today for this list, and does it client-side for facets.
+    pub async fn get_browser_domain_counts(
+        &self,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<DomainCount>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT domain, COUNT(*) AS frame_count
+            FROM (
+                SELECT CASE
+                    WHEN browser_url LIKE 'https://%' THEN
+                        CASE WHEN INSTR(SUBSTR(browser_url, 9), '/') > 0
+                            THEN SUBSTR(browser_url, 9, INSTR(SUBSTR(browser_url, 9), '/') - 1)
+                            ELSE SUBSTR(browser_url, 9)
+                        END
+                    WHEN browser_url LIKE 'http://%' THEN
+                        CASE WHEN INSTR(SUBSTR(browser_url, 8), '/') > 0
+                            THEN SUBSTR(browser_url, 8, INSTR(SUBSTR(browser_url, 8), '/') - 1)
+                            ELSE SUBSTR(browser_url, 8)
+                        END
+                    ELSE browser_url
+                END AS domain
+                FROM frames
+                WHERE browser_url IS NOT NULL AND browser_url != '' AND timestamp > ?1
+            )
+            WHERE domain IS NOT NULL AND domain != ''
+            GROUP BY domain
+            ORDER BY frame_count DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// A page of captured-text snippets (accessibility or OCR) plus the
+    /// total matching row count (pre-limit), for the suggestions panel.
+    /// `app_name`/`window_name` always come from `frames` (nullable in both
+    /// cases); OCR text is joined from `ocr_text`. `max_chars`/`min_chars`
+    /// are clamped by the caller but still bound here, never interpolated.
+    ///
+    /// Privacy: this returns captured screen text — exactly what `/raw_sql`
+    /// already returned to the same bearer-token holder, so it's not new
+    /// exposure, but never log the returned rows.
+    pub async fn get_text_snippets(
+        &self,
+        source: TextSnippetSource,
+        since: DateTime<Utc>,
+        limit: i64,
+        max_chars: i64,
+        min_chars: i64,
+        random_order: bool,
+    ) -> Result<TextSnippetPage, sqlx::Error> {
+        // `order_by` is chosen in Rust from a fixed pair of literals based on
+        // a bool, never from caller text, so splicing it into the SQL string
+        // carries no injection surface.
+        let order_by = if random_order {
+            "RANDOM()"
+        } else {
+            "timestamp DESC"
+        };
+
+        let (count_sql, snippets_sql): (&str, String) = match source {
+            TextSnippetSource::Accessibility => (
+                r#"
+                SELECT COUNT(*) FROM frames
+                WHERE timestamp > ?1 AND full_text IS NOT NULL AND LENGTH(full_text) > ?2
+                "#,
+                format!(
+                    r#"
+                    SELECT app_name, window_name, SUBSTR(full_text, 1, ?3) AS text, timestamp
+                    FROM frames
+                    WHERE timestamp > ?1 AND full_text IS NOT NULL AND LENGTH(full_text) > ?2
+                    ORDER BY {order_by}
+                    LIMIT ?4
+                    "#
+                ),
+            ),
+            TextSnippetSource::Ocr => (
+                r#"
+                SELECT COUNT(*) FROM ocr_text ot
+                JOIN frames f ON ot.frame_id = f.id
+                WHERE f.timestamp > ?1 AND LENGTH(ot.text) > ?2
+                "#,
+                format!(
+                    r#"
+                    SELECT f.app_name AS app_name, f.window_name AS window_name,
+                           SUBSTR(ot.text, 1, ?3) AS text, f.timestamp AS timestamp
+                    FROM ocr_text ot
+                    JOIN frames f ON ot.frame_id = f.id
+                    WHERE f.timestamp > ?1 AND LENGTH(ot.text) > ?2
+                    ORDER BY {order_by}
+                    LIMIT ?4
+                    "#
+                ),
+            ),
+        };
+
+        let total: i64 = sqlx::query_scalar(count_sql)
+            .bind(since)
+            .bind(min_chars)
+            .fetch_one(&self.pool)
+            .await?;
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            app_name: Option<String>,
+            window_name: Option<String>,
+            text: String,
+            #[allow(dead_code)]
+            timestamp: DateTime<Utc>,
+        }
+
+        let rows: Vec<Row> = sqlx::query_as(&snippets_sql)
+            .bind(since)
+            .bind(min_chars)
+            .bind(max_chars)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(TextSnippetPage {
+            total,
+            snippets: rows
+                .into_iter()
+                .map(|r| TextSnippetRow {
+                    app_name: r.app_name,
+                    window_name: r.window_name,
+                    text: r.text,
+                })
+                .collect(),
+        })
+    }
+
+    /// UI input events in `[start, end]` (inclusive), bound as typed
+    /// `DateTime<Utc>` so they compare correctly against the stored RFC 3339
+    /// values. This is the fix for the timeline's empty-panel bugs: the old
+    /// client SQL wrapped the bounds in `datetime(...)`/stripped the `T`,
+    /// producing `YYYY-MM-DD HH:MM:SS`, which never matches a stored
+    /// `...T...Z` string — every row on the date was silently excluded.
+    pub async fn get_ui_events_in_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        limit: i64,
+        descending: bool,
+    ) -> Result<Vec<UiEventSummary>, sqlx::Error> {
+        // `order_by` is a fixed literal chosen from a bool, not caller text.
+        let order_by = if descending {
+            "timestamp DESC"
+        } else {
+            "timestamp ASC"
+        };
+        let sql = format!(
+            r#"
+            SELECT event_type, text_content, app_name, window_title, timestamp
+            FROM ui_events
+            WHERE timestamp >= ?1 AND timestamp <= ?2
+            ORDER BY {order_by}
+            LIMIT ?3
+            "#
+        );
+        sqlx::query_as(&sql)
+            .bind(start)
+            .bind(end)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    /// Vision tags that are actually applied to at least one frame, with
+    /// their frame counts, descending. Fixes the bug where the search
+    /// modal's equivalent client SQL had no `LIMIT`, so `validate_raw_sql`
+    /// rejected it and `#tag` search never showed any tags.
+    pub async fn get_vision_tag_counts(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<VisionTagCount>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT tags.name AS name, COUNT(vision_tags.vision_id) AS frame_count
+            FROM tags
+            JOIN vision_tags ON tags.id = vision_tags.tag_id
+            GROUP BY tags.id, tags.name
+            ORDER BY frame_count DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Frames tagged with any of `tags`, newest first, with just the subset
+    /// of the requested tags that matched each frame. Tag names are bound
+    /// parameters: the `IN (...)` placeholder list is built from `tags.len()`
+    /// and each value is bound individually — never quote-escaped into SQL
+    /// text (that was the injection surface this endpoint replaces).
+    pub async fn get_frames_with_vision_tags(
+        &self,
+        tags: &[String],
+        limit: i64,
+    ) -> Result<Vec<TaggedFrame>, sqlx::Error> {
+        if tags.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (1..=tags.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let limit_placeholder = tags.len() + 1;
+        let sql = format!(
+            r#"
+            SELECT f.id AS frame_id, f.timestamp, f.app_name,
+                   GROUP_CONCAT(DISTINCT t.name) AS tag_names
+            FROM vision_tags vt
+            JOIN frames f ON vt.vision_id = f.id
+            JOIN tags t ON vt.tag_id = t.id
+            WHERE t.name IN ({placeholders})
+            GROUP BY f.id
+            ORDER BY f.timestamp DESC
+            LIMIT ?{limit_placeholder}
+            "#
+        );
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            frame_id: i64,
+            timestamp: DateTime<Utc>,
+            app_name: Option<String>,
+            tag_names: String,
+        }
+
+        let mut query = sqlx::query_as(&sql);
+        for tag in tags {
+            query = query.bind(tag);
+        }
+        query = query.bind(limit);
+
+        let rows: Vec<Row> = query.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TaggedFrame {
+                frame_id: r.frame_id,
+                timestamp: r.timestamp,
+                app_name: r.app_name,
+                tag_names: r.tag_names.split(',').map(str::to_owned).collect(),
+            })
+            .collect())
+    }
+
+    /// App/URL/day facets for a sanitized FTS5 query, replacing the three
+    /// facet queries the search modal built as strings. `query` is sanitized
+    /// with [`crate::text_normalizer::sanitize_fts5_query`] and bound against
+    /// `frames_fts MATCH ?`; when sanitizing yields an empty query (e.g. the
+    /// input was only punctuation), all three arrays come back empty with no
+    /// query run — matching the current UI behavior.
+    pub async fn get_search_facets(
+        &self,
+        query: &str,
+        app_limit: i64,
+        url_limit: i64,
+        day_limit: i64,
+    ) -> Result<SearchFacets, sqlx::Error> {
+        let sanitized = crate::text_normalizer::sanitize_fts5_query(query);
+        if sanitized.trim().is_empty() {
+            return Ok(SearchFacets {
+                apps: Vec::new(),
+                urls: Vec::new(),
+                days: Vec::new(),
+            });
+        }
+
+        let apps: Vec<AppMatchCount> = sqlx::query_as(
+            r#"
+            SELECT app_name, COUNT(*) AS match_count
+            FROM frames_fts
+            WHERE frames_fts MATCH ?1 AND app_name != ''
+            GROUP BY app_name
+            ORDER BY match_count DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(&sanitized)
+        .bind(app_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let urls: Vec<UrlMatchCount> = sqlx::query_as(
+            r#"
+            SELECT f.browser_url AS browser_url, COUNT(*) AS match_count
+            FROM frames_fts
+            JOIN frames f ON f.id = frames_fts.rowid
+            WHERE frames_fts MATCH ?1 AND f.browser_url IS NOT NULL AND f.browser_url != ''
+            GROUP BY f.browser_url
+            ORDER BY match_count DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(&sanitized)
+        .bind(url_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let days: Vec<DayMatchCount> = sqlx::query_as(
+            r#"
+            SELECT DATE(f.timestamp) AS day, MIN(f.timestamp) AS first_timestamp,
+                   COUNT(*) AS match_count
+            FROM frames_fts
+            JOIN frames f ON f.id = frames_fts.rowid
+            WHERE frames_fts MATCH ?1
+            GROUP BY DATE(f.timestamp)
+            ORDER BY day DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(&sanitized)
+        .bind(day_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(SearchFacets { apps, urls, days })
+    }
+
+    /// The frame nearest `timestamp` within `[timestamp - window_seconds,
+    /// timestamp + window_seconds]`, or `None` when nothing is in range.
+    /// Bounds and the centre are all bound as typed `DateTime<Utc>` — never
+    /// formatted into the SQL text.
+    pub async fn get_frame_nearest_timestamp(
+        &self,
+        timestamp: DateTime<Utc>,
+        window_seconds: i64,
+    ) -> Result<Option<NearbyFrame>, sqlx::Error> {
+        let lo = timestamp - chrono::Duration::seconds(window_seconds);
+        let hi = timestamp + chrono::Duration::seconds(window_seconds);
+        sqlx::query_as(
+            r#"
+            SELECT id AS frame_id, timestamp, app_name
+            FROM frames
+            WHERE timestamp >= ?1 AND timestamp <= ?2
+            ORDER BY ABS(julianday(timestamp) - julianday(?3))
+            LIMIT 1
+            "#,
+        )
+        .bind(lo)
+        .bind(hi)
+        .bind(timestamp)
+        .fetch_optional(&self.pool)
+        .await
     }
 
     pub async fn get_audio_chunks_for_speaker(
@@ -11331,6 +11894,560 @@ mod tests {
         DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap()
+    }
+
+    // ─── Dedicated read endpoints: DatabaseManager method tests ───
+    //
+    // See `.local/plans/dedicated-endpoints-contract-20261019.md` and the
+    // "Dedicated read endpoints" block earlier in this file.
+
+    #[tokio::test]
+    async fn get_activity_coverage_on_empty_db_returns_none_and_no_days() {
+        let db = test_database().await;
+        let coverage = db.get_activity_coverage().await.unwrap();
+        assert!(coverage.first_timestamp.is_none());
+        assert!(coverage.last_timestamp.is_none());
+        assert!(coverage.days.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_activity_coverage_unions_sources_across_two_local_days() {
+        let db = test_database().await;
+
+        // One day per source, each several days from the next. Days are
+        // bucketed with SQLite's 'localtime', so two instants a few hours
+        // apart can land on different local days depending on the machine's
+        // offset; keeping each source's day well clear of the others makes
+        // the day count the same under any timezone (max offset ±14h), and
+        // makes each source independently responsible for one day.
+        // Timestamps use the recorder's own `+00:00` spelling.
+
+        // Day 1: a frame only.
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name) \
+             VALUES (NULL, 0, '2026-01-01T12:00:00.000+00:00', 'monitor')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // Day 3: an audio transcription only — proves the union is not just frames.
+        sqlx::query("INSERT INTO audio_chunks (id, file_path) VALUES (1, 'audio.wav')")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO audio_transcriptions \
+             (audio_chunk_id, offset_index, timestamp, transcription) \
+             VALUES (1, 0, '2026-01-03T12:00:00.000+00:00', 'hello')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // Day 5: a privacy notice only. Proves notice-only days are included
+        // (the timeline can display them, so they count as coverage) and
+        // becomes the `last_timestamp` boundary.
+        sqlx::query(
+            "INSERT INTO ui_events (timestamp, event_type) \
+             VALUES ('2026-01-05T12:00:00.000+00:00', 'privacy_notice')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // A non-privacy-notice ui_event, later than everything above — must
+        // NOT count towards days or the last_timestamp boundary.
+        sqlx::query(
+            "INSERT INTO ui_events (timestamp, event_type) \
+             VALUES ('2026-01-09T12:00:00.000+00:00', 'click')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let coverage = db.get_activity_coverage().await.unwrap();
+        assert_eq!(
+            coverage.first_timestamp.unwrap(),
+            DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        // The later `click` is excluded, so the notice is still the boundary.
+        assert_eq!(
+            coverage.last_timestamp.unwrap(),
+            DateTime::parse_from_rfc3339("2026-01-05T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        // One day per source: frame, audio, notice.
+        assert_eq!(coverage.days.len(), 3, "days: {:?}", coverage.days);
+        let mut sorted = coverage.days.clone();
+        sorted.sort();
+        assert_eq!(coverage.days, sorted, "must be ascending");
+    }
+
+    #[tokio::test]
+    async fn get_ui_events_in_range_matches_typed_rfc3339_bound_rows() {
+        // Regression for the bug where the UI's `datetime(...)`-wrapped bound
+        // (producing `YYYY-MM-DD HH:MM:SS`) never string-matched a stored
+        // `...T...Z` timestamp, silently excluding every row on the date.
+        // Binding a typed `DateTime<Utc>` must match correctly instead.
+        let db = test_database().await;
+
+        // Production spelling, deliberately: the recorder writes
+        // `…+00:00` with milliseconds (verified against a live store), and
+        // sqlx encodes a bound `DateTime<Utc>` the same way
+        // (`to_rfc3339_opts(AutoSi, false)`). That matters because this
+        // comparison is lexicographic on TEXT: for the same instant,
+        // `…30Z` sorts AFTER `…30+00:00` ('Z' > '+'), so mixing the two
+        // spellings silently breaks an upper bound — the same class of
+        // defect as the `datetime(...)` bug this test guards.
+        sqlx::query(
+            "INSERT INTO ui_events (timestamp, event_type, text_content, app_name, window_title) \
+             VALUES ('2026-03-01T10:15:30.520+00:00', 'text', 'hello', 'code', 'db.rs')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        // Outside the query window entirely — must never come back.
+        sqlx::query(
+            "INSERT INTO ui_events (timestamp, event_type) VALUES ('2026-03-02T00:00:00Z', 'click')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let start = DateTime::parse_from_rfc3339("2026-03-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-03-01T10:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let events = db
+            .get_ui_events_in_range(start, end, 10, false)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "text");
+        assert_eq!(events[0].text_content.as_deref(), Some("hello"));
+        assert_eq!(events[0].app_name.as_deref(), Some("code"));
+        assert_eq!(events[0].window_title.as_deref(), Some("db.rs"));
+
+        // Bounds are inclusive: querying the exact stored instant must match.
+        // The sub-second part has to be carried here too — a whole-second
+        // bound encodes without a fraction, and `…30.520+00:00` sorts after
+        // `…30+00:00`, so it would fall outside its own upper bound.
+        let exact_ts = DateTime::parse_from_rfc3339("2026-03-01T10:15:30.520Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let exact = db
+            .get_ui_events_in_range(exact_ts, exact_ts, 10, false)
+            .await
+            .unwrap();
+        assert_eq!(exact.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_frames_with_vision_tags_binds_tag_name_with_single_quote() {
+        // Proves binding, not string-escaping: a naive `format!`-built
+        // `IN ('{name}')` would break on the embedded quote (or worse, be
+        // exploitable). A bound parameter handles it transparently.
+        let db = test_database().await;
+
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name) \
+             VALUES (NULL, 0, '2026-01-01T00:00:00Z', 'monitor', 'code')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let frame_id: i64 = sqlx::query_scalar("SELECT id FROM frames LIMIT 1")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+        db.add_tags(
+            frame_id,
+            TagContentType::Vision,
+            vec!["o'brien".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let frames = db
+            .get_frames_with_vision_tags(&["o'brien".to_string()], 10)
+            .await
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].frame_id, frame_id);
+        assert_eq!(frames[0].app_name.as_deref(), Some("code"));
+        assert_eq!(frames[0].tag_names, vec!["o'brien".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_vision_tag_counts_orders_by_frame_count_desc() {
+        let db = test_database().await;
+
+        for (id, ts) in [
+            (1i64, "2026-01-01T00:00:00Z"),
+            (2, "2026-01-02T00:00:00Z"),
+            (3, "2026-01-03T00:00:00Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO frames (id, video_chunk_id, offset_index, timestamp, device_name) \
+                 VALUES (?1, NULL, 0, ?2, 'monitor')",
+            )
+            .bind(id)
+            .bind(ts)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        // "a" tags all 3 frames, "c" tags 2, "b" tags 1.
+        db.add_tags(
+            1,
+            TagContentType::Vision,
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .await
+        .unwrap();
+        db.add_tags(2, TagContentType::Vision, vec!["a".into(), "c".into()])
+            .await
+            .unwrap();
+        db.add_tags(3, TagContentType::Vision, vec!["a".into()])
+            .await
+            .unwrap();
+
+        let counts = db.get_vision_tag_counts(10).await.unwrap();
+        let names: Vec<&str> = counts.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "c", "b"]);
+        let frame_counts: Vec<i64> = counts.iter().map(|c| c.frame_count).collect();
+        assert_eq!(frame_counts, vec![3, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn get_app_frame_counts_excludes_empty_app_name_and_orders_desc() {
+        let db = test_database().await;
+        let since = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name) VALUES \
+             (NULL, 0, '2026-01-02T00:00:00Z', 'monitor', 'chrome'), \
+             (NULL, 0, '2026-01-02T00:01:00Z', 'monitor', 'chrome'), \
+             (NULL, 0, '2026-01-02T00:02:00Z', 'monitor', 'code'), \
+             (NULL, 0, '2026-01-02T00:03:00Z', 'monitor', ''), \
+             (NULL, 0, '2026-01-02T00:04:00Z', 'monitor', NULL)",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let counts = db.get_app_frame_counts(since, 10).await.unwrap();
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[0].app_name, "chrome");
+        assert_eq!(counts[0].frame_count, 2);
+        assert_eq!(counts[1].app_name, "code");
+        assert_eq!(counts[1].frame_count, 1);
+    }
+
+    #[tokio::test]
+    async fn get_recent_frame_ids_orders_newest_first_and_respects_cutoff_and_limit() {
+        // Timestamps are written in the production spelling: `+00:00` with
+        // milliseconds, not `Z` — sqlx 0.7 binds a `DateTime<Utc>` as
+        // `…+00:00`, and `timestamp` is compared lexicographically as TEXT,
+        // so a test using `Z` wouldn't exercise the same comparison the
+        // real bound query does (see `get_ui_events_in_range`'s test above).
+        // Days are also deliberately far apart (10+ days) so the cutoff
+        // comparison can't be accidentally right at any ±14h UTC offset.
+        let db = test_database().await;
+
+        sqlx::query(
+            "INSERT INTO frames (id, video_chunk_id, offset_index, timestamp, device_name) VALUES \
+             (1, NULL, 0, '2026-01-05T00:00:00.000+00:00', 'monitor'), \
+             (2, NULL, 0, '2026-01-15T00:00:00.000+00:00', 'monitor'), \
+             (3, NULL, 0, '2026-01-20T00:00:00.000+00:00', 'monitor'), \
+             (4, NULL, 0, '2026-01-25T00:00:00.000+00:00', 'monitor')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let since = DateTime::parse_from_rfc3339("2026-01-10T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // Frame 1 (2026-01-05) is before `since` and must be excluded.
+        let ids = db.get_recent_frame_ids(since, 10).await.unwrap();
+        assert_eq!(ids, vec![4, 3, 2]);
+
+        // `limit` caps the result without changing the ordering.
+        let limited = db.get_recent_frame_ids(since, 2).await.unwrap();
+        assert_eq!(limited, vec![4, 3]);
+    }
+
+    #[tokio::test]
+    async fn get_browser_domain_counts_extracts_host_from_url() {
+        let db = test_database().await;
+        let since = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, browser_url) VALUES \
+             (NULL, 0, '2026-01-02T00:00:00Z', 'monitor', 'https://github.com/x'), \
+             (NULL, 0, '2026-01-02T00:01:00Z', 'monitor', 'https://github.com/y'), \
+             (NULL, 0, '2026-01-02T00:02:00Z', 'monitor', 'http://example.com')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let domains = db.get_browser_domain_counts(since, 10).await.unwrap();
+        assert_eq!(domains.len(), 2);
+        assert_eq!(domains[0].domain, "github.com");
+        assert_eq!(domains[0].frame_count, 2);
+        assert_eq!(domains[1].domain, "example.com");
+        assert_eq!(domains[1].frame_count, 1);
+    }
+
+    #[tokio::test]
+    async fn get_text_snippets_reports_total_and_truncates_accessibility_text() {
+        let db = test_database().await;
+        let since = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name, window_name, full_text) VALUES \
+             (NULL, 0, '2026-01-02T00:00:00Z', 'monitor', 'code', 'db.rs', 'hello world this is a long snippet'), \
+             (NULL, 0, '2026-01-02T00:01:00Z', 'monitor', 'code', 'short.rs', 'hi')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let page = db
+            .get_text_snippets(TextSnippetSource::Accessibility, since, 10, 5, 3, false)
+            .await
+            .unwrap();
+        // min_chars=3 excludes the 2-char "hi" row from both total and snippets.
+        assert_eq!(page.total, 1);
+        assert_eq!(page.snippets.len(), 1);
+        assert_eq!(page.snippets[0].app_name.as_deref(), Some("code"));
+        assert_eq!(page.snippets[0].window_name.as_deref(), Some("db.rs"));
+        assert_eq!(page.snippets[0].text, "hello"); // SUBSTR(..., 1, 5)
+    }
+
+    #[tokio::test]
+    async fn get_frame_nearest_timestamp_picks_closest_within_window() {
+        let db = test_database().await;
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name) VALUES \
+             (NULL, 0, '2026-01-01T00:00:00Z', 'monitor', 'far'), \
+             (NULL, 0, '2026-01-01T00:00:12Z', 'monitor', 'near'), \
+             (NULL, 0, '2026-01-01T00:05:00Z', 'monitor', 'outside')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let centre = DateTime::parse_from_rfc3339("2026-01-01T00:00:10Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let nearest = db
+            .get_frame_nearest_timestamp(centre, 30)
+            .await
+            .unwrap()
+            .expect("a frame within the 30s window");
+        assert_eq!(nearest.app_name.as_deref(), Some("near"));
+
+        // No frame within a 1-second window of a time with nothing nearby.
+        let none = db
+            .get_frame_nearest_timestamp(
+                DateTime::parse_from_rfc3339("2026-01-01T01:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_app_window_tree_returns_flat_rows_per_app_and_window() {
+        // The DB layer returns flat (app, window) rows; `routes/activity.rs`
+        // assembles the nested per-app tree itself. See the method's doc
+        // comment for why — this is NOT the nested shape.
+        let db = test_database().await;
+        let since = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // chrome: 3 frames across 2 windows ("inbox" x2, "" x1 -> NULL title).
+        // code: 1 frame, 1 window.
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name, window_name) VALUES \
+             (NULL, 0, '2026-01-02T00:00:00Z', 'monitor', 'chrome', 'inbox'), \
+             (NULL, 0, '2026-01-02T00:01:00Z', 'monitor', 'chrome', 'inbox'), \
+             (NULL, 0, '2026-01-02T00:02:00Z', 'monitor', 'chrome', ''), \
+             (NULL, 0, '2026-01-02T00:03:00Z', 'monitor', 'code', 'db.rs')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let rows = db.get_app_window_tree(since, 10, 10).await.unwrap();
+        assert_eq!(rows.len(), 3); // chrome/inbox, chrome/NULL, code/db.rs
+
+        let chrome_rows: Vec<_> = rows.iter().filter(|r| r.app_name == "chrome").collect();
+        assert_eq!(chrome_rows.len(), 2);
+        assert_eq!(chrome_rows[0].window_name.as_deref(), Some("inbox"));
+        assert_eq!(chrome_rows[0].window_frame_count, 2);
+        assert_eq!(chrome_rows[0].app_frame_count, 3);
+        assert_eq!(chrome_rows[0].window_count, 2); // "inbox" and NULL
+        assert_eq!(chrome_rows[1].window_name, None); // NULLIF('','') -> NULL
+        assert_eq!(chrome_rows[1].window_frame_count, 1);
+
+        let code_row = rows.iter().find(|r| r.app_name == "code").unwrap();
+        assert_eq!(code_row.app_frame_count, 1);
+        assert_eq!(code_row.window_count, 1);
+
+        // Apps ordered by app_frame_count desc: chrome (3) before code (1).
+        assert_eq!(rows[0].app_name, "chrome");
+        assert_eq!(rows[2].app_name, "code");
+    }
+
+    #[tokio::test]
+    async fn get_app_window_tree_keeps_rows_contiguous_per_app_when_counts_tie() {
+        // Regression test: the handler (routes/activity.rs::
+        // activity_app_windows_handler) nests these flat rows by appending
+        // to `apps.last_mut()`, which assumes all of one app's rows are
+        // contiguous. With the old `ORDER BY a.app_frame_count DESC,
+        // w.window_frame_count DESC`, two apps with equal frame counts tie
+        // on every sort key and SQLite's sort is not stable, so rows could
+        // interleave (A, B, A) and the handler would emit a duplicate
+        // `app_name` entry. Ordering by the unique `app_rn`/`rn` ranks
+        // instead gives a total order, so same-app rows must stay together
+        // regardless of how many apps tie on frame count.
+        //
+        // Timestamps use the production spelling (`+00:00` with
+        // milliseconds, not `Z`): sqlx 0.7 binds `DateTime<Utc>` that way,
+        // and `timestamp` is TEXT compared lexicographically, so a `Z`
+        // literal wouldn't exercise the same comparison as the real bound
+        // query. Days are spread far apart so the cutoff holds at any
+        // +/-14h UTC offset.
+        let db = test_database().await;
+        let since = DateTime::parse_from_rfc3339("2026-02-01T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // alpha and beta each have 2 windows with 1 frame apiece: every
+        // sort key ties (app_frame_count 2 == 2, window_frame_count 1 == 1
+        // for all 4 rows), so without `app_rn`/`rn` in the ORDER BY, SQLite
+        // is free to interleave the two apps' window rows (e.g.
+        // alpha/beta/alpha/beta) across repeated runs.
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name, window_name) VALUES \
+             (NULL, 0, '2026-02-15T00:00:00.000+00:00', 'monitor', 'alpha', 'a-win-1'), \
+             (NULL, 0, '2026-02-16T00:00:00.000+00:00', 'monitor', 'alpha', 'a-win-2'), \
+             (NULL, 0, '2026-02-20T00:00:00.000+00:00', 'monitor', 'beta', 'b-win-1'), \
+             (NULL, 0, '2026-02-21T00:00:00.000+00:00', 'monitor', 'beta', 'b-win-2')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let rows = db.get_app_window_tree(since, 10, 10).await.unwrap();
+        assert_eq!(rows.len(), 4);
+
+        // Whichever order alpha/beta land in, each app's rows must not
+        // interleave: group consecutive rows by app_name and assert no
+        // app_name repeats in a non-contiguous group.
+        let mut seen = std::collections::HashSet::new();
+        let mut last_app: Option<&str> = None;
+        for row in &rows {
+            if last_app != Some(row.app_name.as_str()) && !seen.insert(row.app_name.clone()) {
+                panic!(
+                    "app_name '{}' appeared non-contiguously in {:?}",
+                    row.app_name,
+                    rows.iter().map(|r| &r.app_name).collect::<Vec<_>>()
+                );
+            }
+            last_app = Some(row.app_name.as_str());
+        }
+    }
+
+    #[tokio::test]
+    async fn get_search_facets_matches_bound_sanitized_query_and_handles_empty_query() {
+        let db = test_database().await;
+
+        // full_text triggers the frames_ai FTS trigger on insert.
+        sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, device_name, app_name, browser_url, full_text) VALUES \
+             (NULL, 0, '2026-01-02T00:00:00Z', 'monitor', 'chrome', 'https://github.com/x', 'reviewing a pull request'), \
+             (NULL, 0, '2026-01-03T00:00:00Z', 'monitor', 'chrome', 'https://github.com/y', 'another pull request review')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let facets = db
+            .get_search_facets("pull request", 10, 10, 10)
+            .await
+            .unwrap();
+        assert_eq!(facets.apps.len(), 1);
+        assert_eq!(facets.apps[0].app_name, "chrome");
+        assert_eq!(facets.apps[0].match_count, 2);
+        assert_eq!(facets.days.len(), 2);
+        assert_eq!(facets.urls.len(), 2);
+
+        // A query that sanitizes to empty (e.g. only a stray backslash) must
+        // short-circuit to empty arrays rather than running `MATCH ''`.
+        let empty = db.get_search_facets("\\", 10, 10, 10).await.unwrap();
+        assert!(empty.apps.is_empty());
+        assert!(empty.urls.is_empty());
+        assert!(empty.days.is_empty());
+    }
+
+    #[tokio::test]
+    async fn caller_sql_connection_reads_but_sqlite_refuses_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "screenwise-read-only-sql-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+
+        let rows = db
+            .execute_read_only_sql("SELECT COUNT(*) AS n FROM frames LIMIT 1")
+            .await
+            .unwrap();
+        assert_eq!(rows[0]["n"], 0);
+
+        for sql in [
+            "CREATE TABLE read_only_probe(x)",
+            "UPDATE frames SET app_name = 'changed'",
+            "PRAGMA user_version = 7",
+        ] {
+            assert!(db.execute_read_only_sql(sql).await.is_err(), "{sql}");
+        }
+        let version = db.execute_raw_sql("PRAGMA user_version").await.unwrap();
+        assert_eq!(version[0]["user_version"], 0);
+
+        db.read_only_sql_pool.close().await;
+        db.api_read_pool.close().await;
+        db.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

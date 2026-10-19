@@ -423,7 +423,7 @@ These specific causes remain available in frame/status diagnostics:
 | `uia_property_text_limit` | One decoded property would exceed its byte limit. |
 | `uia_aggregate_text_limit` | Decoded text would exceed the remaining tree/context byte budget. |
 | `uia_provider_failure` | A non-timeout native provider/timeout-configuration/navigation request failed. |
-| `uia_backoff` | This UIA context's provider retry cooldown is active. |
+| `uia_backoff` | This UIA context's provider retry cooldown is active, after a costly outcome: a failure, or a success slow enough to stall the target application. |
 | `uia_initialization_failed` | UI Automation initialization failed after native window checks. |
 | `uia_walk_disabled` | Tree walking is switched off by configuration (`accessibilityWalkDisabled`); no provider was contacted, so the target application built no accessibility tree for the attempt. |
 

@@ -71,7 +71,7 @@ The local screenpipe server (localhost:3030) requires a bearer token, exposed as
 3. limit=5–10 per call. Never >50.
 4. Cap at 10 search/API calls per user request, then summarize what you have.
 5. Multi-day queries: one day at a time.
-6. Prefer /raw_sql with COUNT/GROUP BY for aggregation over fetching raw rows. SELECT queries must include LIMIT (max 10000).
+6. Prefer the typed GET endpoints (/activity/coverage, /activity/apps, /activity/app-windows, /activity/domains, /activity/text-snippets, /activity/ui-events, /tags/vision, /tags/vision/frames, /search/facets, /frames/nearest) over /raw_sql — they can't be rejected for a missing LIMIT or bad time format. If none fit, /raw_sql takes exactly one SELECT/WITH/EXPLAIN statement: LIMIT is required (max 10000), and a \`;\` is rejected anywhere except as the very last character — including inside a string literal (e.g. \`LIKE '%;%'\` fails), so avoid semicolons in string literals entirely.
 
 # Showing media
 

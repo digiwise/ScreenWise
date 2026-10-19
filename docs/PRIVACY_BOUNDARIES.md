@@ -235,6 +235,27 @@ Keep the recording directory, tokens, exports and backups within your chosen OS
 account and storage protections. Network restrictions are a separate deployment
 control, not proof of confidentiality.
 
+### Firewall scope is not a whole-machine egress control
+
+The optional local deployment's firewall rules block outbound connections for
+the **listed ScreenWise/runtime executables only**. That is a per-executable
+outbound block, not a guarantee that no traffic leaves the machine. A path
+routed through a different Windows component is not that executable's traffic
+and is outside those rules' scope: a UNC path (`\\host\share\...`) is opened by
+the kernel SMB redirector, and a WebDAV path (`\\host@SSL\DavWWWRoot\...`) by
+the WebClient service, neither of which is a ScreenWise process.
+
+The surface that actually matters is which paths the local API will act on.
+Destinations and media paths it accepts (backup, export and media
+read/validate/merge paths) are restricted to a small allowlist of local
+directories, and network-share, WebDAV and device-namespace path forms are
+rejected outright regardless of firewall state. An owner can extend that
+allowlist by one further local directory (for example on another disk)
+through the deployment manifest's `backup_directory` setting; nothing else
+widens it. This closes one specific channel. It is not a claim that
+ScreenWise is leak-proof, fully offline, or otherwise free of egress paths
+outside this one, and it is not validated here by a live network test.
+
 Generic status notices use fixed messages, but opt-in sensitive debug logging is
 a separate diagnostic surface and can contain titles and other private context.
 Treat those logs as private recording-related data rather than public bug-report

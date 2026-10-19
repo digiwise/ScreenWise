@@ -23,6 +23,7 @@ import {
 import { MessageSquare } from "lucide-react";
 import { incompleteDeletionMessage } from "@/lib/deletion-result";
 import { localFetch } from "@/lib/api";
+import { getVisionTags } from "@/lib/api/activity";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -74,20 +75,13 @@ export function TimelineTagToolbar({ anchorRect, onAskAI }: TimelineTagToolbarPr
 	// eslint-disable-next-line react-hooks/exhaustive-deps
 	const frameIds = selectionRange?.frameIds ?? [];
 
-	// Fetch user's frequent tags once on mount via raw SQL
+	// Fetch user's frequent tags once on mount
 	useEffect(() => {
 		let cancelled = false;
-		localFetch("/raw_sql", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				query: "SELECT t.name, COUNT(vt.vision_id) as count FROM tags t JOIN vision_tags vt ON t.id = vt.tag_id GROUP BY t.id, t.name ORDER BY count DESC LIMIT 8",
-			}),
-		})
-			.then((r) => (r.ok ? r.json() : []))
-			.then((rows: Array<{ name: string; count: number }>) => {
-				if (!cancelled && Array.isArray(rows) && rows.length > 0) {
-					setFrequentTags(rows);
+		getVisionTags({ limit: 8 })
+			.then(({ tags }) => {
+				if (!cancelled && tags.length > 0) {
+					setFrequentTags(tags.map((t) => ({ name: t.name, count: t.frame_count })));
 				}
 			})
 			.catch(() => {});

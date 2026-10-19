@@ -49,9 +49,9 @@ export function mainNotices(settings: Settings): MainNotice[] {
       key: "accessibility_walk_disabled",
       pending: false,
       dismissible: false,
-      title: "Accessibility checks are turned off",
+      title: "Accessibility tree checks are turned off",
       body:
-        "Screen text is being recorded from OCR alone. ScreenWise is not reading any application's accessibility tree, so it cannot verify what a window is showing before a frame is stored, and in-memory content screening is the only check left — that is heuristic and can miss things. Exclusions, URL rules, private windows, protected content, screen lock and monitor checks all still apply. Remove accessibilityWalkDisabled from settings to restore the full checks.",
+        "ScreenWise is no longer walking any application's accessibility tree, so it cannot verify what a window is showing before a frame is stored. Screen text is recorded from OCR alone, and in-memory content screening is the only remaining check on it — that is heuristic and can miss things. Narrow focused-element checks still run, including the one that detects password and sensitive fields while you type. Exclusions, URL rules, private windows, protected content, screen lock and monitor checks all still apply. Remove accessibilityWalkDisabled from settings to restore the full checks.",
       settingsSection: "privacy",
       actionLabel: "Open privacy settings",
     });

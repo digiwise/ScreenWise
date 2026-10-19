@@ -116,6 +116,12 @@ $psi.EnvironmentVariables.Remove('SCREENWISE_SENSITIVE_DEBUG')
 if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_logging -eq $true) {
     $psi.EnvironmentVariables['SCREENWISE_SENSITIVE_DEBUG'] = '1'
 }
+# Only a manifest that names a validated extra local directory (e.g. on another
+# disk) gets one; explicitly remove an inherited value for every other manifest.
+$psi.EnvironmentVariables.Remove('SCREENWISE_BACKUP_DIR')
+if ($m.PSObject.Properties['backup_directory']) {
+    $psi.EnvironmentVariables['SCREENWISE_BACKUP_DIR'] = $m.backup_directory
+}
 $psi.EnvironmentVariables['SCREENPIPE_PORT'] = "$($m.port)"
 $psi.EnvironmentVariables['WEBVIEW2_BROWSER_EXECUTABLE_FOLDER'] = $m.webview2_directory
 $psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $webviewProfile

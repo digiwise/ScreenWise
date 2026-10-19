@@ -108,6 +108,14 @@ capture to generate data; trials keep the readiness gate. Canonical queries are 
 Detailed pre-publication maintainer notes may exist under ignored `.local/`.
 They are not needed by a fresh clone and are not current instructions or renewed
 permission to inspect captured data. Public documents contain sanitized summaries.
+Open findings from an API client of the input records (`content_type=input`:
+focus events, duplicate clicks, keyboard-capture pauses, clipboard fields, typed
+text semantics) are in
+`.local/maintainer-notes/input-records-client-findings-20261019.md`.
+Evidence for the audio transcript retrieval findings SW-V44 to SW-V46 (segment
+identity, output-callback stalls, missing transcript-coverage notice) is in
+`.local/maintainer-notes/audio-retrieval-client-findings-20261019.md`; that
+investigation's authorisation covered one window and does not renew.
 
 ## Resource-aware work
 

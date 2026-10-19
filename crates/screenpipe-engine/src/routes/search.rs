@@ -675,6 +675,132 @@ pub(crate) async fn keyword_search_handler(
     }
 }
 
+// ── 8. GET /search/facets ──────────────────────────────────────────────────
+
+const MAX_SEARCH_FACETS_APP_LIMIT: u32 = 50;
+const MAX_SEARCH_FACETS_URL_LIMIT: u32 = 500;
+const MAX_SEARCH_FACETS_DAY_LIMIT: u32 = 90;
+
+fn default_search_facets_app_limit() -> u32 {
+    15
+}
+
+fn default_search_facets_url_limit() -> u32 {
+    200
+}
+
+fn default_search_facets_day_limit() -> u32 {
+    30
+}
+
+#[derive(OaSchema, Deserialize)]
+pub(crate) struct SearchFacetsQuery {
+    pub q: String,
+    #[serde(default = "default_search_facets_app_limit")]
+    pub app_limit: u32,
+    #[serde(default = "default_search_facets_url_limit")]
+    pub url_limit: u32,
+    #[serde(default = "default_search_facets_day_limit")]
+    pub day_limit: u32,
+}
+
+#[derive(OaSchema, Serialize)]
+pub(crate) struct SearchFacetAppItem {
+    pub app_name: String,
+    pub match_count: i64,
+}
+
+#[derive(OaSchema, Serialize)]
+pub(crate) struct SearchFacetUrlItem {
+    pub browser_url: String,
+    pub match_count: i64,
+}
+
+#[derive(OaSchema, Serialize)]
+pub(crate) struct SearchFacetDayItem {
+    pub day: String,
+    pub first_timestamp: DateTime<Utc>,
+    pub match_count: i64,
+}
+
+#[derive(OaSchema, Serialize)]
+pub(crate) struct SearchFacetsResponse {
+    pub apps: Vec<SearchFacetAppItem>,
+    pub urls: Vec<SearchFacetUrlItem>,
+    pub days: Vec<SearchFacetDayItem>,
+}
+
+/// Replaces the three ad-hoc facet queries the search modal used to build
+/// client-side with hand-escaped SQL. `q` is sanitised server-side with the
+/// existing FTS5 sanitiser and always bound as a parameter.
+#[oasgen]
+pub(crate) async fn search_facets_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SearchFacetsQuery>,
+) -> Result<JsonResponse<SearchFacetsResponse>, (StatusCode, JsonResponse<Value>)> {
+    if query.q.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": "q must not be empty"})),
+        ));
+    }
+
+    let app_limit = query.app_limit.clamp(1, MAX_SEARCH_FACETS_APP_LIMIT) as i64;
+    let url_limit = query.url_limit.clamp(1, MAX_SEARCH_FACETS_URL_LIMIT) as i64;
+    let day_limit = query.day_limit.clamp(1, MAX_SEARCH_FACETS_DAY_LIMIT) as i64;
+
+    let sanitized = screenpipe_db::text_normalizer::sanitize_fts5_query(&query.q);
+    if sanitized.trim().is_empty() {
+        // Matches today's UI behavior: a query that sanitises to nothing
+        // returns all three facet lists empty rather than an error.
+        return Ok(JsonResponse(SearchFacetsResponse {
+            apps: Vec::new(),
+            urls: Vec::new(),
+            days: Vec::new(),
+        }));
+    }
+
+    let facets = state
+        .db
+        .get_search_facets(&query.q, app_limit, url_limit, day_limit)
+        .await
+        .map_err(|e| {
+            error!("failed to get search facets: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": e.to_string()})),
+            )
+        })?;
+
+    Ok(JsonResponse(SearchFacetsResponse {
+        apps: facets
+            .apps
+            .into_iter()
+            .map(|a| SearchFacetAppItem {
+                app_name: a.app_name,
+                match_count: a.match_count,
+            })
+            .collect(),
+        urls: facets
+            .urls
+            .into_iter()
+            .map(|u| SearchFacetUrlItem {
+                browser_url: u.browser_url,
+                match_count: u.match_count,
+            })
+            .collect(),
+        days: facets
+            .days
+            .into_iter()
+            .map(|d| SearchFacetDayItem {
+                day: d.day,
+                first_timestamp: d.first_timestamp,
+                match_count: d.match_count,
+            })
+            .collect(),
+    }))
+}
+
 pub(crate) fn from_comma_separated_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>

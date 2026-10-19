@@ -22,6 +22,12 @@ import { commands } from "@/lib/utils/tauri";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { ThumbnailHighlightOverlay } from "./thumbnail-highlight-overlay";
 import { appendAuthToken, localFetch, getApiBaseUrl } from "@/lib/api";
+import {
+  getSearchFacets,
+  getVisionTags,
+  getFramesWithVisionTags,
+  getNearestFrame,
+} from "@/lib/api/activity";
 import { NativeAppIcon } from "@/components/native-app-icon";
 
 interface SpeakerResult {
@@ -137,20 +143,6 @@ const CHAT_BUCKET_LABELS: Record<string, string> = {
   older: "older",
 };
 const CHAT_BUCKET_ORDER = ["today", "yesterday", "week", "older"] as const;
-
-function sanitizeFts5Query(query: string): string {
-  return query
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((token) => token.replace(/[\\"]/g, "").trim())
-    .filter(Boolean)
-    .map((token) => `"${token}"`)
-    .join(" ");
-}
-
-function escapeSqlString(value: string): string {
-  return value.replace(/'/g, "''");
-}
 
 function useSuggestions(isOpen: boolean) {
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -568,7 +560,10 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
       .slice(0, 10);
   }, []);
 
-  // Async facet loading — fires a lightweight SQL aggregation query
+  // Async facet loading — one typed endpoint replaces the three hand-written
+  // frames_fts aggregation queries. FTS sanitising and SQL-string escaping
+  // now happen server-side (GET /search/facets), so the client no longer
+  // builds or escapes a MATCH expression at all.
   useEffect(() => {
     const q = debouncedQuery.trim();
     if (!q || q.length < 3 || q.startsWith("#") || q.startsWith("@")) {
@@ -581,74 +576,39 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
 
     let cancelled = false;
     setFacetsLoading(true);
-    let pending = 3;
-    const onFacetDone = () => { pending--; if (pending === 0 && !cancelled) setFacetsLoading(false); };
-    const ftsQuery = sanitizeFts5Query(q);
-    if (!ftsQuery) {
-      setFacetApps([]);
-      setFacetDomains([]);
-      setFacetTimeRanges([]);
-      setFacetsLoading(false);
-      return;
-    }
-    const escapedFtsQuery = escapeSqlString(ftsQuery);
 
-    // Fire all three facet queries in parallel
-    const fetchFacet = async (sql: string) => {
-      const resp = await localFetch("/raw_sql", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: sql }),
-        signal: AbortSignal.timeout(5000),
+    getSearchFacets({ q, timeoutMs: 5000 })
+      .then((facets) => {
+        if (cancelled) return;
+        setFacetApps(facets.apps.map((a) => [a.app_name, a.match_count]));
+
+        // Aggregate matching URLs by domain — the endpoint groups by exact
+        // browser_url; domain aggregation and www. stripping stay client-side.
+        const domainMap = new Map<string, number>();
+        for (const u of facets.urls) {
+          try {
+            const domain = new URL(u.browser_url).hostname.replace(/^www\./, "");
+            if (domain) domainMap.set(domain, (domainMap.get(domain) || 0) + u.match_count);
+          } catch { /* skip */ }
+        }
+        setFacetDomains([...domainMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8));
+
+        setFacetTimeRanges(
+          buildTimeRanges(
+            facets.days.map((d) => ({ dateKey: d.day, timestamp: d.first_timestamp, count: d.match_count }))
+          )
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFacetApps([]);
+          setFacetDomains([]);
+          setFacetTimeRanges([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setFacetsLoading(false);
       });
-      return resp.ok ? resp.json() : [];
-    };
-
-    // App facet (single frames_fts query)
-    fetchFacet(
-      `SELECT app_name as app, COUNT(*) as cnt
-       FROM frames_fts
-       WHERE frames_fts MATCH '${escapedFtsQuery}'
-       AND app_name != ''
-       GROUP BY app_name ORDER BY cnt DESC LIMIT 15`
-    ).then((rows: { app: string; cnt: number }[]) => {
-      if (!cancelled) setFacetApps(rows.map(r => [r.app, r.cnt]));
-    }).catch(() => {}).finally(onFacetDone);
-
-    // Domain facet (frames_fts joined with frames for browser_url)
-    // Note: FTS5 tables cannot be aliased, must use full table name in MATCH
-    fetchFacet(
-      `SELECT f.browser_url as url, COUNT(*) as cnt
-       FROM frames_fts
-       JOIN frames f ON f.id = frames_fts.rowid
-       WHERE frames_fts MATCH '${escapedFtsQuery}'
-       AND f.browser_url IS NOT NULL AND f.browser_url != ''
-       GROUP BY f.browser_url ORDER BY cnt DESC LIMIT 200`
-    ).then((rows: { url: string; cnt: number }[]) => {
-      if (cancelled) return;
-      // Aggregate by domain
-      const domainMap = new Map<string, number>();
-      for (const r of rows) {
-        try {
-          const domain = new URL(r.url).hostname.replace(/^www\./, "");
-          if (domain) domainMap.set(domain, (domainMap.get(domain) || 0) + r.cnt);
-        } catch { /* skip */ }
-      }
-      setFacetDomains([...domainMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8));
-    }).catch(() => {}).finally(onFacetDone);
-
-    // Time facet — bucket by date (frames_fts)
-    fetchFacet(
-      `SELECT DATE(f.timestamp) as d, MIN(f.timestamp) as ts, COUNT(*) as cnt
-       FROM frames_fts
-       JOIN frames f ON f.id = frames_fts.rowid
-       WHERE frames_fts MATCH '${escapedFtsQuery}'
-       GROUP BY DATE(f.timestamp)
-       ORDER BY d DESC LIMIT 30`
-    ).then((rows: { d: string; ts: string; cnt: number }[]) => {
-      if (cancelled) return;
-      setFacetTimeRanges(buildTimeRanges(rows.map(r => ({ dateKey: r.d, timestamp: r.ts, count: r.cnt }))));
-    }).catch(() => {}).finally(onFacetDone);
 
     return () => { cancelled = true; setFacetsLoading(false); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -889,20 +849,13 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
     (async () => {
       setIsSearchingTags(true);
       try {
-        // Fetch all distinct tags with counts from the tags + vision_tags tables
-        const tagsResp = await localFetch("/raw_sql", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: "SELECT t.name, COUNT(vt.vision_id) as count FROM tags t JOIN vision_tags vt ON t.id = vt.tag_id GROUP BY t.id, t.name ORDER BY count DESC",
-          }),
-          signal: AbortSignal.timeout(5000),
-        });
+        // Fetch all distinct tags with counts. Previously a hand-written
+        // GROUP BY query with no LIMIT, which the /raw_sql validator rejected
+        // outright — so #tag search never showed any tags. GET /tags/vision
+        // has a server-side limit, so this now actually returns rows.
+        const { tags: allDbTags } = await getVisionTags({ limit: 1000, timeoutMs: 5000 });
 
         if (cancelled) return;
-        const allDbTags: { name: string; count: number }[] = tagsResp.ok
-          ? await tagsResp.json()
-          : [];
 
         // Set autocomplete pills (filtered if user typed something after #)
         const tagNames = allDbTags.map(t => t.name);
@@ -918,27 +871,20 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           : allDbTags;
 
         if (matched.length > 0 && !cancelled) {
-          // Fetch frames tagged with matching tags
-          const inList = matched.map(t => `'${t.name.replace(/'/g, "''")}'`).join(",");
-          const framesResp = await localFetch("/raw_sql", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              query: `SELECT f.id as frame_id, f.timestamp, f.app_name, GROUP_CONCAT(DISTINCT t.name) as tag_names FROM vision_tags vt JOIN frames f ON vt.vision_id = f.id JOIN tags t ON vt.tag_id = t.id WHERE t.name IN (${inList}) GROUP BY f.id ORDER BY f.timestamp DESC LIMIT 50`,
-            }),
-            signal: AbortSignal.timeout(5000),
+          // Fetch frames tagged with matching tags (endpoint caps tag count at 50).
+          const { frames } = await getFramesWithVisionTags({
+            tags: matched.slice(0, 50).map(t => t.name),
+            limit: 50,
+            timeoutMs: 5000,
           });
 
           if (cancelled) return;
-          if (framesResp.ok) {
-            const rows: { frame_id: number; timestamp: string; tag_names: string; app_name: string }[] = await framesResp.json();
-            setTagResults(rows.map(r => ({
-              frame_id: r.frame_id,
-              timestamp: r.timestamp,
-              tag_names: r.tag_names.split(","),
-              app_name: r.app_name || "",
-            })));
-          }
+          setTagResults(frames.map(f => ({
+            frame_id: f.frame_id,
+            timestamp: f.timestamp,
+            tag_names: f.tag_names,
+            app_name: f.app_name || "",
+          })));
         } else {
           setTagResults([]);
         }
@@ -1041,22 +987,8 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               const map = new Map<string, { frame_id: number; app_name: string }>();
               // Batch fetch: find closest frame within ±30s for each timestamp
               const promises = uniqueTimestamps.map(async (ts) => {
-                const d = new Date(ts);
-                const lo = new Date(d.getTime() - 30_000).toISOString();
-                const hi = new Date(d.getTime() + 30_000).toISOString();
-                const escaped = ts.replace(/'/g, "''");
-                const resp = await localFetch("/raw_sql", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    query: `SELECT id as frame_id, app_name FROM frames WHERE timestamp >= '${lo}' AND timestamp <= '${hi}' ORDER BY ABS(julianday(timestamp) - julianday('${escaped}')) LIMIT 1`,
-                  }),
-                  signal: AbortSignal.timeout(3000),
-                });
-                if (resp.ok) {
-                  const rows: { frame_id: number; app_name: string }[] = await resp.json();
-                  if (rows.length > 0) map.set(ts, { frame_id: rows[0].frame_id, app_name: rows[0].app_name || "" });
-                }
+                const { frame } = await getNearestFrame({ timestamp: ts, window_seconds: 30, timeoutMs: 3000 });
+                if (frame) map.set(ts, { frame_id: frame.frame_id, app_name: frame.app_name || "" });
               });
               await Promise.all(promises);
               if (!cancelled) setTranscriptionFrames(map);

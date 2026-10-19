@@ -14,6 +14,7 @@ use base64::Engine;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tokio::io::AsyncReadExt;
 use tracing::{error, info};
 
 const VIEWER_LABEL_PREFIX: &str = "viewer-";
@@ -111,11 +112,35 @@ pub enum ViewerContent {
 /// base64 data URL for images. Files larger than `MAX_VIEWER_FILE_BYTES`
 /// are truncated for text or refused for images, since both would blow
 /// up the renderer.
+///
+/// The path is validated through [`screenpipe_core::paths::resolve_local_path`]
+/// before any filesystem access: a refused path (UNC/WebDAV/device-namespace,
+/// relative, empty, etc.) is never stat'ed or opened. Any web page can
+/// navigate to `screenpipe://view?path=<anything>`, so an unvalidated UNC
+/// path here would make this process open an SMB connection and present the
+/// user's NTLM credentials to a remote host.
 #[tauri::command]
 #[specta::specta]
 pub async fn read_viewer_file(path: String) -> Result<ViewerContent, String> {
-    let p = Path::new(&path);
-    let metadata = tokio::fs::metadata(p)
+    read_viewer_file_with_cap(path, MAX_VIEWER_FILE_BYTES).await
+}
+
+/// Implementation of [`read_viewer_file`] with the truncation cap as a
+/// parameter, so tests can inject a small cap instead of writing
+/// multi-megabyte fixtures.
+async fn read_viewer_file_with_cap(path: String, cap_bytes: u64) -> Result<ViewerContent, String> {
+    let requested = Path::new(&path);
+    let resolved = match screenpipe_core::paths::resolve_local_path(requested) {
+        Ok(resolved) => resolved,
+        Err(rejection) => {
+            return Ok(ViewerContent::Error {
+                message: rejection.message().to_string(),
+                path,
+            });
+        }
+    };
+
+    let metadata = tokio::fs::metadata(&resolved)
         .await
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
 
@@ -126,12 +151,12 @@ pub async fn read_viewer_file(path: String) -> Result<ViewerContent, String> {
         });
     }
 
-    let name = p
+    let name = resolved
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
 
-    let ext = p
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
@@ -145,16 +170,15 @@ pub async fn read_viewer_file(path: String) -> Result<ViewerContent, String> {
     );
 
     if is_image {
-        if total_bytes > MAX_VIEWER_FILE_BYTES {
+        if total_bytes > cap_bytes {
             return Ok(ViewerContent::Error {
-                message: format!(
-                    "image too large ({} bytes, max {})",
-                    total_bytes, MAX_VIEWER_FILE_BYTES
-                ),
+                message: format!("image too large ({} bytes, max {})", total_bytes, cap_bytes),
                 path,
             });
         }
-        let bytes = tokio::fs::read(p).await.map_err(|e| e.to_string())?;
+        let bytes = tokio::fs::read(&resolved)
+            .await
+            .map_err(|e| e.to_string())?;
         let mime = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -174,16 +198,23 @@ pub async fn read_viewer_file(path: String) -> Result<ViewerContent, String> {
         });
     }
 
-    // Text-like path. Read up to the cap, then sniff the first 4 KiB
-    // for binary content. If it's binary, return a Binary variant so
-    // the UI shows a polite "open in default app" prompt instead of
-    // rendering garbled bytes.
-    let cap = total_bytes.min(MAX_VIEWER_FILE_BYTES) as usize;
-    let raw = tokio::fs::read(p).await.map_err(|e| e.to_string())?;
-    let truncated = (raw.len() as u64) < total_bytes;
-    let slice = &raw[..raw.len().min(cap)];
+    // Text-like path. Read at most `cap_bytes` — never pre-allocate from
+    // `metadata.len()`, since a lying/growing file must not drive the
+    // allocation — then sniff the bytes actually read for binary content.
+    // If it's binary, return a Binary variant so the UI shows a polite
+    // "open in default app" prompt instead of rendering garbled bytes.
+    let file = tokio::fs::File::open(&resolved)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut limited = file.take(cap_bytes);
+    let mut raw = Vec::new();
+    limited
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|e| e.to_string())?;
+    let truncated = total_bytes > cap_bytes;
 
-    if looks_binary(slice) {
+    if looks_binary(&raw) {
         return Ok(ViewerContent::Binary {
             name,
             path,
@@ -191,7 +222,7 @@ pub async fn read_viewer_file(path: String) -> Result<ViewerContent, String> {
         });
     }
 
-    let text = String::from_utf8_lossy(slice).into_owned();
+    let text = String::from_utf8_lossy(&raw).into_owned();
     Ok(ViewerContent::Text {
         text,
         name,
@@ -314,5 +345,85 @@ mod tests {
             buf.push(b'a');
         }
         assert!(looks_binary(&buf));
+    }
+
+    // F4: a refused path must not be opened, stat'ed or read. Any web page
+    // can navigate to `screenpipe://view?path=\\host\share\x` after the
+    // browser's protocol prompt, so this closes the SMB/NTLM channel.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn read_viewer_file_refuses_unc_path_without_touching_filesystem() {
+        // An unreachable host: if the implementation ever stats or opens
+        // this before validating, the test would hang/timeout on a network
+        // lookup instead of returning immediately with a rejection.
+        let unc_path = r"\\screenwise-test-nonexistent-host\share\x.md".to_string();
+
+        let result = read_viewer_file_with_cap(unc_path.clone(), MAX_VIEWER_FILE_BYTES)
+            .await
+            .expect("a refused path returns Ok(ViewerContent::Error), not Err");
+
+        match result {
+            ViewerContent::Error { message, path } => {
+                assert_eq!(
+                    message,
+                    screenpipe_core::paths::LocalPathRejection::NetworkShare.message()
+                );
+                assert_eq!(path, unc_path);
+            }
+            ViewerContent::Text { .. }
+            | ViewerContent::Image { .. }
+            | ViewerContent::Binary { .. } => {
+                panic!("expected ViewerContent::Error for a UNC path");
+            }
+        }
+    }
+
+    // F4: the doc comment promises truncation at the cap; verify the text
+    // branch actually enforces it instead of reading the whole file first.
+    #[tokio::test]
+    async fn read_viewer_file_truncates_text_at_injected_cap() {
+        let mut file_path = std::env::temp_dir();
+        file_path.push(format!(
+            "screenwise-viewer-truncate-test-{}-{}.txt",
+            std::process::id(),
+            label_for_path("read_viewer_file_truncates_text_at_injected_cap")
+        ));
+
+        let full_content = "x".repeat(100);
+        tokio::fs::write(&file_path, &full_content)
+            .await
+            .expect("failed to write test fixture");
+
+        let small_cap: u64 = 10;
+        let path_str = file_path.to_string_lossy().into_owned();
+        let result = read_viewer_file_with_cap(path_str.clone(), small_cap).await;
+
+        // Clean up before asserting so a failed assertion doesn't leak the file.
+        let _ = tokio::fs::remove_file(&file_path).await;
+
+        let content = result.expect("reading a small local text file must not error");
+        match content {
+            ViewerContent::Text {
+                text,
+                truncated,
+                total_bytes,
+                path,
+                ..
+            } => {
+                assert!(truncated, "expected truncated=true when file exceeds cap");
+                assert_eq!(
+                    text.len(),
+                    small_cap as usize,
+                    "expected exactly the cap's worth of bytes"
+                );
+                assert_eq!(total_bytes, 100);
+                assert_eq!(path, path_str);
+            }
+            ViewerContent::Image { .. }
+            | ViewerContent::Binary { .. }
+            | ViewerContent::Error { .. } => {
+                panic!("expected ViewerContent::Text for a plain text fixture");
+            }
+        }
     }
 }

@@ -1169,6 +1169,124 @@ pub(crate) async fn serve_file(path: &str) -> Result<Response, (StatusCode, Json
     }
 }
 
+// ── 9. GET /frames/nearest ────────────────────────────────────────────────
+
+const MAX_NEAREST_FRAME_WINDOW_SECS: u32 = 3600;
+
+fn default_nearest_frame_window_secs() -> u32 {
+    30
+}
+
+#[derive(Debug, Deserialize, OaSchema)]
+pub struct NearestFrameQuery {
+    #[serde(deserialize_with = "super::time::deserialize_flexible_datetime")]
+    pub timestamp: DateTime<Utc>,
+    #[serde(default = "default_nearest_frame_window_secs")]
+    pub window_seconds: u32,
+}
+
+#[derive(OaSchema, Serialize)]
+pub struct NearbyFrameItem {
+    pub frame_id: i64,
+    pub timestamp: DateTime<Utc>,
+    pub app_name: Option<String>,
+}
+
+#[derive(OaSchema, Serialize)]
+pub struct NearestFrameResponse {
+    pub frame: Option<NearbyFrameItem>,
+}
+
+/// Replaces the per-transcription nearest-frame lookup the search modal used
+/// to build by hand. Picks the frame in
+/// `[timestamp - window_seconds, timestamp + window_seconds]` with the
+/// smallest absolute time difference from `timestamp`.
+#[oasgen]
+pub async fn get_nearest_frame_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<NearestFrameQuery>,
+) -> Result<JsonResponse<NearestFrameResponse>, (StatusCode, JsonResponse<Value>)> {
+    let window_seconds = query.window_seconds.min(MAX_NEAREST_FRAME_WINDOW_SECS) as i64;
+
+    let frame = state
+        .db
+        .get_frame_nearest_timestamp(query.timestamp, window_seconds)
+        .await
+        .map_err(|e| {
+            error!("failed to get nearest frame: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": e.to_string()})),
+            )
+        })?;
+
+    Ok(JsonResponse(NearestFrameResponse {
+        frame: frame.map(|f| NearbyFrameItem {
+            frame_id: f.frame_id,
+            timestamp: f.timestamp,
+            app_name: f.app_name,
+        }),
+    }))
+}
+
+// ── 10. GET /frames/recent ────────────────────────────────────────────────
+
+const MAX_RECENT_FRAMES_SINCE_MINUTES: u32 = 10_080;
+const MAX_RECENT_FRAMES_LIMIT: u32 = 500;
+
+fn default_recent_frames_since_minutes() -> u32 {
+    10
+}
+
+fn default_recent_frames_limit() -> u32 {
+    10
+}
+
+fn clamp_recent_frames_since_minutes(minutes: u32) -> u32 {
+    minutes.clamp(1, MAX_RECENT_FRAMES_SINCE_MINUTES)
+}
+
+#[derive(Debug, Deserialize, OaSchema)]
+pub struct RecentFramesQuery {
+    #[serde(default = "default_recent_frames_since_minutes")]
+    pub since_minutes: u32,
+    #[serde(default = "default_recent_frames_limit")]
+    pub limit: u32,
+}
+
+#[derive(OaSchema, Serialize)]
+pub struct RecentFramesResponse {
+    pub frame_ids: Vec<i64>,
+}
+
+/// Bare frame ids captured in the last `since_minutes`, newest first. Replaces
+/// the last in-app `/raw_sql` caller — `suggestions.rs::store_tags`, which
+/// only needed an id list to tag, not the richer rows the other
+/// activity/frame endpoints return.
+#[oasgen]
+pub async fn get_recent_frames_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RecentFramesQuery>,
+) -> Result<JsonResponse<RecentFramesResponse>, (StatusCode, JsonResponse<Value>)> {
+    let since_minutes = clamp_recent_frames_since_minutes(query.since_minutes);
+    let since = Utc::now() - chrono::Duration::minutes(since_minutes as i64);
+    let limit = query.limit.clamp(1, MAX_RECENT_FRAMES_LIMIT) as i64;
+
+    let frame_ids = state
+        .db
+        .get_recent_frame_ids(since, limit)
+        .await
+        .map_err(|e| {
+            error!("failed to get recent frame ids: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": e.to_string()})),
+            )
+        })?;
+
+    Ok(JsonResponse(RecentFramesResponse { frame_ids }))
+}
+
 /// FrameContent imported from content module for use in video export
 pub use super::content::FrameContent;
 

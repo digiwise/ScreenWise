@@ -132,11 +132,15 @@ fn validate_tags(tags: &[String]) -> Result<(), (StatusCode, JsonResponse<Value>
         ));
     }
     for tag in tags {
-        if tag.len() > MAX_TAG_LENGTH {
+        // Counted in characters, not bytes, so the limit matches the message.
+        // The tag is never echoed back: `&tag[..40]` used to panic here when
+        // byte 40 fell inside a multi-byte character (see the bug class and
+        // its earlier fixes in `screenpipe_core::strings`).
+        if tag.chars().count() > MAX_TAG_LENGTH {
             return Err((
                 StatusCode::BAD_REQUEST,
                 JsonResponse(
-                    json!({"error": format!("tag too long: '{}...' ({} chars, max {})", &tag[..40.min(tag.len())], tag.len(), MAX_TAG_LENGTH)}),
+                    json!({"error": format!("tag too long (max {} chars)", MAX_TAG_LENGTH)}),
                 ),
             ));
         }
@@ -145,11 +149,11 @@ fn validate_tags(tags: &[String]) -> Result<(), (StatusCode, JsonResponse<Value>
 }
 
 fn validate_content(content: &str) -> Result<(), (StatusCode, JsonResponse<Value>)> {
-    if content.len() > MAX_CONTENT_LENGTH {
+    if content.chars().count() > MAX_CONTENT_LENGTH {
         return Err((
             StatusCode::BAD_REQUEST,
             JsonResponse(
-                json!({"error": format!("content too long: {} chars (max {})", content.len(), MAX_CONTENT_LENGTH)}),
+                json!({"error": format!("content too long: {} chars (max {})", content.chars().count(), MAX_CONTENT_LENGTH)}),
             ),
         ));
     }

@@ -798,24 +798,28 @@ pub(crate) async fn export_handler(
         )
     };
 
-    // Explicit output path wins; otherwise name a file under `<data-dir>/exports/`.
-    let explicit_output = body
-        .output_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(std::path::PathBuf::from);
-    let default_output = |stem: String| {
-        state
-            .screenpipe_dir
-            .join("exports")
-            .join(format!("{stem}_{}.mp4", Utc::now().format("%Y%m%d_%H%M%S")))
-    };
+    // Explicit output path wins, but must resolve inside a configured output
+    // root or `<data-dir>/exports/`; otherwise name a file under
+    // `<data-dir>/exports/` (F2 — caller-supplied destination paths).
+    let export_roots: Vec<std::path::PathBuf> =
+        std::iter::once(state.screenpipe_dir.join("exports"))
+            .chain(state.output_roots.iter().cloned())
+            .collect();
+    let resolve_export_output =
+        |stem: &str| -> Result<std::path::PathBuf, (StatusCode, JsonResponse<Value>)> {
+            let default_name = format!("{stem}_{}.mp4", Utc::now().format("%Y%m%d_%H%M%S"));
+            crate::routes::data::resolve_output_path(
+                &export_roots,
+                body.output_path.as_deref(),
+                &default_name,
+            )
+            .map_err(bad_request)
+        };
 
     // meeting_id XOR start/end, same contract as the `screenpipe export` CLI.
     let summary = match (body.meeting_id, body.start.is_some() || body.end.is_some()) {
         (Some(id), _) => {
-            let output = explicit_output.unwrap_or_else(|| default_output(format!("meeting_{id}")));
+            let output = resolve_export_output(&format!("meeting_{id}"))?;
             crate::meeting_export::export_meeting_to_mp4(&state.db, id, &output)
                 .await
                 .map_err(server_error)?
@@ -831,7 +835,7 @@ pub(crate) async fn export_handler(
                     .map_err(|e| bad_request(format!("end: {e}")))?,
                 None => Utc::now(),
             };
-            let output = explicit_output.unwrap_or_else(|| default_output("export".to_string()));
+            let output = resolve_export_output("export")?;
             crate::meeting_export::export_range_to_mp4(&state.db, start, end, &output)
                 .await
                 .map_err(server_error)?

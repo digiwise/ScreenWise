@@ -2224,3 +2224,53 @@ timestamped copy was kept beside it first. No firewall rule, recording
 authorisation or captured-data read was part of the build work; the
 authenticated metrics and aggregate queries used to confirm the setting are
 covered by the standing content-free metrics permission.
+
+## Security batch release build, 2026-10-20
+
+The 2026-10-20 batch (`/raw_sql` replacement endpoints, local-path safety, the
+bounded viewer read, `SO_EXCLUSIVEADDRUSE`, the UIA breaker slow-success fix and
+dropping sqlx's `tls-rustls`) was built as a full desktop `release`, after the
+frontend export so the executable embeds the changed UI — including the
+corrected `accessibilityWalkDisabled` banner wording, which until this build
+still implied that no accessibility data is read at all. The canonical launcher
+(`-Task DesktopBuild -BuildProfile release`, locked/offline, `-Jobs 2`) passed in
+**15m06s** (dependency cache: 1,056 reused, 9 rebuilt as new variants; workspace:
+8 reused, 11 rebuilt). The nine rebuilt dependency variants are the feature
+change: dropping `tls-rustls` removed `rustls` 0.21.12, `rustls-pemfile` 1.0.4,
+`rustls-webpki` 0.101.7, `sct` 0.7.1 and `webpki-roots` 0.24.0 from both
+lockfiles. Artifact:
+`apps/screenpipe-app-tauri/src-tauri/target/release/screenpipe-app.exe`,
+48,290,304 bytes; SHA256
+`2C5E21741325328465A099B6F72D684D6009733322D445CC81505707C575A7AE`.
+Private build evidence: `target/build-diagnostics/20261019T175605421Z-Desktop-Build-0b9f05c9`
+(the launcher stamps evidence directories in UTC, so a build run after local
+midnight carries the previous date).
+
+Launcher lessons from this batch, all reproducible:
+
+- `-Task RootFmt` and `-Task DesktopFmt` **check** formatting; they do not apply
+  it. A non-zero exit prints the diff. Applying it needs `rustfmt --edition 2021
+  <file>` per file (there is no `rustfmt.toml`, so defaults match what the
+  launcher checks).
+- Changing a Cargo feature invalidates the cache baseline, so the first
+  `RootCheck`/`RootTest`/`DesktopBuild` afterwards is refused with
+  `no_matching_successful_baseline` until `-AllowColdCache` is passed.
+- Integration-test binaries run from `target/<profile>/deps/`, but
+  `onnxruntime.dll` is placed one level up in `target/<profile>/`, so every
+  engine integration test that starts the server panics inside `ort` until the
+  DLL is copied next to the test binaries. Copying it is enough; nothing in the
+  tree needs changing.
+- Regenerating the Tauri bindings needs the environment variable, not a test
+  filter alone: `UPDATE_TAURI_BINDINGS=1` with
+  `-Task DesktopTest -TestFilter export_typescript_bindings`.
+- `oasgen` cannot describe an optional request body: `Option<Json<T>>` as a
+  handler parameter fails to compile with `the trait bound
+  axum::Json<T>: OaSchema is not satisfied`.
+- Linking this workspace's test and release binaries needs more memory than a
+  supervised background job is allowed, so those runs were killed even at
+  `-Jobs 1`; the identical command in the foreground succeeded immediately. Run
+  compile-heavy tasks in the foreground, and never alongside the frontend suite.
+
+No recording, deployment or measured performance result is included. The
+deployed installation still runs the 2026-10-19 build; nothing in this batch has
+been exercised on a running installation (see SW-V48).

@@ -225,9 +225,43 @@ curl -X POST http://localhost:3030/raw_sql \
   -d '{"query": "SELECT ... LIMIT 100"}'
 ```
 
-**Rules**: Every SELECT needs LIMIT. Always filter by time. Read-only. Use `datetime('now', '-24 hours')` for time math.
+**Enforced rules** (checked before execution, not just advisory):
+- The connection is opened read-only — no write or schema-changing statement can succeed.
+- Exactly one statement. A `;` is allowed only as the very last character of the query; a `;` anywhere else, including inside a string literal, is rejected.
+- The statement must start with `SELECT`, `WITH` or `EXPLAIN` (case-insensitive).
+- A `LIMIT` clause is required; the maximum accepted value is **10000**.
+
+Always filter by time. Use `datetime('now', '-24 hours')` for time math.
 
 **WARNING**: Do NOT use frame counts for time estimates — frames are event-driven, not fixed-interval. Use `/activity-summary` for screen time.
+
+### Prefer these typed endpoints over SQL
+
+The app's own fixed queries moved off `/raw_sql` onto dedicated endpoints with
+bound parameters and server-side limits. Reach for one of these before writing
+SQL — they're faster to get right and can't be rejected for a missing `LIMIT`
+or a bad time format:
+
+| Endpoint | Parameters | Returns |
+|---|---|---|
+| `GET /activity/coverage` | none | `first_timestamp`, `last_timestamp` (nullable), ascending `days` with any activity |
+| `GET /activity/apps` | `since_minutes` (default 10080), `limit` (default 100, max 500) | `apps: [{app_name, frame_count}]` desc by frame_count — replaces "most used apps" SQL |
+| `GET /activity/app-windows` | `since_minutes` (default 10080), `limit` (apps, default 200, max 500), `windows_per_app` (default 20, max 50) | `apps: [{app_name, frame_count, window_count, windows:[{window_name, frame_count}]}]` |
+| `GET /activity/domains` | `since_minutes` (default 10080), `limit` (default 100, max 500) | `domains: [{domain, frame_count}]` desc by frame_count — replaces "most visited domains" SQL |
+| `GET /activity/text-snippets` | `source` (`accessibility`\|`ocr`, required), `since_minutes` (default 15), `limit` (default 8, max 50), `max_chars` (default 200, max 2000), `min_chars` (default 0), `order` (`recent`\|`random`) | `total`, `snippets: [{app_name, window_name, text}]` |
+| `GET /activity/ui-events` | `start`, `end` (RFC 3339, required), `limit` (default 30, max 200), `order` (`asc`\|`desc`) | `events: [{event_type, text_content, app_name, window_title, timestamp}]` |
+| `GET /tags/vision` | `limit` (default 200, max 1000) | `tags: [{name, frame_count}]` for tags applied to at least one frame |
+| `GET /tags/vision/frames` | `tags` (comma-separated names, 1-50), `limit` (default 50, max 500) | `frames: [{frame_id, timestamp, app_name, tag_names}]` desc by timestamp |
+| `GET /search/facets` | `q` (required), `app_limit` (default 15, max 50), `url_limit` (default 200, max 500), `day_limit` (default 30, max 90) | `apps`, `urls`, `days` match-count facets for a search term |
+| `GET /frames/nearest` | `timestamp` (RFC 3339, required), `window_seconds` (default 30, max 3600) | nearest `frame` in range, or `null` |
+
+All timestamps are RFC 3339 UTC strings (e.g. `2026-10-19T04:05:06Z`); every
+endpoint requires the usual bearer auth.
+
+```bash
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+  "http://localhost:3030/activity/apps?since_minutes=1440&limit=20"
+```
 
 ### Schema
 

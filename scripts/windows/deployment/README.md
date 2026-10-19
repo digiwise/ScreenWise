@@ -259,6 +259,43 @@ contain private decision context and must not be published. See
 [the sensitive diagnostics guide](../../../docs/CAPTURE_PRIVACY.md#sensitive-decision-diagnostics-2026-10-09) for storage and limits.
 Preparation here does not start a diagnostic capture or inspect existing captures.
 
+## Firewall scope: what the deployment rules do not cover
+
+`Set-ScreenWiseDeploymentFirewall.ps1` blocks non-loopback outbound traffic
+**of the listed executables only** — the GUI, recorder, Bun, FFmpeg/FFprobe,
+WebView2 and, when deployed, Ollama and its model runner. That scope does not
+cover bytes leaving the machine through a Windows system service acting on one
+of those executables' behalf rather than the executable itself:
+
+- A UNC path (`\\host\share\x`) is opened by the kernel SMB redirector, not by
+  `screenpipe.exe` or `screenpipe-app.exe`. The redirector is a system
+  component; a per-executable outbound block does not see or stop its traffic.
+  Opening a UNC path this way also presents the signed-in user's Windows
+  credentials to that host.
+- A WebDAV path (`\\host@SSL\DavWWWRoot\...`) is opened by the WebClient
+  service for the same reason: the firewall rule names an executable, and this
+  traffic is not that executable's.
+
+A firewall rule scoped to an executable cannot block a different OS component
+making the connection on that executable's behalf.
+
+**Mitigation lives in the application, not the firewall.** Destinations and
+media paths the local API accepts — backup destinations, export output paths,
+media read/validate/merge paths — are resolved against an allowlist of local
+directories before use, and UNC, WebDAV and device-namespace forms are
+rejected outright regardless of what the firewall can see. `backup_directory`
+in the deployment manifest (passed through to the GUI as
+`SCREENWISE_BACKUP_DIR`) is the one way an owner can permit one additional
+local directory outside the default `backups` folder — for example a
+directory on another disk — without widening that check to arbitrary paths;
+it is still rejected if it is a network/WebDAV/device path form, a
+network-mapped drive, inside the deployed binary directory, or on a drive
+that does not exist.
+This narrows one specific channel — paths handed to the local API — and
+nothing more. It does not change what the firewall rule itself can see, it is
+not validated here by a live test, and it is not a claim that data cannot
+leave the machine some other way.
+
 ## Prompt Parakeet transcription
 
 New deployment stores use `transcriptionMode: "realtime"` with the existing

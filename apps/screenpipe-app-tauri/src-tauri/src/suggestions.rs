@@ -1106,13 +1106,23 @@ fn template_suggestions(
 
 // ─── Suggestion generation ──────────────────────────────────────────────────
 
+/// Row shape of `GET /activity/apps`'s `apps` array.
+#[derive(Debug, Deserialize)]
+struct AppFrameCountRow {
+    app_name: String,
+    frame_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityAppsResponse {
+    apps: Vec<AppFrameCountRow>,
+}
+
 async fn fetch_app_activity(api: &LocalApiContext) -> Result<Vec<AppActivity>, String> {
     let client = reqwest::Client::new();
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT app_name, COUNT(*) as cnt FROM frames WHERE datetime(timestamp) > datetime('now', '-30 minutes') AND app_name != '' AND app_name != 'screenpipe' AND app_name != 'screenpipe-app' GROUP BY app_name ORDER BY cnt DESC LIMIT 15"
-        }))
+        .apply_auth(client.get(api.url("/activity/apps")))
+        .query(&[("since_minutes", "30"), ("limit", "15")])
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
@@ -1121,18 +1131,63 @@ async fn fetch_app_activity(api: &LocalApiContext) -> Result<Vec<AppActivity>, S
     if !resp.status().is_success() {
         return Ok(vec![]);
     }
-    resp.json()
+    let parsed: ActivityAppsResponse = resp
+        .json()
         .await
-        .map_err(|e| format!("parse app activity: {}", e))
+        .map_err(|e| format!("parse app activity: {}", e))?;
+
+    Ok(app_frame_counts_from_response(parsed))
+}
+
+/// The endpoint does not filter out ScreenWise's own app names (that's a
+/// suggestion-quality rule, not a data rule), so it stays here in Rust —
+/// same as the old SQL's `app_name != 'screenpipe' AND app_name !=
+/// 'screenpipe-app'`. Split out from [`fetch_app_activity`] so the mapping
+/// is unit-testable without a live local API.
+fn app_frame_counts_from_response(response: ActivityAppsResponse) -> Vec<AppActivity> {
+    response
+        .apps
+        .into_iter()
+        .filter(|a| a.app_name != "screenpipe" && a.app_name != "screenpipe-app")
+        .map(|a| AppActivity {
+            app_name: a.app_name,
+            cnt: a.frame_count,
+        })
+        .collect()
+}
+
+/// Row shape of `GET /activity/app-windows`'s per-app `windows` array.
+#[derive(Debug, Deserialize)]
+struct AppWindowRow {
+    window_name: Option<String>,
+    frame_count: i64,
+}
+
+/// Row shape of `GET /activity/app-windows`'s `apps` array.
+#[derive(Debug, Deserialize)]
+struct AppWindowsRow {
+    app_name: String,
+    windows: Vec<AppWindowRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityAppWindowsResponse {
+    apps: Vec<AppWindowsRow>,
 }
 
 async fn fetch_window_activity(api: &LocalApiContext) -> Result<Vec<WindowActivity>, String> {
     let client = reqwest::Client::new();
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT app_name, window_name, COUNT(*) as cnt FROM frames WHERE datetime(timestamp) > datetime('now', '-30 minutes') AND app_name != '' AND app_name != 'screenpipe' AND app_name != 'screenpipe-app' AND window_name != '' GROUP BY app_name, window_name ORDER BY cnt DESC LIMIT 20"
-        }))
+        .apply_auth(client.get(api.url("/activity/app-windows")))
+        // `windows_per_app=1, limit=20` is a deliberate narrowing from the old
+        // SQL: it returns the single busiest window of each of the top 20
+        // apps, not the 20 busiest (app, window) pairs overall. A chatty app
+        // with many windows no longer crowds out other apps' busiest windows.
+        .query(&[
+            ("since_minutes", "30"),
+            ("limit", "20"),
+            ("windows_per_app", "1"),
+        ])
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
@@ -1141,9 +1196,40 @@ async fn fetch_window_activity(api: &LocalApiContext) -> Result<Vec<WindowActivi
     if !resp.status().is_success() {
         return Ok(vec![]);
     }
-    resp.json()
+    let parsed: ActivityAppWindowsResponse = resp
+        .json()
         .await
-        .map_err(|e| format!("parse window activity: {}", e))
+        .map_err(|e| format!("parse window activity: {}", e))?;
+
+    Ok(window_activity_from_response(parsed))
+}
+
+/// Flatten the nested `apps[].windows[]` shape into the flat
+/// `(app_name, window_name, cnt)` rows the rest of this file expects. Same
+/// suggestion-quality app-name filter as [`app_frame_counts_from_response`],
+/// and the old SQL's `window_name != ''` condition — the endpoint returns
+/// `null` for a missing title rather than filtering it out, so skip those
+/// here. Split out so it's unit-testable without a live local API.
+fn window_activity_from_response(response: ActivityAppWindowsResponse) -> Vec<WindowActivity> {
+    response
+        .apps
+        .into_iter()
+        .filter(|a| a.app_name != "screenpipe" && a.app_name != "screenpipe-app")
+        .flat_map(|a| {
+            let app_name = a.app_name;
+            a.windows.into_iter().filter_map(move |w| {
+                let window_name = w.window_name?;
+                if window_name.is_empty() {
+                    return None;
+                }
+                Some(WindowActivity {
+                    app_name: app_name.clone(),
+                    window_name,
+                    cnt: w.frame_count,
+                })
+            })
+        })
+        .collect()
 }
 
 async fn check_ai_available(api: &LocalApiContext) -> bool {
@@ -1182,92 +1268,199 @@ struct AudioSnippet {
     speaker_name: Option<String>,
 }
 
+/// Row shape of `GET /activity/text-snippets`'s `snippets` array.
+#[derive(Debug, Deserialize)]
+struct TextSnippetRow {
+    app_name: Option<String>,
+    #[serde(default)]
+    window_name: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextSnippetsResponse {
+    #[serde(default)]
+    total: i64,
+    snippets: Vec<TextSnippetRow>,
+}
+
 async fn fetch_accessibility_snippets(api: &LocalApiContext) -> Vec<AccessibilitySnippet> {
     let client = reqwest::Client::new();
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT app_name, window_name, SUBSTR(full_text, 1, 200) as snippet FROM frames WHERE datetime(timestamp) > datetime('now', '-15 minutes') AND LENGTH(full_text) > 30 AND app_name != 'screenpipe' AND full_text IS NOT NULL ORDER BY timestamp DESC LIMIT 8"
-        }))
+        .apply_auth(client.get(api.url("/activity/text-snippets")))
+        .query(&[
+            ("source", "accessibility"),
+            ("since_minutes", "15"),
+            ("limit", "8"),
+            ("max_chars", "200"),
+            ("min_chars", "30"),
+        ])
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
 
-    match resp {
-        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-        _ => vec![],
+    let Ok(resp) = resp else {
+        return vec![];
+    };
+    if !resp.status().is_success() {
+        return vec![];
     }
+    let Ok(parsed) = resp.json::<TextSnippetsResponse>().await else {
+        return vec![];
+    };
+
+    accessibility_snippets_from_response(parsed)
+}
+
+/// The endpoint doesn't exclude ScreenWise's own app; the old SQL's
+/// `app_name != 'screenpipe'` condition stays here in Rust. Split out so
+/// it's unit-testable without a live local API.
+fn accessibility_snippets_from_response(
+    response: TextSnippetsResponse,
+) -> Vec<AccessibilitySnippet> {
+    response
+        .snippets
+        .into_iter()
+        .filter(|s| s.app_name.as_deref() != Some("screenpipe"))
+        .map(|s| AccessibilitySnippet {
+            app_name: s.app_name.unwrap_or_default(),
+            window_name: s.window_name.unwrap_or_default(),
+            snippet: s.text,
+        })
+        .collect()
+}
+
+/// Minimal shape read from a `/search?content_type=audio` item's `content`
+/// object. Declared locally (rather than depending on the engine's
+/// `AudioContent`) so this file only reads the fields it needs.
+#[derive(Debug, Deserialize)]
+struct SearchAudioContent {
+    transcription: String,
+    device_name: String,
+    #[serde(default)]
+    speaker: Option<SearchAudioSpeaker>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchAudioSpeaker {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchResponseEnvelope {
+    data: Vec<serde_json::Value>,
 }
 
 async fn fetch_audio_snippets(api: &LocalApiContext) -> Vec<AudioSnippet> {
     let client = reqwest::Client::new();
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT SUBSTR(at.transcription, 1, 200) as transcription, at.device, s.name as speaker_name FROM audio_transcriptions at LEFT JOIN speakers s ON at.speaker_id = s.id WHERE datetime(at.timestamp) > datetime('now', '-30 minutes') AND LENGTH(at.transcription) > 10 ORDER BY at.timestamp DESC LIMIT 6"
-        }))
+        .apply_auth(client.get(api.url("/search")))
+        .query(&[
+            ("content_type", "audio"),
+            ("start_time", since.as_str()),
+            ("limit", "6"),
+            // `>= 11` reproduces the old SQL's `LENGTH(transcription) > 10`
+            // server-side, before `limit` is applied — otherwise short
+            // transcriptions eat result slots and fewer than 6 come back.
+            ("min_length", "11"),
+        ])
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
 
-    match resp {
-        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-        _ => vec![],
+    let Ok(resp) = resp else {
+        return vec![];
+    };
+    if !resp.status().is_success() {
+        return vec![];
     }
+    let Ok(envelope) = resp.json::<SearchResponseEnvelope>().await else {
+        return vec![];
+    };
+
+    audio_snippets_from_search_data(envelope.data)
+}
+
+/// Pick out `type: "audio"` items from a `/search` response's `data` array
+/// and map them to the old `AudioSnippet` shape. Old SQL's
+/// `LENGTH(at.transcription) > 10` condition is now applied server-side via
+/// `/search`'s `min_length=11` param (see [`fetch_audio_snippets`]) so it
+/// still runs before `limit`, not after — the old client-side `.filter()`
+/// here would have applied too late and let short transcriptions eat result
+/// slots. The old `SUBSTR(...,1,200)` head-truncation is reproduced
+/// client-side since `/search` has no equivalent param — that also keeps
+/// each entry's size bounded for the AI context char budget in
+/// `build_activity_context`. Split out so it's unit-testable without a live
+/// local API.
+fn audio_snippets_from_search_data(data: Vec<serde_json::Value>) -> Vec<AudioSnippet> {
+    data.into_iter()
+        .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("audio"))
+        .filter_map(|item| {
+            let content = item.get("content")?.clone();
+            serde_json::from_value::<SearchAudioContent>(content).ok()
+        })
+        .map(|c| AudioSnippet {
+            transcription: safe_byte_prefix(&c.transcription, 200).to_string(),
+            device: c.device_name,
+            speaker_name: c.speaker.map(|s| s.name),
+        })
+        .collect()
 }
 
 async fn fetch_ocr_snippets(api: &LocalApiContext) -> Vec<String> {
     let client = reqwest::Client::new();
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT SUBSTR(ot.text, 1, 150) as snippet FROM ocr_text ot JOIN frames f ON ot.frame_id = f.id WHERE datetime(f.timestamp) > datetime('now', '-15 minutes') AND LENGTH(ot.text) > 20 ORDER BY RANDOM() LIMIT 5"
-        }))
+        .apply_auth(client.get(api.url("/activity/text-snippets")))
+        .query(&[
+            ("source", "ocr"),
+            ("since_minutes", "15"),
+            ("limit", "5"),
+            ("max_chars", "150"),
+            ("min_chars", "20"),
+            ("order", "random"),
+        ])
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
 
     match resp {
-        Ok(r) if r.status().is_success() => {
-            #[derive(Deserialize)]
-            struct Row {
-                snippet: String,
-            }
-            r.json::<Vec<Row>>()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| r.snippet)
-                .collect()
-        }
+        Ok(r) if r.status().is_success() => r
+            .json::<TextSnippetsResponse>()
+            .await
+            .map(|parsed| parsed.snippets.into_iter().map(|s| s.text).collect())
+            .unwrap_or_default(),
         _ => vec![],
     }
 }
 
+/// Reads `total` from `GET /activity/text-snippets`, whose count condition is
+/// `LENGTH(full_text) > 0` — a deliberate narrowing from the old query's
+/// `full_text IS NOT NULL`, so a frame with an empty-string `full_text` is no
+/// longer counted. This only affects the accessibility-vs-OCR threshold
+/// decision below, not which rows are returned elsewhere.
+/// NOTE: this call transfers one 200-char text snippet (`limit=1`) purely to
+/// read a count; there is no cheap way to get just `total` from this endpoint
+/// today without adding a new one, which is out of scope here.
 async fn count_accessibility_rows(api: &LocalApiContext) -> i64 {
     let client = reqwest::Client::new();
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT COUNT(*) as cnt FROM frames WHERE datetime(timestamp) > datetime('now', '-30 minutes') AND full_text IS NOT NULL"
-        }))
+        .apply_auth(client.get(api.url("/activity/text-snippets")))
+        .query(&[
+            ("source", "accessibility"),
+            ("since_minutes", "30"),
+            ("limit", "1"),
+        ])
         .timeout(std::time::Duration::from_secs(3))
         .send()
         .await;
 
     match resp {
-        Ok(r) if r.status().is_success() => {
-            #[derive(Deserialize)]
-            struct Row {
-                cnt: i64,
-            }
-            r.json::<Vec<Row>>()
-                .await
-                .unwrap_or_default()
-                .first()
-                .map(|r| r.cnt)
-                .unwrap_or(0)
-        }
+        Ok(r) if r.status().is_success() => r
+            .json::<TextSnippetsResponse>()
+            .await
+            .map(|parsed| parsed.total)
+            .unwrap_or(0),
         _ => 0,
     }
 }
@@ -1627,16 +1820,20 @@ fn generate_heuristic_tags(mode: &str, top_apps: &[String]) -> Vec<String> {
     tags
 }
 
+/// Row shape of `GET /frames/recent`'s response.
+#[derive(Debug, Deserialize)]
+struct RecentFramesResponse {
+    frame_ids: Vec<i64>,
+}
+
 /// Store AI-generated tags on recent frames using the existing tags + vision_tags tables.
 async fn store_tags(api: &LocalApiContext, tags: &[String]) -> Result<(), String> {
     let client = reqwest::Client::new();
 
-    // Get recent frame IDs (last 10 minutes, sample up to 10)
+    // Get recent frame IDs (last 10 minutes, sample up to 10).
     let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT id FROM frames WHERE timestamp >= datetime('now', '-10 minutes') ORDER BY timestamp DESC LIMIT 10"
-        }))
+        .apply_auth(client.get(api.url("/frames/recent")))
+        .query(&[("since_minutes", "10"), ("limit", "10")])
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
@@ -1646,27 +1843,24 @@ async fn store_tags(api: &LocalApiContext, tags: &[String]) -> Result<(), String
         return Err("failed to fetch recent frames".into());
     }
 
-    #[derive(Deserialize)]
-    struct FrameRow {
-        id: i64,
-    }
-    let frames: Vec<FrameRow> = resp
+    let parsed: RecentFramesResponse = resp
         .json()
         .await
         .map_err(|e| format!("parse frames: {}", e))?;
+    let frame_ids = parsed.frame_ids;
 
-    if frames.is_empty() {
+    if frame_ids.is_empty() {
         return Ok(());
     }
 
     // Tag frames via the existing API endpoint (POST /tags/vision/:id)
     let tag_body = serde_json::json!({ "tags": tags });
     let mut tagged = 0;
-    for frame in &frames {
+    for frame_id in &frame_ids {
         let resp = api
             .apply_auth(
                 client
-                    .post(api.url(&format!("/tags/vision/{}", frame.id)))
+                    .post(api.url(&format!("/tags/vision/{}", frame_id)))
                     .json(&tag_body)
                     .timeout(std::time::Duration::from_secs(5)),
             )
@@ -1680,7 +1874,7 @@ async fn store_tags(api: &LocalApiContext, tags: &[String]) -> Result<(), String
     info!(
         "suggestions: tagged {}/{} frames with {} tags",
         tagged,
-        frames.len(),
+        frame_ids.len(),
         tags.len()
     );
     Ok(())
@@ -1691,6 +1885,147 @@ async fn store_tags(api: &LocalApiContext, tags: &[String]) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── /raw_sql replacement mapping tests ────────────────────────────────
+
+    #[test]
+    fn app_frame_counts_filters_screenwise_own_app_names() {
+        let response = ActivityAppsResponse {
+            apps: vec![
+                AppFrameCountRow {
+                    app_name: "code".into(),
+                    frame_count: 812,
+                },
+                AppFrameCountRow {
+                    app_name: "screenpipe".into(),
+                    frame_count: 999,
+                },
+                AppFrameCountRow {
+                    app_name: "screenpipe-app".into(),
+                    frame_count: 999,
+                },
+            ],
+        };
+        let result = app_frame_counts_from_response(response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].app_name, "code");
+        assert_eq!(result[0].cnt, 812);
+    }
+
+    #[test]
+    fn window_activity_skips_null_and_empty_titles_and_screenwise_app() {
+        let response = ActivityAppWindowsResponse {
+            apps: vec![
+                AppWindowsRow {
+                    app_name: "chrome".into(),
+                    windows: vec![
+                        AppWindowRow {
+                            window_name: Some("inbox".into()),
+                            frame_count: 310,
+                        },
+                        AppWindowRow {
+                            window_name: None,
+                            frame_count: 12,
+                        },
+                        AppWindowRow {
+                            window_name: Some(String::new()),
+                            frame_count: 5,
+                        },
+                    ],
+                },
+                AppWindowsRow {
+                    app_name: "screenpipe".into(),
+                    windows: vec![AppWindowRow {
+                        window_name: Some("settings".into()),
+                        frame_count: 42,
+                    }],
+                },
+            ],
+        };
+        let result = window_activity_from_response(response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].app_name, "chrome");
+        assert_eq!(result[0].window_name, "inbox");
+        assert_eq!(result[0].cnt, 310);
+    }
+
+    #[test]
+    fn accessibility_snippets_exclude_screenpipe_app() {
+        let response = TextSnippetsResponse {
+            total: 2,
+            snippets: vec![
+                TextSnippetRow {
+                    app_name: Some("code".into()),
+                    window_name: Some("db.rs".into()),
+                    text: "fn main() {}".into(),
+                },
+                TextSnippetRow {
+                    app_name: Some("screenpipe".into()),
+                    window_name: Some("settings".into()),
+                    text: "should be excluded".into(),
+                },
+            ],
+        };
+        let result = accessibility_snippets_from_response(response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].app_name, "code");
+        assert_eq!(result[0].snippet, "fn main() {}");
+    }
+
+    #[test]
+    fn audio_snippets_keep_only_audio_type() {
+        let data = vec![
+            serde_json::json!({
+                "type": "audio",
+                "content": {
+                    "transcription": "a transcript longer than ten characters",
+                    "device_name": "MacBook Pro Microphone",
+                    "speaker": {"name": "ada"}
+                }
+            }),
+            serde_json::json!({
+                "type": "audio",
+                "content": {
+                    "transcription": "short",
+                    "device_name": "MacBook Pro Microphone",
+                    "speaker": null
+                }
+            }),
+            serde_json::json!({
+                "type": "ocr",
+                "content": {"text": "unrelated ocr row"}
+            }),
+        ];
+        let result = audio_snippets_from_search_data(data);
+        // The old `LENGTH(transcription) > 10` filter is now applied
+        // server-side via `/search`'s `min_length=11` param (see
+        // `fetch_audio_snippets`), before `limit` is applied — this pure
+        // function only keeps `type: "audio"` items, so the "short" entry
+        // passes through here.
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0].transcription,
+            "a transcript longer than ten characters"
+        );
+        assert_eq!(result[0].speaker_name.as_deref(), Some("ada"));
+        assert_eq!(result[1].transcription, "short");
+    }
+
+    #[test]
+    fn audio_snippets_truncate_transcription_to_200_chars() {
+        let long_transcription = "a".repeat(500);
+        let data = vec![serde_json::json!({
+            "type": "audio",
+            "content": {
+                "transcription": long_transcription,
+                "device_name": "mic",
+                "speaker": null
+            }
+        })];
+        let result = audio_snippets_from_search_data(data);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].transcription.len(), 200);
+    }
 
     #[test]
     fn test_detect_mode_coding() {

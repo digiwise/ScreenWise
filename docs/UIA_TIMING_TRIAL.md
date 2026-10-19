@@ -36,9 +36,16 @@ large, frequently changing WPF window (a one-second timer) was slowed to a crawl
 by repeated walks. Since then:
 
 - A circuit breaker follows costly provider outcomes (timeout, node/depth/text
-  limit, provider failure) per window (process id plus window handle). While
+  limit, provider failure, or a walk that returned a tree only after 400 ms)
+  per window (process id plus window handle). While
   open, that window gets no UIA calls of the affected scope; the period doubles
-  from 30 s to a 10 min cap and three consecutive successes reset it. When the
+  from 30 s to a 10 min cap and three consecutive cheap successes reset it. A
+  slow success counts with the failures: the cost is paid on the target's UI
+  thread either way, and an enormous tree that answered every walk in one to
+  two seconds otherwise reset its own backoff and stalled the application every
+  30 s indefinitely. It stays a distinct outcome: the frame is admitted with
+  full accessibility evidence, no failure reason is reported for it, and it is
+  counted separately as `breaker_costly_successes`. When the
   window's native area has shrunk by at least a quarter since its last failure
   (a list collapsed back into a bar) the backoff is released at once, but the
   failure count is kept, so regrowing and failing again continues the doubling. Walk failures withhold the
@@ -48,10 +55,35 @@ by repeated walks. Since then:
   has its own backoff, so a large tree never disables keystroke checks; it is
   skipped (input denied) only while a walk to the same process has run longer
   than the probe's 50 ms provider timeout. Counters: `breaker_openings`,
-  `breaker_shrink_releases`, `breaker_walk_skips`, `breaker_text_skips`,
+  `breaker_costly_successes` (the subset of those openings caused by a slow
+  success), `breaker_shrink_releases`, `breaker_walk_skips`, `breaker_text_skips`,
   `breaker_probe_skips`, `breaker_open_walk_windows`,
   `breaker_open_text_windows` and `breaker_open_probe_processes` (no process
-  ids or window handles).
+  ids or window handles). Because a slow success now opens the gate,
+  `breaker_openings` counts more than it did before 2026-10-19 and is not
+  comparable with earlier figures; subtract `breaker_costly_successes` to
+  recover the old meaning.
+
+### Open question: the 400 ms budget is unmeasured (2026-10-20)
+
+The budget is a judgement, not a measurement. Two things need a trial before
+the number can be trusted:
+
+- **It may not fire at all.** `elapsed` is timed in our process. A UIA call is
+  synchronous and cross-process, so it approximates what the target spends, but
+  the target's renderer work can precede or outlive our return. If the walks
+  that cost the inspected application 750 ms to 2 s come back to us in under
+  400 ms, this fix never triggers and the budget has to come down.
+- **It costs capture coverage.** A walk gate that opens withholds the frame
+  (only the text gate degrades to OCR), so a single transiently slow walk now
+  withholds that window's frames for at least 30 s, doubling from there. Under
+  machine load this can affect many windows at once.
+
+Watch `breaker_costly_successes` against `breaker_openings` and the
+`uia_backoff` share of stored frames. If one-off blips dominate, the cheaper
+correction is to require two consecutive costly successes before opening the
+gate rather than raising the budget, so a genuinely heavy window still backs
+off after two walks while a blip does not.
 - An invalidated walk restarts at most twice: a second attempt only if the
   first ended within half of the privacy budget, a third only within its first
   two-thirds; otherwise the walk ends as `uia_walk_timeout`.

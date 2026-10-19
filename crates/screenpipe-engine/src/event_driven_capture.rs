@@ -6172,9 +6172,11 @@ fn windows_uia_fail_open_applies(
     if app.is_empty() || app == "unknown" {
         return false;
     }
-    // With walking switched off, no window can ever produce UIA evidence, so the
-    // per-window pattern list is moot: every verified window falls back to
-    // screening. The caller's other preconditions (a verified target, no
+    // With walking switched off, no window can produce UIA *hierarchy* evidence
+    // for privacy admission, so the per-window pattern list is moot: every
+    // verified window falls back to screening. (The narrow focused-element probe
+    // is a different path and still runs; it serves input admission, not this
+    // decision.) The caller's other preconditions (a verified target, no
     // unresolved native window policy) still gate this, and the exclusion, URL,
     // incognito, DRM, lock and monitor/focus/identity checks are untouched.
     if walk_disabled {

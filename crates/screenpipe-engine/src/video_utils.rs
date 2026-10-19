@@ -227,11 +227,28 @@ pub async fn validate_media(file_path: &str) -> Result<()> {
     }
 }
 
+/// Merge recorded video chunks into one file. `data_root` is the local data
+/// directory every `video_paths` entry must resolve inside (F2 — caller-
+/// supplied destination paths); it is passed in explicitly by the caller
+/// rather than read from a global so the check always uses the same root the
+/// HTTP handler validated against.
 pub async fn merge_videos(
     request: MergeVideosRequest,
     output_dir: PathBuf,
+    data_root: &Path,
 ) -> Result<MergeVideosResponse> {
-    info!("merging videos: {:?}", request.video_paths);
+    // Content-free: log the chunk count, not the paths themselves (AGENTS.md).
+    debug!("merging {} video chunks", request.video_paths.len());
+
+    // A path outside the data root is a caller error, not a skippable row —
+    // reject the whole request rather than silently dropping the entry.
+    for video_path in &request.video_paths {
+        if screenpipe_core::paths::resolve_within(data_root, Path::new(video_path)).is_err() {
+            return Err(anyhow::anyhow!(
+                "video_paths entry is outside the local data directory"
+            ));
+        }
+    }
 
     if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
         error!("failed to create output directory: {:?}", e);

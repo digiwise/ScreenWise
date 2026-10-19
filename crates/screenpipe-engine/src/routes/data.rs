@@ -11,10 +11,43 @@ use chrono::{DateTime, Utc};
 use oasgen::{oasgen, OaSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tracing::info;
 
 use crate::server::AppState;
+
+/// Resolve a caller-supplied destination against the configured roots
+/// (`AppState::output_roots`). `default_name` names the file created under
+/// `roots[0]` when `requested` is absent or empty. A non-empty `requested`
+/// must be an absolute path that resolves inside one of `roots` — see
+/// `screenpipe_core::paths::resolve_within`; relative paths and paths
+/// outside every configured root are rejected with that rejection's
+/// content-free message (never the attempted path itself).
+pub(crate) fn resolve_output_path(
+    roots: &[PathBuf],
+    requested: Option<&str>,
+    default_name: &str,
+) -> Result<PathBuf, String> {
+    match requested.filter(|p| !p.is_empty()) {
+        Some(path) => {
+            let candidate = std::path::Path::new(path);
+            let mut last_rejection = None;
+            for root in roots {
+                match screenpipe_core::paths::resolve_within(root, candidate) {
+                    Ok(resolved) => return Ok(resolved),
+                    Err(rejection) => last_rejection = Some(rejection),
+                }
+            }
+            Err(last_rejection
+                .map(|r| r.message().to_string())
+                .unwrap_or_else(|| "no configured destination root".to_string()))
+        }
+        None => roots
+            .first()
+            .map(|root| root.join(default_name))
+            .ok_or_else(|| "no configured destination root".to_string()),
+    }
+}
 
 #[derive(Deserialize, OaSchema)]
 pub struct DeleteTimeRangeRequest {
@@ -342,9 +375,12 @@ pub(crate) async fn checkpoint_handler(
 }
 
 #[derive(Deserialize, OaSchema)]
-pub struct BackupQuery {
-    /// Destination file path for the backup. If omitted, defaults to
-    /// `<screenpipe_dir>/backup.sqlite`.
+pub struct BackupRequest {
+    /// Destination file path for the backup. Must be an absolute path that
+    /// resolves inside one of the server's configured output roots
+    /// (`<screenpipe_dir>/backups`, plus `SCREENWISE_BACKUP_DIR` when
+    /// configured). If omitted, defaults to a timestamped file under the
+    /// first configured root.
     pub path: Option<String>,
 }
 
@@ -357,45 +393,152 @@ pub struct BackupResponse {
 
 /// Create an atomic SQLite backup via `VACUUM INTO`. Safe to call while
 /// Screenpipe is running — the backup is a consistent snapshot.
+///
+/// State-changing (creates a file) — POST, not GET (F2).
+///
+/// A JSON body is required because `oasgen` cannot describe an optional one:
+/// send `{}` (with `Content-Type: application/json`) to take the timestamped
+/// default destination. A bare POST with no body is rejected before this
+/// handler runs.
 #[oasgen]
 pub(crate) async fn backup_handler(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<BackupQuery>,
+    Json(payload): Json<BackupRequest>,
 ) -> Result<JsonResponse<BackupResponse>, (StatusCode, JsonResponse<Value>)> {
-    let dest = query.path.unwrap_or_else(|| {
-        state
-            .screenpipe_dir
-            .join("backup.sqlite")
-            .to_string_lossy()
-            .into_owned()
-    });
+    let path = payload.path;
+    let default_name = format!("backup-{}.sqlite", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let dest = resolve_output_path(&state.output_roots, path.as_deref(), &default_name)
+        .map_err(|msg| (StatusCode::BAD_REQUEST, JsonResponse(json!({"error": msg}))))?;
 
     // Safety: don't overwrite an existing file
-    if std::path::Path::new(&dest).exists() {
+    if dest.exists() {
         return Err((
             StatusCode::CONFLICT,
-            JsonResponse(json!({"error": format!("destination already exists: {}", dest)})),
+            JsonResponse(json!({"error": "destination already exists"})),
         ));
     }
 
-    info!("starting database backup to {}", dest);
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": format!("failed to create backup directory: {}", e)})),
+            ));
+        }
+    }
 
-    state.db.backup_to(&dest).await.map_err(|e| {
+    let dest_str = dest.to_string_lossy().into_owned();
+
+    info!("starting database backup");
+
+    state.db.backup_to(&dest_str).await.map_err(|e| {
         // Clean up partial file on failure
-        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&dest_str);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             JsonResponse(json!({"error": format!("backup failed: {}", e)})),
         )
     })?;
 
-    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&dest_str).map(|m| m.len()).unwrap_or(0);
 
-    info!("database backup complete: {} ({} bytes)", dest, size);
+    info!("database backup complete ({} bytes)", size);
 
     Ok(JsonResponse(BackupResponse {
         success: true,
-        path: dest,
+        path: dest_str,
         size_bytes: size,
     }))
+}
+
+#[cfg(test)]
+mod resolve_output_path_tests {
+    use super::*;
+
+    fn root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) {
+            r"C:\data\backups"
+        } else {
+            "/data/backups"
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_destination_is_rejected() {
+        let err = resolve_output_path(&[root()], Some(r"\\host\share\x.sqlite"), "default.sqlite")
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn destination_outside_every_root_is_rejected() {
+        let outside = if cfg!(windows) {
+            r"C:\elsewhere\x.sqlite".to_string()
+        } else {
+            "/elsewhere/x.sqlite".to_string()
+        };
+        let err = resolve_output_path(&[root()], Some(&outside), "default.sqlite").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn relative_destination_is_rejected() {
+        let err =
+            resolve_output_path(&[root()], Some("sub/x.sqlite"), "default.sqlite").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn destination_inside_the_configured_root_is_accepted() {
+        let root = root();
+        let inside = if cfg!(windows) {
+            r"C:\data\backups\sub\x.sqlite".to_string()
+        } else {
+            "/data/backups/sub/x.sqlite".to_string()
+        };
+        let resolved =
+            resolve_output_path(&[root.clone()], Some(&inside), "default.sqlite").unwrap();
+        assert!(resolved.starts_with(&root));
+    }
+
+    #[test]
+    fn destination_inside_a_second_configured_root_is_accepted() {
+        // Exercises the `SCREENWISE_BACKUP_DIR` case: a second root the
+        // default `<screenpipe_dir>/backups` root doesn't cover.
+        let second_root = PathBuf::from(if cfg!(windows) {
+            r"D:\other\dir"
+        } else {
+            "/other/dir"
+        });
+        let roots = vec![root(), second_root.clone()];
+        let inside = if cfg!(windows) {
+            r"D:\other\dir\x.sqlite".to_string()
+        } else {
+            "/other/dir/x.sqlite".to_string()
+        };
+        let resolved = resolve_output_path(&roots, Some(&inside), "default.sqlite").unwrap();
+        assert!(resolved.starts_with(&second_root));
+    }
+
+    #[test]
+    fn default_destination_is_used_when_no_path_is_given() {
+        let root = root();
+        let resolved = resolve_output_path(&[root.clone()], None, "backup-fixed.sqlite").unwrap();
+        assert_eq!(resolved, root.join("backup-fixed.sqlite"));
+    }
+
+    #[test]
+    fn empty_requested_path_falls_back_to_the_default() {
+        let root = root();
+        let resolved =
+            resolve_output_path(&[root.clone()], Some(""), "backup-fixed.sqlite").unwrap();
+        assert_eq!(resolved, root.join("backup-fixed.sqlite"));
+    }
+
+    #[test]
+    fn no_configured_roots_is_an_error() {
+        assert!(resolve_output_path(&[], None, "backup.sqlite").is_err());
+        assert!(resolve_output_path(&[], Some("x"), "backup.sqlite").is_err());
+    }
 }

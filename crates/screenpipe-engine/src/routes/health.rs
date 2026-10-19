@@ -1283,7 +1283,7 @@ mod tests {
                 let reasons = metrics["reason_codes"]
                     .as_array()
                     .expect("fixed process reasons");
-                assert_eq!(reasons.len(), 10);
+                assert_eq!(reasons.len(), 11);
                 for code in &reasons[..8] {
                     assert!(
                         screenpipe_config::capture_diagnostics::AccessibilityStopReason::from_code(
@@ -1292,8 +1292,18 @@ mod tests {
                         .is_some()
                     );
                 }
+                // `uia_monitor_unverified` is a capture reason with no
+                // `AccessibilityStopReason`, so it is checked by name; the other
+                // two are, and `unknown` must stay last as the lookup fallback.
                 assert_eq!(reasons[8], "uia_monitor_unverified");
-                assert_eq!(reasons[9], "unknown");
+                assert_eq!(reasons[9], "uia_walk_disabled");
+                assert!(
+                    screenpipe_config::capture_diagnostics::AccessibilityStopReason::from_code(
+                        "uia_walk_disabled"
+                    )
+                    .is_some()
+                );
+                assert_eq!(reasons[10], "unknown");
                 assert_eq!(Some(&metrics["stage_names"]), expected_stage_names.as_ref());
                 assert_eq!(metrics["schema_version"], 2);
                 assert_eq!(
@@ -1354,7 +1364,7 @@ mod tests {
                                 assert_eq!(
                                     counts.len(),
                                     match field.as_str() {
-                                        "reason_counts" => 10,
+                                        "reason_counts" => 11,
                                         "mode_attempt_counts" => 2,
                                         "retry_cause_counts" | "failed_retry_cause_counts" => 4,
                                         "failure_phase_counts"

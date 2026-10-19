@@ -32,6 +32,56 @@ function Assert-DeploymentPath {
     return $full
 }
 
+function Assert-DeploymentBackupDirectory {
+    param([string]$Path, [string]$BinaryDirectory)
+    # Deliberately not Assert-DeploymentPath: the whole point of this setting is
+    # that backups can live on a different disk from the repository .local root.
+    # Still reject every channel that would route the bytes through an OS
+    # component other than the recorder itself: the SMB redirector (UNC), the
+    # WebClient service (WebDAV) and raw device namespaces.
+    if ([string]::IsNullOrEmpty($Path)) { throw 'Backup directory cannot be empty.' }
+    $components = $Path -split '[\\/]'
+    if (@($components | Where-Object { $_ -ieq 'DavWWWRoot' -or $_ -match '@SSL$' }).Count) {
+        throw 'Backup directory must not be a WebDAV path.'
+    }
+    if ($Path -match '^[\\/][\\/]\?[\\/]UNC[\\/]') {
+        throw 'Backup directory must not be a network share (UNC) path.'
+    }
+    if ($Path -match '^[\\/][\\/]\.[\\/]') {
+        throw 'Backup directory must not be a device-namespace path.'
+    }
+    if ($Path -match '^[\\/][\\/]\?[\\/]') {
+        # Only a plain `\\?\<drive>:\` long-path spelling is a local path; any
+        # other `\\?\` form (UNC was already caught above) is a raw device
+        # namespace handle.
+        if ($Path -notmatch '^[\\/][\\/]\?[\\/][A-Za-z]:[\\/]') {
+            throw 'Backup directory must not be a device-namespace path.'
+        }
+        $Path = $Path.Substring(4)
+    } elseif ($Path -match '^[\\/][\\/]') {
+        throw 'Backup directory must not be a network share (UNC) path.'
+    } elseif (![IO.Path]::IsPathRooted($Path)) {
+        throw 'Backup directory must be an absolute local path.'
+    }
+    $full = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($full)
+    if (!$root -or !(Test-Path -LiteralPath $root)) {
+        throw 'Backup directory drive does not exist.'
+    }
+    if ([IO.DriveInfo]::new($root).DriveType -eq 'Network') {
+        # A lexical UNC/WebDAV/device check above does not catch a drive letter
+        # mapped to a remote share (e.g. `net use Z: \\host\share`); the bytes
+        # still leave over SMB even though the path form looks local.
+        throw 'Backup directory must not be on a network-mapped drive.'
+    }
+    if ($full -ieq $BinaryDirectory -or
+        $full.StartsWith($BinaryDirectory + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $BinaryDirectory.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Backup directory must not be inside the deployed binary directory.'
+    }
+    return $full
+}
+
 function Get-DeploymentRemoteAddresses {
     return @('0.0.0.0-126.255.255.255', '128.0.0.0-255.255.255.255',
         '::', '::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
@@ -149,6 +199,9 @@ function Read-DeploymentManifest {
     if ($binaryRoot -ieq $dataRoot -or $dataRoot.StartsWith($binaryRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
         $binaryRoot.StartsWith($dataRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Recording data and deployed binaries must be separate directories.'
+    }
+    if ($m.PSObject.Properties['backup_directory']) {
+        $m.backup_directory = Assert-DeploymentBackupDirectory $m.backup_directory $binaryRoot
     }
     foreach ($name in @('gui_executable', 'cli_executable', 'bun_executable', 'ffmpeg_executable', 'ffprobe_executable')) {
         $p = Assert-DeploymentPath $m.$name $PrivateRoot
@@ -414,7 +467,7 @@ function Invoke-DeploymentStartup {
     }
 }
 
-Export-ModuleMember -Function Assert-DeploymentPath, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
+Export-ModuleMember -Function Assert-DeploymentPath, Assert-DeploymentBackupDirectory, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
     Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, Set-DeploymentUiaComparisonMode, New-DeploymentStaging,
     Test-DeploymentQuitCapability, Get-DeploymentSourceState, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration

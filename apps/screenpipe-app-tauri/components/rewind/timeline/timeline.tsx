@@ -17,6 +17,7 @@ import { AppContextPopover } from "./app-context-popover";
 import { TimelineTagToolbar } from "./timeline-tag-toolbar";
 import { extractDomain, FaviconImg } from "./favicon-utils";
 import { localFetch } from "@/lib/api";
+import { getActivityUiEvents, type UiEventSummary } from "@/lib/api/activity";
 import { NativeAppIcon } from "@/components/native-app-icon";
 import { FilterColumnViewport } from "./filter-column-viewport";
 
@@ -31,14 +32,6 @@ const CachedAppIcon = React.memo(function CachedAppIcon({ appName, className }: 
 		/>
 	);
 });
-
-interface UiEventSummary {
-	event_type: string;
-	text_content: string | null;
-	app_name: string | null;
-	window_title: string | null;
-	timestamp: string;
-}
 
 function formatUiEvent(ev: UiEventSummary): { icon: string; label: string; context: string | null } | null {
 	const truncate = (s: string, max = 30) => s.length > max ? s.slice(0, max) + "\u2026" : s;
@@ -283,19 +276,27 @@ export const TimelineSlider = ({
 		if (uiEventsCacheRef.current[cacheKey] || uiEventsFetchingRef.current.has(cacheKey)) return;
 		uiEventsFetchingRef.current.add(cacheKey);
 
-		// Always use timestamp-based query: frame_id is never populated in ui_events
-		const query = `SELECT event_type, text_content, app_name, window_title, timestamp FROM ui_events WHERE timestamp BETWEEN datetime('${timestamp}', '-15 seconds') AND datetime('${timestamp}', '+15 seconds') ORDER BY timestamp ASC LIMIT 10`;
+		// Always use timestamp-based lookup: frame_id is never populated in
+		// ui_events. Bug fix: this used to wrap the bounds in SQLite's
+		// datetime(...), which yields "YYYY-MM-DD HH:MM:SS" — that never
+		// matches ui_events.timestamp's stored RFC 3339 "...T...Z" form, so
+		// every row was excluded and the tooltip panel was always empty. The
+		// ±15s window is now computed in JS as ISO strings and bound as typed
+		// timestamps server-side.
+		const center = new Date(timestamp);
+		if (Number.isNaN(center.getTime())) {
+			// Unparseable timestamp — bail before building the request so this
+			// takes the same handled path as a failed fetch, and the cache key
+			// is always released rather than left stuck in uiEventsFetchingRef.
+			uiEventsFetchingRef.current.delete(cacheKey);
+			return;
+		}
+		const start = new Date(center.getTime() - 15_000).toISOString();
+		const end = new Date(center.getTime() + 15_000).toISOString();
 
-		localFetch("/raw_sql", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ query }),
-		})
-			.then((r) => (r.ok ? r.json() : []))
-			.then((rows: UiEventSummary[]) => {
-				if (Array.isArray(rows)) {
-					setUiEventsCache((prev) => ({ ...prev, [cacheKey]: rows }));
-				}
+		getActivityUiEvents({ start, end, limit: 10, order: "asc" })
+			.then(({ events }) => {
+				setUiEventsCache((prev) => ({ ...prev, [cacheKey]: events }));
 			})
 			.catch(() => {})
 			.finally(() => {

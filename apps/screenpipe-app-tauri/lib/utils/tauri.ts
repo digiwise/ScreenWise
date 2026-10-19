@@ -1039,6 +1039,13 @@ async readAudioExclusions() : Promise<Result<ExcludedApp[], string>> {
  * base64 data URL for images. Files larger than `MAX_VIEWER_FILE_BYTES`
  * are truncated for text or refused for images, since both would blow
  * up the renderer.
+ *
+ * The path is validated through [`screenpipe_core::paths::resolve_local_path`]
+ * before any filesystem access: a refused path (UNC/WebDAV/device-namespace,
+ * relative, empty, etc.) is never stat'ed or opened. Any web page can
+ * navigate to `screenpipe://view?path=<anything>`, so an unvalidated UNC
+ * path here would make this process open an SMB connection and present the
+ * user's NTLM credentials to a remote host.
  */
 async readViewerFile(path: string) : Promise<Result<ViewerContent, string>> {
     try {

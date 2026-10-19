@@ -901,6 +901,167 @@ impl From<ElementRow> for Element {
     }
 }
 
+// ─── Dedicated read-endpoint types (replacing the app's own `/raw_sql` use) ───
+//
+// Row/result shapes for the `DatabaseManager` query methods added alongside
+// `routes/activity.rs`, `routes/tags.rs`, `routes/search.rs` and
+// `routes/frames.rs`. See `.local/plans/dedicated-endpoints-contract-20261019.md`
+// for the full contract each shape here implements.
+
+/// Earliest/latest captured activity and the set of local-calendar days with
+/// any data, across frames, audio transcriptions and privacy notices. Backs
+/// `GET /activity/coverage`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityCoverage {
+    pub first_timestamp: Option<DateTime<Utc>>,
+    pub last_timestamp: Option<DateTime<Utc>>,
+    /// Ascending `YYYY-MM-DD` local-calendar days with any captured data.
+    pub days: Vec<String>,
+}
+
+/// One app's frame count over a lookback window. Backs `GET /activity/apps`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AppFrameCount {
+    pub app_name: String,
+    pub frame_count: i64,
+}
+
+/// One (app, window) pair from the flat `ROW_NUMBER() OVER
+/// (PARTITION BY app_name ...)` query behind `GET /activity/app-windows` —
+/// already limited to `windows_per_app` windows per app and ordered
+/// app-desc then window-desc. The caller (the HTTP route) nests these into
+/// the per-app tree shape the contract's JSON response describes; the DB
+/// layer intentionally returns the flat rows rather than pre-nesting them,
+/// matching how `routes/activity.rs` already consumes this method.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AppWindowUsage {
+    pub app_name: String,
+    /// `NULL` when the frame carried no window title.
+    pub window_name: Option<String>,
+    /// Frames for this specific (app, window) pair.
+    pub window_frame_count: i64,
+    /// Frames across all windows of this app in the lookback window.
+    pub app_frame_count: i64,
+    /// Distinct window titles observed for this app (not capped by
+    /// `windows_per_app`).
+    pub window_count: i64,
+}
+
+/// One browser domain's frame count. Backs `GET /activity/domains`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DomainCount {
+    pub domain: String,
+    pub frame_count: i64,
+}
+
+/// Which text column `get_text_snippets` reads from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSnippetSource {
+    /// `frames.full_text` (accessibility-derived text on the frame itself).
+    Accessibility,
+    /// `ocr_text.text` joined to `frames`.
+    Ocr,
+}
+
+/// A single captured-text snippet, nested inside [`TextSnippetPage`]. Not
+/// separately named in the endpoint contract.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize)]
+pub struct TextSnippetRow {
+    pub app_name: Option<String>,
+    pub window_name: Option<String>,
+    pub text: String,
+}
+
+/// A page of captured-text snippets plus the total matching row count
+/// (pre-limit). Backs `GET /activity/text-snippets`.
+///
+/// Privacy note: this carries captured screen text. Never log its contents —
+/// counts and row numbers only.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize)]
+pub struct TextSnippetPage {
+    pub total: i64,
+    pub snippets: Vec<TextSnippetRow>,
+}
+
+/// A UI input event summarized for timeline display: just enough to show
+/// "what was typed/clicked near this frame" without the full event record's
+/// position/button/element detail. Backs `GET /activity/ui-events`.
+///
+/// Distinct from [`UiEventRecord`]/[`UiEventRow`]: those carry the full
+/// ~20-field capture shape; no existing type matched this 5-field summary,
+/// so this is new rather than reused (checked per the endpoint contract).
+///
+/// Privacy note: `text_content` is captured keyboard/clipboard text. Never
+/// log it — counts and row numbers only.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UiEventSummary {
+    pub event_type: String,
+    pub text_content: Option<String>,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A vision tag and how many frames it's applied to. Backs `GET /tags/vision`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct VisionTagCount {
+    pub name: String,
+    pub frame_count: i64,
+}
+
+/// A frame matching one or more requested vision tags, with the subset of
+/// those tags actually applied to it. Backs `GET /tags/vision/frames`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize)]
+pub struct TaggedFrame {
+    pub frame_id: i64,
+    pub timestamp: DateTime<Utc>,
+    pub app_name: Option<String>,
+    pub tag_names: Vec<String>,
+}
+
+/// App facet row, nested inside [`SearchFacets`]. Backs the `apps` array of
+/// `GET /search/facets`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AppMatchCount {
+    pub app_name: String,
+    pub match_count: i64,
+}
+
+/// URL facet row, nested inside [`SearchFacets`]. Backs the `urls` array of
+/// `GET /search/facets`. Domain aggregation/`www.` stripping stay client-side.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UrlMatchCount {
+    pub browser_url: String,
+    pub match_count: i64,
+}
+
+/// Day facet row, nested inside [`SearchFacets`]. Backs the `days` array of
+/// `GET /search/facets`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DayMatchCount {
+    /// `YYYY-MM-DD`, UTC `DATE()` bucket (matches current behaviour).
+    pub day: String,
+    pub first_timestamp: DateTime<Utc>,
+    pub match_count: i64,
+}
+
+/// The three facet arrays for a sanitized FTS5 query. Backs `GET /search/facets`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize)]
+pub struct SearchFacets {
+    pub apps: Vec<AppMatchCount>,
+    pub urls: Vec<UrlMatchCount>,
+    pub days: Vec<DayMatchCount>,
+}
+
+/// The frame nearest a given timestamp, within a bounded window. Backs
+/// `GET /frames/nearest`.
+#[derive(OaSchema, Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct NearbyFrame {
+    pub frame_id: i64,
+    pub timestamp: DateTime<Utc>,
+    pub app_name: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

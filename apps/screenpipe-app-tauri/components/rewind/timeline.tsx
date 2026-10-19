@@ -698,7 +698,9 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 	useEffect(() => {
 		const getStartDateAndSet = async () => {
 			const data = await getStartDate();
-			if (!("error" in data)) {
+			// data is null on a fresh install with nothing captured yet — leave
+			// the default start date in place rather than erroring on `in null`.
+			if (data && !("error" in data)) {
 				setStartAndEndDates((prev) => ({
 					...prev,
 					start: data,

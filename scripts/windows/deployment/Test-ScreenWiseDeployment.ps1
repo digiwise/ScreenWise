@@ -175,6 +175,45 @@ $manifest.gui_executable=Join-Path $source 'screenpipe-app.exe'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 Reject { Read-DeploymentManifest $manifestPath $private } 'foreign executable path rejected'
 $manifest.gui_executable=Join-Path $binary 'screenpipe-app.exe'
+# backup_directory is deliberately not routed through Assert-DeploymentPath: the
+# point of this setting is that backups can live on another disk, outside the
+# repository .local root. Still reject every channel that would route the bytes
+# through an OS component other than the recorder itself.
+Reject { Assert-DeploymentBackupDirectory '' $binary } 'empty backup directory rejected'
+Check ((Assert-DeploymentBackupDirectory (Join-Path $root 'backups') $binary) -eq (Join-Path $root 'backups')) 'local backup directory accepted'
+Reject { Assert-DeploymentBackupDirectory '\\server\share\db.sqlite' $binary } 'UNC backup directory rejected'
+Reject { Assert-DeploymentBackupDirectory '//server/share/db.sqlite' $binary } 'forward-slash UNC backup directory rejected'
+Reject { Assert-DeploymentBackupDirectory '\\?\UNC\server\share\x' $binary } 'long UNC backup directory rejected'
+Reject { Assert-DeploymentBackupDirectory '\\host@SSL\DavWWWRoot\x' $binary } 'WebDAV @SSL backup directory rejected'
+Reject { Assert-DeploymentBackupDirectory '\\host\DavWWWRoot\x' $binary } 'WebDAV DavWWWRoot backup directory rejected'
+Reject { Assert-DeploymentBackupDirectory '\\.\PhysicalDrive0' $binary } 'device-namespace backup directory rejected'
+Check ((Assert-DeploymentBackupDirectory '\\?\C:\data\backup.sqlite' $binary) -ceq 'C:\data\backup.sqlite') 'long-path drive spelling normalised to plain drive path'
+Reject { Assert-DeploymentBackupDirectory 'backup.sqlite' $binary } 'relative backup directory rejected'
+Reject { Assert-DeploymentBackupDirectory $binary $binary } 'backup directory equal to binary directory rejected'
+Reject { Assert-DeploymentBackupDirectory (Join-Path $binary 'sub') $binary } 'backup directory inside binary directory rejected'
+$usedDriveLetters = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0,1).ToUpperInvariant() })
+$missingDrive = @('Z','Y','X','W','V','U','T','S','R','Q') | Where-Object { $_ -notin $usedDriveLetters } | Select-Object -First 1
+Reject { Assert-DeploymentBackupDirectory "${missingDrive}:\does-not-exist\backups" $binary } 'nonexistent drive backup directory rejected'
+$networkDrive = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Network' } | Select-Object -First 1)
+if ($networkDrive.Count) {
+    Reject { Assert-DeploymentBackupDirectory (Join-Path $networkDrive[0].Name.TrimEnd('\') 'backups') $binary } 'network-mapped drive backup directory rejected'
+} else {
+    # No `net use`-mapped drive exists on this machine to exercise the real
+    # DriveType check; Assert-DeploymentBackupDirectory's lexical checks above
+    # already cover UNC/WebDAV/device forms, so this is not a gap in those.
+    Write-Host 'skipped: network-mapped drive backup directory rejected (no network drive mapped on this host)'
+}
+$manifest.backup_directory = Join-Path $root 'backups'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+$withBackup = Read-DeploymentManifest $manifestPath $private
+Check ($withBackup.backup_directory -eq (Join-Path $root 'backups')) 'manifest backup directory round-trips'
+$manifest.backup_directory = '\\server\share\backups'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+Reject { Read-DeploymentManifest $manifestPath $private } 'manifest UNC backup directory rejected'
+$manifest.Remove('backup_directory')
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+$withoutBackup = Read-DeploymentManifest $manifestPath $private
+Check (!$withoutBackup.PSObject.Properties['backup_directory']) 'manifest without backup directory still works unchanged'
 $shared = Join-Path $private ('deployment-shared-tests\' + [Guid]::NewGuid().ToString('N') + '\pi-agent')
 $pkg = Join-Path $shared 'node_modules\@earendil-works\pi-coding-agent'
 $null = New-Item -ItemType Directory -Path (Join-Path $pkg 'dist') -Force

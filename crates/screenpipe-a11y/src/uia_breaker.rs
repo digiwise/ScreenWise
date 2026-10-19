@@ -1,10 +1,15 @@
 //! UIA circuit breaker (owner policy 2026-10-16).
 //!
 //! A UIA request is served on the target application's UI thread, and a
-//! client-side timeout does not stop that work. After a costly failure
-//! (timeout, node/depth/text limit or provider failure) the target receives no
-//! UIA calls of that scope for an increasing period — 30 s, 60 s, 120 s ...
-//! capped at 10 min — and three consecutive successes reset it.
+//! client-side timeout does not stop that work. After a costly outcome — a
+//! failure (timeout, node/depth/text limit or provider failure) or a success
+//! that took longer than the walk's cost budget — the target receives no UIA
+//! calls of that scope for an increasing period — 30 s, 60 s, 120 s ... capped
+//! at 10 min — and three consecutive cheap successes reset it. A slow success
+//! costs the target exactly what a slow failure does (owner decision
+//! 2026-10-19: a window with an enormous tree answered every walk in one to
+//! two seconds, so its backoff was reset by three "healthy" successes and the
+//! application stalled every 30 s indefinitely).
 //!
 //! `Walk` (capture-time tree walks) and `Text` (only their optional text phase,
 //! so a slow text phase degrades a window to OCR text without withholding its
@@ -38,6 +43,30 @@ pub(crate) enum Scope {
     Probe,
 }
 
+/// What one UIA call cost its target.
+///
+/// `CostlySuccess` returned a usable tree but blocked the target's UI thread
+/// for at least the walk's cost budget. It extends the backoff exactly as a
+/// failure does — the point of the breaker is the cost, not the verdict — but
+/// stays a distinct value so diagnostics never report it as an accessibility
+/// failure: its frame was admitted with full accessibility evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// Returned within the cost budget: counts towards resetting the gate.
+    Success,
+    /// Returned a tree, but slowly enough to hurt the target application.
+    CostlySuccess,
+    /// A costly failure: no usable tree, and the target paid for the attempt.
+    Failure,
+}
+
+impl Outcome {
+    /// Whether this outcome extends the target's backoff.
+    fn costly(self) -> bool {
+        !matches!(self, Outcome::Success)
+    }
+}
+
 /// Process-level targets (`Probe`) use window handle 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Target {
@@ -45,7 +74,7 @@ struct Target {
     hwnd: isize,
 }
 
-/// Backoff after `failures` consecutive costly failures (>= 1).
+/// Backoff after `failures` consecutive costly outcomes (>= 1).
 pub(crate) fn backoff(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(5);
     BASE_BACKOFF.saturating_mul(1 << doublings).min(MAX_BACKOFF)
@@ -58,6 +87,7 @@ fn shrunk_enough(area: u64, failed_at: u64) -> bool {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Gate {
+    /// Consecutive costly outcomes: failures and slow successes alike.
     failures: u32,
     successes: u32,
     open_until: Option<Instant>,
@@ -67,11 +97,13 @@ impl Gate {
     fn allows(&self, now: Instant) -> bool {
         self.open_until.is_none_or(|until| now >= until)
     }
-    fn fail(&mut self, now: Instant) {
+    /// Extend the backoff after a costly outcome: a failure or a slow success.
+    fn back_off(&mut self, now: Instant) {
         self.failures = self.failures.saturating_add(1);
         self.successes = 0;
         self.open_until = Some(now + backoff(self.failures));
     }
+    /// Count a cheap success; only these reset the failure streak.
     fn succeed(&mut self) {
         self.successes = self.successes.saturating_add(1);
         if self.successes >= RESET_AFTER_SUCCESSES {
@@ -88,7 +120,7 @@ struct Entry {
     walk: Gate,
     text: Gate,
     probe: Gate,
-    /// Window area when it last failed (window targets only).
+    /// Window area at its last costly outcome (window targets only).
     failure_area: Option<u64>,
     last_seen: Option<Instant>,
 }
@@ -143,22 +175,25 @@ impl Breaker {
         &mut self,
         target: Target,
         scope: Scope,
-        costly_failure: bool,
+        outcome: Outcome,
         area: Option<u64>,
         now: Instant,
     ) {
-        if !costly_failure && !self.entries.contains_key(&target) {
+        if !outcome.costly() && !self.entries.contains_key(&target) {
             return;
         }
         self.evict(now);
         let entry = self.entries.entry(target).or_default();
         entry.last_seen = Some(now);
-        if costly_failure {
-            entry.gate_mut(scope).fail(now);
+        if outcome.costly() {
+            entry.gate_mut(scope).back_off(now);
             if area.is_some() {
                 entry.failure_area = area;
             }
             OPENINGS.fetch_add(1, Ordering::Relaxed);
+            if outcome == Outcome::CostlySuccess {
+                COSTLY_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            }
         } else {
             entry.gate_mut(scope).succeed();
         }
@@ -316,6 +351,8 @@ pub(crate) fn long_walk_in_flight(pid: u32, age: Duration) -> bool {
 
 static BREAKER: OnceLock<Mutex<Breaker>> = OnceLock::new();
 static OPENINGS: AtomicU64 = AtomicU64::new(0);
+/// Openings caused by a slow success rather than a failure.
+static COSTLY_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static SHRINK_RELEASES: AtomicU64 = AtomicU64::new(0);
 static WALK_SKIPS: AtomicU64 = AtomicU64::new(0);
 static TEXT_SKIPS: AtomicU64 = AtomicU64::new(0);
@@ -343,17 +380,11 @@ pub(crate) fn record_window(
     hwnd: isize,
     area: Option<u64>,
     scope: Scope,
-    costly_failure: bool,
+    outcome: Outcome,
 ) {
     if pid != 0 {
         with_breaker(|breaker| {
-            breaker.record(
-                Target { pid, hwnd },
-                scope,
-                costly_failure,
-                area,
-                Instant::now(),
-            )
+            breaker.record(Target { pid, hwnd }, scope, outcome, area, Instant::now())
         });
     }
 }
@@ -366,13 +397,19 @@ pub(crate) fn allows_probe(pid: u32) -> bool {
         })
 }
 
+/// Probes either answer cheaply or fail; they have no slow-success case.
 pub(crate) fn record_probe(pid: u32, costly_failure: bool) {
     if pid != 0 {
+        let outcome = if costly_failure {
+            Outcome::Failure
+        } else {
+            Outcome::Success
+        };
         with_breaker(|breaker| {
             breaker.record(
                 Target { pid, hwnd: 0 },
                 Scope::Probe,
-                costly_failure,
+                outcome,
                 None,
                 Instant::now(),
             )
@@ -406,6 +443,7 @@ pub(crate) fn metrics_snapshot() -> serde_json::Value {
     });
     serde_json::json!({
         "breaker_openings": OPENINGS.load(Ordering::Relaxed),
+        "breaker_costly_successes": COSTLY_SUCCESSES.load(Ordering::Relaxed),
         "breaker_shrink_releases": SHRINK_RELEASES.load(Ordering::Relaxed),
         "breaker_walk_skips": WALK_SKIPS.load(Ordering::Relaxed),
         "breaker_text_skips": TEXT_SKIPS.load(Ordering::Relaxed),
@@ -436,7 +474,7 @@ mod tests {
         let mut breaker = Breaker::default();
         let big = window(10, 0x100);
         let t0 = Instant::now();
-        breaker.record(big, Scope::Walk, true, Some(1_000), t0);
+        breaker.record(big, Scope::Walk, Outcome::Failure, Some(1_000), t0);
         assert!(!breaker.allows(big, Scope::Walk, None, t0 + Duration::from_secs(29)));
         assert!(
             breaker.allows(big, Scope::Text, None, t0),
@@ -452,21 +490,83 @@ mod tests {
         );
         let t1 = t0 + Duration::from_secs(30);
         assert!(breaker.allows(big, Scope::Walk, None, t1));
-        breaker.record(big, Scope::Walk, true, Some(1_000), t1);
+        breaker.record(big, Scope::Walk, Outcome::Failure, Some(1_000), t1);
         assert!(!breaker.allows(big, Scope::Walk, None, t1 + Duration::from_secs(59)));
         let t2 = t1 + Duration::from_secs(60);
         // Two successes do not forget the failure streak...
-        breaker.record(big, Scope::Walk, false, None, t2);
-        breaker.record(big, Scope::Walk, false, None, t2);
-        breaker.record(big, Scope::Walk, true, Some(1_000), t2);
+        breaker.record(big, Scope::Walk, Outcome::Success, None, t2);
+        breaker.record(big, Scope::Walk, Outcome::Success, None, t2);
+        breaker.record(big, Scope::Walk, Outcome::Failure, Some(1_000), t2);
         assert!(!breaker.allows(big, Scope::Walk, None, t2 + Duration::from_secs(119)));
         // ...three in a row do.
         let t3 = t2 + Duration::from_secs(120);
         for _ in 0..3 {
-            breaker.record(big, Scope::Walk, false, None, t3);
+            breaker.record(big, Scope::Walk, Outcome::Success, None, t3);
         }
-        breaker.record(big, Scope::Walk, true, Some(1_000), t3);
+        breaker.record(big, Scope::Walk, Outcome::Failure, Some(1_000), t3);
         assert!(breaker.allows(big, Scope::Walk, None, t3 + Duration::from_secs(30)));
+    }
+
+    /// The bug this fixes: a window whose tree is so large that every walk
+    /// takes seconds answered successfully, so three of those slow walks reset
+    /// the gate and the target was walked again every 30 s forever.
+    #[test]
+    fn slow_successes_keep_doubling_the_backoff_instead_of_resetting_it() {
+        let mut breaker = Breaker::default();
+        let heavy = window(30, 0x400);
+        let t0 = Instant::now();
+        let costly_before = COSTLY_SUCCESSES.load(Ordering::Relaxed);
+        breaker.record(heavy, Scope::Walk, Outcome::CostlySuccess, Some(1_000), t0);
+        // A slow success opens the gate exactly as a failure does.
+        assert!(!breaker.allows(heavy, Scope::Walk, None, t0 + Duration::from_secs(29)));
+        assert!(breaker.allows(heavy, Scope::Walk, None, t0 + Duration::from_secs(30)));
+        // Three more never reset it: each doubles the period.
+        let mut at = t0;
+        for expected in [60u64, 120, 240] {
+            at += Duration::from_secs(expected / 2);
+            breaker.record(heavy, Scope::Walk, Outcome::CostlySuccess, Some(1_000), at);
+            assert!(!breaker.allows(
+                heavy,
+                Scope::Walk,
+                None,
+                at + Duration::from_secs(expected - 1)
+            ));
+            assert!(breaker.allows(heavy, Scope::Walk, None, at + Duration::from_secs(expected)));
+        }
+        // Only cheap successes recover: three of them reset the streak, so the
+        // next costly outcome starts again at the base period.
+        for _ in 0..RESET_AFTER_SUCCESSES {
+            breaker.record(heavy, Scope::Walk, Outcome::Success, None, at);
+        }
+        breaker.record(heavy, Scope::Walk, Outcome::CostlySuccess, Some(1_000), at);
+        assert!(!breaker.allows(heavy, Scope::Walk, None, at + Duration::from_secs(29)));
+        assert!(breaker.allows(heavy, Scope::Walk, None, at + Duration::from_secs(30)));
+        // A slow success is still a success for the frame, so it is counted
+        // separately from a hard failure in the diagnostics.
+        assert!(
+            COSTLY_SUCCESSES.load(Ordering::Relaxed) >= costly_before + 5,
+            "each slow success is counted as one"
+        );
+    }
+
+    #[test]
+    fn a_slow_success_mixed_into_a_streak_does_not_reset_it() {
+        let mut breaker = Breaker::default();
+        let heavy = window(31, 0x500);
+        let t0 = Instant::now();
+        breaker.record(heavy, Scope::Walk, Outcome::Failure, Some(1_000), t0);
+        // Two cheap successes and one slow one: the slow walk breaks the run
+        // of successes and extends the backoff to the second step.
+        breaker.record(heavy, Scope::Walk, Outcome::Success, None, t0);
+        breaker.record(heavy, Scope::Walk, Outcome::Success, None, t0);
+        breaker.record(heavy, Scope::Walk, Outcome::CostlySuccess, Some(1_000), t0);
+        assert!(!breaker.allows(heavy, Scope::Walk, None, t0 + Duration::from_secs(59)));
+        assert!(breaker.allows(heavy, Scope::Walk, None, t0 + Duration::from_secs(60)));
+        // A third cheap success after it does not inherit the earlier two.
+        let t1 = t0 + Duration::from_secs(60);
+        breaker.record(heavy, Scope::Walk, Outcome::Success, None, t1);
+        breaker.record(heavy, Scope::Walk, Outcome::Failure, Some(1_000), t1);
+        assert!(!breaker.allows(heavy, Scope::Walk, None, t1 + Duration::from_secs(119)));
     }
 
     #[test]
@@ -474,19 +574,19 @@ mod tests {
         let mut breaker = Breaker::default();
         let list = window(20, 0x300);
         let t0 = Instant::now();
-        breaker.record(list, Scope::Walk, true, Some(1_000), t0);
-        breaker.record(list, Scope::Text, true, Some(1_000), t0);
+        breaker.record(list, Scope::Walk, Outcome::Failure, Some(1_000), t0);
+        breaker.record(list, Scope::Text, Outcome::Failure, Some(1_000), t0);
         // Shrinking by less than a quarter keeps it backed off.
         assert!(!breaker.allows(list, Scope::Walk, Some(751), t0));
         // Collapsed to the bar: released at once, both scopes.
         assert!(breaker.allows(list, Scope::Walk, Some(750), t0));
         assert!(breaker.allows(list, Scope::Text, Some(750), t0));
         // Expanded again and failing again: the second failure's 60 s applies.
-        breaker.record(list, Scope::Walk, true, Some(1_000), t0);
+        breaker.record(list, Scope::Walk, Outcome::Failure, Some(1_000), t0);
         assert!(!breaker.allows(list, Scope::Walk, None, t0 + Duration::from_secs(59)));
         assert!(breaker.allows(list, Scope::Walk, None, t0 + Duration::from_secs(60)));
         // Unknown size never releases.
-        breaker.record(list, Scope::Walk, true, Some(1_000), t0);
+        breaker.record(list, Scope::Walk, Outcome::Failure, Some(1_000), t0);
         assert!(!breaker.allows(list, Scope::Walk, None, t0));
     }
 
@@ -535,10 +635,14 @@ mod tests {
     fn healthy_targets_are_not_tracked_and_the_table_is_bounded() {
         let mut breaker = Breaker::default();
         let now = Instant::now();
-        breaker.record(window(1, 1), Scope::Walk, false, None, now);
+        breaker.record(window(1, 1), Scope::Walk, Outcome::Success, None, now);
         assert!(breaker.entries.is_empty());
+        // A slow success of an untracked window is tracked at once.
+        breaker.record(window(2, 1), Scope::Walk, Outcome::CostlySuccess, None, now);
+        assert_eq!(breaker.entries.len(), 1);
+        breaker.entries.clear();
         for pid in 1..=(MAX_TRACKED_TARGETS as u32 * 2) {
-            breaker.record(window(pid, 1), Scope::Walk, true, Some(10), now);
+            breaker.record(window(pid, 1), Scope::Walk, Outcome::Failure, Some(10), now);
         }
         assert!(breaker.entries.len() <= MAX_TRACKED_TARGETS);
     }

@@ -127,7 +127,7 @@ eventkit-rs = { git = "https://github.com/divanshu-go/eventkit-rs", rev = "9dd52
 # features may layer CoreML or DirectML on top. No CUDA / Vulkan / GPU-vendor
 # SDKs are bundled.
 screenpipe-redact = { path = "../../../crates/screenpipe-redact", features = ["onnx-cpu"] }
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio"] }
 image = "0.25.5"
 
 # jemalloc — aggressively returns freed pages to OS, reducing RSS bloat

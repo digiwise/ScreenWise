@@ -422,7 +422,10 @@ mod tests {
         }
         assert_eq!(registry.unknown.attempts, 7);
         assert!(registry.processes.is_empty());
-        assert_eq!(registry.total.reason_counts[9], 7);
+        // `unknown` is the fallback bucket and is always last, so derive its
+        // index: hard-coding it silently broke when a reason code was inserted.
+        let unknown = REASON_CODES.len() - 1;
+        assert_eq!(registry.total.reason_counts[unknown], 7);
     }
 
     #[test]
@@ -609,6 +612,9 @@ mod tests {
         let registry = registry.lock().unwrap();
         assert_eq!(registry.total.attempts, 800);
         assert_eq!(registry.processes["safe.exe"].failed, 800);
-        assert_eq!(registry.total.reason_counts[9], 800);
+        // `unknown` is the fallback bucket and is always last, so derive its
+        // index: hard-coding it silently broke when a reason code was inserted.
+        let unknown = REASON_CODES.len() - 1;
+        assert_eq!(registry.total.reason_counts[unknown], 800);
     }
 }

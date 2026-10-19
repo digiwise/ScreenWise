@@ -14,15 +14,16 @@ use tracing::{debug, error, info};
 use crate::{
     hot_frame_cache::HotFrameCache,
     routes::{
+        activity::{
+            activity_app_windows_handler, activity_apps_handler, activity_coverage_handler,
+            activity_domains_handler, activity_text_snippets_handler, activity_ui_events_handler,
+        },
         activity_summary::get_activity_summary,
         audio::{
             api_list_audio_devices, audio_device_status, start_audio, start_audio_device,
             stop_audio, stop_audio_device,
         },
-        content::{
-            add_tags, add_to_database, execute_raw_sql, get_tags_batch, merge_frames_handler,
-            remove_tags, validate_media_handler,
-        },
+        content::{add_to_database, execute_raw_sql, merge_frames_handler, validate_media_handler},
         data::{
             backup_handler, checkpoint_handler, delete_time_range_handler, evict_media_handler,
             storage_preview_handler,
@@ -30,7 +31,8 @@ use crate::{
         elements::{get_frame_elements, search_elements},
         frames::{
             get_frame_context, get_frame_data, get_frame_metadata, get_frame_text_data,
-            get_next_valid_frame, run_frame_ocr,
+            get_nearest_frame_handler, get_next_valid_frame, get_recent_frames_handler,
+            run_frame_ocr,
         },
         health::{
             api_list_monitors, api_vision_status, audio_metrics_handler, health_check,
@@ -47,13 +49,17 @@ use crate::{
             list_memories_handler, list_memory_tags_handler, update_memory_handler,
         },
         retranscribe::retranscribe_meeting_handler,
-        search::{keyword_search_handler, search},
+        search::{keyword_search_handler, search, search_facets_handler},
         speakers::{
             delete_speaker_handler, get_similar_speakers_handler, get_unnamed_speakers_handler,
             mark_as_hallucination_handler, merge_speakers_handler, reassign_speaker_handler,
             search_speakers_handler, undo_speaker_reassign_handler, update_speaker_handler,
         },
         streaming::stream_frames_handler,
+        tags::{
+            add_tags, get_tags_batch, list_frames_with_vision_tags_handler,
+            list_vision_tags_handler, remove_tags,
+        },
         websocket::{
             ws_events_handler, ws_health_handler, ws_meeting_status_handler, ws_metrics_handler,
         },
@@ -76,28 +82,95 @@ use tower_http::{
     trace::DefaultMakeSpan,
 };
 
-/// Bind a TcpListener with SO_REUSEADDR on Windows to avoid TIME_WAIT port conflicts.
-/// On non-Windows platforms, falls back to the standard tokio bind.
+/// How long `bind_listener` keeps retrying an in-use port on Windows.
+///
+/// `SO_EXCLUSIVEADDRUSE` has a documented cost: unlike `SO_REUSEADDR`, a new
+/// listening bind is refused with `WSAEADDRINUSE` while any socket accepted by
+/// the previous run is still in TIME_WAIT. Stopping and immediately restarting
+/// the app is a normal operation here (the launcher does exactly that), so a
+/// bare bind would intermittently fail at startup. Retrying briefly covers the
+/// usual case without masking a real conflict: a second ScreenWise instance
+/// holding the port keeps the port for as long as it runs, so it still ends in
+/// the same error, only a few seconds later. Windows' TIME_WAIT delay can
+/// exceed this window, so a restart after heavy API traffic can still fail;
+/// that is reported rather than retried indefinitely.
+#[cfg(target_os = "windows")]
+const BIND_RETRY_WINDOW: Duration = Duration::from_secs(15);
+
+#[cfg(target_os = "windows")]
+const BIND_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// Bind a TcpListener, claiming the port exclusively on Windows.
+///
+/// Windows `SO_REUSEADDR` lets an unrelated process bind the same address and
+/// port while we are listening, and the winner of a later connection is not
+/// defined, so another local program could receive our API traffic. We ask for
+/// `SO_EXCLUSIVEADDRUSE` instead, which refuses that hijack. It does not share
+/// `SO_REUSEADDR`'s tolerance of our own previous run's TIME_WAIT sockets, so
+/// an in-use port is retried for `BIND_RETRY_WINDOW` before giving up. On
+/// non-Windows platforms, falls back to the standard tokio bind.
 pub async fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     #[cfg(target_os = "windows")]
     {
-        use socket2::{Domain, Protocol, Socket, Type};
-        let domain = if addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
-        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-        socket.set_reuse_address(true)?;
-        socket.set_nonblocking(true)?;
-        socket.bind(&addr.into())?;
-        socket.listen(1024)?;
-        TcpListener::from_std(socket.into())
+        let deadline = std::time::Instant::now() + BIND_RETRY_WINDOW;
+        loop {
+            match bind_exclusive_listener(addr) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && std::time::Instant::now() < deadline =>
+                {
+                    debug!(
+                        "Local API port {} is still in use; retrying the exclusive bind",
+                        addr.port()
+                    );
+                    tokio::time::sleep(BIND_RETRY_DELAY).await;
+                }
+                result => return result,
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
         TcpListener::bind(addr).await
     }
+}
+
+/// One exclusive-bind attempt. Separate so `bind_listener` can retry it.
+#[cfg(target_os = "windows")]
+fn bind_exclusive_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    // socket2 exposes no SO_EXCLUSIVEADDRUSE setter, so set it directly.
+    // It must be set before bind() to have any effect.
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Networking::WinSock::{
+            setsockopt, SOCKET, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+        };
+        let enable = 1i32.to_ne_bytes();
+        // SAFETY: the socket stays owned by `socket` for the whole call and
+        // `enable` outlives it; we only read the returned status code.
+        let status = unsafe {
+            setsockopt(
+                SOCKET(socket.as_raw_socket() as usize),
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                Some(&enable),
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
 }
 
 // Re-export types from route modules for backward compatibility
@@ -146,6 +219,11 @@ pub struct AppState {
     pub audio_manager: Arc<AudioManager>,
     pub app_start_time: DateTime<Utc>,
     pub screenpipe_dir: PathBuf,
+    /// Local directories a caller-supplied backup/export destination may be
+    /// inside. Index 0 is `<screenpipe_dir>/backups`; a second entry is
+    /// present when `SCREENWISE_BACKUP_DIR` names a usable local directory.
+    /// Resolved once at startup — not re-read per request.
+    pub output_roots: Vec<PathBuf>,
     pub vision_disabled: bool,
     pub audio_disabled: bool,
     pub frame_cache: Option<Arc<FrameCache>>,
@@ -310,7 +388,7 @@ impl SCServer {
         // Create the OpenAPI server
         let app = self.create_router().await;
 
-        // Create the listener (SO_REUSEADDR on Windows to avoid TIME_WAIT conflicts)
+        // Create the listener (SO_EXCLUSIVEADDRUSE on Windows, see bind_listener)
         let listener = bind_listener(self.addr).await?;
         info!("Server listening on {}", self.addr);
 
@@ -376,6 +454,26 @@ impl SCServer {
             }
         });
 
+        // Resolve the destination roots a caller-supplied backup/export path
+        // may be inside, once at startup (F2). A misconfigured
+        // `SCREENWISE_BACKUP_DIR` is visible as a startup warning rather than
+        // a silent fallback; only the rejection reason is logged, never the
+        // configured path itself.
+        let output_roots = {
+            let mut roots = vec![self.screenpipe_dir.join("backups")];
+            match screenpipe_core::paths::configured_output_dir() {
+                Ok(Some(dir)) => roots.push(dir),
+                Ok(None) => {}
+                Err(rejection) => {
+                    tracing::warn!(
+                        "SCREENWISE_BACKUP_DIR rejected ({}); using the default backup directory only",
+                        rejection.message()
+                    );
+                }
+            }
+            roots
+        };
+
         let api_db = Arc::new(self.db.api_reads());
         let app_state = Arc::new(AppState {
             db: api_db.clone(),
@@ -383,6 +481,7 @@ impl SCServer {
             audio_manager: self.audio_manager.clone(),
             app_start_time: Utc::now(),
             screenpipe_dir: self.screenpipe_dir.clone(),
+            output_roots,
             vision_disabled: self.vision_disabled,
             audio_disabled: self.audio_disabled,
             frame_cache: match FrameCache::new(
@@ -518,6 +617,20 @@ impl SCServer {
             .post("/audio/start", start_audio)
             .post("/audio/stop", stop_audio)
             .get("/search/keyword", keyword_search_handler)
+            // Dedicated read endpoints replacing the app's own hand-built
+            // /raw_sql queries — see
+            // .local/plans/dedicated-endpoints-contract-20261019.md
+            .get("/activity/coverage", activity_coverage_handler)
+            .get("/activity/apps", activity_apps_handler)
+            .get("/activity/app-windows", activity_app_windows_handler)
+            .get("/activity/domains", activity_domains_handler)
+            .get("/activity/text-snippets", activity_text_snippets_handler)
+            .get("/activity/ui-events", activity_ui_events_handler)
+            .get("/tags/vision", list_vision_tags_handler)
+            .get("/tags/vision/frames", list_frames_with_vision_tags_handler)
+            .get("/search/facets", search_facets_handler)
+            .get("/frames/nearest", get_nearest_frame_handler)
+            .get("/frames/recent", get_recent_frames_handler)
             .post("/audio/device/start", start_audio_device)
             .post("/audio/device/stop", stop_audio_device)
             .get("/audio/device/status", audio_device_status)
@@ -542,7 +655,7 @@ impl SCServer {
             .get("/data/storage-preview", storage_preview_handler)
             // Database backup & checkpoint
             .post("/data/checkpoint", checkpoint_handler)
-            .get("/data/backup", backup_handler)
+            .post("/data/backup", backup_handler)
             .route_yaml_spec("/openapi.yaml")
             .route_json_spec("/openapi.json")
             .freeze();
@@ -876,6 +989,70 @@ mod access_boundary_tests {
             body,
             serde_json::json!({"status": "ok", "status_code": 200, "message": "API ready"})
         );
+    }
+}
+
+#[cfg(test)]
+mod tag_route_dispatch_tests {
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Method, Request, StatusCode},
+        routing::{get, post},
+        Router,
+    };
+    use tower::ServiceExt;
+
+    async fn marker(name: &'static str) -> &'static str {
+        name
+    }
+
+    /// The dedicated-endpoints contract adds `GET /tags/vision` and
+    /// `GET /tags/vision/frames` alongside the pre-existing
+    /// `POST /tags/vision/batch` and the generic
+    /// `POST|DELETE /tags/:content_type/:id`. axum prefers a more specific
+    /// literal segment over a dynamic one, so none of these should shadow
+    /// each other — mirrors the exact path literals wired in `create_router`
+    /// without needing the full `AppState`.
+    #[tokio::test]
+    async fn vision_tag_routes_do_not_shadow_each_other() {
+        let router = Router::new()
+            .route("/tags/vision", get(|| marker("list_vision_tags")))
+            .route("/tags/vision/batch", post(|| marker("get_tags_batch")))
+            .route(
+                "/tags/vision/frames",
+                get(|| marker("list_frames_with_vision_tags")),
+            )
+            .route(
+                "/tags/:content_type/:id",
+                post(|| marker("add_tags")).delete(|| marker("remove_tags")),
+            );
+
+        for (method, uri, expected_body) in [
+            (Method::GET, "/tags/vision", "list_vision_tags"),
+            (
+                Method::GET,
+                "/tags/vision/frames",
+                "list_frames_with_vision_tags",
+            ),
+            (Method::POST, "/tags/vision/batch", "get_tags_batch"),
+            (Method::POST, "/tags/vision/1", "add_tags"),
+            (Method::DELETE, "/tags/vision/1", "remove_tags"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body, expected_body.as_bytes(), "{method} {uri}");
+        }
     }
 }
 

@@ -130,6 +130,32 @@ fn privacy_restart_allowed(restarts: u32, start: Instant, deadline: Instant, now
 /// errors from one window kept a whole editor withheld for minutes).
 const QUICK_PROVIDER_ERROR: Duration = Duration::from_millis(250);
 
+/// A walk that returns a tree only after this long is treated as a costly
+/// outcome, not a healthy success (owner decision 2026-10-19).
+///
+/// The cost of a walk is paid on the target application's UI thread, so it is
+/// invisible in this process's own CPU use: measured walks of one enormous
+/// accessibility tree took 750 ms to 2 s each and made the inspected
+/// application unresponsive every 30 s, while succeeding every time and so
+/// resetting the breaker. The budget sits below that observed harmful range
+/// and below half of `TOTAL_DEADLINE` (1025 ms), the point at which we stop
+/// waiting for a walk (the provider keeps working on the target's thread, so
+/// that is not a bound on what the target actually spends), while leaving
+/// untouched the ordinary windows that answer in tens of milliseconds. It is
+/// deliberately above the ~100 ms at which a stall becomes perceptible: a walk
+/// between the two costs the target one noticeable hitch, and backing those
+/// windows off would withhold their frames (`uia_backoff`) for no
+/// proportionate gain.
+///
+/// The figure is a judgement, not a measurement: `elapsed` is timed in this
+/// process, so it includes our own handling and only approximates what the
+/// target spent. One slow walk therefore withholds that window's frames for
+/// at least 30 s, which is a real reduction in coverage for a window that was
+/// merely transiently slow. Watch `breaker_costly_successes` against
+/// `breaker_openings` on the next trial before trusting the number; see
+/// `docs/UIA_TIMING_TRIAL.md`.
+const COSTLY_WALK_BUDGET: Duration = Duration::from_millis(400);
+
 /// Costly provider outcomes that open the per-process circuit breaker. Work
 /// limits always count; a provider error counts only when it was slow (for
 /// example a .NET provider timing out), measured over the whole walk.
@@ -145,34 +171,46 @@ fn costly_stop(
     }
 }
 
-/// `(walk, text)` breaker outcomes of one walk: `Some(true)` a costly failure,
-/// `Some(false)` a success, `None` nothing to record.
+/// `(walk, text)` breaker outcomes of one walk; `None` is nothing to record.
+///
+/// A walk that returned a tree is a success only if it stayed within
+/// `COSTLY_WALK_BUDGET`; a slower one is a `CostlySuccess`, which extends the
+/// window's backoff like a failure without being reported as one. The optional
+/// text phase has its own, much smaller deadline, so the whole walk's duration
+/// is not charged to it: its gate only follows its own costly stops.
 fn breaker_outcomes(
     result: &Result<TreeWalkResult>,
     elapsed: Duration,
-) -> (Option<bool>, Option<bool>) {
+) -> (Option<Outcome>, Option<Outcome>) {
     match result {
         Ok(TreeWalkResult::Found(snapshot)) => {
             let text = snapshot
                 .windows_capture_verification
                 .as_ref()
                 .and_then(|verification| match &verification.text {
-                    WindowsTextAcquisition::Complete => Some(false),
+                    WindowsTextAcquisition::Complete => Some(Outcome::Success),
                     WindowsTextAcquisition::Unavailable(reason)
                         if costly_stop(*reason, elapsed) =>
                     {
-                        Some(true)
+                        Some(Outcome::Failure)
                     }
                     _ => None,
                 });
-            (Some(false), text)
+            let walk = if elapsed >= COSTLY_WALK_BUDGET {
+                Outcome::CostlySuccess
+            } else {
+                Outcome::Success
+            };
+            (Some(walk), text)
         }
-        Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => {
-            (costly_stop(failure.cause, elapsed).then_some(true), None)
-        }
-        Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => {
-            (costly_stop(*reason, elapsed).then_some(true), None)
-        }
+        Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityRetrievalFailed(failure))) => (
+            costly_stop(failure.cause, elapsed).then_some(Outcome::Failure),
+            None,
+        ),
+        Ok(TreeWalkResult::Skipped(SkipReason::AccessibilityIncomplete(reason))) => (
+            costly_stop(*reason, elapsed).then_some(Outcome::Failure),
+            None,
+        ),
         _ => (None, None),
     }
 }
@@ -198,6 +236,7 @@ fn is_extension_url(value: &str) -> bool {
         || value.starts_with("ms-browser-extension://")
 }
 
+use crate::uia_breaker::Outcome;
 use anyhow::Result;
 use chrono::Utc;
 use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
@@ -1376,22 +1415,22 @@ impl WindowsTreeWalker {
         }
         if let Some(pid) = candidate_pid {
             let (walk, text) = breaker_outcomes(&result, start.elapsed());
-            if let Some(costly) = walk {
+            if let Some(outcome) = walk {
                 crate::uia_breaker::record_window(
                     pid,
                     candidate_hwnd.unwrap_or_default(),
                     candidate_area,
                     crate::uia_breaker::Scope::Walk,
-                    costly,
+                    outcome,
                 );
             }
-            if let Some(costly) = text {
+            if let Some(outcome) = text {
                 crate::uia_breaker::record_window(
                     pid,
                     candidate_hwnd.unwrap_or_default(),
                     candidate_area,
                     crate::uia_breaker::Scope::Text,
-                    costly,
+                    outcome,
                 );
             }
         }
@@ -2518,7 +2557,7 @@ mod tests {
         ] {
             assert_eq!(
                 breaker_outcomes(&failure(cause), Duration::from_secs(1)),
-                (Some(true), None)
+                (Some(Outcome::Failure), None)
             );
         }
         for cause in [R::Backoff, R::Initialization] {
@@ -2532,11 +2571,11 @@ mod tests {
         assert_eq!(breaker_outcomes(&failure(R::Provider), quick), (None, None));
         assert_eq!(
             breaker_outcomes(&failure(R::Timeout), quick),
-            (Some(true), None)
+            (Some(Outcome::Failure), None)
         );
         assert_eq!(
             breaker_outcomes(&failure(R::Nodes), quick),
-            (Some(true), None)
+            (Some(Outcome::Failure), None)
         );
         assert_eq!(
             breaker_outcomes(
@@ -2545,7 +2584,7 @@ mod tests {
                 )),
                 Duration::from_secs(1),
             ),
-            (Some(true), None)
+            (Some(Outcome::Failure), None)
         );
         assert_eq!(
             breaker_outcomes(
@@ -2553,6 +2592,63 @@ mod tests {
                 Duration::from_secs(1)
             ),
             (None, None)
+        );
+    }
+
+    /// A walk of a heavy tree can succeed and still stall the target
+    /// application, so its duration decides whether it was healthy.
+    #[test]
+    fn a_slow_successful_walk_is_a_costly_success_and_a_quick_one_is_not() {
+        use screenpipe_config::capture_diagnostics::AccessibilityStopReason as R;
+        let found = |text| {
+            Ok(TreeWalkResult::Found(TreeSnapshot {
+                app_name: "synthetic.exe".into(),
+                window_name: "Synthetic".into(),
+                text_content: String::new(),
+                nodes: Vec::new(),
+                browser_url: None,
+                document_path: None,
+                timestamp: Utc::now(),
+                node_count: 1,
+                walk_duration: Duration::from_secs(2),
+                content_hash: 0,
+                simhash: 0,
+                truncated: false,
+                truncation_reason: crate::tree::TruncationReason::None,
+                max_depth_reached: 0,
+                windows_capture_verification: Some(WindowsCaptureVerification {
+                    privacy: WindowsPrivacyVerification::Verified,
+                    text,
+                }),
+            }))
+        };
+        let complete = found(WindowsTextAcquisition::Complete);
+        assert_eq!(
+            breaker_outcomes(&complete, COSTLY_WALK_BUDGET - Duration::from_millis(1)),
+            (Some(Outcome::Success), Some(Outcome::Success)),
+            "a walk within the budget stays healthy"
+        );
+        assert_eq!(
+            breaker_outcomes(&complete, COSTLY_WALK_BUDGET),
+            (Some(Outcome::CostlySuccess), Some(Outcome::Success)),
+            "the whole walk's cost is charged to the walk, not its text phase"
+        );
+        assert_eq!(
+            breaker_outcomes(&complete, Duration::from_secs(2)),
+            (Some(Outcome::CostlySuccess), Some(Outcome::Success))
+        );
+        // A slow walk whose text phase also hit a costly limit: the tree was
+        // still returned, so the walk is a costly success, never a failure.
+        assert_eq!(
+            breaker_outcomes(
+                &found(WindowsTextAcquisition::Unavailable(R::AggregateText)),
+                Duration::from_secs(2),
+            ),
+            (Some(Outcome::CostlySuccess), Some(Outcome::Failure))
+        );
+        assert!(
+            COSTLY_WALK_BUDGET < TOTAL_DEADLINE / 2,
+            "a walk that may run to the total deadline must be able to exceed the budget"
         );
     }
 
