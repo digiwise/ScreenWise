@@ -425,6 +425,7 @@ These specific causes remain available in frame/status diagnostics:
 | `uia_provider_failure` | A non-timeout native provider/timeout-configuration/navigation request failed. |
 | `uia_backoff` | This UIA context's provider retry cooldown is active. |
 | `uia_initialization_failed` | UI Automation initialization failed after native window checks. |
+| `uia_walk_disabled` | Tree walking is switched off by configuration (`accessibilityWalkDisabled`); no provider was contacted, so the target application built no accessibility tree for the attempt. |
 
 The typed cause survives tree-walk results, per-frame JSON stored atomically in
 SQLite, current status and persisted notice diagnostics returned by the API.
@@ -649,3 +650,43 @@ reason `content_screening`, and `accessibility.processing` may be
 `screened_fail_open`. The field is omitted when screening is disabled, so earlier
 metadata is unchanged. Semantics, limits and permitted aggregate queries are in
 [content screening](CONTENT_SCREENING.md).
+
+## Accessibility tree walking switched off (2026-10-19)
+
+Owner decision, accepting the privacy reduction: the settings-only
+`accessibilityWalkDisabled` stops every accessibility-hierarchy acquisition.
+There is no settings UI; the main window carries a standing, non-dismissible
+banner for as long as the mode is on.
+
+Why it exists: building an accessibility tree is work the *inspected*
+application performs, so its cost lands outside ScreenWise's own accounting. On
+one observed large web document a single bulk acquisition blocked for 819 ms and
+its event teardown for 1,331 ms inside the target, while ScreenWise's UIA
+accounting for that process showed 0.4% of one core. A bounded structural probe
+of that window passed 1,500 nodes without finishing. The existing per-window
+breaker limits recurrence but cannot prevent it: it opens on limit-exceeded
+outcomes, so a slow *success* records as healthy, sets no cooldown, and three of
+them reset the failure count.
+
+What changes when it is on. The walker reports `uia_walk_disabled` after the
+native window-policy checks, so exclusions still decide first and no provider is
+contacted. Because no window can then produce hierarchy evidence for privacy
+admission, the per-window `uiaFailOpenWindows` list stops being the gate: every
+window with a verified identity falls back to in-memory content screening, which
+is heuristic. The mode therefore requires `contentScreeningEnabled` and an
+identified app; an empty or `unknown` app name is still refused.
+
+What does not change. Narrow focused-element probes are a separate path and
+still run, including the keyboard privacy check that detects password and
+sensitive fields. OCR and every non-UIA recording path are unaffected. Matched
+exclusions, URL rules, private/incognito windows, detected DRM content, screen
+lock, monitor/focus/identity checks and screening failure all still apply and
+still fail closed, and unscreened pixels or text are still never persisted.
+
+Limits. This removes hierarchy evidence from admission, so a window's displayed
+content is no longer verified before a frame is stored; screening can miss
+things. Verified on a deployed installation only as the absence of hierarchy
+acquisition (`bulk_acquisition_calls` and `hierarchy_structure_acquisitions`
+both 0, only `uia_walk_disabled` recorded) with frames still stored from OCR.
+No live measurement establishes the effect on any application's responsiveness,
+and the breaker's slow-success gap above is unfixed.

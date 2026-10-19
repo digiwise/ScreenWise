@@ -2171,3 +2171,56 @@ No captured data/API read, new recording, deployment/restart, desktop launch,
 hardware/GUI trial or firewall change occurred. Secondary audio paths and complete
 queue/segment tracing remain incompletely instrumented. Retention/pending-review
 implementation and approved live validation remain separate milestones.
+
+## Accessibility walk switch, 2026-10-19
+
+`accessibilityWalkDisabled` (SW-V47) was built and deployed in one cycle.
+
+- `DesktopCheck` passed with 1,084 external reused and zero rebuilt. One
+  compile error was expected and useful: adding an `AccessibilityStopReason`
+  variant broke the exhaustive match in
+  `screenpipe-a11y/src/tree/windows_bulk.rs` that maps a stop reason to its
+  metrics index, so the fixed reason vector and its `reason_codes` labels were
+  extended together. `unknown` stays last in
+  `windows_process_metrics.rs::REASON_CODES` because the lookup searches every
+  entry except the final one and falls back to it.
+- Regenerating the Tauri TypeScript bindings must go through the launcher
+  (`-Task DesktopTest -TestFilter export_typescript_bindings` with
+  `UPDATE_TAURI_BINDINGS=1`). A direct `cargo test` for the same filter fails in
+  `knf-rs-sys`' bindgen with `'stdint.h' file not found`, because it lacks the
+  Developer PowerShell native environment. That direct attempt also touched the
+  `aws-lc-rs`/`ring` build scripts, and the next launcher run reported 55
+  unexpected external rebuilds; the following runs were back to zero. Prefer the
+  launcher first rather than paying that invalidation.
+- `RootFmt` and `DesktopFmt` passed after formatting the changed files with
+  `rustfmt --edition 2021`.
+- Focused tests: five engine fail-open tests including a new walk-disabled
+  matrix. `-Task DesktopTest` does not reach them — they live in
+  `screenpipe-engine`, so the root workspace preset is required
+  (`-Task RootTest -Package screenpipe-engine -Lib`).
+- `RootTest` for a package whose lib has never been built as a *test* target in
+  the root cache (`screenpipe-core`, `screenpipe-db`) is refused with
+  `no_matching_successful_baseline` and needs `-AllowColdCache` once. A failing
+  run records no baseline, so the next run is refused again for the same reason.
+- Frontend: `bun run typecheck` clean, 680 tests passed, `bun run build`
+  emitted 13 routes. The `prebuild` skill generator rewrites
+  `lib/generated/screenpipe-skills.ts` with CRLF on this checkout; that diff is
+  line endings only and was reverted rather than committed.
+- `DesktopBuild` (release-local) passed in 6m00s, then
+  `DesktopBuild -BuildProfile release -Jobs 4` passed in 18m42s; both reported
+  1,080 external reused and zero rebuilt, ten workspace reused and nine rebuilt.
+  The release link step held ~4.2 GB resident, taking free RAM to 2.9 GB, so
+  nothing else was run alongside it. Deployed desktop SHA256:
+  `1B8335E365F535C5D638621CDC5B6DE2B170274F0E04B3D731E7BEC99010D82F`.
+- Deployment reused the existing CLI artifact (release-local, 2026-10-14). The
+  GUI embeds the recorder, so the standalone CLI was not part of this change;
+  it serves `auth token` and the audio-model preflight only.
+
+A deployment did occur in this cycle, with the owner's explicit instruction, and
+the setting was enabled by editing the existing `store.bin` after a graceful
+tray-equivalent shutdown (`Stop-DeploymentInstance`). `Start-ScreenWise.ps1`
+seeds that file only when it is absent, so the edit survives redeployment. A
+timestamped copy was kept beside it first. No firewall rule, recording
+authorisation or captured-data read was part of the build work; the
+authenticated metrics and aggregate queries used to confirm the setting are
+covered by the standing content-free metrics permission.
