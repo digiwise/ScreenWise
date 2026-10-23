@@ -63,6 +63,7 @@ pub mod budget;
 pub mod config;
 pub mod events;
 pub mod incognito;
+pub mod input_accounting;
 pub mod platform;
 pub mod tree;
 #[cfg(target_os = "windows")]

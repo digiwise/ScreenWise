@@ -9,6 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Part of the session limit kept for small periodic summaries, so detailed
+/// per-decision records cannot crowd out the aggregate counts.
+const SUMMARY_RESERVE_BYTES: u64 = 1024 * 1024;
+const SUMMARY_CATEGORIES: [&str; 2] = ["input_keystroke_epoch", "input_probe_summary"];
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const REPEAT_INTERVAL: Duration = Duration::from_secs(30);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -145,11 +149,18 @@ fn start_writer() -> Option<mpsc::SyncSender<(&'static str, Value)>> {
                 file,
                 written: 0,
                 recent: HashMap::new(),
+                detail_limit_reported: false,
             };
             while let Ok((category, details)) = receiver.recv() {
-                if sink.write(category, details).is_err() {
-                    report_notice(SensitiveDebugNotice::WriteFailedOrLimitReached);
-                    break;
+                match sink.write(category, details) {
+                    Ok(Written::Stored | Written::Repeated | Written::DetailLimitReached) => {}
+                    Ok(Written::FirstDetailLimit) => {
+                        report_notice(SensitiveDebugNotice::WriteFailedOrLimitReached)
+                    }
+                    Err(_) => {
+                        report_notice(SensitiveDebugNotice::WriteFailedOrLimitReached);
+                        break;
+                    }
                 }
             }
         })
@@ -172,15 +183,24 @@ struct Sink {
     file: File,
     written: u64,
     recent: HashMap<&'static str, (Value, Instant)>,
+    detail_limit_reported: bool,
+}
+#[derive(Debug, PartialEq, Eq)]
+enum Written {
+    Stored,
+    Repeated,
+    /// A detailed record was dropped to keep the summary reserve.
+    DetailLimitReached,
+    FirstDetailLimit,
 }
 impl Sink {
-    fn write(&mut self, category: &'static str, details: Value) -> io::Result<()> {
+    fn write(&mut self, category: &'static str, details: Value) -> io::Result<Written> {
         let details = bounded_details(details);
         let now = Instant::now();
         if self.recent.get(category).is_some_and(|(previous, at)| {
             previous == &details && now.duration_since(*at) < REPEAT_INTERVAL
         }) {
-            return Ok(());
+            return Ok(Written::Repeated);
         }
         let mut record = serde_json::to_vec(
             &json!({"sensitive":true,"timestamp_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),"category":category,"details":details}),
@@ -191,7 +211,16 @@ impl Sink {
             )?;
         }
         record.push(b'\n');
-        if self.written.saturating_add(record.len() as u64) > MAX_BYTES {
+        let after = self.written.saturating_add(record.len() as u64);
+        if !SUMMARY_CATEGORIES.contains(&category) && after > MAX_BYTES - SUMMARY_RESERVE_BYTES {
+            let first = !std::mem::replace(&mut self.detail_limit_reported, true);
+            return Ok(if first {
+                Written::FirstDetailLimit
+            } else {
+                Written::DetailLimitReached
+            });
+        }
+        if after > MAX_BYTES {
             return Err(io::Error::other("session limit"));
         }
         self.file.write_all(&record)?;
@@ -199,7 +228,7 @@ impl Sink {
         self.written += record.len() as u64;
         // Fixed producer categories, never titles/IDs as keys.
         self.recent.insert(category, (details, now));
-        Ok(())
+        Ok(Written::Stored)
     }
 }
 #[cfg(windows)]
@@ -381,11 +410,15 @@ mod tests {
             file: file.reopen().unwrap(),
             written: 0,
             recent: HashMap::new(),
+            detail_limit_reported: false,
         };
         let details = json!({"stage":"password_property","error":"synthetic provider error\n0x80004005","candidate":{"pid":42}});
         sink.write("probe", details.clone()).unwrap();
         let size = sink.written;
-        sink.write("probe", details.clone()).unwrap();
+        assert_eq!(
+            sink.write("probe", details.clone()).unwrap(),
+            Written::Repeated
+        );
         assert_eq!(sink.written, size);
         let row: Value =
             serde_json::from_str(std::fs::read_to_string(file.path()).unwrap().trim()).unwrap();
@@ -393,8 +426,26 @@ mod tests {
         assert_eq!(row["sensitive"], true);
         sink.write("probe", json!({"stage":"different"})).unwrap();
         assert!(sink.written > size);
+        // Detailed records stop at the reserve; summaries continue to the limit.
+        sink.written = MAX_BYTES - SUMMARY_RESERVE_BYTES;
+        assert_eq!(
+            sink.write("probe", json!({"stage":"new"})).unwrap(),
+            Written::FirstDetailLimit
+        );
+        assert_eq!(
+            sink.write("probe", json!({"stage":"newer"})).unwrap(),
+            Written::DetailLimitReached
+        );
+        assert_eq!(sink.written, MAX_BYTES - SUMMARY_RESERVE_BYTES);
+        assert_eq!(
+            sink.write("input_keystroke_epoch", json!({"admitted":1}))
+                .unwrap(),
+            Written::Stored
+        );
         sink.written = MAX_BYTES;
-        assert!(sink.write("probe", json!({"stage":"new"})).is_err());
+        assert!(sink
+            .write("input_probe_summary", json!({"probes":1}))
+            .is_err());
     }
     #[test]
     fn sensitive_oversized_records_remain_valid_json() {
@@ -403,6 +454,7 @@ mod tests {
             file: file.reopen().unwrap(),
             written: 0,
             recent: HashMap::new(),
+            detail_limit_reported: false,
         };
         sink.write("probe", json!({"error":"x".repeat(MAX_RECORD_BYTES)}))
             .unwrap();

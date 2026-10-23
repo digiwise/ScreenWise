@@ -259,6 +259,21 @@ contain private decision context and must not be published. See
 [the sensitive diagnostics guide](../../../docs/CAPTURE_PRIVACY.md#sensitive-decision-diagnostics-2026-10-09) for storage and limits.
 Preparation here does not start a diagnostic capture or inspect existing captures.
 
+## Keyboard privacy relaxations (owner-authorised, default off)
+
+`-UiaPasswordStateUnsupportedProcesses` and `-UiaFocusWithoutKeyboardFocusProcesses`
+each take `none` (the default), `all`, or a comma-separated list of executable
+basenames. For a listed process, the first treats a UIA IsPassword value that the
+provider reports as unsupported as non-password; the second accepts a focused element
+without HasKeyboardFocus while still requiring an explicit IsPassword. Each replaces
+only its own check: native focus, process ownership, exclusions, rechecks and pause
+gates still apply, the two never combine for one probe, and admissions under either
+are labelled in diagnostics. Each deployment states the lists explicitly (they are not
+carried over); they are normalised and validated, recorded in the manifest, and
+startup passes only manifest values to the GUI child, removing inherited ones. Both
+reduce a privacy check for the listed processes, so list only processes the owner has
+approved.
+
 ## Firewall scope: what the deployment rules do not cover
 
 `Set-ScreenWiseDeploymentFirewall.ps1` blocks non-loopback outbound traffic

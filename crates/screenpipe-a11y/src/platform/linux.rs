@@ -600,6 +600,7 @@ fn monitor_keyboards(
                                         browser_url: None,
                                         element: None,
                                         frame_id: None,
+                                        accounting: None,
                                     };
                                     let _ = tx.try_send(event);
                                 });
@@ -637,6 +638,7 @@ fn monitor_keyboards(
                                         browser_url: None,
                                         element: None,
                                         frame_id: None,
+                                        accounting: None,
                                     };
                                     let _ = tx.try_send(event);
                                 });
@@ -668,6 +670,7 @@ fn monitor_keyboards(
                                     browser_url: None,
                                     element: None,
                                     frame_id: None,
+                                    accounting: None,
                                 };
                                 let _ = tx.try_send(event);
                                 continue;
@@ -692,6 +695,7 @@ fn monitor_keyboards(
                                 browser_url: None,
                                 element: None,
                                 frame_id: None,
+                                accounting: None,
                             };
                             let _ = tx.try_send(event);
                         }
@@ -713,6 +717,7 @@ fn monitor_keyboards(
                                 browser_url: None,
                                 element: None,
                                 frame_id: None,
+                                accounting: None,
                             };
                             let _ = tx.try_send(event);
                         }
@@ -730,6 +735,7 @@ fn monitor_keyboards(
                             browser_url: None,
                             element: None,
                             frame_id: None,
+                            accounting: None,
                         };
                         let _ = tx.try_send(event);
                     }
@@ -840,6 +846,7 @@ fn monitor_mice(
                                             browser_url: None,
                                             element: None,
                                             frame_id: None,
+                                            accounting: None,
                                         };
                                         let _ = tx.try_send(event);
                                     }
@@ -863,6 +870,7 @@ fn monitor_mice(
                                             browser_url: None,
                                             element: None,
                                             frame_id: None,
+                                            accounting: None,
                                         };
                                         let _ = tx.try_send(event);
                                     }
@@ -897,6 +905,7 @@ fn monitor_mice(
                                         browser_url: None,
                                         element: None,
                                         frame_id: None,
+                                        accounting: None,
                                     };
                                     let _ = tx.try_send(event);
                                 }
@@ -977,6 +986,7 @@ fn run_window_observer(
                         browser_url: None,
                         element: None,
                         frame_id: None,
+                        accounting: None,
                     };
                     let _ = tx.try_send(event);
                 }

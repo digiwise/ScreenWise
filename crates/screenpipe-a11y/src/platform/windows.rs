@@ -20,10 +20,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
+use super::windows_uia::input_admission::{self, DiscardCause, KeyAdmissionTally};
 use super::windows_uia::{
-    self, ClickElementRequest, ClipboardReadFailure, KeyboardPrivacy, KeyboardPrivacyDenial,
-    NativeKeyboardFocus,
+    self, ClickElementRequest, ClipboardReadFailure, KeyboardGrant, KeyboardPrivacy,
+    KeyboardPrivacyDenial, NativeKeyboardFocus,
 };
+use crate::input_accounting::{self, KeystrokeTag, LostCause};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -53,12 +55,20 @@ static INPUT_CONTENT_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
 fn try_send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
     match tx.try_send(event) {
         Ok(()) => {}
-        Err(TrySendError::Full(_)) => {
+        Err(TrySendError::Full(event)) => {
             UI_EVENT_QUEUE_FULL_DROPS.fetch_add(1, Ordering::Relaxed);
+            note_event_lost(&event, LostCause::QueueFull);
         }
-        Err(TrySendError::Disconnected(_)) => {
+        Err(TrySendError::Disconnected(event)) => {
             UI_EVENT_QUEUE_DISCONNECTED_DROPS.fetch_add(1, Ordering::Relaxed);
+            note_event_lost(&event, LostCause::QueueFull);
         }
+    }
+}
+
+fn note_event_lost(event: &UiEvent, cause: LostCause) {
+    if let Some(tag) = &event.accounting {
+        input_accounting::note_lost(tag, cause);
     }
 }
 
@@ -287,7 +297,7 @@ impl UiRecorder {
                     if !content_config.skip_password_fields {
                         Some(0)
                     } else {
-                        content_privacy.permit(NativeKeyboardFocus::current())
+                        content_privacy.permit_token(NativeKeyboardFocus::current())
                     }
                 },
             );
@@ -401,6 +411,7 @@ impl UiRecorder {
                     browser_url: None,
                     element: Some(ctx),
                     frame_id: None,
+                    accounting: None,
                 };
                 try_send_ui_event(&tx5, event);
             }
@@ -430,8 +441,12 @@ struct PendingClipboard {
     relative_ms: u64,
     app_name: Option<String>,
     window_title: Option<String>,
+    /// Permit token at Ctrl+C/X/V: content is read only under the same token
+    /// (same generation, native focus and verified element).
     privacy_generation: Option<u64>,
     queued_at: Instant,
+    /// The Ctrl+C/X/V keystroke, persisted with the clipboard event.
+    accounting: Option<KeystrokeTag>,
 }
 
 const INPUT_CONTENT_QUEUE_CAPACITY: usize = 32;
@@ -458,6 +473,16 @@ impl PendingClipboard {
             browser_url: None,
             element: None,
             frame_id: None,
+            accounting: self.accounting,
+        }
+    }
+}
+
+impl InputContentWork {
+    fn accounting(&self) -> Option<&KeystrokeTag> {
+        match self {
+            Self::Clipboard(pending) => pending.accounting.as_ref(),
+            Self::Text(event) => event.accounting.as_ref(),
         }
     }
 }
@@ -469,8 +494,11 @@ fn queue_input_content(state: &HookState, work: InputContentWork) {
         let work = match err {
             TrySendError::Full(work) | TrySendError::Disconnected(work) => work,
         };
-        if let InputContentWork::Clipboard(pending) = work {
-            try_send_ui_event(&state.tx, pending.into_event(None));
+        match work {
+            InputContentWork::Clipboard(pending) => {
+                try_send_ui_event(&state.tx, pending.into_event(None));
+            }
+            InputContentWork::Text(event) => note_event_lost(&event, LostCause::QueueFull),
         }
     }
 }
@@ -483,6 +511,9 @@ fn process_input_content(
     admitted: &impl Fn() -> bool,
 ) -> Option<UiEvent> {
     if !admitted() {
+        if let Some(tag) = work.accounting() {
+            input_accounting::note_lost(tag, LostCause::ContentWorker);
+        }
         return None;
     }
     let started = Instant::now();
@@ -547,7 +578,12 @@ fn process_input_content(
             started.elapsed().as_millis()
         );
     }
-    admitted().then_some(event)
+    if admitted() {
+        Some(event)
+    } else {
+        note_event_lost(&event, LostCause::ContentWorker);
+        None
+    }
 }
 
 fn run_input_content_worker(
@@ -606,7 +642,21 @@ struct HookState {
     last_mouse_pos: (i32, i32),
     text_buf: String,
     last_text_time: Option<Instant>,
+    /// Permit token of the buffered characters (generation, native focus
+    /// and verified UIA element).
     text_privacy_generation: Option<u64>,
+    /// Raw generation of the buffered characters.
+    text_generation: Option<u64>,
+    /// The buffered characters' decision identified its UIA element.
+    text_element_bound: bool,
+    /// Hash of that element's runtime id: a later permit re-verifies the
+    /// buffer only for the same element.
+    text_element: Option<u64>,
+    /// Native focus of the buffered characters: text is only ever emitted
+    /// for the generation and native focus it was admitted under.
+    text_focus: Option<NativeKeyboardFocus>,
+    /// Since when an idle flush has been waiting for re-verification.
+    text_hold_since: Option<Instant>,
     /// Buffers confirmed permissible immediately before navigation changes
     /// focus. PII processing is deferred out of the low-level hook.
     pending_text: Vec<UiEvent>,
@@ -624,6 +674,16 @@ struct HookState {
     last_input_at_ms: Arc<AtomicU64>,
     /// In-flight scroll aggregator (None = not currently scrolling).
     scroll_aggregator: Option<ScrollAggregator>,
+    /// Content-free key-press admission counts, reported by the privacy worker.
+    key_tally: KeyAdmissionTally,
+    /// Foreground process of the latest buffered character (attribution only).
+    text_pid: u32,
+    /// Admitted keystrokes whose effect is in the text buffer.
+    text_tag: KeystrokeTag,
+    /// The key held down, so its auto-repeat counts as one keystroke.
+    held_vk: Option<u16>,
+    /// The previous recordable keystroke, for active typing time.
+    last_recordable_at: Option<Instant>,
 }
 
 /// Emit the accumulated scroll as a single `Scroll` event. `delta_y` is summed
@@ -650,6 +710,7 @@ fn emit_aggregated_scroll(tx: &Sender<UiEvent>, agg: ScrollAggregator) {
         browser_url: None,
         element: None,
         frame_id: None,
+        accounting: None,
     };
     try_send_ui_event(tx, event);
 }
@@ -680,6 +741,7 @@ fn run_native_hooks(
     content_tx: Sender<InputContentWork>,
 ) {
     debug!("Starting native Windows hooks");
+    input_accounting::set_origin(start);
 
     // Initialize thread-local state
     HOOK_STATE.with(|state| {
@@ -691,6 +753,11 @@ fn run_native_hooks(
             text_buf: String::new(),
             last_text_time: None,
             text_privacy_generation: None,
+            text_generation: None,
+            text_element_bound: false,
+            text_element: None,
+            text_focus: None,
+            text_hold_since: None,
             pending_text: Vec::new(),
             current_app,
             current_window,
@@ -701,6 +768,11 @@ fn run_native_hooks(
             content_tx,
             last_input_at_ms,
             scroll_aggregator: None,
+            key_tally: KeyAdmissionTally::default(),
+            text_pid: 0,
+            text_tag: KeystrokeTag::default(),
+            held_vk: None,
+            last_recordable_at: None,
         }));
     });
 
@@ -768,6 +840,13 @@ fn run_native_hooks(
                                 emit_aggregated_scroll(&s.tx, agg);
                             }
                         }
+                        let epoch = input_accounting::epoch_at(s.start, Instant::now());
+                        if let Some(report) = s.key_tally.take_due(epoch, false) {
+                            // Never wait on the worker: retry on the next tick.
+                            if let Err(report) = s.keyboard_privacy.offer_admission_report(report) {
+                                s.key_tally.restore(report);
+                            }
+                        }
                     }
                 }
             });
@@ -793,9 +872,15 @@ fn run_native_hooks(
                 for event in std::mem::take(&mut s.pending_text) {
                     emit_text(s, event);
                 }
-                flush_text_buffer(s);
+                // No waiting for re-verification at shutdown.
+                if let Some(event) = take_permitted_text_buffer(s, DiscardCause::FlushUnverified) {
+                    emit_text(s, event);
+                }
                 if let Some(agg) = s.scroll_aggregator.take() {
                     emit_aggregated_scroll(&s.tx, agg);
+                }
+                if let Some(report) = s.key_tally.take_due(0, true) {
+                    let _ = s.keyboard_privacy.offer_admission_report(report);
                 }
             }
         });
@@ -805,85 +890,439 @@ fn run_native_hooks(
     report_ui_event_queue_drops();
 }
 
+/// How long an idle flush may wait for a fresh decision that re-verifies the
+/// buffered text's generation and native focus. Nothing is emitted without one.
+const TEXT_REVERIFY_HOLD: Duration = Duration::from_secs(3);
+
+/// Idle flush: emit only with a fresh permit for the buffer's token
+/// (generation, native focus and element). While the decision is merely stale
+/// or its lock contended (nothing changed and nothing failed) keep the buffer
+/// and retry on the next tick.
 fn flush_text_buffer(state: &mut HookState) {
-    if let Some(event) = take_permitted_text_buffer(state) {
+    if has_buffered_text(state) {
+        flush_text_buffer_at(state, NativeKeyboardFocus::current());
+    }
+}
+
+fn flush_text_buffer_at(state: &mut HookState, focus: Option<NativeKeyboardFocus>) {
+    if !has_buffered_text(state) {
+        return;
+    }
+    let admission = diagnosed_keyboard_capture_permit(state, focus);
+    if let Ok(grant) = admission {
+        rebind_reverified_text(state, grant, focus);
+    }
+    let permit = admission.as_ref().ok().map(|grant| grant.token);
+    if admission.is_err_and(awaitable_denial) && may_await_reverification(state, focus) {
+        let since = *state.text_hold_since.get_or_insert_with(Instant::now);
+        if since.elapsed() < TEXT_REVERIFY_HOLD {
+            return;
+        }
+        discard_text_buffer(state, DiscardCause::HoldExpired);
+        return;
+    }
+    if let Some(event) =
+        take_text_buffer_with_permit(state, permit, focus, DiscardCause::FlushUnverified)
+    {
         emit_text(state, event);
     }
 }
 
-fn take_permitted_text_buffer(state: &mut HookState) -> Option<UiEvent> {
-    if state.text_buf.is_empty() {
+fn take_permitted_text_buffer(state: &mut HookState, cause: DiscardCause) -> Option<UiEvent> {
+    if !has_buffered_text(state) {
         return None;
     }
-    // Recheck at every emission (idle timeout and shutdown). Text from an old
+    // Recheck at every emission (navigation and shutdown). Text from an old
     // or uncertain focus must never survive into a later allowed field.
-    let permit = keyboard_capture_permit(state);
-    take_text_buffer_with_permit(state, permit)
+    let focus = NativeKeyboardFocus::current();
+    let permit = match diagnosed_keyboard_capture_permit(state, focus) {
+        Ok(grant) => {
+            rebind_reverified_text(state, grant, focus);
+            Some(grant.token)
+        }
+        Err(_) => None,
+    };
+    take_text_buffer_with_permit(state, permit, focus, cause)
 }
 
-fn take_text_buffer_with_permit(state: &mut HookState, permit: Option<u64>) -> Option<UiEvent> {
-    if permit.is_none() || permit != state.text_privacy_generation {
-        discard_text_buffer(state);
+/// Denials after which buffered text may wait for re-verification: a stale
+/// or contended decision, or one invalidated or cleared by a probe timeout or
+/// skip only (`may_await_reverification` rejects any strong invalidation).
+fn awaitable_denial(denial: KeyboardPrivacyDenial) -> bool {
+    matches!(
+        denial,
+        KeyboardPrivacyDenial::DecisionStale
+            | KeyboardPrivacyDenial::WorkerLockContended
+            | KeyboardPrivacyDenial::GenerationChanged
+            | KeyboardPrivacyDenial::DecisionUnavailable
+    )
+}
+
+/// A fresh permit after only weak invalidations (probe timeouts or skips)
+/// re-verifies the buffered characters when it names the same native focus
+/// and the same UIA element; the buffer then continues under its token.
+fn rebind_reverified_text(
+    state: &mut HookState,
+    grant: KeyboardGrant,
+    focus: Option<NativeKeyboardFocus>,
+) -> bool {
+    if Some(grant.token) == state.text_privacy_generation {
+        return false;
+    }
+    let reverified = has_buffered_text(state)
+        && may_await_reverification(state, focus)
+        && grant.element.is_some()
+        && grant.element == state.text_element
+        && state
+            .text_generation
+            .is_some_and(|generation| windows_uia::same_focus_epoch(generation, grant.generation));
+    if reverified {
+        state.text_privacy_generation = Some(grant.token);
+        state.text_generation = Some(grant.generation);
+        state.text_hold_since = None;
+    }
+    reverified
+}
+
+/// Nothing indicates that the buffered characters' field changed: the same
+/// native focus, their decision identified the UIA element a later permit
+/// must match, and no strong invalidation (focus event, navigation, password
+/// verdict, exclusion, pause or a probe failure that may mean focus moved)
+/// happened since. Probe timeouts and skips are weak and keep the epoch.
+fn may_await_reverification(state: &HookState, focus: Option<NativeKeyboardFocus>) -> bool {
+    state.config.skip_password_fields
+        && screenpipe_config::audio_privacy::visual_capture_allowed()
+        && state.text_element_bound
+        && focus.is_some()
+        && focus == state.text_focus
+        && state.text_generation.is_some_and(|generation| {
+            windows_uia::same_focus_epoch(generation, state.keyboard_privacy.generation())
+        })
+}
+
+fn take_text_buffer_with_permit(
+    state: &mut HookState,
+    permit: Option<u64>,
+    focus: Option<NativeKeyboardFocus>,
+    cause: DiscardCause,
+) -> Option<UiEvent> {
+    let same_focus = !state.config.skip_password_fields || focus == state.text_focus;
+    if permit.is_none() || permit != state.text_privacy_generation || !same_focus {
+        discard_text_buffer(state, cause);
         return None;
     }
     let content = std::mem::take(&mut state.text_buf);
-    state.last_text_time = None;
-    state.text_privacy_generation = None;
-    Some(UiEvent::text(
+    let accounting = std::mem::take(&mut state.text_tag);
+    clear_text_identity(state);
+    if content.is_empty() {
+        // Typed and fully deleted before the flush: nothing is stored.
+        input_accounting::note_lost(&accounting, LostCause::NetZeroEdit);
+        return None;
+    }
+    let mut event = UiEvent::text(
         Utc::now(),
         state.start.elapsed().as_millis() as u64,
         content,
-    ))
+    );
+    event.accounting = (!accounting.is_empty()).then_some(accounting);
+    Some(event)
 }
 
 fn emit_text(state: &HookState, event: UiEvent) {
     if screenpipe_config::audio_privacy::visual_capture_allowed() {
         queue_input_content(state, InputContentWork::Text(event));
+    } else {
+        note_event_lost(&event, LostCause::RecorderPrivacyPause);
     }
 }
 
-fn discard_text_buffer(state: &mut HookState) {
+/// Buffered text or a net-zero edit (typed then deleted) awaiting flush.
+fn has_buffered_text(state: &HookState) -> bool {
+    !state.text_buf.is_empty() || !state.text_tag.is_empty()
+}
+
+fn drop_pending_text(state: &mut HookState) {
+    for event in std::mem::take(&mut state.pending_text) {
+        note_event_lost(&event, LostCause::RecorderPrivacyPause);
+    }
+}
+
+fn discard_text_buffer(state: &mut HookState, cause: DiscardCause) {
+    // Each buffered keystroke was admitted; count what the recheck drops.
+    let tag = std::mem::take(&mut state.text_tag);
+    let epoch = input_accounting::epoch_at(state.start, Instant::now());
+    let source = state.keyboard_privacy.last_invalidation_source();
+    state
+        .key_tally
+        .discarded(state.text_pid, epoch, tag.keystrokes(), cause, source);
+    input_accounting::note_lost(&tag, LostCause::BufferDiscarded);
     state.text_buf.clear();
+    clear_text_identity(state);
+}
+
+fn clear_text_identity(state: &mut HookState) {
     state.last_text_time = None;
     state.text_privacy_generation = None;
+    state.text_generation = None;
+    state.text_element_bound = false;
+    state.text_element = None;
+    state.text_focus = None;
+    state.text_hold_since = None;
+}
+
+/// Whether buffered text may stay after this key press's admission result.
+/// Only a stale or contended decision at the same generation, native focus
+/// and element keeps it, and never for an editing key (Backspace, Delete or a
+/// Ctrl chord such as Ctrl+Backspace/X/Z): text the user is removing must not
+/// be emitted because the removal itself was denied. The denied key is dropped.
+fn buffered_text_discard(
+    state: &HookState,
+    admission: Result<KeyboardGrant, KeyboardPrivacyDenial>,
+    focus: Option<NativeKeyboardFocus>,
+    editing: bool,
+) -> Option<DiscardCause> {
+    if !has_buffered_text(state) {
+        return None;
+    }
+    let same_focus = !state.config.skip_password_fields || focus == state.text_focus;
+    match admission {
+        Ok(grant) if Some(grant.token) == state.text_privacy_generation => None,
+        Ok(grant) if Some(grant.generation) != state.text_generation => {
+            Some(DiscardCause::GenerationChanged)
+        }
+        Ok(_) if !same_focus => Some(DiscardCause::NativeFocusChanged),
+        Ok(_) => Some(DiscardCause::ElementChanged),
+        Err(denial)
+            if awaitable_denial(denial) && !editing && may_await_reverification(state, focus) =>
+        {
+            None
+        }
+        Err(KeyboardPrivacyDenial::GenerationChanged) => Some(DiscardCause::GenerationChanged),
+        Err(KeyboardPrivacyDenial::FocusMismatch) => Some(DiscardCause::NativeFocusChanged),
+        Err(_) => Some(DiscardCause::DeniedKey),
+    }
 }
 
 /// Only native, bounded work in the LL hook; UIA runs on its worker. A missing
 /// provider, expired decision, contended lock, or focus mismatch suppresses
 /// content while ActivityFeed remains available for adaptive capture.
-fn keyboard_capture_permit(state: &HookState) -> Option<u64> {
-    if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-        return None;
-    }
-    if !state.config.skip_password_fields {
-        return Some(0);
-    }
-    state
-        .keyboard_privacy
-        .permit(NativeKeyboardFocus::current())
-}
-
-fn diagnosed_keyboard_capture_permit(state: &HookState) -> Result<u64, KeyboardPrivacyDenial> {
+fn diagnosed_keyboard_capture_permit(
+    state: &HookState,
+    focus: Option<NativeKeyboardFocus>,
+) -> Result<KeyboardGrant, KeyboardPrivacyDenial> {
     if !screenpipe_config::audio_privacy::visual_capture_allowed() {
         return Err(KeyboardPrivacyDenial::DecisionUnavailable);
     }
     if !state.config.skip_password_fields {
-        return Ok(0);
+        return Ok(KeyboardGrant {
+            generation: 0,
+            token: 0,
+            element: None,
+            element_bound: false,
+            relaxed: false,
+        });
     }
-    state
-        .keyboard_privacy
-        .permit_diagnosed(NativeKeyboardFocus::current())
+    state.keyboard_privacy.grant_classified(focus)
 }
 
 fn invalidate_keyboard_focus(state: &mut HookState) {
     if state.config.skip_password_fields {
         // Preserve text that is still permitted in the source field before a
         // click/Tab/Enter moves focus. Never run PII regex in the input hook.
-        if let Some(event) = take_permitted_text_buffer(state) {
+        if let Some(event) = take_permitted_text_buffer(state, DiscardCause::NavigationUnverified) {
             state.pending_text.push(event);
         }
     }
-    state.keyboard_privacy.invalidate();
+    state
+        .keyboard_privacy
+        .invalidate_from(windows_uia::InvalidationSource::Navigation);
+}
+
+/// Key-down handling after the pause gate (see `keyboard_hook_proc`).
+fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) {
+    let timestamp = Utc::now();
+    let t = s.start.elapsed().as_millis() as u64;
+    let now = Instant::now();
+    let epoch = input_accounting::epoch_at(s.start, now);
+    // try_lock when prioritize_input_latency is set, mirroring mouse_hook_proc:
+    // avoid stalling the OS message queue if these locks are contended.
+    let (app_name, window_title) = if s.config.prioritize_input_latency {
+        (
+            s.current_app.try_lock().map(|g| g.clone()).unwrap_or(None),
+            s.current_window
+                .try_lock()
+                .map(|g| g.clone())
+                .unwrap_or(None),
+        )
+    } else {
+        (
+            s.current_app.lock().clone(),
+            s.current_window.lock().clone(),
+        )
+    };
+
+    // Check exclusions
+    if !s.config.should_capture_target(
+        app_name.as_deref().unwrap_or_default(),
+        window_title.as_deref(),
+    ) {
+        discard_text_buffer(s, DiscardCause::Excluded);
+        return;
+    }
+
+    // One native sample (no messages or UIA) serves admission and
+    // content-free per-application counting of this keystroke.
+    // Intended blocks (password field, exclusion) are not counted.
+    let native = NativeKeyboardFocus::sample();
+    let key_pid = match &native {
+        Ok(focus) => focus.foreground_pid(),
+        Err(failure) => failure.foreground_pid,
+    };
+    let focus = native.ok();
+    let privacy_admission = diagnosed_keyboard_capture_permit(s, focus);
+    let privacy_grant = privacy_admission.as_ref().ok().copied();
+    let privacy_generation = privacy_grant.map(|grant| grant.token);
+    if let Some(grant) = privacy_grant {
+        rebind_reverified_text(s, grant, focus);
+    }
+    let counts_content =
+        s.config.capture_text || s.config.capture_keystrokes || s.config.capture_clipboard_content;
+    if counts_content {
+        match privacy_admission {
+            Ok(_) => s.keyboard_privacy.note_content_admitted(),
+            Err(reason) => s.keyboard_privacy.note_content_suppressed(reason),
+        }
+    }
+    // A recordable keystroke: counted with its gate outcome and active time.
+    let recordable = counts_content
+        && keystroke
+        && privacy_admission
+            .as_ref()
+            .err()
+            .is_none_or(|reason| !reason.intended());
+    if recordable {
+        match privacy_admission {
+            Ok(grant) => s.key_tally.admitted(key_pid, epoch, grant.relaxed),
+            Err(reason) => s.key_tally.denied(key_pid, epoch, reason),
+        }
+        if let Some(gap) = input_admission::active_gap(s.last_recordable_at, now) {
+            s.key_tally.active(epoch, gap);
+        }
+        s.last_recordable_at = Some(now);
+    }
+    // The admitted keystroke's tag travels with whichever event carries its
+    // effect, until the recorder confirms the database insert.
+    let mut key_tag = (recordable && privacy_grant.is_some())
+        .then(|| input_accounting::KeystrokeTag::key(key_pid, epoch));
+    // Keys that delete or select text: a denied one must never let text the
+    // user is removing or replacing be emitted later (Backspace, Delete, any
+    // Ctrl chord, and Shift+Home/End/PageUp/PageDown/arrow selection).
+    let editing = matches!(vk_code, 0x08 | 0x2E)
+        || mods & 0x02 != 0
+        || (mods & 0x01 != 0 && matches!(vk_code, 0x21..=0x28));
+    if let Some(cause) = buffered_text_discard(s, privacy_admission, focus, editing) {
+        discard_text_buffer(s, cause);
+    }
+
+    let key_event = |app_name, window_title, accounting| UiEvent {
+        id: None,
+        timestamp,
+        relative_ms: t,
+        data: EventData::Key {
+            key_code: vk_code,
+            modifiers: mods,
+        },
+        app_name,
+        window_title,
+        browser_url: None,
+        element: None,
+        frame_id: None,
+        accounting,
+    };
+
+    // Check for clipboard operations (Ctrl+C, Ctrl+X, Ctrl+V)
+    // IMPORTANT: Do NOT read clipboard or apply PII regex here — this is
+    // a low-level hook callback that must return in <10ms or it stalls the
+    // entire system input queue. Hand off to the separate worker.
+    if mods & 0x02 != 0 && s.config.capture_clipboard {
+        // Ctrl is pressed
+        let op = match vk_code {
+            0x43 => Some('c'), // C
+            0x58 => Some('x'), // X
+            0x56 => Some('v'), // V
+            _ => None,
+        };
+        if let Some(operation) = op {
+            queue_input_content(
+                s,
+                InputContentWork::Clipboard(PendingClipboard {
+                    operation,
+                    timestamp,
+                    relative_ms: t,
+                    app_name: app_name.clone(),
+                    window_title: window_title.clone(),
+                    privacy_generation,
+                    queued_at: Instant::now(),
+                    accounting: key_tag.take(),
+                }),
+            );
+            return;
+        }
+    }
+
+    // Clipboard operation metadata above contains no key/text
+    // content. Its optional content is independently gated again
+    // before and after the worker reads it.
+    let Some(privacy_generation) = privacy_generation else {
+        return;
+    };
+
+    // Record key events for shortcuts (with modifiers)
+    if mods & 0x0E != 0 {
+        // Ctrl, Alt or Win pressed: a shortcut, never text
+        if s.config.capture_keystrokes {
+            try_send_ui_event(&s.tx, key_event(app_name, window_title, key_tag.take()));
+        }
+    } else if s.config.capture_text {
+        // Aggregate text input
+        match vk_to_char(vk_code, mods) {
+            // Backspace with nothing buffered edits text already emitted:
+            // store the key itself so the edit is not lost.
+            Some('\x08') if s.text_buf.is_empty() && s.config.capture_keystrokes => {
+                try_send_ui_event(&s.tx, key_event(app_name, window_title, key_tag.take()));
+            }
+            Some(c) => {
+                if c == '\x08' {
+                    // Backspace
+                    s.text_buf.pop();
+                } else {
+                    s.text_buf.push(c);
+                }
+                if key_tag.take().is_some() {
+                    s.text_tag.push(key_pid, epoch, c == '\x08');
+                }
+                s.last_text_time = Some(Instant::now());
+                s.text_privacy_generation = Some(privacy_generation);
+                s.text_generation = privacy_grant.map(|grant| grant.generation);
+                s.text_element_bound = privacy_grant.is_some_and(|grant| grant.element_bound);
+                s.text_element = privacy_grant.and_then(|grant| grant.element);
+                s.text_focus = focus;
+                s.text_hold_since = None;
+                s.text_pid = key_pid;
+            }
+            None if s.config.capture_keystrokes => {
+                // Unknown key, record as key event
+                try_send_ui_event(&s.tx, key_event(app_name, window_title, key_tag.take()));
+            }
+            None => {}
+        }
+    } else if s.config.capture_keystrokes {
+        try_send_ui_event(&s.tx, key_event(app_name, window_title, key_tag.take()));
+    }
+    // An admitted keystroke whose effect no event carries.
+    if let Some(tag) = key_tag {
+        input_accounting::note_lost(&tag, input_accounting::LostCause::NoEffect);
+    }
 }
 
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -916,175 +1355,41 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     }
                 }
 
+                if is_key_up && s.held_vk == Some(vk_code) {
+                    s.held_vk = None;
+                }
                 // Only process key down events for UI events
                 if !is_key_down {
                     return;
                 }
+                // One keystroke per press of a non-modifier key: a chord counts
+                // once (its modifiers are not keystrokes) and so does a held
+                // key's auto-repeat.
+                let repeat = s.held_vk == Some(vk_code);
+                s.held_vk = Some(vk_code);
+                let keystroke = !repeat && !input_admission::is_modifier(vk_code);
 
                 // Schedule, DRM, and lock privacy are acquisition boundaries,
                 // not merely persistence filters. Keep only content-free
                 // activity timing while the recorder is paused.
                 if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-                    discard_text_buffer(s);
-                    s.pending_text.clear();
+                    discard_text_buffer(s, DiscardCause::Paused);
+                    drop_pending_text(s);
                     return;
                 }
 
-                let timestamp = Utc::now();
-                let t = s.start.elapsed().as_millis() as u64;
                 let mods = get_modifier_state();
-
                 // These keys can move focus before the asynchronous UIA focus
                 // callback arrives (including between controls in one HWND).
-                // Invalidate before forwarding them to the application.
-                if matches!(vk_code, 0x09 | 0x0D | 0x1B | 0x5B | 0x5C) || mods & 0x0C != 0 {
+                // The key itself still reaches the field focused now, so it is
+                // handled under that field's permit first; the permit is then
+                // invalidated before this hook returns, i.e. before the
+                // application receives the key and can move focus.
+                let navigation =
+                    matches!(vk_code, 0x09 | 0x0D | 0x1B | 0x5B | 0x5C) || mods & 0x0C != 0;
+                process_key_down(s, vk_code, mods, keystroke);
+                if navigation {
                     invalidate_keyboard_focus(s);
-                }
-
-                // try_lock when prioritize_input_latency is set, mirroring mouse_hook_proc:
-                // avoid stalling the OS message queue if these locks are contended.
-                let (app_name, window_title) = if s.config.prioritize_input_latency {
-                    (
-                        s.current_app.try_lock().map(|g| g.clone()).unwrap_or(None),
-                        s.current_window
-                            .try_lock()
-                            .map(|g| g.clone())
-                            .unwrap_or(None),
-                    )
-                } else {
-                    (
-                        s.current_app.lock().clone(),
-                        s.current_window.lock().clone(),
-                    )
-                };
-
-                // Check exclusions
-                if !s.config.should_capture_target(
-                    app_name.as_deref().unwrap_or_default(),
-                    window_title.as_deref(),
-                ) {
-                    discard_text_buffer(s);
-                    return;
-                }
-
-                let privacy_admission = diagnosed_keyboard_capture_permit(s);
-                let privacy_generation = privacy_admission.as_ref().ok().copied();
-                if s.config.capture_text
-                    || s.config.capture_keystrokes
-                    || s.config.capture_clipboard_content
-                {
-                    if let Err(reason) = privacy_admission {
-                        s.keyboard_privacy.note_content_suppressed(reason);
-                    }
-                }
-                if privacy_generation.is_none()
-                    || (s.text_privacy_generation.is_some()
-                        && s.text_privacy_generation != privacy_generation)
-                {
-                    discard_text_buffer(s);
-                }
-
-                // Check for clipboard operations (Ctrl+C, Ctrl+X, Ctrl+V)
-                // IMPORTANT: Do NOT read clipboard or apply PII regex here — this is
-                // a low-level hook callback that must return in <10ms or it stalls the
-                // entire system input queue. Hand off to the separate worker.
-                if mods & 0x02 != 0 && s.config.capture_clipboard {
-                    // Ctrl is pressed
-                    let op = match vk_code {
-                        0x43 => Some('c'), // C
-                        0x58 => Some('x'), // X
-                        0x56 => Some('v'), // V
-                        _ => None,
-                    };
-                    if let Some(operation) = op {
-                        queue_input_content(
-                            s,
-                            InputContentWork::Clipboard(PendingClipboard {
-                                operation,
-                                timestamp,
-                                relative_ms: t,
-                                app_name: app_name.clone(),
-                                window_title: window_title.clone(),
-                                privacy_generation,
-                                queued_at: Instant::now(),
-                            }),
-                        );
-                        return;
-                    }
-                }
-
-                // Clipboard operation metadata above contains no key/text
-                // content. Its optional content is independently gated again
-                // before and after the worker reads it.
-                let Some(privacy_generation) = privacy_generation else {
-                    return;
-                };
-
-                // Record key events for shortcuts (with modifiers)
-                if mods & 0x0A != 0 {
-                    // Ctrl or Win pressed
-                    if s.config.capture_keystrokes {
-                        let event = UiEvent {
-                            id: None,
-                            timestamp,
-                            relative_ms: t,
-                            data: EventData::Key {
-                                key_code: vk_code,
-                                modifiers: mods,
-                            },
-                            app_name,
-                            window_title,
-                            browser_url: None,
-                            element: None,
-                            frame_id: None,
-                        };
-                        try_send_ui_event(&s.tx, event);
-                    }
-                } else if s.config.capture_text {
-                    // Aggregate text input
-                    if let Some(c) = vk_to_char(vk_code, mods) {
-                        if c == '\x08' {
-                            // Backspace
-                            s.text_buf.pop();
-                        } else {
-                            s.text_buf.push(c);
-                        }
-                        s.last_text_time = Some(Instant::now());
-                        s.text_privacy_generation = Some(privacy_generation);
-                    } else if s.config.capture_keystrokes {
-                        // Unknown key, record as key event
-                        let event = UiEvent {
-                            id: None,
-                            timestamp,
-                            relative_ms: t,
-                            data: EventData::Key {
-                                key_code: vk_code,
-                                modifiers: mods,
-                            },
-                            app_name,
-                            window_title,
-                            browser_url: None,
-                            element: None,
-                            frame_id: None,
-                        };
-                        try_send_ui_event(&s.tx, event);
-                    }
-                } else if s.config.capture_keystrokes {
-                    let event = UiEvent {
-                        id: None,
-                        timestamp,
-                        relative_ms: t,
-                        data: EventData::Key {
-                            key_code: vk_code,
-                            modifiers: mods,
-                        },
-                        app_name,
-                        window_title,
-                        browser_url: None,
-                        element: None,
-                        frame_id: None,
-                    };
-                    try_send_ui_event(&s.tx, event);
                 }
             }
         });
@@ -1124,8 +1429,8 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 // capture must not copy coordinates, titles, click context, or
                 // scroll data into recorder-owned buffers.
                 if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-                    discard_text_buffer(s);
-                    s.pending_text.clear();
+                    discard_text_buffer(s, DiscardCause::Paused);
+                    drop_pending_text(s);
                     s.scroll_aggregator = None;
                     return;
                 }
@@ -1171,6 +1476,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                                 browser_url: None,
                                 element: None,
                                 frame_id: None,
+                                accounting: None,
                             };
                             try_send_ui_event(&s.tx, event);
                         }
@@ -1773,6 +2079,7 @@ fn process_foreground_change(state: &mut AppObserverState) {
                 browser_url: None,
                 element,
                 frame_id: None,
+                accounting: None,
             };
             try_send_ui_event(&state.tx, event);
         }
@@ -2082,7 +2389,63 @@ mod tests {
             window_title: None,
             privacy_generation: generation,
             queued_at: Instant::now(),
+            accounting: None,
         })
+    }
+
+    #[test]
+    fn keystroke_tags_follow_text_and_are_settled_once_when_dropped() {
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        input_accounting::reset_for_test();
+        let (tx, _rx) = crossbeam_channel::bounded(64);
+        let (mut state, _content_rx) = make_test_state(tx, "ab");
+        state.text_tag.push(7, 0, false);
+        state.text_tag.push(7, 0, false);
+        // Emitted text carries its keystrokes to the recorder.
+        let event =
+            take_text_buffer_with_permit(&mut state, Some(0), None, DiscardCause::FlushUnverified)
+                .unwrap();
+        assert_eq!(
+            event.accounting.as_ref().map(|tag| tag.keystrokes()),
+            Some(2)
+        );
+        assert!(state.text_tag.is_empty());
+        // A discarded buffer settles its keystrokes as lost.
+        state.text_buf.push('c');
+        state.text_tag.push(7, 0, false);
+        state.text_privacy_generation = Some(0);
+        discard_text_buffer(&mut state, DiscardCause::DeniedKey);
+        // Typed and deleted again: nothing stored, settled as a net-zero edit.
+        state.text_tag.push(7, 0, false);
+        state.text_tag.push(7, 0, true);
+        state.text_privacy_generation = Some(0);
+        assert!(has_buffered_text(&state));
+        assert!(take_text_buffer_with_permit(
+            &mut state,
+            Some(0),
+            None,
+            DiscardCause::FlushUnverified
+        )
+        .is_none());
+        // A content-worker refusal settles the event's tag.
+        let mut refused = UiEvent::text(Utc::now(), 1, "x".into());
+        refused.accounting = Some(KeystrokeTag::key(7, 0));
+        assert!(process_input_content(
+            InputContentWork::Text(refused),
+            &state.config,
+            &mut || Ok(None),
+            &|| Some(0),
+            &|| false,
+        )
+        .is_none());
+        let done = input_accounting::take_through(0);
+        let lost = done[0].totals.lost;
+        assert_eq!(lost[LostCause::BufferDiscarded.index()], 1);
+        assert_eq!(lost[LostCause::NetZeroEdit.index()], 2);
+        assert_eq!(lost[LostCause::ContentWorker.index()], 1);
+        assert_eq!(done[0].totals.persisted(), 0);
     }
 
     #[test]
@@ -2415,6 +2778,11 @@ mod tests {
                     Some(std::time::Instant::now())
                 },
                 text_privacy_generation: (!text.is_empty()).then_some(0),
+                text_generation: (!text.is_empty()).then_some(0),
+                text_element_bound: false,
+                text_element: None,
+                text_focus: None,
+                text_hold_since: None,
                 pending_text: Vec::new(),
                 current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
                 current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
@@ -2425,6 +2793,11 @@ mod tests {
                 content_tx,
                 last_input_at_ms: Arc::new(AtomicU64::new(0)),
                 scroll_aggregator: None,
+                key_tally: KeyAdmissionTally::default(),
+                text_pid: 0,
+                text_tag: KeystrokeTag::default(),
+                held_vk: None,
+                last_recordable_at: None,
             },
             content_rx,
         )
@@ -2474,6 +2847,250 @@ mod tests {
         assert!(rx.try_recv().is_err()); // No event sent
     }
 
+    fn bound_test_text(state: &mut HookState, focus: NativeKeyboardFocus, token: u64) {
+        state.config.skip_password_fields = true;
+        state.text_buf = "synthetic text".into();
+        state.text_focus = Some(focus);
+        state.text_generation = Some(state.keyboard_privacy.generation());
+        state.text_privacy_generation = Some(token);
+        state.text_element_bound = true;
+        state.last_text_time = Some(Instant::now());
+    }
+
+    #[test]
+    fn keyboard_privacy_keeps_text_only_while_nothing_suggests_a_focus_change() {
+        use KeyboardPrivacyDenial::*;
+        let (tx, _rx) = crossbeam_channel::bounded(64);
+        let (mut state, _content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let other = NativeKeyboardFocus::for_test(10, 99, 12);
+        bound_test_text(&mut state, focus, 7);
+        let grant = |generation, token| {
+            Ok(KeyboardGrant {
+                generation,
+                token,
+                element: Some(1),
+                element_bound: true,
+                relaxed: false,
+            })
+        };
+        let keep = |state: &HookState, admission, at, editing| {
+            buffered_text_discard(state, admission, at, editing)
+        };
+        // Only a stale, contended or weakly withdrawn decision at the same
+        // field keeps it (no strong invalidation since the text was typed).
+        for denial in [
+            DecisionStale,
+            WorkerLockContended,
+            GenerationChanged,
+            DecisionUnavailable,
+        ] {
+            let dropped = Some(if denial == GenerationChanged {
+                DiscardCause::GenerationChanged
+            } else {
+                DiscardCause::DeniedKey
+            });
+            assert_eq!(keep(&state, Err(denial), Some(focus), false), None);
+            assert_eq!(
+                keep(&state, Err(denial), Some(focus), true),
+                dropped,
+                "a denied deletion never keeps the text it would remove"
+            );
+            assert_eq!(keep(&state, Err(denial), Some(other), false), dropped);
+            assert_eq!(keep(&state, Err(denial), None, false), dropped);
+        }
+        // A verdict that may mean focus moved discards it.
+        for denial in [PasswordField, Excluded] {
+            assert_eq!(
+                keep(&state, Err(denial), Some(focus), false),
+                Some(DiscardCause::DeniedKey)
+            );
+        }
+        // A weak invalidation (probe timeout or skip) keeps the focus epoch.
+        state
+            .keyboard_privacy
+            .invalidate_from(windows_uia::InvalidationSource::ProbeTimeout);
+        for denial in [GenerationChanged, DecisionUnavailable, DecisionStale] {
+            assert_eq!(keep(&state, Err(denial), Some(focus), false), None);
+        }
+        // Any strong invalidation ends every hold.
+        for source in [
+            windows_uia::InvalidationSource::FocusEvent,
+            windows_uia::InvalidationSource::Navigation,
+            windows_uia::InvalidationSource::ProbeFailure,
+        ] {
+            bound_test_text(&mut state, focus, 7);
+            state.keyboard_privacy.invalidate_from(source);
+            assert_eq!(
+                keep(&state, Err(GenerationChanged), Some(focus), false),
+                Some(DiscardCause::GenerationChanged),
+                "{source:?} ends the hold"
+            );
+            assert_eq!(
+                keep(&state, Err(DecisionUnavailable), Some(focus), false),
+                Some(DiscardCause::DeniedKey)
+            );
+        }
+        bound_test_text(&mut state, focus, 7);
+        let generation = state.keyboard_privacy.generation();
+        assert_eq!(
+            keep(&state, Err(FocusMismatch), Some(focus), false),
+            Some(DiscardCause::NativeFocusChanged)
+        );
+        // Admitted: only the same token continues the text. Another element
+        // of the same native window (same generation) never merges into it.
+        assert_eq!(keep(&state, grant(generation, 7), Some(focus), false), None);
+        assert_eq!(
+            keep(&state, grant(generation, 8), Some(focus), false),
+            Some(DiscardCause::ElementChanged)
+        );
+        assert_eq!(
+            keep(&state, grant(generation, 8), Some(other), false),
+            Some(DiscardCause::NativeFocusChanged)
+        );
+        assert_eq!(
+            keep(&state, grant(generation + 1, 9), Some(focus), false),
+            Some(DiscardCause::GenerationChanged)
+        );
+        // Without an identified element, a stale decision never keeps it.
+        state.text_element_bound = false;
+        assert_eq!(
+            keep(&state, Err(DecisionStale), Some(focus), false),
+            Some(DiscardCause::DeniedKey)
+        );
+        state.text_element_bound = true;
+        state.keyboard_privacy.invalidate();
+        assert_eq!(
+            keep(&state, Err(DecisionStale), Some(focus), false),
+            Some(DiscardCause::DeniedKey),
+            "a newer generation never keeps older text"
+        );
+    }
+
+    #[test]
+    fn keyboard_privacy_idle_flush_waits_only_for_a_stale_decision_then_discards() {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let stale_at = Instant::now() - Duration::from_millis(200);
+        // A decision withdrawn by a failure that may mean focus moved:
+        // discarded at once.
+        NativeKeyboardFocus::test_grant(&state.keyboard_privacy, focus, Some(1), Instant::now());
+        bound_test_text(&mut state, focus, 7);
+        NativeKeyboardFocus::test_failure(&state.keyboard_privacy, focus, false);
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        // Withdrawn by a provider timeout only: wait, emit nothing.
+        NativeKeyboardFocus::test_grant(&state.keyboard_privacy, focus, Some(1), Instant::now());
+        bound_test_text(&mut state, focus, 7);
+        NativeKeyboardFocus::test_failure(&state.keyboard_privacy, focus, true);
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert_eq!(state.text_buf, "synthetic text");
+        state.text_buf.clear();
+        clear_text_identity(&mut state);
+        // A stale decision for the same field: wait, emit nothing.
+        NativeKeyboardFocus::test_grant(&state.keyboard_privacy, focus, Some(1), stale_at);
+        bound_test_text(&mut state, focus, 7);
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert_eq!(state.text_buf, "synthetic text");
+        assert!(state.text_hold_since.is_some());
+        // An expired hold discards without emitting.
+        state.text_hold_since = Some(Instant::now() - TEXT_REVERIFY_HOLD);
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        // Another native field is never awaited.
+        bound_test_text(&mut state, focus, 7);
+        flush_text_buffer_at(&mut state, Some(NativeKeyboardFocus::for_test(10, 99, 12)));
+        assert!(state.text_buf.is_empty());
+        // Nor is text whose decision did not identify its element.
+        bound_test_text(&mut state, focus, 7);
+        state.text_element_bound = false;
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        // Nor a newer generation.
+        bound_test_text(&mut state, focus, 7);
+        state.keyboard_privacy.invalidate();
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(
+            state.text_buf.is_empty(),
+            "a newer generation is never awaited"
+        );
+        drain_test_content(&state, &content_rx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn keyboard_privacy_reverifies_held_text_only_for_the_same_element_after_weak_failures() {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let admit = |state: &HookState| {
+            state
+                .keyboard_privacy
+                .grant_classified(Some(focus))
+                .unwrap()
+        };
+        let typed = |state: &mut HookState, grant: KeyboardGrant| {
+            bound_test_text(state, focus, grant.token);
+            state.text_generation = Some(grant.generation);
+            state.text_element = grant.element;
+        };
+        let grant_now = |state: &HookState, element| {
+            NativeKeyboardFocus::test_grant(&state.keyboard_privacy, focus, element, Instant::now())
+        };
+        // Typed under element 1, then a probe times out and a later probe
+        // verifies element 1 again: the text is emitted under the new permit.
+        grant_now(&state, Some(1));
+        let first = admit(&state);
+        typed(&mut state, first);
+        NativeKeyboardFocus::test_failure(&state.keyboard_privacy, focus, true);
+        grant_now(&state, Some(1));
+        assert_ne!(admit(&state).token, first.token);
+        flush_text_buffer_at(&mut state, Some(focus));
+        drain_test_content(&state, &content_rx);
+        assert!(matches!(
+            rx.try_recv().unwrap().data,
+            EventData::Text { .. }
+        ));
+        // Another element after the timeout: discarded, never emitted.
+        grant_now(&state, Some(1));
+        let grant = admit(&state);
+        typed(&mut state, grant);
+        NativeKeyboardFocus::test_failure(&state.keyboard_privacy, focus, true);
+        grant_now(&state, Some(2));
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        // The same element after a strong failure: discarded.
+        grant_now(&state, Some(1));
+        let grant = admit(&state);
+        typed(&mut state, grant);
+        NativeKeyboardFocus::test_failure(&state.keyboard_privacy, focus, false);
+        grant_now(&state, Some(1));
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        // A password verdict in between is strong as well.
+        grant_now(&state, Some(1));
+        let grant = admit(&state);
+        typed(&mut state, grant);
+        NativeKeyboardFocus::test_password(&state.keyboard_privacy, focus, Some(1));
+        grant_now(&state, Some(1));
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        // An element-less re-verification never rebinds.
+        grant_now(&state, Some(1));
+        let grant = admit(&state);
+        typed(&mut state, grant);
+        NativeKeyboardFocus::test_failure(&state.keyboard_privacy, focus, true);
+        grant_now(&state, None);
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        drain_test_content(&state, &content_rx);
+        assert!(
+            rx.try_recv().is_err(),
+            "only the re-verified text was emitted"
+        );
+    }
+
     #[test]
     fn keyboard_privacy_drops_buffer_on_unknown_focus_and_invalidation() {
         let (tx, rx) = crossbeam_channel::bounded(64);
@@ -2503,7 +3120,9 @@ mod tests {
         // The hook snapshots a buffer confirmed safe in its source field. It
         // then invalidates the generation before forwarding navigation, and
         // the content worker applies PII before emitting the deferred buffer.
-        let event = take_text_buffer_with_permit(&mut state, Some(0)).unwrap();
+        let event =
+            take_text_buffer_with_permit(&mut state, Some(0), None, DiscardCause::FlushUnverified)
+                .unwrap();
         state.keyboard_privacy.invalidate();
         emit_text(&state, event);
         drain_test_content(&state, &content_rx);
@@ -2521,7 +3140,13 @@ mod tests {
         // A buffer from an earlier focus cannot take the same path.
         state.text_buf.push_str("synthetic secret");
         state.text_privacy_generation = Some(0);
-        assert!(take_text_buffer_with_permit(&mut state, Some(1)).is_none());
+        assert!(take_text_buffer_with_permit(
+            &mut state,
+            Some(1),
+            None,
+            DiscardCause::FlushUnverified
+        )
+        .is_none());
         assert!(state.text_buf.is_empty());
         assert!(rx.try_recv().is_err());
     }

@@ -22,6 +22,8 @@ use tracing::{debug, error, info, trace, warn};
 
 #[path = "windows_uia_budget.rs"]
 mod budget;
+#[path = "windows_input_admission.rs"]
+pub(crate) mod input_admission;
 pub(crate) use budget::UiaLimits;
 use budget::{ProviderBackoff, TreeProvider, UiaStop, WalkBudget, PROVIDER_TIMEOUT_MS};
 use windows::core::{implement, Interface, BSTR, VARIANT};
@@ -38,7 +40,8 @@ use windows::Win32::UI::Accessibility::{
     UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId,
     UIA_HelpTextPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
     UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
-    UIA_ProcessIdPropertyId, UIA_ValueValuePropertyId, UIA_E_TIMEOUT, UIA_PROPERTY_ID,
+    UIA_ProcessIdPropertyId, UIA_RuntimeIdPropertyId, UIA_ValueValuePropertyId, UIA_E_TIMEOUT,
+    UIA_PROPERTY_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -56,7 +59,9 @@ const KEYBOARD_PRIVACY_UNKNOWN: u8 = 0;
 const KEYBOARD_PRIVACY_ALLOWED: u8 = 1;
 const KEYBOARD_PRIVACY_PASSWORD: u8 = 2;
 const KEYBOARD_PRIVACY_UNAVAILABLE: u8 = 3;
-const KEYBOARD_PRIVACY_DENIAL_REASONS: usize = 5;
+const KEYBOARD_PRIVACY_DENIAL_REASONS: usize = 7;
+/// Interval of the content-free admission/probe summaries.
+pub(crate) const KEYBOARD_ADMISSION_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const PASSWORD_FIELD_MARKER: &str = "[REDACTED: password field]";
 const UNVERIFIED_FIELD_MARKER: &str = "[REDACTED: UIA password state unavailable]";
 
@@ -90,9 +95,23 @@ pub(crate) enum KeyboardPrivacyDenial {
     GenerationChanged,
     FocusMismatch,
     DecisionStale,
+    /// The worker found an explicit password field at this native focus.
+    PasswordField,
+    /// The worker refused to contact this native focus's excluded application.
+    Excluded,
 }
 
 impl KeyboardPrivacyDenial {
+    pub(crate) const ALL: [Self; KEYBOARD_PRIVACY_DENIAL_REASONS] = [
+        Self::DecisionUnavailable,
+        Self::WorkerLockContended,
+        Self::GenerationChanged,
+        Self::FocusMismatch,
+        Self::DecisionStale,
+        Self::PasswordField,
+        Self::Excluded,
+    ];
+
     fn index(self) -> usize {
         match self {
             Self::DecisionUnavailable => 0,
@@ -100,42 +119,220 @@ impl KeyboardPrivacyDenial {
             Self::GenerationChanged => 2,
             Self::FocusMismatch => 3,
             Self::DecisionStale => 4,
+            Self::PasswordField => 5,
+            Self::Excluded => 6,
         }
     }
+
+    /// Fixed label for content-free counters.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::DecisionUnavailable => "decision_unavailable",
+            Self::WorkerLockContended => "worker_lock_contended",
+            Self::GenerationChanged => "generation_changed",
+            Self::FocusMismatch => "focus_mismatch",
+            Self::DecisionStale => "decision_stale",
+            Self::PasswordField => "password_field",
+            Self::Excluded => "excluded",
+        }
+    }
+
+    /// A denial the privacy configuration intends (not a lost key press).
+    pub(crate) fn intended(self) -> bool {
+        matches!(self, Self::PasswordField | Self::Excluded)
+    }
+}
+
+/// The worker's latest password/exclusion verdict for one native focus, kept
+/// until a later verdict replaces it (failed or skipped probes keep it), so
+/// keystrokes typed there are never counted as ordinary losses in the app log.
+/// It only labels the hook's denials; it never grants or extends a permit.
+#[derive(Clone, Copy)]
+struct KeyboardPrivacyBlock {
+    focus: NativeKeyboardFocus,
+    denial: KeyboardPrivacyDenial,
 }
 
 /// Native focus identity is cheap to check inside a low-level input hook. UIA
 /// calls must stay on the worker: an unresponsive provider must not block input.
+/// `control_pid` owns the window that receives keystrokes; it differs from the
+/// foreground `pid` when a host embeds another process's window (WebView2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NativeKeyboardFocus {
     foreground: isize,
     control: isize,
     pid: u32,
+    control_pid: u32,
+}
+
+/// Allocation-free native sampling failure, safe to build inside the hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeFocusFailure {
+    pub(crate) stage: &'static str,
+    pub(crate) detail: &'static str,
+    /// Foreground process when known, for per-application attribution only.
+    pub(crate) foreground_pid: u32,
+}
+
+fn native_failure(stage: &'static str, detail: &'static str, pid: u32) -> NativeFocusFailure {
+    NativeFocusFailure {
+        stage,
+        detail,
+        foreground_pid: pid,
+    }
+}
+
+fn gui_thread_info(thread: u32) -> Option<GUITHREADINFO> {
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetGUIThreadInfo(thread, &mut info) }
+        .ok()
+        .map(|()| info)
+}
+
+fn window_root(hwnd: HWND) -> HWND {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+    unsafe { GetAncestor(hwnd, GA_ROOT) }
 }
 
 impl NativeKeyboardFocus {
     pub(crate) fn current() -> Option<Self> {
+        Self::sample().ok()
+    }
+
+    /// Native, bounded user32 reads only (no window messages or UIA), so the
+    /// low-level hook can call it. Without a focus window there is no
+    /// identity: the failure only labels which other window state was seen.
+    pub(crate) fn sample() -> Result<Self, NativeFocusFailure> {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.is_invalid() {
-                return None;
+                return Err(native_failure(
+                    "GetForegroundWindow",
+                    "no foreground HWND",
+                    0,
+                ));
             }
             let mut pid = 0;
             let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            let mut info = GUITHREADINFO {
-                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-                ..Default::default()
-            };
-            GetGUIThreadInfo(thread, &mut info).ok()?;
-            if pid == 0 || info.hwndFocus.is_invalid() || GetForegroundWindow() != hwnd {
-                return None;
+            if thread == 0 || pid == 0 {
+                return Err(native_failure(
+                    "GetWindowThreadProcessId",
+                    "foreground thread unavailable",
+                    pid,
+                ));
             }
-            Some(Self {
+            let Some(info) = gui_thread_info(thread) else {
+                return Err(native_failure(
+                    "GetGUIThreadInfo",
+                    "thread input state unavailable",
+                    pid,
+                ));
+            };
+            let control = info.hwndFocus;
+            if control.is_invalid() {
+                // Diagnostic labels only; neither window is ever admitted.
+                let detail = if gui_thread_info(0).is_some_and(|foreground| {
+                    !foreground.hwndFocus.is_invalid() && window_root(foreground.hwndFocus) == hwnd
+                }) {
+                    "no focused control HWND; foreground input thread has one"
+                } else if !info.hwndActive.is_invalid() {
+                    "no focused control HWND; active window present"
+                } else {
+                    "no focused control HWND"
+                };
+                return Err(native_failure("GetGUIThreadInfo.hwndFocus", detail, pid));
+            }
+            let mut control_pid = 0;
+            if GetWindowThreadProcessId(control, Some(&mut control_pid)) == 0 || control_pid == 0 {
+                return Err(native_failure(
+                    "GetWindowThreadProcessId(control)",
+                    "focused control owner unavailable",
+                    pid,
+                ));
+            }
+            if GetForegroundWindow() != hwnd {
+                return Err(native_failure(
+                    "GetForegroundWindow recheck",
+                    "foreground changed during native sample",
+                    pid,
+                ));
+            }
+            Ok(Self {
                 foreground: hwnd.0 as isize,
-                control: info.hwndFocus.0 as isize,
+                control: control.0 as isize,
                 pid,
+                control_pid,
             })
         }
+    }
+
+    /// Foreground process, for per-application attribution only.
+    pub(crate) fn foreground_pid(self) -> u32 {
+        self.pid
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(foreground: isize, control: isize, pid: u32) -> Self {
+        Self {
+            foreground,
+            control,
+            pid,
+            control_pid: pid,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_grant(
+        privacy: &KeyboardPrivacy,
+        focus: NativeKeyboardFocus,
+        element: Option<u64>,
+        checked_at: Instant,
+    ) {
+        privacy.update_probe(
+            privacy.generation(),
+            Some(focus),
+            element,
+            Some(false),
+            checked_at,
+            None,
+            None,
+        );
+    }
+
+    /// A password verdict at `focus`.
+    #[cfg(test)]
+    pub(crate) fn test_password(
+        privacy: &KeyboardPrivacy,
+        focus: NativeKeyboardFocus,
+        element: Option<u64>,
+    ) {
+        privacy.update_probe(
+            privacy.generation(),
+            Some(focus),
+            element,
+            Some(true),
+            Instant::now(),
+            None,
+            None,
+        );
+    }
+
+    /// A failed probe at `focus`: weak (a timeout) or strong.
+    #[cfg(test)]
+    pub(crate) fn test_failure(privacy: &KeyboardPrivacy, focus: NativeKeyboardFocus, weak: bool) {
+        privacy.update_probe_weak(
+            privacy.generation(),
+            Some(focus),
+            None,
+            None,
+            Instant::now(),
+            Some(CaptureReason::InputFocusedElementFailed),
+            None,
+            weak,
+        );
     }
 
     #[cfg(test)]
@@ -144,11 +341,113 @@ impl NativeKeyboardFocus {
     }
 }
 
+/// Executable basename of a process (one cheap kernel query, no snapshot).
+pub(crate) fn process_image_basename(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = [0u16; 1024];
+        let mut length = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        );
+        let _ = CloseHandle(process);
+        result.ok()?;
+        let path = String::from_utf16_lossy(&buffer[..length as usize]);
+        path.rsplit(['\\', '/']).next().map(str::to_string)
+    }
+}
+
+/// Parent process id from a process snapshot (cross-process focus only).
+fn parent_process_id(pid: u32) -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut parent = None;
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            if entry.th32ProcessID == pid {
+                parent = Some(entry.th32ParentProcessID);
+                break;
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+        parent
+    }
+}
+
+/// The only accepted cross-process keyboard focus: a WebView2 browser
+/// process (`msedgewebview2.exe`) started by the foreground application,
+/// whose focused window lies inside the foreground window. Any other process
+/// owning the focus window (remote/VM viewers, embedded document servers,
+/// UWP frames) remains denied without a UIA call. The answer is cached for
+/// one control process for at most a few seconds.
+struct CrossProcessFocusCheck {
+    last: std::cell::Cell<Option<(u32, u32, bool, Instant)>>,
+}
+
+impl CrossProcessFocusCheck {
+    const TTL: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            last: std::cell::Cell::new(None),
+        }
+    }
+
+    fn allows(&self, focus: NativeKeyboardFocus) -> bool {
+        if focus.control_pid == focus.pid {
+            return true;
+        }
+        if window_root(HWND(focus.control as *mut std::ffi::c_void)).0 as isize != focus.foreground
+        {
+            return false;
+        }
+        if let Some((pid, control_pid, allowed, at)) = self.last.get() {
+            if pid == focus.pid && control_pid == focus.control_pid && at.elapsed() < Self::TTL {
+                return allowed;
+            }
+        }
+        let allowed = process_image_basename(focus.control_pid)
+            .is_some_and(|name| name.eq_ignore_ascii_case("msedgewebview2.exe"))
+            && parent_process_id(focus.control_pid) == Some(focus.pid);
+        self.last.set(Some((
+            focus.pid,
+            focus.control_pid,
+            allowed,
+            Instant::now(),
+        )));
+        allowed
+    }
+}
+
 #[derive(Debug)]
 struct PrivacyProbeFailure {
     reason: CaptureReason,
     stage: &'static str,
     error: String,
+    /// Fixed native-sample detail, for aggregate diagnostics.
+    detail: Option<&'static str>,
 }
 fn probe_error(
     reason: CaptureReason,
@@ -159,61 +458,222 @@ fn probe_error(
         reason,
         stage,
         error: format!("{error:#?}"),
+        detail: None,
     }
 }
-// Worker-only probe: the input hook keeps its existing atomic/cheap path.
-fn native_focus_probe() -> Result<NativeKeyboardFocus, PrivacyProbeFailure> {
-    let reason = CaptureReason::InputNativeFocusUnavailable;
+
+/// What bumped the keyboard privacy generation (aggregate diagnostics only;
+/// password verdicts are deliberately not counted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InvalidationSource {
+    FocusEvent,
+    Navigation,
+    /// A failed probe that may mean focus moved.
+    ProbeFailure,
+    /// A probe skipped by its breaker or behind a long walk (weak).
+    ProbeSkip,
+    /// A provider timeout or exhausted probe budget (weak).
+    ProbeTimeout,
+}
+pub(crate) const INVALIDATION_SOURCES: usize = 5;
+
+impl InvalidationSource {
+    /// Codes by index; `INVALIDATION_SOURCES` is any other invalidation
+    /// (password verdict, exclusion, pause, worker start or stop).
+    pub(crate) const CODES: [&'static str; INVALIDATION_SOURCES + 1] = [
+        "focus_event",
+        "navigation",
+        "probe_failure",
+        "probe_skip",
+        "probe_timeout",
+        "other",
+    ];
+
+    /// No evidence that focus moved: the provider was not asked or did not
+    /// answer in time. Buffered text may then await re-verification.
+    fn weak(self) -> bool {
+        matches!(self, Self::ProbeSkip | Self::ProbeTimeout)
+    }
+}
+
+/// A strong invalidation adds this to the generation, a weak one adds 1, so
+/// `generation >> 32` (the focus epoch) changes only when focus may have
+/// moved. A carry from the low half also changes it, which only fails closed.
+const STRONG_INVALIDATION: u64 = (1 << 32) + 1;
+
+/// Whether no strong invalidation separates two generations.
+pub(crate) fn same_focus_epoch(earlier: u64, later: u64) -> bool {
+    earlier >> 32 == later >> 32
+}
+
+/// A process list setting: none (default), all, or executable basenames.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProcessList {
+    #[default]
+    None,
+    All,
+    Some(Vec<String>),
+}
+
+fn executable_stem(name: &str) -> String {
+    let name = name.trim().to_ascii_lowercase();
+    name.strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(name)
+}
+
+impl ProcessList {
+    /// `none`/empty, `all`, or a comma/semicolon separated list of
+    /// executables (with or without `.exe`).
+    pub(crate) fn parse(value: &str) -> Self {
+        let value = value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("none") {
+            return Self::None;
+        }
+        if value.eq_ignore_ascii_case("all") {
+            return Self::All;
+        }
+        let names: Vec<String> = value
+            .split([',', ';'])
+            .map(executable_stem)
+            .filter(|name| !name.is_empty())
+            .collect();
+        if names.is_empty() {
+            Self::None
+        } else {
+            Self::Some(names)
+        }
+    }
+
+    pub(crate) fn matches(&self, executable: Option<&str>) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => executable.is_some(),
+            Self::Some(names) => {
+                executable.is_some_and(|exe| names.contains(&executable_stem(exe)))
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::All => usize::MAX,
+            Self::Some(names) => names.len(),
+        }
+    }
+}
+
+/// Owner-authorised relaxations (2026-10-23), set through the deployment
+/// path as environment variables for the GUI process only. Each replaces
+/// only its own check: native focus, process ownership, exclusions, the
+/// rechecks and the pause gates always apply.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProbeRelaxations {
+    /// An unsupported (not explicit) IsPassword counts as non-password.
+    pub(crate) password_state_unsupported: ProcessList,
+    /// A focused element without HasKeyboardFocus is accepted; its
+    /// IsPassword must then be explicit.
+    pub(crate) focus_without_keyboard_focus: ProcessList,
+}
+
+impl ProbeRelaxations {
+    pub(crate) const PASSWORD_STATE_VAR: &'static str =
+        "SCREENWISE_UIA_PASSWORD_STATE_UNSUPPORTED_PROCESSES";
+    pub(crate) const FOCUS_VAR: &'static str =
+        "SCREENWISE_UIA_FOCUS_WITHOUT_KEYBOARD_FOCUS_PROCESSES";
+
+    pub(crate) fn from_env() -> Self {
+        let read = |name| ProcessList::parse(&std::env::var(name).unwrap_or_default());
+        Self {
+            password_state_unsupported: read(Self::PASSWORD_STATE_VAR),
+            focus_without_keyboard_focus: read(Self::FOCUS_VAR),
+        }
+    }
+}
+
+/// Which relaxation a decision relied on (diagnostic label only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeRelaxation {
+    PasswordStateAssumed,
+    FocusAssumed,
+}
+
+/// UIA's reserved "not supported" value: the only non-Boolean IsPassword the
+/// password-state relaxation accepts (an empty or malformed value is not).
+fn is_reserved_not_supported(value: &VARIANT) -> bool {
+    use windows::Win32::UI::Accessibility::UiaGetReservedNotSupportedValue;
     unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() {
-            return Err(probe_error(
-                reason,
-                "GetForegroundWindow",
-                "no foreground HWND",
-            ));
+        let raw = value.as_raw().Anonymous.Anonymous;
+        if raw.vt != 13 {
+            return false;
         }
-        let mut pid = 0;
-        let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if thread == 0 || pid == 0 {
-            return Err(probe_error(
-                reason,
-                "GetWindowThreadProcessId",
-                std::io::Error::last_os_error(),
-            ));
-        }
-        let mut info = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
+        let Ok(reserved) = UiaGetReservedNotSupportedValue() else {
+            return false;
         };
-        GetGUIThreadInfo(thread, &mut info)
-            .map_err(|e| probe_error(reason, "GetGUIThreadInfo", e))?;
-        if info.hwndFocus.is_invalid() {
-            return Err(probe_error(
-                reason,
-                "GetGUIThreadInfo.hwndFocus",
-                "no focused control HWND",
-            ));
-        }
-        if GetForegroundWindow() != hwnd {
-            return Err(probe_error(
-                reason,
-                "GetForegroundWindow recheck",
-                "foreground changed during native sample",
-            ));
-        }
-        Ok(NativeKeyboardFocus {
-            foreground: hwnd.0 as isize,
-            control: info.hwndFocus.0 as isize,
-            pid,
-        })
+        !raw.Anonymous.punkVal.is_null() && raw.Anonymous.punkVal == reserved.as_raw()
     }
 }
 
 struct KeyboardPrivacyDecision {
     generation: u64,
     focus: NativeKeyboardFocus,
+    relaxation: Option<ProbeRelaxation>,
+    /// Hash of the verified element's UIA runtime id, when the provider gave one.
+    element: Option<u64>,
     checked_at: Instant,
+}
+
+/// A granted keyboard permit. `token` changes whenever the generation, the
+/// native focus or the verified UIA element changes, so content admitted
+/// under one token is only ever emitted under the same token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeyboardGrant {
+    pub(crate) generation: u64,
+    pub(crate) token: u64,
+    /// Hash of the verified UIA element's runtime id, if known.
+    pub(crate) element: Option<u64>,
+    /// The decision identified its element; only then may content wait out
+    /// a stale decision for re-verification.
+    pub(crate) element_bound: bool,
+    /// The decision relied on an owner-authorised relaxation.
+    pub(crate) relaxed: bool,
+}
+
+fn grant_token(generation: u64, focus: NativeKeyboardFocus, element: Option<u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (
+        generation,
+        focus.foreground,
+        focus.control,
+        focus.pid,
+        focus.control_pid,
+        element,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash of a cached UIA runtime id (VT_ARRAY | VT_I4); `None` if absent.
+fn runtime_id_hash(value: &VARIANT) -> Option<u64> {
+    unsafe {
+        let raw = value.as_raw().Anonymous.Anonymous;
+        if raw.vt != 0x2003 {
+            return None;
+        }
+        let array = raw.Anonymous.parray as *const windows::Win32::System::Com::SAFEARRAY;
+        if array.is_null() || (*array).cDims != 1 || (*array).pvData.is_null() {
+            return None;
+        }
+        let count = (*array).rgsabound[0].cElements as usize;
+        if count == 0 || count > 64 {
+            return None;
+        }
+        let ids = std::slice::from_raw_parts((*array).pvData as *const i32, count);
+        let mut hasher = DefaultHasher::new();
+        ids.hash(&mut hasher);
+        Some(hasher.finish())
+    }
 }
 
 /// Separate from the tree/context cache: only a recent, explicit UIA
@@ -245,6 +705,13 @@ pub struct KeyboardPrivacy {
     last_probe_completed_at: Mutex<Option<Instant>>,
     last_stale_age_us: AtomicU64,
     max_stale_age_us: AtomicU64,
+    block: Mutex<Option<KeyboardPrivacyBlock>>,
+    content_admissions: AtomicU64,
+    /// Hook-thread tallies awaiting the worker's content-free report.
+    admission_reports: Mutex<Vec<input_admission::KeyAdmissionReport>>,
+    invalidations: [AtomicU64; INVALIDATION_SOURCES],
+    reported_invalidations: [AtomicU64; INVALIDATION_SOURCES],
+    last_invalidation: AtomicU8,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -266,18 +733,135 @@ fn duration_micros(value: Duration) -> u64 {
 }
 
 impl KeyboardPrivacy {
+    /// A strong invalidation: focus may have moved.
     pub(crate) fn invalidate(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.last_invalidation
+            .store(INVALIDATION_SOURCES as u8, Ordering::Relaxed);
+        self.generation
+            .fetch_add(STRONG_INVALIDATION, Ordering::SeqCst);
     }
 
+    /// As `invalidate`, counting its source for diagnostics; a weak source
+    /// keeps the focus epoch.
+    pub(crate) fn invalidate_from(&self, source: InvalidationSource) {
+        self.invalidations[source as usize].fetch_add(1, Ordering::Relaxed);
+        self.last_invalidation
+            .store(source as u8, Ordering::Relaxed);
+        let step = if source.weak() {
+            1
+        } else {
+            STRONG_INVALIDATION
+        };
+        self.generation.fetch_add(step, Ordering::SeqCst);
+    }
+
+    /// Index into `InvalidationSource::CODES` of the latest invalidation
+    /// (diagnostics only: concurrent invalidations may race).
+    pub(crate) fn last_invalidation_source(&self) -> usize {
+        usize::from(self.last_invalidation.load(Ordering::Relaxed)).min(INVALIDATION_SOURCES)
+    }
+
+    /// The current generation; text buffered under another one is discarded.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn take_invalidation_deltas(&self) -> [u64; INVALIDATION_SOURCES] {
+        let mut deltas = [0; INVALIDATION_SOURCES];
+        for (index, delta) in deltas.iter_mut().enumerate() {
+            let total = self.invalidations[index].load(Ordering::Relaxed);
+            let previous = self.reported_invalidations[index].swap(total, Ordering::Relaxed);
+            *delta = total.saturating_sub(previous);
+        }
+        deltas
+    }
+
+    #[cfg(test)]
     pub(crate) fn permit(&self, focus: Option<NativeKeyboardFocus>) -> Option<u64> {
         self.permit_diagnosed(focus).ok()
     }
 
+    /// As `permit_diagnosed`, but a denial at a focus for which the worker's
+    /// latest verdict was a password field or an excluded application is
+    /// labelled as that intended block. The label never changes admission.
+    #[cfg(test)]
+    pub(crate) fn permit_classified(
+        &self,
+        focus: Option<NativeKeyboardFocus>,
+    ) -> Result<u64, KeyboardPrivacyDenial> {
+        self.permit_diagnosed(focus)
+            .map_err(|denial| self.classify(focus, denial))
+    }
+
+    fn classify(
+        &self,
+        focus: Option<NativeKeyboardFocus>,
+        denial: KeyboardPrivacyDenial,
+    ) -> KeyboardPrivacyDenial {
+        let block = self.block.try_lock().and_then(|block| *block);
+        match (focus, block) {
+            (Some(focus), Some(block)) if block.focus == focus => block.denial,
+            _ => denial,
+        }
+    }
+
+    fn set_block(&self, block: Option<(NativeKeyboardFocus, KeyboardPrivacyDenial)>) {
+        *self.block.lock() = block.map(|(focus, denial)| KeyboardPrivacyBlock { focus, denial });
+    }
+
+    /// Hook-side, atomic-only: one key press whose content passed the gate.
+    pub(crate) fn note_content_admitted(&self) {
+        self.content_admissions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Hook thread (message loop, not the hook callback): hand one interval's
+    /// tally to the worker without waiting; a contended hand-off returns the
+    /// report for the next tick. Bounded: the oldest unreported tally merges.
+    pub(crate) fn offer_admission_report(
+        &self,
+        report: input_admission::KeyAdmissionReport,
+    ) -> Result<(), input_admission::KeyAdmissionReport> {
+        let Some(mut reports) = self.admission_reports.try_lock() else {
+            return Err(report);
+        };
+        if reports.len() >= 8 {
+            let oldest = reports.remove(0);
+            reports[0].merge_earlier(oldest);
+        }
+        reports.push(report);
+        Ok(())
+    }
+
+    fn take_admission_reports(&self) -> Vec<input_admission::KeyAdmissionReport> {
+        std::mem::take(&mut *self.admission_reports.lock())
+    }
+
+    #[cfg(test)]
     pub(crate) fn permit_diagnosed(
         &self,
         focus: Option<NativeKeyboardFocus>,
     ) -> Result<u64, KeyboardPrivacyDenial> {
+        self.admit(focus).map(|grant| grant.generation)
+    }
+
+    /// The permit token for `focus`, if content may be admitted now.
+    pub(crate) fn permit_token(&self, focus: Option<NativeKeyboardFocus>) -> Option<u64> {
+        self.admit(focus).ok().map(|grant| grant.token)
+    }
+
+    /// As `admit`, with intended blocks labelled (see `permit_classified`).
+    pub(crate) fn grant_classified(
+        &self,
+        focus: Option<NativeKeyboardFocus>,
+    ) -> Result<KeyboardGrant, KeyboardPrivacyDenial> {
+        self.admit(focus)
+            .map_err(|denial| self.classify(focus, denial))
+    }
+
+    fn admit(
+        &self,
+        focus: Option<NativeKeyboardFocus>,
+    ) -> Result<KeyboardGrant, KeyboardPrivacyDenial> {
         let generation = self.generation.load(Ordering::SeqCst);
         let decision = self
             .decision
@@ -304,7 +888,13 @@ impl KeyboardPrivacy {
         if self.generation.load(Ordering::SeqCst) != generation {
             return Err(KeyboardPrivacyDenial::GenerationChanged);
         }
-        Ok(generation)
+        Ok(KeyboardGrant {
+            generation,
+            token: grant_token(generation, decision.focus, decision.element),
+            element: decision.element,
+            element_bound: decision.element.is_some(),
+            relaxed: decision.relaxation.is_some(),
+        })
     }
 
     /// Called by the low-level hook when fail-closed admission prevents a
@@ -312,7 +902,11 @@ impl KeyboardPrivacy {
     /// delay the Windows input queue; the UIA worker emits bounded aggregate
     /// diagnostics on its next poll.
     pub(crate) fn note_content_suppressed(&self, reason: KeyboardPrivacyDenial) {
-        self.content_suppressions.fetch_add(1, Ordering::Relaxed);
+        // Password-field and exclusion blocks only mark the notice reason:
+        // counting them would log how many keys were typed there.
+        if !reason.intended() {
+            self.content_suppressions.fetch_add(1, Ordering::Relaxed);
+        }
         self.content_suppressions_by_reason[reason.index()].fetch_add(1, Ordering::Relaxed);
     }
 
@@ -392,6 +986,9 @@ impl KeyboardPrivacy {
                 .store(total, Ordering::Relaxed);
             let mut reason_deltas = [0u64; KEYBOARD_PRIVACY_DENIAL_REASONS];
             for (index, delta) in reason_deltas.iter_mut().enumerate() {
+                if KeyboardPrivacyDenial::ALL[index].intended() {
+                    continue;
+                }
                 let reason_total =
                     self.content_suppressions_by_reason[index].load(Ordering::Relaxed);
                 let previous = self.reported_content_suppressions_by_reason[index]
@@ -407,6 +1004,7 @@ impl KeyboardPrivacy {
                 generation_changed = reason_deltas[KeyboardPrivacyDenial::GenerationChanged.index()],
                 focus_mismatch = reason_deltas[KeyboardPrivacyDenial::FocusMismatch.index()],
                 decision_stale = reason_deltas[KeyboardPrivacyDenial::DecisionStale.index()],
+                total_admitted_events = self.content_admissions.load(Ordering::Relaxed),
                 "keyboard/clipboard content events were suppressed by the password-field privacy gate"
             );
             *last = Some(now);
@@ -423,6 +1021,8 @@ impl KeyboardPrivacy {
             CaptureReason::InputGenerationChanged,
             CaptureReason::InputFocusChanged,
             CaptureReason::InputCheckStale,
+            CaptureReason::PasswordField,
+            CaptureReason::ExcludedForeground,
         ]
         .into_iter()
         .enumerate()
@@ -453,6 +1053,54 @@ impl KeyboardPrivacy {
         is_password: Option<bool>,
         checked_at: Instant,
         failure: Option<CaptureReason>,
+    ) {
+        self.update_probe(
+            generation,
+            focus,
+            None,
+            is_password,
+            checked_at,
+            failure,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_probe(
+        &self,
+        generation: u64,
+        focus: Option<NativeKeyboardFocus>,
+        element: Option<u64>,
+        is_password: Option<bool>,
+        checked_at: Instant,
+        failure: Option<CaptureReason>,
+        relaxation: Option<ProbeRelaxation>,
+    ) {
+        self.update_probe_weak(
+            generation,
+            focus,
+            element,
+            is_password,
+            checked_at,
+            failure,
+            relaxation,
+            false,
+        );
+    }
+
+    /// As `update_probe`; `weak_failure` marks a failed probe with no
+    /// evidence that focus moved (see `failure_without_focus_evidence`).
+    #[allow(clippy::too_many_arguments)]
+    fn update_probe_weak(
+        &self,
+        generation: u64,
+        focus: Option<NativeKeyboardFocus>,
+        element: Option<u64>,
+        is_password: Option<bool>,
+        checked_at: Instant,
+        failure: Option<CaptureReason>,
+        relaxation: Option<ProbeRelaxation>,
+        weak_failure: bool,
     ) {
         let changed_reason = {
             let mut previous = self.failure_reason.lock();
@@ -528,14 +1176,33 @@ impl KeyboardPrivacy {
             (Some(focus), Some(false)) => Some(KeyboardPrivacyDecision {
                 generation,
                 focus,
+                relaxation,
+                element,
                 checked_at,
             }),
+            // Every failure and every password verdict invalidates.
+            (_, None) => {
+                self.invalidate_from(if weak_failure {
+                    InvalidationSource::ProbeTimeout
+                } else {
+                    InvalidationSource::ProbeFailure
+                });
+                None
+            }
             _ => {
                 self.invalidate();
                 None
             }
         };
         *self.decision.lock() = decision;
+        match (focus, is_password) {
+            (Some(focus), Some(true)) => {
+                self.set_block(Some((focus, KeyboardPrivacyDenial::PasswordField)))
+            }
+            // A failed probe at the same focus keeps an earlier verdict.
+            (Some(focus), None) if self.block.lock().is_some_and(|block| block.focus == focus) => {}
+            _ => self.set_block(None),
+        }
         self.report_content_suppressions(checked_at, state != KEYBOARD_PRIVACY_UNAVAILABLE);
     }
 }
@@ -633,42 +1300,97 @@ impl UiaContext {
     /// Refresh keyboard privacy independently of tree capture/debouncing. Query
     /// the actual focused element, explicitly disallowing UIA default values:
     /// an unsupported IsPassword property must not become a false permission.
-    fn refresh_keyboard_privacy(&self, privacy: &KeyboardPrivacy, config: &UiCaptureConfig) {
-        if !self.provider_ready() {
-            privacy.invalidate();
-            return;
-        }
+    /// No context-wide retry backoff: a failed probe already denies content,
+    /// and repeating it sooner can only restore a verified permit sooner.
+    /// Provider cost is bounded per process by the probe breaker instead.
+    fn refresh_keyboard_privacy(
+        &self,
+        privacy: &KeyboardPrivacy,
+        config: &UiCaptureConfig,
+        cross_process: &CrossProcessFocusCheck,
+        relaxations: &ProbeRelaxations,
+    ) -> input_admission::ProbeRecord {
+        use input_admission::{ProbeOutcome, ProbeRecord, ProbeSkip};
         let started_at = Instant::now();
         let generation = privacy.generation.load(Ordering::SeqCst);
         // Native/UIA candidate identities only: never ask for Name, Value or
         // password contents just to diagnose a failed privacy decision.
-        let native = native_focus_probe();
+        let sampled = NativeKeyboardFocus::sample();
+        let attributed_pid = match &sampled {
+            Ok(focus) => focus.pid,
+            Err(failure) => failure.foreground_pid,
+        };
+        let control_pid = sampled.as_ref().ok().map(|focus| focus.control_pid);
+        let record = |outcome| ProbeRecord {
+            pid: attributed_pid,
+            control_pid,
+            duration: started_at.elapsed(),
+            outcome,
+        };
+        let native = sampled.map_err(|failure| PrivacyProbeFailure {
+            detail: Some(failure.detail),
+            ..probe_error(
+                CaptureReason::InputNativeFocusUnavailable,
+                failure.stage,
+                failure.detail,
+            )
+        });
         let focus = native.as_ref().ok().copied();
         // Never contact an excluded (or unidentifiable) application through
-        // UIA. Keystrokes there are already discarded by the hook; deny them.
+        // UIA: neither the foreground application nor, when another process
+        // owns the focused window (WebView2), that process. Deny keystrokes.
         if focus.is_some_and(|focus| {
             !uia_target_allowed(config, HWND(focus.foreground as *mut std::ffi::c_void))
+                || (focus.control_pid != focus.pid
+                    && !uia_target_allowed(config, HWND(focus.control as *mut std::ffi::c_void)))
         }) {
             crate::uia_breaker::note_exclusion_skip();
+            privacy.set_block(focus.map(|focus| (focus, KeyboardPrivacyDenial::Excluded)));
             privacy.invalidate();
-            return;
+            return record(ProbeOutcome::Skipped(ProbeSkip::Excluded));
         }
+        // A focus window owned by another process is only probed for the
+        // foreground application's own WebView2 child; otherwise deny
+        // without contacting that process's provider.
+        let native = native.and_then(|focus| {
+            if cross_process.allows(focus) {
+                Ok(focus)
+            } else {
+                Err(probe_error(
+                    CaptureReason::InputFocusOwnershipFailed,
+                    "cross_process_focus",
+                    "focus window owned by an unsupported process",
+                ))
+            }
+        });
         // Fail closed without calling the provider while this probe's own
-        // backoff is open, or while a walk to the same process has already
-        // run longer than a probe could wait (it would only queue behind it).
-        if focus.is_some_and(|focus| {
-            !crate::uia_breaker::allows_probe(focus.pid)
-                || crate::uia_breaker::long_walk_in_flight(
-                    focus.pid,
-                    Duration::from_millis(u64::from(PROVIDER_TIMEOUT_MS)),
-                )
+        // backoff is open for the process that owns the focused window, or
+        // while a walk to it has already run longer than a probe could wait
+        // (it would only queue behind it on the shared UI thread).
+        if let Some(skip) = focus.and_then(|focus| {
+            if !crate::uia_breaker::allows_probe(focus.control_pid) {
+                Some(ProbeSkip::Breaker)
+            } else {
+                [focus.pid, focus.control_pid]
+                    .into_iter()
+                    .any(|pid| {
+                        crate::uia_breaker::long_walk_in_flight(
+                            pid,
+                            Duration::from_millis(u64::from(PROVIDER_TIMEOUT_MS)),
+                        )
+                    })
+                    .then_some(ProbeSkip::LongWalk)
+            }
         }) {
             crate::uia_breaker::note_probe_skipped();
-            privacy.invalidate();
-            return;
+            privacy.invalidate_from(InvalidationSource::ProbeSkip);
+            return record(ProbeOutcome::Skipped(skip));
         }
+        let provider_called = std::cell::Cell::new(false);
+        let provider_failed = std::cell::Cell::new(false);
         let provider_timed_out = std::cell::Cell::new(false);
         let note_timeout = |error: &windows::core::Error| {
+            provider_failed.set(true);
             if error.code().0 as u32 == UIA_E_TIMEOUT {
                 provider_timed_out.set(true);
             }
@@ -686,9 +1408,13 @@ impl UiaContext {
                     )
                 })
         };
+        let element_id = std::cell::Cell::new(None);
+        let password_read = std::cell::Cell::new(None);
+        let relaxation = std::cell::Cell::new(None);
         let (result, checked_at) = complete_keyboard_privacy_probe(|| unsafe {
             let focus = native?;
             prepare()?;
+            provider_called.set(true);
             let element = self
                 .automation
                 .GetFocusedElementBuildCache(&self.privacy_cache_request)
@@ -701,6 +1427,16 @@ impl UiaContext {
                     )
                 })?;
             let evidence_at = Instant::now();
+            // Local cached reads (no provider call).
+            element_id.set(
+                element
+                    .GetCachedPropertyValueEx(UIA_RuntimeIdPropertyId, true)
+                    .ok()
+                    .and_then(|value| runtime_id_hash(&value)),
+            );
+            if let Ok(value) = element.GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true) {
+                password_read.set(explicit_cached_password_state(&value).ok());
+            }
             budget.check_complete().map_err(|_| {
                 probe_error(
                     CaptureReason::InputFocusedElementFailed,
@@ -740,13 +1476,24 @@ impl UiaContext {
                     e,
                 )
             })? as u32;
-            if !owns_focus || element_pid != focus.pid {
+            // The element must belong to the process that natively owns the
+            // focused window: for a WebView2 host this is the embedded
+            // msedgewebview2.exe, never merely the foreground host process.
+            let control_executable = || process_image_basename(focus.control_pid);
+            // Owner-authorised: a listed process's focused element may lack
+            // HasKeyboardFocus; ownership and an explicit IsPassword remain.
+            let focus_relaxed = !owns_focus
+                && element_pid == focus.control_pid
+                && relaxations
+                    .focus_without_keyboard_focus
+                    .matches(control_executable().as_deref());
+            if (!owns_focus && !focus_relaxed) || element_pid != focus.control_pid {
                 return Err(probe_error(
                     CaptureReason::InputFocusOwnershipFailed,
                     "focus_ownership",
                     format!(
-                        "has_keyboard_focus={owns_focus}; element_pid={element_pid}; native_pid={}",
-                        focus.pid
+                        "has_keyboard_focus={owns_focus}; element_pid={element_pid}; native_pid={}; control_pid={}",
+                        focus.pid, focus.control_pid
                     ),
                 ));
             }
@@ -759,22 +1506,48 @@ impl UiaContext {
                         e,
                     )
                 })?;
-            let is_password = explicit_cached_password_state(&value).map_err(|e| {
-                probe_error(
-                    CaptureReason::InputPasswordPropertyUnsupported,
-                    "IsPassword Boolean conversion",
-                    e,
-                )
-            })?;
+            let is_password = match explicit_cached_password_state(&value) {
+                Ok(is_password) => {
+                    if focus_relaxed {
+                        relaxation.set(Some(ProbeRelaxation::FocusAssumed));
+                    }
+                    is_password
+                }
+                // Owner-authorised: a listed process's unsupported IsPassword
+                // counts as non-password, never together with the focus
+                // relaxation, and never for an empty or malformed value.
+                Err(_)
+                    if !focus_relaxed
+                        && is_reserved_not_supported(&value)
+                        && relaxations
+                            .password_state_unsupported
+                            .matches(control_executable().as_deref()) =>
+                {
+                    relaxation.set(Some(ProbeRelaxation::PasswordStateAssumed));
+                    false
+                }
+                Err(e) => {
+                    return Err(probe_error(
+                        CaptureReason::InputPasswordPropertyUnsupported,
+                        "IsPassword Boolean conversion",
+                        e,
+                    ))
+                }
+            };
             prepare()?;
-            let current = self.automation.GetFocusedElement().map_err(|e| {
-                note_timeout(&e);
-                probe_error(
-                    CaptureReason::InputFocusVerificationFailed,
-                    "GetFocusedElement recheck",
-                    e,
-                )
-            })?;
+            // Cached ids only, so a changed element can be described by fixed
+            // numbers (control types, same process) without more calls.
+            let current = self
+                .automation
+                .GetFocusedElementBuildCache(&self.privacy_cache_request)
+                .map_err(|e| {
+                    note_timeout(&e);
+                    probe_error(
+                        CaptureReason::InputFocusVerificationFailed,
+                        "GetFocusedElement recheck",
+                        e,
+                    )
+                })?;
             if NativeKeyboardFocus::current() != Some(focus) {
                 return Err(probe_error(
                     CaptureReason::InputFocusVerificationFailed,
@@ -799,7 +1572,7 @@ impl UiaContext {
                 return Err(probe_error(
                     CaptureReason::InputFocusVerificationFailed,
                     "CompareElements",
-                    "focused element changed",
+                    changed_element_detail(&element, &current),
                 ));
             }
             budget.check_complete().map_err(|_| {
@@ -815,17 +1588,26 @@ impl UiaContext {
             validated_password_evidence(is_password, evidence_at, checked_at)
         });
         let reason = result.as_ref().err().map(|failure| failure.reason);
-        if provider_timed_out.get() {
-            if let Some(focus) = focus {
-                crate::uia_breaker::record_probe(focus.pid, true);
+        // A provider that already reported IsPassword=true keeps the failure
+        // strong: that element must never be re-verified into a permit.
+        let weak_failure = password_read.get() != Some(true)
+            && result.as_ref().err().is_some_and(|failure| {
+                failure_without_focus_evidence(failure, provider_timed_out.get())
+            });
+        // Timeouts open the probe breaker for the provider's process; probes
+        // whose provider calls all answered count towards resetting it.
+        if let Some(focus) = focus {
+            if provider_timed_out.get() {
+                crate::uia_breaker::record_probe(focus.control_pid, true);
+            } else if provider_called.get() && !provider_failed.get() {
+                crate::uia_breaker::record_probe(focus.control_pid, false);
             }
         }
         if let Err(failure) = &result {
-            self.backoff.failed();
             screenpipe_config::sensitive_debug::record("input_privacy_probe", || {
                 serde_json::json!({
                     "reason":failure.reason.code(), "stage":failure.stage, "error":failure.error,
-                    "native_candidate":focus.map(|f| serde_json::json!({"foreground_hwnd":f.foreground,"control_hwnd":f.control,"pid":f.pid}))
+                    "native_candidate":focus.map(|f| serde_json::json!({"foreground_hwnd":f.foreground,"control_hwnd":f.control,"pid":f.pid,"control_pid":f.control_pid}))
                 })
             });
         } else if matches!(result, Ok((true, _))) {
@@ -838,11 +1620,39 @@ impl UiaContext {
         }
         // Focus events still invalidate permission; diagnosis never opens a gate.
         privacy.note_probe_completed(started_at, checked_at);
+        let outcome = match &result {
+            Ok((false, _)) => match relaxation.get() {
+                Some(relaxed) => ProbeOutcome::AllowedRelaxed(relaxed),
+                None => ProbeOutcome::Allowed,
+            },
+            Ok((true, _)) => ProbeOutcome::Password,
+            Err(failure) => ProbeOutcome::Failed {
+                reason: failure.reason.code(),
+                stage: failure.stage,
+                hresult: input_admission::hresult_label(&failure.error).or(failure.detail),
+            },
+        };
         let (is_password, evidence_at) = match result {
             Ok((is_password, evidence_at)) => (Some(is_password), evidence_at),
             Err(_) => (None, checked_at),
         };
-        privacy.update_diagnosed(generation, focus, is_password, evidence_at, reason);
+        let failed = is_password.is_none();
+        privacy.update_probe_weak(
+            generation,
+            focus,
+            element_id.get(),
+            is_password,
+            evidence_at,
+            reason,
+            relaxation.get(),
+            weak_failure,
+        );
+        // A provider that reported IsPassword=true before a later stage failed
+        // is still a password verdict for labelling (the failure invalidated).
+        if failed && password_read.get() == Some(true) {
+            privacy.set_block(focus.map(|focus| (focus, KeyboardPrivacyDenial::PasswordField)));
+        }
+        record(outcome)
     }
 
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
@@ -908,6 +1718,9 @@ impl UiaContext {
             privacy_cache_request.AddProperty(UIA_IsPasswordPropertyId)?;
             privacy_cache_request.AddProperty(UIA_ProcessIdPropertyId)?;
             privacy_cache_request.AddProperty(UIA_HasKeyboardFocusPropertyId)?;
+            privacy_cache_request.AddProperty(UIA_RuntimeIdPropertyId)?;
+            // A fixed number, only for describing a changed element.
+            privacy_cache_request.AddProperty(UIA_ControlTypePropertyId)?;
             privacy_cache_request.SetTreeScope(TreeScope_Element)?;
             privacy_cache_request.SetAutomationElementMode(AutomationElementMode_Full)?;
 
@@ -1332,6 +2145,54 @@ fn navigation_result_at(
     Ok(element)
 }
 
+/// A failed probe with no evidence that focus moved: a provider call timed
+/// out or the probe ran out of time. Every other failure (native focus,
+/// ownership, a changed element, an unsupported or failed property) may mean
+/// focus moved, and stays a strong invalidation.
+fn failure_without_focus_evidence(failure: &PrivacyProbeFailure, timed_out: bool) -> bool {
+    timed_out
+        || matches!(
+            failure.stage,
+            "provider_budget"
+                | "cached_state_budget"
+                | "completed_probe_budget"
+                | "cached_password_evidence_age"
+        )
+}
+
+/// Fixed numbers describing why a focus recheck found another element: both
+/// cached control types, whether the process and runtime id match, and the
+/// new element's HasKeyboardFocus. No names or values.
+fn changed_element_detail(first: &IUIAutomationElement, second: &IUIAutomationElement) -> String {
+    let int = |element: &IUIAutomationElement, property| unsafe {
+        element
+            .GetCachedPropertyValueEx(property, true)
+            .ok()
+            .and_then(|value| i32::try_from(&value).ok())
+    };
+    let runtime = |element: &IUIAutomationElement| unsafe {
+        element
+            .GetCachedPropertyValueEx(UIA_RuntimeIdPropertyId, true)
+            .ok()
+            .and_then(|value| runtime_id_hash(&value))
+    };
+    let focused = unsafe {
+        second
+            .GetCachedPropertyValueEx(UIA_HasKeyboardFocusPropertyId, true)
+            .ok()
+            .and_then(|value| bool::try_from(&value).ok())
+    };
+    let first_pid = int(first, UIA_ProcessIdPropertyId);
+    format!(
+        "focused element changed; first_control_type={:?}; second_control_type={:?}; same_process={}; same_runtime_id={}; second_has_keyboard_focus={:?}",
+        int(first, UIA_ControlTypePropertyId),
+        int(second, UIA_ControlTypePropertyId),
+        first_pid.is_some() && first_pid == int(second, UIA_ProcessIdPropertyId),
+        runtime(first).is_some() && runtime(first) == runtime(second),
+        focused,
+    )
+}
+
 fn validated_password_evidence(
     is_password: bool,
     evidence_at: Instant,
@@ -1409,7 +2270,7 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
         _sender: Option<&IUIAutomationElement>,
     ) -> windows::core::Result<()> {
         if let Some(keyboard_privacy) = &self.keyboard_privacy {
-            keyboard_privacy.invalidate();
+            keyboard_privacy.invalidate_from(InvalidationSource::FocusEvent);
         }
         // Record the time of focus change; the UIA thread will debounce and capture
         let hwnd = unsafe { GetForegroundWindow() };
@@ -1532,6 +2393,22 @@ pub(crate) fn run_keyboard_privacy_thread(
     }
 
     let mut msg = MSG::default();
+    let cross_process = CrossProcessFocusCheck::new();
+    let relaxations = ProbeRelaxations::from_env();
+    info!(
+        reason_code = "keyboard_privacy_relaxations",
+        password_state_unsupported_processes = relaxations.password_state_unsupported.len(),
+        focus_without_keyboard_focus_processes = relaxations.focus_without_keyboard_focus.len(),
+        "owner-authorised keyboard privacy relaxations configured (process counts only)"
+    );
+    screenpipe_config::sensitive_debug::record("input_privacy_relaxations", || {
+        serde_json::json!({
+            "password_state_unsupported": format!("{:?}", relaxations.password_state_unsupported),
+            "focus_without_keyboard_focus": format!("{:?}", relaxations.focus_without_keyboard_focus),
+        })
+    });
+    let mut probes = input_admission::ProbeTally::default();
+    let mut pending_keys = std::collections::BTreeMap::new();
     while !stop.load(Ordering::Relaxed) {
         unsafe {
             while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
@@ -1539,7 +2416,14 @@ pub(crate) fn run_keyboard_privacy_thread(
                 DispatchMessageW(&msg);
             }
         }
+        report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, false);
         if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+            probes.record(input_admission::ProbeRecord {
+                pid: 0,
+                control_pid: None,
+                duration: Duration::ZERO,
+                outcome: input_admission::ProbeOutcome::VisualGateClosed,
+            });
             keyboard_privacy.update_diagnosed(
                 keyboard_privacy.generation.load(Ordering::SeqCst),
                 None,
@@ -1554,15 +2438,188 @@ pub(crate) fn run_keyboard_privacy_thread(
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
             continue;
         }
-        uia.refresh_keyboard_privacy(&keyboard_privacy, &config);
+        probes.record(uia.refresh_keyboard_privacy(
+            &keyboard_privacy,
+            &config,
+            &cross_process,
+            &relaxations,
+        ));
         unsafe {
             MsgWaitForMultipleObjects(None, false, KEYBOARD_PRIVACY_POLL_MS as u32, QS_ALLINPUT);
         }
     }
 
+    report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, true);
     keyboard_privacy.invalidate();
     let _ = uia.unsubscribe_focus_changes(&handler_interface);
     debug!("UIA keyboard privacy worker stopped");
+}
+
+/// Epochs are reported this many epochs after they end, once text flushes,
+/// re-verification holds and recorder batches have settled.
+const KEYSTROKE_SETTLE_EPOCHS: u32 = 12;
+
+fn fixed_counts(pairs: impl IntoIterator<Item = (&'static str, u64)>) -> String {
+    pairs
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(code, count)| format!("{code}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Join settled hook epochs with their persisted/lost dispositions. Totals go
+/// to the app log; per-process counts (pid and executable basename) only to
+/// the opt-in sensitive diagnostics.
+fn report_keyboard_admission(
+    privacy: &KeyboardPrivacy,
+    probes: &mut input_admission::ProbeTally,
+    pending: &mut std::collections::BTreeMap<u32, input_admission::EpochKeys>,
+    flush_all: bool,
+) {
+    use crate::input_accounting::{self, LostCause};
+    // Names were resolved by the tally while each process was foreground.
+    let names = probes.names();
+    let process = |pid: u32| names.get(&pid).cloned();
+    for report in privacy.take_admission_reports() {
+        for (epoch, keys) in report.epochs {
+            pending.entry(epoch).or_default().add(&keys);
+        }
+    }
+    let current = input_accounting::current_epoch();
+    let through = if flush_all {
+        current
+    } else {
+        current.and_then(|epoch| epoch.checked_sub(KEYSTROKE_SETTLE_EPOCHS))
+    };
+    if let Some(through) = through {
+        let mut dispositions: std::collections::BTreeMap<u32, input_accounting::EpochDispositions> =
+            input_accounting::take_through(through)
+                .into_iter()
+                .map(|entry| (entry.epoch, entry))
+                .collect();
+        let rest = pending.split_off(&(through.saturating_add(1)));
+        let settled = std::mem::replace(pending, rest);
+        let mut epochs: Vec<u32> = settled.keys().chain(dispositions.keys()).copied().collect();
+        epochs.sort_unstable();
+        epochs.dedup();
+        for epoch in epochs {
+            let keys = settled.get(&epoch).cloned().unwrap_or_default();
+            let done = dispositions.remove(&epoch);
+            let totals = done.as_ref().map(|d| d.totals).unwrap_or_default();
+            let gate_lost = keys.totals.suppressed();
+            // Keystrokes the recorder's own exclusions dropped after admission
+            // were blocked on purpose: they leave neither a count nor a gap
+            // between the logged admitted and recordable totals.
+            let admitted = keys.totals.admitted.saturating_sub(totals.intended());
+            let recordable = admitted + gate_lost;
+            let unresolved = keys
+                .totals
+                .admitted
+                .saturating_sub(totals.persisted() + totals.lost_unintended() + totals.intended());
+            let (run, epoch_start) = input_accounting::epoch_start_unix_ms(epoch).unwrap_or((0, 0));
+            let denied = |denial: KeyboardPrivacyDenial| keys.totals.denied[denial.index()];
+            info!(
+                reason_code = "keystroke_accounting",
+                run,
+                epoch,
+                epoch_start_unix_ms = epoch_start,
+                active_ms = keys.active_ms,
+                recordable,
+                recorded = totals.persisted(),
+                admitted,
+                admitted_relaxed = keys.totals.admitted_relaxed.min(admitted),
+                lost_at_gate = gate_lost,
+                lost_after_admission = totals.lost_unintended(),
+                unresolved,
+                persisted_text = totals.persisted_text,
+                persisted_edit = totals.persisted_edit,
+                persisted_key = totals.persisted_key,
+                decision_unavailable = denied(KeyboardPrivacyDenial::DecisionUnavailable),
+                worker_lock_contended = denied(KeyboardPrivacyDenial::WorkerLockContended),
+                generation_changed = denied(KeyboardPrivacyDenial::GenerationChanged),
+                focus_mismatch = denied(KeyboardPrivacyDenial::FocusMismatch),
+                decision_stale = denied(KeyboardPrivacyDenial::DecisionStale),
+                after_admission = %fixed_counts(
+                    LostCause::ALL
+                        .into_iter()
+                        .filter(|cause| !cause.intended())
+                        .map(|cause| (cause.code(), totals.lost[cause.index()]))
+                ),
+                "keystroke accounting for one settled 10 s epoch (counts only; no content)"
+            );
+            screenpipe_config::sensitive_debug::record("input_keystroke_epoch", || {
+                let mut pids: Vec<u32> = keys.by_pid.keys().copied().collect();
+                if let Some(done) = &done {
+                    pids.extend(done.by_pid.keys().copied());
+                }
+                pids.sort_unstable();
+                pids.dedup();
+                serde_json::json!({
+                    "run": run,
+                    "epoch": epoch,
+                    "epoch_start_unix_ms": epoch_start,
+                    "active_ms": keys.active_ms,
+                    "discarded_by": keys.totals.discarded_json(),
+                    "discarded_after": keys.totals.discarded_after_json(),
+                    "processes": pids.into_iter().map(|pid| {
+                        let gate = keys.by_pid.get(&pid).copied().unwrap_or_default();
+                        let after = done
+                            .as_ref()
+                            .and_then(|d| d.by_pid.get(&pid).copied())
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "pid": pid,
+                            "exe": process(pid),
+                            "recordable": (gate.admitted + gate.suppressed()).saturating_sub(after.intended()),
+                            "recorded": after.persisted(),
+                            "admitted": gate.admitted.saturating_sub(after.intended()),
+                            "admitted_relaxed": gate.admitted_relaxed,
+                            "lost_at_gate": gate.denied_json(),
+                            "lost_after_admission": after.lost_json(),
+                            "persisted_text": after.persisted_text,
+                            "persisted_edit": after.persisted_edit,
+                            "persisted_key": after.persisted_key,
+                            "discarded_by": gate.discarded_json(),
+                            "discarded_after": gate.discarded_after_json(),
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            });
+        }
+    }
+    let late = input_accounting::take_late();
+    if late != input_accounting::Dispositions::default() {
+        info!(
+            reason_code = "keystroke_accounting_late",
+            recorded = late.persisted(),
+            lost_after_admission = late.lost_unintended(),
+            "keystroke dispositions that arrived after their epoch was reported (counts only)"
+        );
+    }
+    if let Some(report) = probes.take_due(KEYBOARD_ADMISSION_REPORT_INTERVAL) {
+        info!(
+            reason_code = "keyboard_privacy_probe_summary",
+            interval_ms = report.interval.as_millis() as u64,
+            probes = report.probes,
+            allowed = report.allowed,
+            failed = report.failed,
+            skipped = report.skipped,
+            failures = %report.failures_by_reason,
+            "keyboard privacy probe outcomes for the interval (fixed codes; no content)"
+        );
+        let invalidations = privacy.take_invalidation_deltas();
+        screenpipe_config::sensitive_debug::record("input_probe_summary", || {
+            serde_json::json!({
+                "interval_ms": report.interval.as_millis() as u64,
+                "invalidations_focus_event_navigation_probe_failure_probe_skip_probe_timeout": invalidations,
+                "totals": report.totals,
+                "processes": report.by_pid.iter().map(|(pid, counts)| serde_json::json!({
+                    "pid": pid, "exe": process(*pid), "counts": counts,
+                })).collect::<Vec<_>>(),
+            })
+        });
+    }
 }
 
 /// Run the UI Automation worker thread.
@@ -2296,7 +3353,196 @@ mod tests {
             foreground: 10,
             control: 11,
             pid: 12,
+            control_pid: 12,
         }
+    }
+
+    #[test]
+    fn owner_relaxation_lists_parse_strictly_and_match_basenames() {
+        assert_eq!(ProcessList::parse(""), ProcessList::None);
+        assert_eq!(ProcessList::parse(" none "), ProcessList::None);
+        assert_eq!(ProcessList::parse("ALL"), ProcessList::All);
+        let list = ProcessList::parse("alpha, Beta.exe;");
+        assert_eq!(list, ProcessList::Some(vec!["alpha".into(), "beta".into()]));
+        assert!(list.matches(Some("alpha.exe")));
+        assert!(list.matches(Some("BETA.EXE")));
+        assert!(!list.matches(Some("beta++.exe")));
+        assert!(!list.matches(Some("gamma.exe")));
+        assert!(!list.matches(None), "an unidentified process never matches");
+        assert!(!ProcessList::None.matches(Some("alpha.exe")));
+        assert!(ProcessList::All.matches(Some("anything.exe")));
+        assert!(!ProcessList::All.matches(None));
+        let defaults = ProbeRelaxations::default();
+        assert_eq!(defaults.password_state_unsupported, ProcessList::None);
+        assert_eq!(defaults.focus_without_keyboard_focus, ProcessList::None);
+    }
+
+    #[test]
+    fn password_relaxation_accepts_only_uias_reserved_not_supported_value() {
+        use windows::Win32::UI::Accessibility::UiaGetReservedNotSupportedValue;
+        let reserved = unsafe { UiaGetReservedNotSupportedValue() }.unwrap();
+        assert!(is_reserved_not_supported(&VARIANT::from(reserved)));
+        assert!(!is_reserved_not_supported(&VARIANT::default()));
+        assert!(!is_reserved_not_supported(&VARIANT::from(false)));
+        assert!(!is_reserved_not_supported(&VARIANT::from(0i32)));
+    }
+
+    #[test]
+    fn keyboard_privacy_labels_intended_blocks_without_permitting_them() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = test_keyboard_focus();
+        let other = NativeKeyboardFocus {
+            control: 99,
+            ..focus
+        };
+        privacy.update(0, Some(focus), Some(true), Instant::now());
+        assert_eq!(
+            privacy.permit_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::PasswordField)
+        );
+        assert_eq!(
+            privacy.permit_diagnosed(Some(focus)),
+            Err(KeyboardPrivacyDenial::DecisionUnavailable),
+            "the label never changes the underlying denial"
+        );
+        assert_eq!(
+            privacy.permit_classified(Some(other)),
+            Err(KeyboardPrivacyDenial::DecisionUnavailable),
+            "another focus is not covered by the verdict"
+        );
+        assert_eq!(
+            privacy.permit_classified(None),
+            Err(KeyboardPrivacyDenial::DecisionUnavailable)
+        );
+        // A later failed probe at the same focus keeps the verdict until it ages.
+        privacy.update(
+            privacy.generation.load(Ordering::SeqCst),
+            Some(focus),
+            None,
+            Instant::now(),
+        );
+        assert_eq!(
+            privacy.permit_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::PasswordField)
+        );
+        // An ordinary field clears it and permits normally.
+        let generation = privacy.generation.load(Ordering::SeqCst);
+        privacy.update(generation, Some(focus), Some(false), Instant::now());
+        assert_eq!(privacy.permit_classified(Some(focus)), Ok(generation));
+        privacy.invalidate();
+        assert_eq!(
+            privacy.permit_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::GenerationChanged)
+        );
+
+        privacy.set_block(Some((focus, KeyboardPrivacyDenial::Excluded)));
+        assert_eq!(
+            privacy.permit_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::Excluded)
+        );
+        // Failed and skipped probes keep the label; another native focus
+        // or a later ordinary verdict ends it.
+        NativeKeyboardFocus::test_failure(&privacy, focus, true);
+        assert_eq!(
+            privacy.permit_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::Excluded)
+        );
+        let elsewhere = NativeKeyboardFocus::for_test(1, 99, 3);
+        assert_ne!(
+            privacy.permit_classified(Some(elsewhere)),
+            Err(KeyboardPrivacyDenial::Excluded)
+        );
+        privacy.set_block(None);
+        assert_eq!(
+            privacy.permit_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::DecisionUnavailable),
+            "without a verdict a denial is an ordinary loss"
+        );
+        // Every failure and every password verdict bumps the generation.
+        let generation = privacy.generation();
+        privacy.update(generation, Some(focus), Some(false), Instant::now());
+        privacy.update_probe(
+            generation,
+            Some(focus),
+            None,
+            None,
+            Instant::now(),
+            Some(CaptureReason::InputFocusedElementFailed),
+            None,
+        );
+        let failed = generation + STRONG_INVALIDATION;
+        assert_eq!(privacy.generation(), failed);
+        assert!(!same_focus_epoch(generation, failed), "a failure is strong");
+        // A timeout only is weak: a new generation in the same focus epoch.
+        privacy.update_probe_weak(
+            failed,
+            Some(focus),
+            None,
+            None,
+            Instant::now(),
+            Some(CaptureReason::InputFocusedElementFailed),
+            None,
+            true,
+        );
+        assert_eq!(privacy.generation(), failed + 1);
+        assert!(same_focus_epoch(failed, failed + 1));
+        privacy.update(failed + 1, Some(focus), Some(true), Instant::now());
+        assert_eq!(privacy.generation(), failed + 1 + STRONG_INVALIDATION);
+        privacy.set_block(None);
+
+        // The permit token binds generation, native focus and element: the
+        // same generation with another element is a different token.
+        let generation = privacy.generation();
+        let token_for = |element| {
+            privacy.update_probe(
+                generation,
+                Some(focus),
+                element,
+                Some(false),
+                Instant::now(),
+                None,
+                None,
+            );
+            privacy.admit(Some(focus)).unwrap()
+        };
+        let first = token_for(Some(1));
+        let again = token_for(Some(1));
+        let other = token_for(Some(2));
+        let unbound = token_for(None);
+        assert_eq!(first, again);
+        assert!(first.element_bound && !unbound.element_bound);
+        assert_ne!(first.token, other.token);
+        assert_eq!(first.generation, other.generation);
+        assert_eq!(privacy.permit_token(Some(focus)), Some(unbound.token));
+
+        // Intended blocks mark the notice reason but never enter the counts
+        // or the periodic warning (they would reveal how much was typed).
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::PasswordField);
+        privacy.note_content_suppressed(KeyboardPrivacyDenial::Excluded);
+        assert_eq!(privacy.diagnostics().suppressions, 0);
+        assert_eq!(
+            privacy.take_content_suppression_reasons(CaptureReason::InputCheckUnavailable),
+            vec![
+                CaptureReason::PasswordField,
+                CaptureReason::ExcludedForeground
+            ]
+        );
+
+        // Cross-process focus: same process passes; another process whose
+        // window is not inside the foreground window is denied natively.
+        let check = CrossProcessFocusCheck::new();
+        assert!(check.allows(focus));
+        assert!(!check.allows(NativeKeyboardFocus {
+            control_pid: focus.control_pid + 1,
+            ..focus
+        }));
+
+        let codes: Vec<_> = KeyboardPrivacyDenial::ALL
+            .into_iter()
+            .map(|denial| (denial.index(), denial.code()))
+            .collect();
+        assert_eq!(codes.len(), KEYBOARD_PRIVACY_DENIAL_REASONS);
+        assert!(codes.iter().enumerate().all(|(i, (index, _))| i == *index));
     }
 
     #[test]
@@ -2485,6 +3731,10 @@ mod tests {
             },
             NativeKeyboardFocus {
                 pid: 20,
+                ..test_keyboard_focus()
+            },
+            NativeKeyboardFocus {
+                control_pid: 20,
                 ..test_keyboard_focus()
             },
         ] {
@@ -3582,6 +4832,7 @@ fn diagnosed_privacy_failure_preserves_stage_without_granting_permission() {
         foreground: 1,
         control: 2,
         pid: 3,
+        control_pid: 3,
     });
     for reason in [
         CaptureReason::InputNativeFocusUnavailable,

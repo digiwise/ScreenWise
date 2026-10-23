@@ -18,6 +18,11 @@ param(
     [switch]$PrepareOnly,
     [ValidateRange(1,300)][int]$ShutdownTimeoutSeconds = 60,
     [bool]$SensitiveDebugLogging = $true,
+    # Owner-authorised keyboard privacy relaxations (default none): `none`,
+    # `all`, or a comma-separated list of executables. Not carried over from
+    # an earlier deployment: each deployment states them explicitly.
+    [string]$UiaPasswordStateUnsupportedProcesses = 'none',
+    [string]$UiaFocusWithoutKeyboardFocusProcesses = 'none',
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -25,6 +30,8 @@ if ($Launch -and $PrepareOnly) { throw 'Choose automatic startup or -PrepareOnly
 if ($PSBoundParameters.ContainsKey('BuildScope') -and !$Build) { throw '-BuildScope requires -Build.' }
 if ($AllowColdCache -and !$Build) { throw '-AllowColdCache requires -Build.' }
 Import-Module (Join-Path $PSScriptRoot 'Deployment.psm1') -Force
+$UiaPasswordStateUnsupportedProcesses = ConvertTo-DeploymentProcessList $UiaPasswordStateUnsupportedProcesses
+$UiaFocusWithoutKeyboardFocusProcesses = ConvertTo-DeploymentProcessList $UiaFocusWithoutKeyboardFocusProcesses
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $private = Join-Path $repo '.local'
 if (!$DeploymentDirectory) { $DeploymentDirectory = Join-Path $private 'deployment' }
@@ -54,6 +61,8 @@ if ($PlanOnly) {
         data = $DataDirectory; port = $Port; register_startup = [bool]$RegisterStartup;
         launch = !$PrepareOnly; prepare_only = [bool]$PrepareOnly; graceful_shutdown = !$PrepareOnly; shutdown_timeout_seconds = $ShutdownTimeoutSeconds;
         sensitive_debug_logging = $SensitiveDebugLogging; webview_manifest = $RuntimeManifestPath; pi_included = $true;
+        uia_password_state_unsupported_processes = $UiaPasswordStateUnsupportedProcesses;
+        uia_focus_without_keyboard_focus_processes = $UiaFocusWithoutKeyboardFocusProcesses;
         pi_runtime = $PiRuntimePath; pi_tool_mode = 'recording-api-only'; provision_pi = [bool]$ProvisionPi } | ConvertTo-Json
     return
 }
@@ -247,6 +256,8 @@ foreach ($file in @($piItems | Where-Object { !$_.PSIsContainer }) + @(Get-Item 
 }
 $manifest = [ordered]@{
     schema='screenwise.local-deployment.v2'; profile=$BuildProfile; sensitive_debug_logging=$SensitiveDebugLogging; deployed_utc=[DateTime]::UtcNow.ToString('o');
+    uia_password_state_unsupported_processes=$UiaPasswordStateUnsupportedProcesses;
+    uia_focus_without_keyboard_focus_processes=$UiaFocusWithoutKeyboardFocusProcesses;
     binary_directory=$binary; data_directory=$DataDirectory; port=$Port; firewall_group=$group;
     gui_executable=(Join-Path $binary 'screenpipe-app.exe'); cli_executable=(Join-Path $binary 'screenpipe.exe');
     graceful_quit_protocol='ScreenWise.GracefulQuit.v1'; gui_sha256=$guiHash;

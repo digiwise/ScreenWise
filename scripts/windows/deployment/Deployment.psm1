@@ -185,6 +185,35 @@ function Assert-DeploymentFiles {
     }
 }
 
+# `none`, `all`, or a comma-separated list of executable basenames.
+function ConvertTo-DeploymentProcessList {
+    param([string]$Value)
+    $text = "$Value".Trim()
+    if (!$text -or $text -ieq 'none') { return 'none' }
+    if ($text -ieq 'all') { return 'all' }
+    $names = @($text -split '[,;]' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+    foreach ($name in $names) {
+        if ($name -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$') { throw "Invalid process name in list: $name" }
+    }
+    if (!$names) { return 'none' }
+    return (($names | ForEach-Object { if ($_.EndsWith('.exe')) { $_ } else { "$_.exe" } }) -join ',')
+}
+
+# Owner-authorised keyboard privacy relaxations: only a manifest value reaches
+# the GUI child; inherited values are always removed first.
+function Set-DeploymentKeyboardRelaxations {
+    param([Parameter(Mandatory)][Diagnostics.ProcessStartInfo]$StartInfo, [Parameter(Mandatory)]$Manifest)
+    foreach ($pair in @(
+            @('SCREENWISE_UIA_PASSWORD_STATE_UNSUPPORTED_PROCESSES', 'uia_password_state_unsupported_processes'),
+            @('SCREENWISE_UIA_FOCUS_WITHOUT_KEYBOARD_FOCUS_PROCESSES', 'uia_focus_without_keyboard_focus_processes'))) {
+        $StartInfo.EnvironmentVariables.Remove($pair[0])
+        if ($Manifest.PSObject.Properties[$pair[1]]) {
+            $value = ConvertTo-DeploymentProcessList $Manifest.($pair[1])
+            if ($value -ne 'none') { $StartInfo.EnvironmentVariables[$pair[0]] = $value }
+        }
+    }
+}
+
 function Read-DeploymentManifest {
     param([string]$Path, [string]$PrivateRoot, [switch]$SkipRuntimeValidation)
     $Path = Assert-DeploymentPath $Path $PrivateRoot
@@ -193,6 +222,11 @@ function Read-DeploymentManifest {
         $m.profile -cnotin @('release-local','release')) { throw 'Unsupported deployment manifest.' }
     if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_logging -isnot [bool]) {
         throw 'Sensitive debug logging must be a boolean.'
+    }
+    foreach ($name in @('uia_password_state_unsupported_processes', 'uia_focus_without_keyboard_focus_processes')) {
+        if ($m.PSObject.Properties[$name] -and (ConvertTo-DeploymentProcessList $m.$name) -cne $m.$name) {
+            throw "Invalid keyboard privacy relaxation list: $name"
+        }
     }
     $binaryRoot = Assert-DeploymentPath $m.binary_directory $PrivateRoot
     $dataRoot = Assert-DeploymentPath $m.data_directory $PrivateRoot
@@ -467,7 +501,7 @@ function Invoke-DeploymentStartup {
     }
 }
 
-Export-ModuleMember -Function Assert-DeploymentPath, Assert-DeploymentBackupDirectory, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
+Export-ModuleMember -Function Assert-DeploymentPath, ConvertTo-DeploymentProcessList, Set-DeploymentKeyboardRelaxations, Assert-DeploymentBackupDirectory, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
     Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, Set-DeploymentUiaComparisonMode, New-DeploymentStaging,
     Test-DeploymentQuitCapability, Get-DeploymentSourceState, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration

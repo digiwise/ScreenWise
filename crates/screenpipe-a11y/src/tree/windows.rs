@@ -871,6 +871,8 @@ impl WindowsTreeWalker {
                     None => return Ok(TreeWalkResult::Skipped(SkipReason::TargetBusy(pid))),
                 }
             };
+            // Keyboard probes to this process wait only while UIA requests run.
+            let _uia_active = crate::uia_breaker::walk_uia_active(pid);
 
             // Native privacy checks do not depend on UIA initialization or text retrieval.
             stage = "uia_initialization";

@@ -22,8 +22,14 @@
 //!
 //! `Probe` (the cheap keyboard focus probe) is keyed by process: a large tree
 //! never disables keystroke privacy checks, and a probe is instead skipped
-//! while a walk to the same process has run longer than a probe's own
-//! provider timeout (it would only queue behind it on the shared UI thread).
+//! while a walk's UIA requests to the same process have run longer than a
+//! probe's own provider timeout (it would only queue behind them on the
+//! shared UI thread). A walk lease reserved before a screenshot does not
+//! count until the walk's UIA phase starts.
+//! A probe costs its target one bounded provider request, not a walk, and
+//! every skipped probe withholds the user's typing, so its timeouts back off
+//! for 1 s, 2 s, 4 s ... capped at 30 s (2026-10-23) instead of the walk
+//! schedule; probes whose provider calls all answer count as cheap successes.
 //! Keys are process ids and window handles only; the tables are bounded.
 
 use std::collections::HashMap;
@@ -33,6 +39,8 @@ use std::time::{Duration, Instant};
 
 const BASE_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
+const PROBE_BASE_BACKOFF: Duration = Duration::from_secs(1);
+const PROBE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const RESET_AFTER_SUCCESSES: u32 = 3;
 const MAX_TRACKED_TARGETS: usize = 64;
 
@@ -80,6 +88,19 @@ pub(crate) fn backoff(failures: u32) -> Duration {
     BASE_BACKOFF.saturating_mul(1 << doublings).min(MAX_BACKOFF)
 }
 
+/// Backoff of a scope after `failures` consecutive costly outcomes (>= 1).
+fn scope_backoff(scope: Scope, failures: u32) -> Duration {
+    match scope {
+        Scope::Walk | Scope::Text => backoff(failures),
+        Scope::Probe => {
+            let doublings = failures.saturating_sub(1).min(5);
+            PROBE_BASE_BACKOFF
+                .saturating_mul(1 << doublings)
+                .min(PROBE_MAX_BACKOFF)
+        }
+    }
+}
+
 /// Whether `area` is at most three quarters of `failed_at`.
 fn shrunk_enough(area: u64, failed_at: u64) -> bool {
     area.saturating_mul(4) <= failed_at.saturating_mul(3)
@@ -98,10 +119,10 @@ impl Gate {
         self.open_until.is_none_or(|until| now >= until)
     }
     /// Extend the backoff after a costly outcome: a failure or a slow success.
-    fn back_off(&mut self, now: Instant) {
+    fn back_off(&mut self, scope: Scope, now: Instant) {
         self.failures = self.failures.saturating_add(1);
         self.successes = 0;
-        self.open_until = Some(now + backoff(self.failures));
+        self.open_until = Some(now + scope_backoff(scope, self.failures));
     }
     /// Count a cheap success; only these reset the failure streak.
     fn succeed(&mut self) {
@@ -186,7 +207,7 @@ impl Breaker {
         let entry = self.entries.entry(target).or_default();
         entry.last_seen = Some(now);
         if outcome.costly() {
-            entry.gate_mut(scope).back_off(now);
+            entry.gate_mut(scope).back_off(scope, now);
             if area.is_some() {
                 entry.failure_area = area;
             }
@@ -344,9 +365,42 @@ pub fn walk_target_busy(pid: u32) -> bool {
     pid != 0 && with_in_flight(|in_flight| in_flight.busy(pid))
 }
 
-/// Whether a walk to `pid` has been running for longer than `age`.
+/// UIA requests of walks actually running (not leases held across a
+/// screenshot): only these occupy the target's UI thread ahead of a probe.
+static ACTIVE: OnceLock<Mutex<InFlight>> = OnceLock::new();
+
+fn with_active<T>(f: impl FnOnce(&mut InFlight) -> T) -> T {
+    let mut guard = ACTIVE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+/// Marks a walk's UIA phase to `pid` active until dropped.
+pub(crate) struct ActiveWalk {
+    pid: u32,
+    started: Instant,
+}
+
+impl Drop for ActiveWalk {
+    fn drop(&mut self) {
+        with_active(|active| active.finish(self.pid, self.started));
+    }
+}
+
+/// Start of a walk's UIA requests to `pid` (after any screenshot taken under
+/// a lease reserved earlier).
+pub(crate) fn walk_uia_active(pid: u32) -> ActiveWalk {
+    let started = Instant::now();
+    with_active(|active| active.start(pid, started));
+    ActiveWalk { pid, started }
+}
+
+/// Whether a walk's UIA requests to `pid` have run for longer than `age`; a
+/// lease held while a screenshot is taken does not count.
 pub(crate) fn long_walk_in_flight(pid: u32, age: Duration) -> bool {
-    pid != 0 && with_in_flight(|in_flight| in_flight.longer_than(pid, age, Instant::now()))
+    pid != 0 && with_active(|active| active.longer_than(pid, age, Instant::now()))
 }
 
 static BREAKER: OnceLock<Mutex<Breaker>> = OnceLock::new();
@@ -467,6 +521,42 @@ mod tests {
     fn backoff_doubles_from_thirty_seconds_and_caps_at_ten_minutes() {
         let secs: Vec<u64> = (1..=8).map(|n| backoff(n).as_secs()).collect();
         assert_eq!(secs, vec![30, 60, 120, 240, 480, 600, 600, 600]);
+        let walk: Vec<u64> = (1..=8)
+            .map(|n| scope_backoff(Scope::Walk, n).as_secs())
+            .collect();
+        assert_eq!(walk, secs);
+    }
+
+    #[test]
+    fn probe_timeouts_back_off_briefly_and_answered_probes_reset() {
+        let secs: Vec<u64> = (1..=8)
+            .map(|n| scope_backoff(Scope::Probe, n).as_secs())
+            .collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+        let mut breaker = Breaker::default();
+        let process = window(40, 0);
+        let t0 = Instant::now();
+        breaker.record(process, Scope::Probe, Outcome::Failure, None, t0);
+        assert!(!breaker.allows(process, Scope::Probe, None, t0 + Duration::from_millis(999)));
+        assert!(breaker.allows(process, Scope::Probe, None, t0 + Duration::from_secs(1)));
+        let t1 = t0 + Duration::from_secs(1);
+        breaker.record(process, Scope::Probe, Outcome::Failure, None, t1);
+        assert!(!breaker.allows(
+            process,
+            Scope::Probe,
+            None,
+            t1 + Duration::from_millis(1_999)
+        ));
+        let t2 = t1 + Duration::from_secs(2);
+        for _ in 0..RESET_AFTER_SUCCESSES {
+            breaker.record(process, Scope::Probe, Outcome::Success, None, t2);
+        }
+        assert!(
+            breaker.entries.is_empty(),
+            "answered probes forget the streak"
+        );
+        breaker.record(process, Scope::Probe, Outcome::Failure, None, t2);
+        assert!(breaker.allows(process, Scope::Probe, None, t2 + Duration::from_secs(1)));
     }
 
     #[test]
@@ -624,11 +714,16 @@ mod tests {
         );
         drop(lease);
         assert!(!walk_target_busy(4343));
+        // A lease alone (screenshot phase) never makes probes wait.
         let guard = walk_in_flight(4242);
         std::thread::sleep(Duration::from_millis(5));
+        assert!(!long_walk_in_flight(4242, Duration::from_millis(1)));
+        let active = walk_uia_active(4242);
+        std::thread::sleep(Duration::from_millis(5));
         assert!(long_walk_in_flight(4242, Duration::from_millis(1)));
-        drop(guard);
+        drop(active);
         assert!(!long_walk_in_flight(4242, Duration::ZERO));
+        drop(guard);
     }
 
     #[test]

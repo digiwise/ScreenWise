@@ -37,6 +37,30 @@ try {
 } finally {
     [Environment]::SetEnvironmentVariable('SCREENWISE_UIA_PRIVACY_ONLY', $savedUiaMode, 'Process')
 }
+Check ((ConvertTo-DeploymentProcessList '') -ceq 'none') 'empty relaxation list is none'
+Check ((ConvertTo-DeploymentProcessList ' None ') -ceq 'none') 'relaxation none is case-insensitive'
+Check ((ConvertTo-DeploymentProcessList 'ALL') -ceq 'all') 'relaxation all is normalised'
+Check ((ConvertTo-DeploymentProcessList 'Alpha, beta.exe;;') -ceq 'alpha.exe,beta.exe') 'relaxation list normalised to executables'
+Reject { ConvertTo-DeploymentProcessList 'beta,..\evil' } 'relaxation list rejects a path'
+Reject { ConvertTo-DeploymentProcessList 'note pad' } 'relaxation list rejects spaces'
+$relaxPairs = @(
+    @('SCREENWISE_UIA_PASSWORD_STATE_UNSUPPORTED_PROCESSES', 'uia_password_state_unsupported_processes'),
+    @('SCREENWISE_UIA_FOCUS_WITHOUT_KEYBOARD_FOCUS_PROCESSES', 'uia_focus_without_keyboard_focus_processes'))
+$savedRelax = @($relaxPairs | ForEach-Object { [Environment]::GetEnvironmentVariable($_[0], 'Process') })
+try {
+    foreach ($pair in $relaxPairs) { [Environment]::SetEnvironmentVariable($pair[0], 'all', 'Process') }
+    $relaxPsi = [Diagnostics.ProcessStartInfo]::new()
+    Set-DeploymentKeyboardRelaxations -StartInfo $relaxPsi -Manifest ([pscustomobject]@{ schema = 'old' })
+    Check (!$relaxPsi.EnvironmentVariables.ContainsKey($relaxPairs[0][0]) -and !$relaxPsi.EnvironmentVariables.ContainsKey($relaxPairs[1][0])) 'manifest without relaxations removes inherited values from child'
+    Set-DeploymentKeyboardRelaxations -StartInfo $relaxPsi -Manifest ([pscustomobject]@{
+            uia_password_state_unsupported_processes = 'alpha.exe,beta.exe'; uia_focus_without_keyboard_focus_processes = 'none' })
+    Check ($relaxPsi.EnvironmentVariables[$relaxPairs[0][0]] -ceq 'alpha.exe,beta.exe') 'manifest relaxation list reaches child'
+    Check (!$relaxPsi.EnvironmentVariables.ContainsKey($relaxPairs[1][0])) 'manifest none sets no child value'
+    Reject { Set-DeploymentKeyboardRelaxations -StartInfo $relaxPsi -Manifest ([pscustomobject]@{ uia_password_state_unsupported_processes = 'a b' }) } 'invalid manifest relaxation refused at launch'
+    Check ([Environment]::GetEnvironmentVariable($relaxPairs[0][0], 'Process') -ceq 'all') 'relaxation selection leaves parent environment intact'
+} finally {
+    for ($i = 0; $i -lt $relaxPairs.Count; $i++) { [Environment]::SetEnvironmentVariable($relaxPairs[$i][0], $savedRelax[$i], 'Process') }
+}
 Reject { Assert-DeploymentPath (Join-Path $repo 'README.md') $private } 'outside private root'
 Reject { Assert-DeploymentPath (Join-Path $private '..\README.md') $private } 'parent traversal'
 Check ((Assert-DeploymentPath (Join-Path $root 'release') $private) -eq (Join-Path $root 'release')) 'local path'
@@ -118,12 +142,21 @@ $manifest.profile = 'debug'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 Reject { Read-DeploymentManifest $manifestPath $private } 'unsupported deployment profile rejected'
 $manifest.profile = 'release'
+$manifest.uia_password_state_unsupported_processes = 'alpha.exe,beta.exe'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+Check ((Read-DeploymentManifest $manifestPath $private).uia_password_state_unsupported_processes -ceq 'alpha.exe,beta.exe') 'normalised relaxation list accepted in manifest'
+$manifest.uia_password_state_unsupported_processes = 'Alpha'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+Reject { Read-DeploymentManifest $manifestPath $private } 'unnormalised relaxation list rejected in manifest'
+$manifest.Remove('uia_password_state_unsupported_processes')
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 foreach ($selectedProfile in @('release-local', 'release')) {
     $planArgs = @{PlanOnly=$true}
     if ($selectedProfile -eq 'release') { $planArgs.BuildProfile = $selectedProfile }
     $plan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') @planArgs | Out-String | ConvertFrom-Json)
     Check ($plan.launch -eq $true -and !$plan.prepare_only) "automatic $selectedProfile startup selected"
     Check ($plan.sensitive_debug_logging -eq $true) "local sensitive diagnostics selected"
+    Check ($plan.uia_password_state_unsupported_processes -ceq 'none' -and $plan.uia_focus_without_keyboard_focus_processes -ceq 'none') "no $selectedProfile keyboard relaxation unless stated"
     Check ($plan.profile -ceq $selectedProfile) "deployment selects $selectedProfile"
     Check (!$plan.build_requested -and @($plan.build_tasks).Count -eq 0) "no $selectedProfile build without -Build"
     Check ($plan.gui_source -eq (Join-Path $repo "apps\screenpipe-app-tauri\src-tauri\target\$selectedProfile") -and
@@ -140,6 +173,9 @@ $inertPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -Bui
     -DeploymentDirectory $planOnlyDirectory -DataDirectory (Join-Path $root 'plan-data') `
     -RuntimeManifestPath (Join-Path $root 'missing-runtime.json') -PiRuntimePath (Join-Path $root 'missing-pi') `
     -ShutdownTimeoutSeconds 7 | Out-String | ConvertFrom-Json)
+$relaxPlan = (& (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -UiaPasswordStateUnsupportedProcesses 'Alpha,beta' -UiaFocusWithoutKeyboardFocusProcesses 'gamma.exe' | Out-String | ConvertFrom-Json)
+Check ($relaxPlan.uia_password_state_unsupported_processes -ceq 'alpha.exe,beta.exe' -and $relaxPlan.uia_focus_without_keyboard_focus_processes -ceq 'gamma.exe') 'deployment plan normalises stated relaxation lists'
+Reject { & (Join-Path $PSScriptRoot 'Deploy-ScreenWise.ps1') -PlanOnly -UiaFocusWithoutKeyboardFocusProcesses 'a b' } 'deployment refuses an invalid relaxation list'
 Check (!(Test-Path -LiteralPath $planOnlyDirectory) -and $inertPlan.shutdown_timeout_seconds -eq 7) 'plan-only neither prepares files nor invokes requested build/provision/register/shutdown'
 Check ($inertPlan.build_scope -ceq 'Desktop' -and
     @($inertPlan.build_tasks).Count -eq 1 -and $inertPlan.build_tasks[0] -ceq 'DesktopBuild') 'normal build selects desktop only'

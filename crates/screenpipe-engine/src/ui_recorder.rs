@@ -7,6 +7,8 @@
 //! Integrates screenpipe-a11y capture with the server's recording loop.
 
 use anyhow::Result;
+use screenpipe_a11y::events::UiEvent;
+use screenpipe_a11y::input_accounting::{self, KeystrokeTag, LostCause};
 use screenpipe_a11y::{ExtractionThreadPriority, UiCaptureConfig, UiRecorder};
 use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
 use screenpipe_db::{DatabaseManager, InsertUiEvent};
@@ -53,6 +55,9 @@ fn live_input_channel(
 struct EventBatch {
     events: Vec<InsertUiEvent>,
     correlation_ids: Vec<Option<CorrelationId>>,
+    /// Content-free keystroke accounting, settled once per event: persisted
+    /// on a confirmed insert, otherwise lost with a fixed cause.
+    accounting: Vec<Option<KeystrokeTag>>,
 }
 
 impl EventBatch {
@@ -60,11 +65,27 @@ impl EventBatch {
         Self {
             events: Vec::with_capacity(n),
             correlation_ids: Vec::with_capacity(n),
+            accounting: Vec::with_capacity(n),
         }
     }
+    #[cfg(test)]
     fn push(&mut self, event: InsertUiEvent, correlation_id: Option<CorrelationId>) {
+        self.push_accounted(event, correlation_id, None);
+    }
+    fn push_accounted(
+        &mut self,
+        event: InsertUiEvent,
+        correlation_id: Option<CorrelationId>,
+        accounting: Option<KeystrokeTag>,
+    ) {
         self.events.push(event);
         self.correlation_ids.push(correlation_id);
+        self.accounting.push(accounting);
+    }
+    fn settle_lost(tags: impl IntoIterator<Item = Option<KeystrokeTag>>, cause: LostCause) {
+        for tag in tags.into_iter().flatten() {
+            input_accounting::note_lost(&tag, cause);
+        }
     }
     fn len(&self) -> usize {
         debug_assert_eq!(self.events.len(), self.correlation_ids.len());
@@ -76,16 +97,24 @@ impl EventBatch {
     fn take_correlation_ids(&mut self) -> Vec<CorrelationId> {
         self.correlation_ids.drain(..).flatten().collect::<Vec<_>>()
     }
-    fn discard_all(&mut self) -> Vec<CorrelationId> {
+    fn discard_all(&mut self, cause: LostCause) -> Vec<CorrelationId> {
         let correlation_ids = self.take_correlation_ids();
         self.events.clear();
+        Self::settle_lost(self.accounting.drain(..), cause);
         correlation_ids
     }
-    /// Drop oldest `n` entries from both vecs in lockstep. Used by the
+    /// Drop oldest `n` entries from all vecs in lockstep. Used by the
     /// contention-storm guard.
-    fn drain_oldest(&mut self, n: usize) -> Vec<CorrelationId> {
+    fn drain_oldest(&mut self, n: usize, cause: LostCause) -> Vec<CorrelationId> {
         self.events.drain(..n);
+        Self::settle_lost(self.accounting.drain(..n), cause);
         self.correlation_ids.drain(..n).flatten().collect()
+    }
+}
+
+fn settle_event_lost(event: &UiEvent, cause: LostCause) {
+    if let Some(tag) = &event.accounting {
+        input_accounting::note_lost(tag, cause);
     }
 }
 
@@ -702,13 +731,11 @@ pub async fn start_ui_recording(
                         "UI acquisition privacy gate active; discarding captured events and triggers"
                     );
                 }
-                let discarded = batch.discard_all();
+                let discarded = batch.discard_all(LostCause::RecorderPrivacyPause);
                 report_events_discarded(linker_tx.as_ref(), discarded);
                 scroll_burst.clear();
-                if handle
-                    .recv_timeout(UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT)
-                    .is_some()
-                {
+                if let Some(event) = handle.recv_timeout(UI_RECORDER_PRIVACY_PAUSE_RECV_TIMEOUT) {
+                    settle_event_lost(&event, LostCause::RecorderPrivacyPause);
                     privacy_discarded_events = privacy_discarded_events.saturating_add(1);
                 }
                 last_flush = std::time::Instant::now();
@@ -739,7 +766,8 @@ pub async fn start_ui_recording(
                         privacy_discarded_events = privacy_discarded_events
                             .saturating_add(batch.len() as u64)
                             .saturating_add(1);
-                        let discarded = batch.discard_all();
+                        settle_event_lost(&event, LostCause::RecorderPrivacyPause);
+                        let discarded = batch.discard_all(LostCause::RecorderPrivacyPause);
                         report_events_discarded(linker_tx.as_ref(), discarded);
                         scroll_burst.clear();
                         last_flush = std::time::Instant::now();
@@ -871,6 +899,16 @@ pub async fn start_ui_recording(
                         }
                     }
 
+                    if !should_record_event {
+                        settle_event_lost(
+                            &event,
+                            if is_ignored {
+                                LostCause::RecorderExcluded
+                            } else {
+                                LostCause::RecorderFiltered
+                            },
+                        );
+                    }
                     if should_record_event {
                         let db_event =
                             event.to_db_insert(Some(session_id.clone()), config.apply_pii_removal);
@@ -880,7 +918,7 @@ pub async fn start_ui_recording(
                                 screenpipe_config::capture_diagnostics::CaptureScope::Global,
                             );
                         }
-                        batch.push(db_event, correlation_id);
+                        batch.push_accounted(db_event, correlation_id, event.accounting.clone());
                     }
 
                     // Flush if batch is full
@@ -903,7 +941,8 @@ pub async fn start_ui_recording(
                             let old_len = batch.len();
                             // Keep only the most recent batch_size events
                             let drain_count = old_len.saturating_sub(batch_size);
-                            let discarded = batch.drain_oldest(drain_count);
+                            let discarded =
+                                batch.drain_oldest(drain_count, LostCause::DatabaseFailure);
                             report_events_discarded(linker_tx.as_ref(), discarded);
                             warn!(
                                 "UI recorder: dropped {} old events during DB contention (kept {})",
@@ -944,7 +983,7 @@ pub async fn start_ui_recording(
                     "UI recorder: dropping {} stale events (last flush {}s ago, {} consecutive failures)",
                     batch.len(), last_flush.elapsed().as_secs(), consecutive_failures
                 );
-                let discarded = batch.discard_all();
+                let discarded = batch.discard_all(LostCause::DatabaseFailure);
                 report_events_discarded(linker_tx.as_ref(), discarded);
                 last_flush = std::time::Instant::now();
             }
@@ -1050,7 +1089,7 @@ async fn flush_batch(
             discarded_events = batch.len(),
             "UI privacy state changed before database admission; discarded buffered events"
         );
-        let discarded = batch.discard_all();
+        let discarded = batch.discard_all(LostCause::RecorderPrivacyPause);
         report_events_discarded(linker_tx, discarded);
         return;
     }
@@ -1060,6 +1099,16 @@ async fn flush_batch(
     // row_ids afterwards.
     match db.insert_ui_events_batch(&batch.events).await {
         Ok(row_ids) => {
+            // Only confirmed rows count as recorded; any shortfall is lost.
+            for (index, tag) in batch.accounting.drain(..).enumerate() {
+                if let Some(tag) = tag {
+                    if index < row_ids.len() {
+                        input_accounting::note_persisted(&tag);
+                    } else {
+                        input_accounting::note_lost(&tag, LostCause::DatabaseFailure);
+                    }
+                }
+            }
             for event in batch.events.iter().take(row_ids.len()) {
                 if let Some(channel) = live_input_channel(&event.event_type) {
                     screenpipe_config::live_capture_status::stored(
@@ -1143,10 +1192,11 @@ async fn flush_batch(
         }
     }
     let discarded = if *consecutive_failures > 0 {
-        batch.discard_all()
+        batch.discard_all(LostCause::DatabaseFailure)
     } else {
         batch.events.clear();
         batch.correlation_ids.clear();
+        batch.accounting.clear();
         Vec::new()
     };
     report_events_discarded(linker_tx, discarded);
@@ -1385,10 +1435,29 @@ mod event_batch_tests {
         b.push(evt(), Some(2));
         b.push(evt(), Some(3));
         b.push(evt(), Some(4));
-        assert_eq!(b.drain_oldest(2), vec![1, 2]);
+        assert_eq!(b.drain_oldest(2, LostCause::DatabaseFailure), vec![1, 2]);
         assert_eq!(b.len(), 2);
         assert_eq!(b.events.len(), b.correlation_ids.len());
         assert_eq!(b.correlation_ids, vec![Some(3), Some(4)]);
+    }
+
+    #[test]
+    fn discarded_events_settle_their_keystrokes_as_lost_once() {
+        let mut b = EventBatch::with_capacity(2);
+        let mut tag = KeystrokeTag::default();
+        tag.push(77, 4_000_000, false);
+        tag.push(77, 4_000_000, false);
+        b.push_accounted(evt(), None, Some(tag));
+        b.push_accounted(evt(), None, None);
+        b.discard_all(LostCause::DatabaseFailure);
+        assert!(b.accounting.is_empty());
+        let done = input_accounting::take_through(4_000_000);
+        let epoch = done
+            .iter()
+            .find(|entry| entry.epoch == 4_000_000)
+            .expect("epoch settled");
+        assert_eq!(epoch.totals.lost[LostCause::DatabaseFailure.index()], 2);
+        assert_eq!(epoch.totals.persisted(), 0);
     }
 
     #[test]
@@ -1396,7 +1465,7 @@ mod event_batch_tests {
         let mut b = EventBatch::with_capacity(2);
         b.push(evt(), Some(1));
         b.push(evt(), None);
-        assert_eq!(b.discard_all(), vec![1]);
+        assert_eq!(b.discard_all(LostCause::DatabaseFailure), vec![1]);
         assert!(b.is_empty());
         assert_eq!(b.events.len(), 0);
         assert_eq!(b.correlation_ids.len(), 0);

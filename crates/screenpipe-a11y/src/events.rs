@@ -42,6 +42,11 @@ pub struct UiEvent {
     /// Associated screenshot frame ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_id: Option<i64>,
+
+    /// Content-free accounting of the admitted keystrokes this event carries
+    /// (never serialized or stored).
+    #[serde(skip)]
+    pub accounting: Option<crate::input_accounting::KeystrokeTag>,
 }
 
 /// Event data - tagged union for different event types
@@ -544,6 +549,7 @@ impl UiEvent {
             browser_url: None,
             element: None,
             frame_id: None,
+            accounting: None,
         }
     }
 
@@ -563,6 +569,7 @@ impl UiEvent {
             browser_url: None,
             element: None,
             frame_id: None,
+            accounting: None,
         }
     }
 
@@ -578,6 +585,7 @@ impl UiEvent {
             browser_url: None,
             element: None,
             frame_id: None,
+            accounting: None,
         }
     }
 

@@ -444,6 +444,7 @@ fn clipboard_event(
         browser_url: None,
         element: None,
         frame_id: None,
+        accounting: None,
     }
 }
 
@@ -777,6 +778,7 @@ fn run_event_tap(
                         browser_url: None,
                         element: Some(element),
                         frame_id: None,
+                        accounting: None,
                     };
                     let _ = req.tx.try_send(ctx_event);
                 }
@@ -1060,6 +1062,7 @@ extern "C" fn tap_callback(
                         browser_url: None,
                         element: None,
                         frame_id: None,
+                        accounting: None,
                     };
                     let _ = state.tx.try_send(ui_event);
                 }
@@ -1091,6 +1094,7 @@ extern "C" fn tap_callback(
                         browser_url: None,
                         element: None,
                         frame_id: None,
+                        accounting: None,
                     };
                     let _ = state.tx.try_send(ui_event);
                 }
@@ -1149,6 +1153,7 @@ extern "C" fn tap_callback(
                         browser_url: None,
                         element: None,
                         frame_id: None,
+                        accounting: None,
                     };
                     let _ = state.tx.try_send(event);
                 }
@@ -1177,6 +1182,7 @@ extern "C" fn tap_callback(
                         browser_url: None,
                         element: None,
                         frame_id: None,
+                        accounting: None,
                     };
                     let _ = state.tx.try_send(event);
                 }
@@ -1194,6 +1200,7 @@ extern "C" fn tap_callback(
                     browser_url: None,
                     element: None,
                     frame_id: None,
+                    accounting: None,
                 };
                 let _ = state.tx.try_send(event);
             }
@@ -1282,6 +1289,7 @@ fn emit_focus_state(state: &ObserverCallbackState) {
                 browser_url: None,
                 element: focused_element,
                 frame_id: None,
+                accounting: None,
             };
             let _ = state.tx.try_send(event);
         }

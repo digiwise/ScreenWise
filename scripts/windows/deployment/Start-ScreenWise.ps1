@@ -116,6 +116,8 @@ $psi.EnvironmentVariables.Remove('SCREENWISE_SENSITIVE_DEBUG')
 if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_logging -eq $true) {
     $psi.EnvironmentVariables['SCREENWISE_SENSITIVE_DEBUG'] = '1'
 }
+# Owner-authorised keyboard privacy relaxations (manifest values only).
+Set-DeploymentKeyboardRelaxations -StartInfo $psi -Manifest $m
 # Only a manifest that names a validated extra local directory (e.g. on another
 # disk) gets one; explicitly remove an inherited value for every other manifest.
 $psi.EnvironmentVariables.Remove('SCREENWISE_BACKUP_DIR')
