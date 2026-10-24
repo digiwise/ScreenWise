@@ -91,6 +91,177 @@ layouts (including cards followed by an expiry or year), narrows Maestro to real
 issuer ranges and fixes Diners 300–305 / Discover 644–649 prefixes that never
 matched. `REGEX_REDACTOR_VERSION` is 3 (it keys only the in-memory cache).
 
+## Credential files and prefixless tokens (2026-10-24)
+
+Three additions, each with focused unit/integration tests only (no live trial,
+no `release-local` build by the implementing agent).
+
+**Credential-file window titles** (`screenpipe_capture_policy::credential_files`).
+A window whose title names a credential file is excluded exactly like a window
+matching `ignoredWindows`, on every capture path and whatever
+`accessibilityWalkDisabled` says: window enumeration for full-monitor and
+active-window capture (the rule reads the native title of every enumerated,
+non-minimised window overlapping the monitor, not only the foreground one;
+`configured_exclusion` code, so a visible background window is blacked out
+and forces active-window-only capture and a foreground one gives a
+placeholder without title, app or URL), the accessibility walker's native
+policy (before the walk-disabled check), nested Window/Document names, the
+engine's final ignored-window gate, UIA-failure placeholder metadata, the
+input recorder (keyboard, clipboard, click and focus rows and their capture
+triggers) and the shared contact gate. A title that cannot be read during window
+enumeration is now unknown metadata (fail closed); an empty title is not. The
+rule is built in and always on, matches file-name shapes, never bare words,
+and ignores editor decorations (`*`/`●` unsaved markers, quotes, brackets,
+` - App` suffixes, directories). Built-in list, case-insensitive on each title
+token's file name:
+
+- exact names: `.env`, `.npmrc`, `.pypirc`, `.netrc`, `_netrc`,
+  `.git-credentials`, `.pgpass`, `.htpasswd`, `wallet.dat`, `id_rsa`,
+  `id_ed25519`, `id_ecdsa`, `id_dsa`;
+- `.env.<suffix>` except the templates `.env.example`, `.env.sample`,
+  `.env.template`, `.env.dist`;
+- extensions `.secret`, `.pem`, `.key` (also Keynote decks), `.p12`, `.pfx`,
+  `.kdbx`, `.ppk`, `.jks`, `.keystore`, after a non-empty stem (a bare `.pem`
+  in "Convert .pem to .pfx" names a format, not a file); an exact name such as
+  `.env` or `.npmrc` is excluded wherever it appears in a title, including a
+  documentation page titled `Configuring .npmrc`;
+- a data/config extension (`txt json yaml yml toml ini cfg conf config env xml
+  csv properties plist dat bak old enc gpg asc age`) with a stem containing the
+  whole word `token`, `secret`, `secrets`, `credential(s)`, `password(s)`,
+  `passwd` or `apikey(s)` (words split at `.`, `_`, `-`, digits and camelCase;
+  `api_key` counts as `apikey`; the plural `tokens` is deliberately absent);
+- `credentials` only as the last component of a path (`~/.aws/credentials`) or,
+  in lower case, as the whole first title segment (`credentials - Notepad`).
+
+Not matched: `Secret Santa Planning.docx`, `Manage your credentials`,
+`Credentials | Console`, `token_service.rs`, `tokenizer.json`,
+`tokens.json`, `design-tokens.json`, `id_rsa.pub`, `.envrc`. A name with
+spaces is judged by its last word (`Team passwords.txt` matches, `Secret
+notes.txt` does not); file-name-shaped ordinary names such as
+`secret-santa-list.txt` or `password-policy.txt` do match.
+`credentialFilePatterns` adds owner globs (`*`, `?`, case-insensitive, whole
+file name or whole title segment). Credential-file matches add no rule reference
+to the capture diagnostics (the reason is the usual excluded foreground or
+background); a dedicated rule kind would need a coordinated frontend change.
+Nested Window/Document names are checked in every app: the accessibility walk
+now always requests the subtree-rule evidence (names of nested Windows and
+Documents, Document values), as it already did wherever a configured title
+rule applied; a missing required name fails closed as before. Input events
+are admitted against both the observer's cached title and the foreground
+window's live title (read without a window message), so a credential file
+opened in a tab of an already focused window is excluded at once.
+
+**Generic tokens near credential words** (`generic_token_hits`). A run of
+letters, digits and `+ / _ -` (with optional `=` padding) is a redactable
+secret when it has at least 32 characters, upper case, lower case and a digit,
+is not hex-only (git SHAs, digests, UUIDs with or without hyphens), has Shannon
+entropy of at least 3.5 bits per character, changes character class at 30% or
+more of adjacent positions and has lower-case runs averaging under 3.5
+characters (camelCase identifiers and paths), **and** a credential word
+(`token`, `secret`, `password`/`passwd`/`passphrase`, `credential`, `bearer`,
+`authorization`/`authorisation`, `api key`, `access key`, `private key`,
+`vault`, `.env`; also inside identifiers and OCR-split text) lies within 16
+words of it, or the frame's window title names a credential file. Native
+window titles also lend context (weaker than the title rule: they never
+exclude a window): when the frame window's native title has a credential
+word, its own texts (title, URL, document path, accessibility text, and the
+OCR text of an active-window-only frame) are in context; on a full-monitor
+frame only the OCR words whose centre lies inside a visible window whose
+enumerated native title has a credential word are. Title-lent context does
+not reach strings inside URL tokens (document and page IDs in address bars);
+a nearby credential word still does. On a full-monitor frame the natively
+enumerated titles of the other admitted windows overlapping the monitor are
+screened too: any screening hit in one of them (a secret, keyword,
+password-manager brand or blocked domain) withholds the frame (that title bar
+is on screen and cannot be redacted as metadata). Windows are treated as
+visible when enumerated, not minimised and not cloaked; occlusion is not
+known, so a covered window can over-block. These titles stay in memory for screening only and are never
+logged or stored. Labelled base64 integrity
+digests (`sha512-…`, `sha384-…`, Go `h1:…`, `sha256:`/`sha256=` values) are
+not candidates. Its hits follow the
+existing tiers: redacted when the redaction tier allows, otherwise (fail-open
+frames, thresholds, unlocatable copies) the frame is withheld. Existing
+detectors are unchanged; generic hits never overlap them. Synthetic
+measurements: 0 hits, both with proximity context and with title-lent context, on 2,418
+false-positive fixtures placed beside credential
+words (git SHAs, short SHAs, UUIDs, hyphen-free UUIDs, upper-case UUIDs,
+22/27-character base64 IDs, sha256 digests, npm/SRI/Go base64 integrity
+digests beside `jsonwebtoken`-style names, build-log lines, paths, URLs,
+identifiers, prose); hex never hits even in a credential-file frame. Detection
+of uniformly random tokens beside a credential word is asserted at no less than
+97% (32 base62 characters), 98% (36 base62, 40 base64, 43 base64url) and 99%
+(48 base62); a calibration run of the same rules measured about 99.4% for
+32-character base62 tokens. Known limits: a 32+ character random-looking ID (for example a
+long base64 document ID) beside a credential word is redacted or, on a
+fail-open frame, withholds the frame; tokens shorter than 32 characters, split
+by OCR into shorter pieces, single-case or without a digit (for example
+upper-case base32 seeds) and hex-only tokens (32/40/64-hex API keys) are not
+detected by this rule. Only the window title counts as credential-file
+context; a credential file named elsewhere in the frame does not.
+
+**Re-screening stored data** (`screenpipe privacy rescreen`, owner-run only).
+Applies the current rules (credential-file titles, protected apps,
+`ignoredWindows`, `ignoredUrls`, content screening with
+`contentScreeningKeywords` and, with `pauseOnDrmContent`, DRM domains) to every
+stored frame (app for the window rules; title, URL, document path,
+accessibility text, tree JSON and accessibility element texts as the frame
+window's texts; OCR text with its stored word positions, OCR word JSON, full
+text and OCR element texts as image texts) and input event (title, URL, text,
+element name/value/description, screened as a frame of its own window).
+`includedWindows` is not re-applied. Screening always runs here, even if
+`contentScreeningEnabled` is off. Capture time and the re-screen make no
+decision of their own: both call the shared frame decision
+(`screenpipe_redact::frame_screening::screen_frame` and its tier) and the
+shared window rules (`screenpipe_capture_policy::target`: `TargetFilter`,
+`ignore_exclusion`); a test runs the same fixtures through both callers.
+Stored rows keep no window enumeration, so the visible-window context of a
+full-monitor frame cannot be re-applied: such frames' image texts only get
+proximity context on re-screen. A stored text larger than the in-memory
+screening bound is screened in overlapping windows (capture time withholds
+such a frame instead). Frames are deleted through the same frame-set
+deletion as range deletion (`db::delete_frame_set`); only the re-screen keeps
+a device's newest, possibly still recording, video chunk.
+
+```text
+screenpipe privacy rescreen --data-dir <recording data directory>
+screenpipe privacy rescreen --data-dir <same directory> --apply --confirm <fingerprint>
+```
+
+The first command is a dry run: it changes no data, prints scanned counts and
+`<table>/<action>/<reason>` counts (`content_secret_redactable` marks frames
+whose only hits capture-time screening could have redacted in place), and
+saves a content-free plan
+(`<data-dir>/rescreen/plan.json`) with a fingerprint. `--apply --confirm`
+applies only that plan: rows up to the planned highest ids, only while the
+rules are unchanged (otherwise run the dry run again), in batches of
+`--batch-size` (default 100, at most 200) rows, each written in one short
+`IMMEDIATE` transaction with `secure_delete` on, pausing `--pause-ms` (default
+100) between batches. Progress is saved after every batch
+(`rescreen/progress.json`); `--max-rows` bounds one invocation and repeating the
+command resumes. `--data-dir` has no default and a missing database is refused,
+not created; a data directory without settings (`store.bin`) is refused unless
+`--allow-default-rules` is given, and both runs print where the rules came
+from and their counts. Actions: a captured frame that would now be blocked is deleted with
+its OCR rows, elements (a shared element anchor moves to the first kept frame,
+as in range deletion) and search-index entries, and its video chunk or snapshot
+is queued in `media_deletion_jobs` and removed when no frame still uses it.
+A device's newest video chunk (possibly still recording) is never removed: an
+emptied one is listed in the progress file and released by a later run once
+recording has moved to a new chunk (the plan completes only then); a
+placeholder frame only loses app, title, URL and document path; an input event
+is deleted, or its secret spans are replaced with `[SECRET]` and the row
+re-screened. Output and state files hold counts, fixed reason codes, ids and
+hashes only.
+
+Limits: stored pixels cannot be redacted in place, so a deleted frame whose
+video chunk is shared with kept frames leaves its pixels in that file (counted
+as `deleted frames whose video chunk is shared`); deleting a time range is the
+existing way to remove them. Old text can survive in SQLite free pages, FTS
+segments not yet merged and the WAL until those are rewritten (a later
+checkpoint/`VACUUM` reduces this). Audio transcripts and memories are not
+re-screened. It opens the database with the normal migrations, so run it with
+the same build as the recorder. Tested only on synthetic databases.
+
 ## Settings
 
 | Key | Default | Meaning |
@@ -99,6 +270,7 @@ matched. `REGEX_REDACTOR_VERSION` is 3 (it keys only the in-memory cache).
 | `contentScreeningKeywords` | `[]` | Extra case-insensitive substrings that withhold the frame |
 | `uiaFailOpenWindows` | `[]` | `App::`/`App::Title` patterns allowed to fail open as above |
 | `untitledSafeApps` | `[]` | Executables whose untitled windows count as verified for window exclusion (see [capture decision metadata](CAPTURE_PRIVACY.md)) |
+| `credentialFilePatterns` | `[]` | Owner file-name globs added to the built-in credential-file title rule (no settings UI yet) |
 
 With screening disabled, capture decisions and decision metadata are unchanged
 from before screening existed.
@@ -175,7 +347,9 @@ them out of public documents except as sanitized numeric summaries.
   Windows OCR CPU, not yet measured) plus text screening, including frames that
   previously skipped OCR.
 - Only the screenshot path is screened. `ui_events`, clipboard, keyboard rows and
-  the macOS HD recorder are not.
+  the macOS HD recorder are not (input rows in credential-file windows are not
+  recorded at all; stored rows can be re-screened with `screenpipe privacy
+  rescreen`).
 - Non-Windows code paths are not compiled or tested on the development machine;
   macOS/Tesseract OCR errors may look like empty text and pass as blank frames.
 - The in-memory frame comparer still sees original pixels (internal only).

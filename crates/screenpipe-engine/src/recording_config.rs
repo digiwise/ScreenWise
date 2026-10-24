@@ -91,6 +91,10 @@ pub struct RecordingConfig {
     pub accessibility_walk_disabled: bool,
     /// Executables whose untitled windows are verified (`untitledSafeApps`).
     pub untitled_safe_apps: Vec<String>,
+    /// Owner credential-file title globs (`credentialFilePatterns`), added to
+    /// the built-in credential-file title rule. Installed process-wide by
+    /// [`Self::from_settings`].
+    pub credential_file_patterns: Vec<String>,
     /// Skip persisting clipboard rows/content in the UI recorder. Clipboard
     /// operations can still wake event-driven capture when clipboard-triggered
     /// capture is enabled.
@@ -214,6 +218,11 @@ impl RecordingConfig {
         // Sync the record_while_locked preference to the shared atomic flag
         // so the audio recording loop can read it without holding a config reference.
         screenpipe_config::set_record_while_locked(settings.record_while_locked);
+        // Owner credential-file patterns extend the built-in title rule on
+        // every capture path (the built-in list needs no installation).
+        screenpipe_capture_policy::credential_files::set_owner_patterns(
+            &settings.credential_file_patterns,
+        );
 
         Self {
             audio_chunk_duration: settings.audio_chunk_duration.max(0) as u64,
@@ -260,6 +269,7 @@ impl RecordingConfig {
             uia_fail_open_windows: settings.uia_fail_open_windows.clone(),
             accessibility_walk_disabled: settings.accessibility_walk_disabled,
             untitled_safe_apps: settings.untitled_safe_apps.clone(),
+            credential_file_patterns: settings.credential_file_patterns.clone(),
             disable_clipboard_capture: settings.disable_clipboard_capture,
             disable_keyboard_capture: settings.disable_keyboard_capture,
             disable_pointer_capture: settings.disable_pointer_capture,
@@ -598,6 +608,20 @@ mod tests {
         assert_eq!(vision.min_capture_interval_ms, Some(120));
         assert_eq!(vision.capture_on_keystroke, Some(true));
         assert_eq!(vision.capture_on_clipboard, Some(true));
+    }
+
+    #[test]
+    fn credential_file_patterns_flow_from_settings() {
+        let defaults = build(&screenpipe_config::RecordingSettings::default());
+        assert!(defaults.credential_file_patterns.is_empty());
+        let settings = screenpipe_config::RecordingSettings {
+            credential_file_patterns: vec!["*.synthetic-vault".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            build(&settings).credential_file_patterns,
+            settings.credential_file_patterns
+        );
     }
 
     #[test]

@@ -348,6 +348,32 @@ async fn main() -> anyhow::Result<()> {
             screenpipe_engine::cli::backup::handle_backup_command(subcommand, data_dir).await?;
             return Ok(());
         }
+        Command::Privacy { ref subcommand } => {
+            let screenpipe_engine::cli::PrivacyCommand::Rescreen {
+                ref data_dir,
+                apply,
+                ref confirm,
+                batch_size,
+                max_rows,
+                pause_ms,
+                allow_default_rules,
+            } = *subcommand;
+            screenpipe_engine::cli::rescreen::handle_rescreen(
+                screenpipe_engine::cli::rescreen::RescreenCommand {
+                    data_dir: std::path::Path::new(data_dir),
+                    apply,
+                    confirm: confirm.as_deref(),
+                    allow_default_rules,
+                    limits: screenpipe_engine::cli::rescreen::RunLimits {
+                        batch_size,
+                        max_rows,
+                        pause: std::time::Duration::from_millis(pause_ms),
+                    },
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         Command::Export(ref args) => {
             screenpipe_engine::cli::export::handle_export_command(args).await?;
             return Ok(());

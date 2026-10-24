@@ -73,20 +73,18 @@ fn normalize_timestamp_for_range_query(timestamp: &str) -> String {
 
 // Preserve unrelated orphan rows: a range action owns only chunks referenced by
 // records selected before deletion. In particular raw, untranscribed audio must
-// not lose its only file pointer during an unrelated range deletion.
-async fn range_chunk_ids(
+// not lose its only file pointer during an unrelated range deletion. (Video
+// chunks are selected by the shared frame-set deletion, `delete_frame_set`.)
+async fn range_audio_chunk_ids(
     tx: &mut ImmediateTx,
     start: &str,
     end: &str,
-) -> Result<(Vec<i64>, Vec<i64>), sqlx::Error> {
-    let videos = sqlx::query_scalar("SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL")
-        .bind(start).bind(end).fetch_all(&mut **tx.conn()).await?;
-    let audio = sqlx::query_scalar("SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL")
-        .bind(start).bind(end).fetch_all(&mut **tx.conn()).await?;
-    Ok((videos, audio))
+) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL")
+        .bind(start).bind(end).fetch_all(&mut **tx.conn()).await
 }
 
-async fn delete_selected_orphan_chunks(
+pub(crate) async fn delete_selected_orphan_chunks(
     tx: &mut ImmediateTx,
     ids: &[i64],
     video: bool,
@@ -113,7 +111,241 @@ async fn delete_selected_orphan_chunks(
     Ok(deleted)
 }
 
-async fn enqueue_media_deletions(
+/// What a device's newest video chunk gets when a frame-set deletion empties
+/// it: range deletion removes it like any other chunk (`Remove`); the
+/// re-screen beside a running recorder keeps it (`Defer`) until recording
+/// has moved on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveVideoChunks {
+    Remove,
+    Defer,
+}
+
+/// Content-free counts of one frame-set deletion.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSetCounts {
+    pub frames_deleted: u64,
+    pub ocr_rows_deleted: u64,
+    pub elements_deleted: u64,
+    pub video_chunks_deleted: u64,
+    /// Deleted frames whose video chunk is still used by kept frames: their
+    /// pixels stay in that chunk file (deferred chunks are not counted).
+    pub frames_with_shared_video: u64,
+}
+
+/// Outcome of [`delete_frame_set`].
+pub(crate) struct FrameSetDeletion {
+    pub counts: FrameSetCounts,
+    /// Now-unreferenced video files, queued in `media_deletion_jobs`.
+    pub video_files: Vec<String>,
+    /// Snapshot files no kept frame uses, queued in `media_deletion_jobs`.
+    pub snapshot_files: Vec<String>,
+    /// Emptied newest chunks kept under [`LiveVideoChunks::Defer`].
+    pub deferred_chunks: Vec<i64>,
+}
+
+/// The newest video chunk id of every device: the recorder appends frames to
+/// it.
+pub(crate) async fn newest_video_chunks(tx: &mut ImmediateTx) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT MAX(id) FROM video_chunks GROUP BY device_name")
+        .fetch_all(&mut **tx.conn())
+        .await
+}
+
+/// Start a frame set (the temporary `frame_delete_set` table) for this
+/// transaction's connection.
+async fn reset_frame_set(tx: &mut ImmediateTx) -> Result<(), sqlx::Error> {
+    sqlx::query("CREATE TEMP TABLE IF NOT EXISTS frame_delete_set (id INTEGER PRIMARY KEY)")
+        .execute(&mut **tx.conn())
+        .await?;
+    sqlx::query("DELETE FROM temp.frame_delete_set")
+        .execute(&mut **tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// The frame set of a time-range deletion.
+pub(crate) async fn select_frame_set_by_time_range(
+    tx: &mut ImmediateTx,
+    start: &str,
+    end: &str,
+) -> Result<(), sqlx::Error> {
+    reset_frame_set(tx).await?;
+    sqlx::query(
+        "INSERT INTO temp.frame_delete_set (id) SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2",
+    )
+    .bind(start)
+    .bind(end)
+    .execute(&mut **tx.conn())
+    .await?;
+    Ok(())
+}
+
+/// The frame set of an id-list deletion.
+pub(crate) async fn select_frame_set_by_ids(
+    tx: &mut ImmediateTx,
+    ids: &[i64],
+) -> Result<(), sqlx::Error> {
+    reset_frame_set(tx).await?;
+    for id in ids {
+        sqlx::query("INSERT OR IGNORE INTO temp.frame_delete_set (id) VALUES (?1)")
+            .bind(id)
+            .execute(&mut **tx.conn())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete the selected frame set and everything derived from it, in the
+/// caller's transaction: queue now-unreferenced video files and unshared
+/// snapshot files in `media_deletion_jobs`, delete OCR rows, move element
+/// anchors that kept frames still reference to the first of them
+/// ([`move_element_anchor`]), delete elements and frames (FTS through the
+/// triggers) and drop the emptied video chunks. The one implementation of
+/// frame deletion, shared by range deletion and the re-screen.
+pub(crate) async fn delete_frame_set(
+    tx: &mut ImmediateTx,
+    live: LiveVideoChunks,
+) -> Result<FrameSetDeletion, sqlx::Error> {
+    const IN_SET: &str = "SELECT id FROM temp.frame_delete_set";
+    let mut out = FrameSetDeletion {
+        counts: FrameSetCounts::default(),
+        video_files: Vec::new(),
+        snapshot_files: Vec::new(),
+        deferred_chunks: Vec::new(),
+    };
+    let chunk_ids: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT video_chunk_id FROM frames WHERE video_chunk_id IS NOT NULL AND id IN ({IN_SET})"
+    ))
+    .fetch_all(&mut **tx.conn())
+    .await?;
+    let newest: Vec<i64> = match live {
+        LiveVideoChunks::Remove => Vec::new(),
+        LiveVideoChunks::Defer => newest_video_chunks(tx).await?,
+    };
+    // Chunks whose every frame is in the set.
+    let emptied: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT id, file_path FROM video_chunks
+         WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
+                      WHERE video_chunk_id IS NOT NULL AND id IN ({IN_SET}))
+           AND NOT EXISTS (SELECT 1 FROM frames other
+                           WHERE other.video_chunk_id = video_chunks.id
+                             AND other.id NOT IN ({IN_SET}))"
+    ))
+    .fetch_all(&mut **tx.conn())
+    .await?;
+    let mut released = Vec::new();
+    for (id, path) in emptied {
+        if newest.contains(&id) {
+            out.deferred_chunks.push(id);
+        } else {
+            released.push(id);
+            out.video_files.push(path);
+        }
+    }
+    let accounted: Vec<i64> = released
+        .iter()
+        .chain(out.deferred_chunks.iter())
+        .copied()
+        .collect();
+    if chunk_ids.len() > accounted.len() {
+        let mut query = sqlx::QueryBuilder::<Sqlite>::new(format!(
+            "SELECT COUNT(*) FROM frames WHERE id IN ({IN_SET}) AND video_chunk_id IS NOT NULL"
+        ));
+        if !accounted.is_empty() {
+            query.push(" AND video_chunk_id NOT IN (");
+            let mut values = query.separated(", ");
+            for id in &accounted {
+                values.push_bind(*id);
+            }
+            values.push_unseparated(")");
+        }
+        out.counts.frames_with_shared_video = query
+            .build_query_scalar::<i64>()
+            .fetch_one(&mut **tx.conn())
+            .await? as u64;
+    }
+    out.snapshot_files = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT snapshot_path FROM frames f
+         WHERE f.snapshot_path IS NOT NULL AND f.id IN ({IN_SET})
+           AND NOT EXISTS (SELECT 1 FROM frames other
+                           WHERE other.snapshot_path = f.snapshot_path
+                             AND other.id NOT IN ({IN_SET}))"
+    ))
+    .fetch_all(&mut **tx.conn())
+    .await?;
+    enqueue_media_deletions(tx, &out.video_files, &[], &out.snapshot_files).await?;
+
+    out.counts.ocr_rows_deleted = sqlx::query(&format!(
+        "DELETE FROM ocr_text WHERE frame_id IN ({IN_SET})"
+    ))
+    .execute(&mut **tx.conn())
+    .await?
+    .rows_affected();
+
+    // Element anchors referenced by kept frames move to the first of them.
+    let anchors: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT elements_ref_frame_id FROM frames
+         WHERE elements_ref_frame_id IN ({IN_SET}) AND id NOT IN ({IN_SET})"
+    ))
+    .fetch_all(&mut **tx.conn())
+    .await?;
+    for anchor in anchors {
+        let new_anchor: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT MIN(id) FROM frames WHERE elements_ref_frame_id = ?1 AND id NOT IN ({IN_SET})"
+        ))
+        .bind(anchor)
+        .fetch_one(&mut **tx.conn())
+        .await?;
+        if let Some(new_anchor) = new_anchor {
+            move_element_anchor(tx, anchor, new_anchor).await?;
+        }
+    }
+
+    out.counts.elements_deleted = sqlx::query(&format!(
+        "DELETE FROM elements WHERE frame_id IN ({IN_SET})"
+    ))
+    .execute(&mut **tx.conn())
+    .await?
+    .rows_affected();
+    out.counts.frames_deleted = sqlx::query(&format!("DELETE FROM frames WHERE id IN ({IN_SET})"))
+        .execute(&mut **tx.conn())
+        .await?
+        .rows_affected();
+    out.counts.video_chunks_deleted = delete_selected_orphan_chunks(tx, &released, true).await?;
+    sqlx::query("DELETE FROM temp.frame_delete_set")
+        .execute(&mut **tx.conn())
+        .await?;
+    Ok(out)
+}
+
+/// Move a shared element anchor (a deleted frame whose elements other frames
+/// reference through `elements_ref_frame_id`) to `new_anchor`, a kept
+/// referencing frame, which then owns the elements. Shared by every frame
+/// deletion path.
+pub(crate) async fn move_element_anchor(
+    tx: &mut ImmediateTx,
+    anchor: i64,
+    new_anchor: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE elements SET frame_id = ?1 WHERE frame_id = ?2")
+        .bind(new_anchor)
+        .bind(anchor)
+        .execute(&mut **tx.conn())
+        .await?;
+    sqlx::query("UPDATE frames SET elements_ref_frame_id = ?1 WHERE elements_ref_frame_id = ?2")
+        .bind(new_anchor)
+        .bind(anchor)
+        .execute(&mut **tx.conn())
+        .await?;
+    sqlx::query("UPDATE frames SET elements_ref_frame_id = NULL WHERE id = ?1")
+        .bind(new_anchor)
+        .execute(&mut **tx.conn())
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn enqueue_media_deletions(
     tx: &mut ImmediateTx,
     videos: &[String],
     audio: &[String],
@@ -7185,34 +7417,7 @@ impl DatabaseManager {
 
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
-        let (selected_video_ids, selected_audio_ids) =
-            range_chunk_ids(&mut tx, &start_str, &end_str).await?;
-
-        // 1. Collect local video file paths for chunks that become fully orphaned.
-        // Correlated NOT EXISTS below remains safe when frame references are NULL.
-        let video_files: Vec<String> = sqlx::query_scalar(
-            r#"SELECT file_path FROM video_chunks
-               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
-                            WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
-                              WHERE outside_frames.video_chunk_id = video_chunks.id
-                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
-
-        // Also collect local snapshot files.
-        let snapshot_files: Vec<String> = sqlx::query_scalar(
-            r#"SELECT snapshot_path FROM frames
-               WHERE timestamp BETWEEN ?1 AND ?2
-               AND snapshot_path IS NOT NULL"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
+        let selected_audio_ids = range_audio_chunk_ids(&mut tx, &start_str, &end_str).await?;
 
         // 2. Collect audio file paths for chunks that become fully orphaned.
         // The correlated NOT EXISTS keeps nullable transcript references safe.
@@ -7228,93 +7433,17 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+        enqueue_media_deletions(&mut tx, &[], &audio_files, &[]).await?;
 
-        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
-
-        // 3. Delete ocr_text (ocr_text_fts was dropped by migration)
-        let ocr_result = sqlx::query(
-            "DELETE FROM ocr_text WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .execute(&mut **tx.conn())
-        .await?;
-        let ocr_deleted = ocr_result.rows_affected();
-
-        // 4b. Migrate elements from anchor frames being deleted that are referenced
-        // by frames outside the delete range. For each such anchor, move its elements
-        // to the first referencing frame and update all references.
-        let anchor_ids: Vec<i64> = sqlx::query_scalar(
-            r#"SELECT DISTINCT f.id FROM frames f
-               WHERE f.timestamp BETWEEN ?1 AND ?2
-               AND EXISTS (
-                   SELECT 1 FROM frames ref
-                   WHERE ref.elements_ref_frame_id = f.id
-                   AND ref.timestamp NOT BETWEEN ?1 AND ?2
-               )"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
-
-        for anchor_id in &anchor_ids {
-            // Find the first referencing frame outside the delete range
-            let new_anchor_id: Option<i64> = sqlx::query_scalar(
-                r#"SELECT MIN(id) FROM frames
-                   WHERE elements_ref_frame_id = ?1
-                   AND timestamp NOT BETWEEN ?2 AND ?3"#,
-            )
-            .bind(anchor_id)
-            .bind(&start_str)
-            .bind(&end_str)
-            .fetch_optional(&mut **tx.conn())
-            .await?
-            .flatten();
-
-            if let Some(new_id) = new_anchor_id {
-                // Move elements to the new anchor frame
-                sqlx::query("UPDATE elements SET frame_id = ?1 WHERE frame_id = ?2")
-                    .bind(new_id)
-                    .bind(anchor_id)
-                    .execute(&mut **tx.conn())
-                    .await?;
-                // Update all references to point to new anchor
-                sqlx::query(
-                    "UPDATE frames SET elements_ref_frame_id = ?1 WHERE elements_ref_frame_id = ?2",
-                )
-                .bind(new_id)
-                .bind(anchor_id)
-                .execute(&mut **tx.conn())
-                .await?;
-                // Clear ref on the new anchor (it now owns the elements)
-                sqlx::query("UPDATE frames SET elements_ref_frame_id = NULL WHERE id = ?1")
-                    .bind(new_id)
-                    .execute(&mut **tx.conn())
-                    .await?;
-            }
-        }
-
-        // 4c. Delete elements belonging to frames in the delete range (no CASCADE on FK)
-        sqlx::query(
-            "DELETE FROM elements WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .execute(&mut **tx.conn())
-        .await?;
-
-        // 5. Delete frames — triggers frames_fts delete; vision_tags CASCADE'd automatically
-        let frames_result = sqlx::query("DELETE FROM frames WHERE timestamp BETWEEN ?1 AND ?2")
-            .bind(&start_str)
-            .bind(&end_str)
-            .execute(&mut **tx.conn())
-            .await?;
-        let frames_deleted = frames_result.rows_affected();
-
-        // 6. Delete orphaned video_chunks (no frames reference them anymore)
-        let video_chunks_deleted =
-            delete_selected_orphan_chunks(&mut tx, &selected_video_ids, true).await?;
+        // Frames and everything derived from them: the shared frame-set
+        // deletion (also used by the re-screen of stored data).
+        select_frame_set_by_time_range(&mut tx, &start_str, &end_str).await?;
+        let frame_set = delete_frame_set(&mut tx, LiveVideoChunks::Remove).await?;
+        let video_files = frame_set.video_files;
+        let snapshot_files = frame_set.snapshot_files;
+        let ocr_deleted = frame_set.counts.ocr_rows_deleted;
+        let frames_deleted = frame_set.counts.frames_deleted;
+        let video_chunks_deleted = frame_set.counts.video_chunks_deleted;
 
         // 7. Delete audio_transcriptions — triggers audio_transcriptions_fts delete
         let audio_transcriptions_result =
@@ -7396,34 +7525,7 @@ impl DatabaseManager {
 
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
-        let (selected_video_ids, selected_audio_ids) =
-            range_chunk_ids(&mut tx, &start_str, &end_str).await?;
-
-        // 1. Collect ALL video file paths for chunks that become fully orphaned.
-        // Correlated NOT EXISTS below remains safe when frame references are NULL.
-        let video_files: Vec<String> = sqlx::query_scalar(
-            r#"SELECT file_path FROM video_chunks
-               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
-                            WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
-               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
-                              WHERE outside_frames.video_chunk_id = video_chunks.id
-                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
-
-        // 2. Collect ALL snapshot files (not just cloud-uploaded)
-        let snapshot_files: Vec<String> = sqlx::query_scalar(
-            r#"SELECT snapshot_path FROM frames
-               WHERE timestamp BETWEEN ?1 AND ?2
-               AND snapshot_path IS NOT NULL"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
+        let selected_audio_ids = range_audio_chunk_ids(&mut tx, &start_str, &end_str).await?;
 
         // 3. Collect ALL audio file paths for chunks that become fully orphaned.
         // Same NULL-in-NOT-IN guard as above (audio_transcriptions.audio_chunk_id
@@ -7440,87 +7542,17 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+        enqueue_media_deletions(&mut tx, &[], &audio_files, &[]).await?;
 
-        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
-
-        // 4. Delete ocr_text
-        let ocr_result = sqlx::query(
-            "DELETE FROM ocr_text WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .execute(&mut **tx.conn())
-        .await?;
-        let ocr_deleted = ocr_result.rows_affected();
-
-        // 5. Migrate elements from anchor frames being deleted
-        let anchor_ids: Vec<i64> = sqlx::query_scalar(
-            r#"SELECT DISTINCT f.id FROM frames f
-               WHERE f.timestamp BETWEEN ?1 AND ?2
-               AND EXISTS (
-                   SELECT 1 FROM frames ref
-                   WHERE ref.elements_ref_frame_id = f.id
-                   AND ref.timestamp NOT BETWEEN ?1 AND ?2
-               )"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
-
-        for anchor_id in &anchor_ids {
-            let new_anchor_id: Option<i64> = sqlx::query_scalar(
-                r#"SELECT MIN(id) FROM frames
-                   WHERE elements_ref_frame_id = ?1
-                   AND timestamp NOT BETWEEN ?2 AND ?3"#,
-            )
-            .bind(anchor_id)
-            .bind(&start_str)
-            .bind(&end_str)
-            .fetch_optional(&mut **tx.conn())
-            .await?
-            .flatten();
-
-            if let Some(new_id) = new_anchor_id {
-                sqlx::query("UPDATE elements SET frame_id = ?1 WHERE frame_id = ?2")
-                    .bind(new_id)
-                    .bind(anchor_id)
-                    .execute(&mut **tx.conn())
-                    .await?;
-                sqlx::query(
-                    "UPDATE frames SET elements_ref_frame_id = ?1 WHERE elements_ref_frame_id = ?2",
-                )
-                .bind(new_id)
-                .bind(anchor_id)
-                .execute(&mut **tx.conn())
-                .await?;
-                sqlx::query("UPDATE frames SET elements_ref_frame_id = NULL WHERE id = ?1")
-                    .bind(new_id)
-                    .execute(&mut **tx.conn())
-                    .await?;
-            }
-        }
-
-        // 6. Delete elements belonging to frames in the delete range
-        sqlx::query(
-            "DELETE FROM elements WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .execute(&mut **tx.conn())
-        .await?;
-
-        // 7. Delete frames
-        let frames_result = sqlx::query("DELETE FROM frames WHERE timestamp BETWEEN ?1 AND ?2")
-            .bind(&start_str)
-            .bind(&end_str)
-            .execute(&mut **tx.conn())
-            .await?;
-        let frames_deleted = frames_result.rows_affected();
-
-        // 8. Delete orphaned video_chunks
-        let video_chunks_deleted =
-            delete_selected_orphan_chunks(&mut tx, &selected_video_ids, true).await?;
+        // Frames and everything derived from them: the shared frame-set
+        // deletion (also used by the re-screen of stored data).
+        select_frame_set_by_time_range(&mut tx, &start_str, &end_str).await?;
+        let frame_set = delete_frame_set(&mut tx, LiveVideoChunks::Remove).await?;
+        let video_files = frame_set.video_files;
+        let snapshot_files = frame_set.snapshot_files;
+        let ocr_deleted = frame_set.counts.ocr_rows_deleted;
+        let frames_deleted = frame_set.counts.frames_deleted;
+        let video_chunks_deleted = frame_set.counts.video_chunks_deleted;
 
         // 9. Delete audio_transcriptions
         let audio_transcriptions_result =
@@ -7804,31 +7836,7 @@ impl DatabaseManager {
 
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
-        let (selected_video_ids, selected_audio_ids) =
-            range_chunk_ids(&mut tx, &start_str, &end_str).await?;
-
-        // Collect snapshot files
-        let snapshot_files: Vec<String> = sqlx::query_scalar(
-            r#"SELECT snapshot_path FROM frames
-               WHERE timestamp BETWEEN ?1 AND ?2
-               AND snapshot_path IS NOT NULL"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
-
-        // Collect video files that are fully within this batch (all frames in chunk are in range)
-        let video_query = r#"SELECT file_path FROM video_chunks
-               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND NOT EXISTS (SELECT 1 FROM frames outside_frames
-                              WHERE outside_frames.video_chunk_id = video_chunks.id
-                                AND outside_frames.timestamp NOT BETWEEN ?1 AND ?2)"#;
-        let video_files: Vec<String> = sqlx::query_scalar(video_query)
-            .bind(&start_str)
-            .bind(&end_str)
-            .fetch_all(&mut **tx.conn())
-            .await?;
+        let selected_audio_ids = range_audio_chunk_ids(&mut tx, &start_str, &end_str).await?;
 
         // Collect audio files
         let audio_files: Vec<String> = sqlx::query_scalar(
@@ -7842,86 +7850,17 @@ impl DatabaseManager {
         .bind(&end_str)
         .fetch_all(&mut **tx.conn())
         .await?;
+        enqueue_media_deletions(&mut tx, &[], &audio_files, &[]).await?;
 
-        enqueue_media_deletions(&mut tx, &video_files, &audio_files, &snapshot_files).await?;
-
-        // Delete ocr_text
-        let ocr_result = sqlx::query(
-            "DELETE FROM ocr_text WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .execute(&mut **tx.conn())
-        .await?;
-        let ocr_deleted = ocr_result.rows_affected();
-
-        // Migrate elements from anchor frames
-        let anchor_ids: Vec<i64> = sqlx::query_scalar(
-            r#"SELECT DISTINCT f.id FROM frames f
-               WHERE f.timestamp BETWEEN ?1 AND ?2
-               AND EXISTS (
-                   SELECT 1 FROM frames ref
-                   WHERE ref.elements_ref_frame_id = f.id
-                   AND ref.timestamp NOT BETWEEN ?1 AND ?2
-               )"#,
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .fetch_all(&mut **tx.conn())
-        .await?;
-
-        for anchor_id in &anchor_ids {
-            let new_anchor_id: Option<i64> = sqlx::query_scalar(
-                r#"SELECT MIN(id) FROM frames
-                   WHERE elements_ref_frame_id = ?1
-                   AND timestamp NOT BETWEEN ?2 AND ?3"#,
-            )
-            .bind(anchor_id)
-            .bind(&start_str)
-            .bind(&end_str)
-            .fetch_optional(&mut **tx.conn())
-            .await?
-            .flatten();
-
-            if let Some(new_id) = new_anchor_id {
-                sqlx::query("UPDATE elements SET frame_id = ?1 WHERE frame_id = ?2")
-                    .bind(new_id)
-                    .bind(anchor_id)
-                    .execute(&mut **tx.conn())
-                    .await?;
-                sqlx::query(
-                    "UPDATE frames SET elements_ref_frame_id = ?1 WHERE elements_ref_frame_id = ?2",
-                )
-                .bind(new_id)
-                .bind(anchor_id)
-                .execute(&mut **tx.conn())
-                .await?;
-                sqlx::query("UPDATE frames SET elements_ref_frame_id = NULL WHERE id = ?1")
-                    .bind(new_id)
-                    .execute(&mut **tx.conn())
-                    .await?;
-            }
-        }
-
-        // Delete elements
-        sqlx::query(
-            "DELETE FROM elements WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
-        )
-        .bind(&start_str)
-        .bind(&end_str)
-        .execute(&mut **tx.conn())
-        .await?;
-
-        // Delete frames
-        let frames_result = sqlx::query("DELETE FROM frames WHERE timestamp BETWEEN ?1 AND ?2")
-            .bind(&start_str)
-            .bind(&end_str)
-            .execute(&mut **tx.conn())
-            .await?;
-        let frames_deleted = frames_result.rows_affected();
-
-        let video_chunks_deleted =
-            delete_selected_orphan_chunks(&mut tx, &selected_video_ids, true).await?;
+        // Frames and everything derived from them: the shared frame-set
+        // deletion (also used by the re-screen of stored data).
+        select_frame_set_by_time_range(&mut tx, &start_str, &end_str).await?;
+        let frame_set = delete_frame_set(&mut tx, LiveVideoChunks::Remove).await?;
+        let video_files = frame_set.video_files;
+        let snapshot_files = frame_set.snapshot_files;
+        let ocr_deleted = frame_set.counts.ocr_rows_deleted;
+        let frames_deleted = frame_set.counts.frames_deleted;
+        let video_chunks_deleted = frame_set.counts.video_chunks_deleted;
 
         // Delete audio_transcriptions
         let audio_transcriptions_result =

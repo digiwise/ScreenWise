@@ -903,6 +903,21 @@ pub fn close_source(scope: CaptureScope, source: DiagnosticSource, reason: Captu
     }
 }
 
+/// Persisted `frames.capture_privacy.outcome` codes of the Windows capture
+/// decision, shared by the capture path that writes them and the readers of
+/// stored frames (the re-screen).
+pub mod capture_outcome {
+    pub const FULL_MONITOR: &str = "full_monitor";
+    pub const ACTIVE_WINDOW_ONLY: &str = "active_window_only";
+    pub const REDACTED: &str = "redacted";
+    pub const CAPTURE_FAILED: &str = "capture_failed";
+
+    /// A withheld capture whose stored image is a fixed notice.
+    pub fn is_placeholder(outcome: &str) -> bool {
+        outcome == REDACTED || outcome == CAPTURE_FAILED
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

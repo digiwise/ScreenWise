@@ -41,11 +41,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW,
-    GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION, HHOOK,
-    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT,
-    WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
+    GetWindowTextW, GetWindowThreadProcessId, InternalGetWindowText, PostThreadMessageW, SetTimer,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION,
+    HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
 };
 
 static UI_EVENT_QUEUE_FULL_DROPS: AtomicU64 = AtomicU64::new(0);
@@ -684,6 +685,45 @@ struct HookState {
     held_vk: Option<u16>,
     /// The previous recordable keystroke, for active typing time.
     last_recordable_at: Option<Instant>,
+    /// Reads the foreground window's current title for input admission
+    /// ([`live_foreground_title`]; tests substitute a fixed source).
+    foreground_title: fn() -> Option<String>,
+}
+
+/// The foreground window's current title, read with `InternalGetWindowText`,
+/// which never sends a window message (safe in a low-level hook). The app
+/// observer refreshes its cached title only when the foreground window
+/// changes, so a tab or document switched inside the same window (an editor
+/// opening a credential file) would otherwise keep a stale, innocent title.
+fn live_foreground_title() -> Option<String> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let len = InternalGetWindowText(hwnd, &mut buf);
+        (len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Input admission against both the observer's cached title and the live
+/// foreground title: excluded (`None`) when either is excluded, otherwise
+/// the title to record (the live one when it could be read).
+fn admitted_input_title(
+    config: &UiCaptureConfig,
+    app_name: Option<&str>,
+    cached: Option<String>,
+    live: Option<String>,
+) -> Option<Option<String>> {
+    let app = app_name.unwrap_or_default();
+    if !config.should_capture_target(app, cached.as_deref()) {
+        return None;
+    }
+    if live.is_some() && !config.should_capture_target(app, live.as_deref()) {
+        return None;
+    }
+    Some(live.or(cached))
 }
 
 /// Emit the accumulated scroll as a single `Scroll` event. `delta_y` is summed
@@ -773,6 +813,7 @@ fn run_native_hooks(
             text_tag: KeystrokeTag::default(),
             held_vk: None,
             last_recordable_at: None,
+            foreground_title: live_foreground_title,
         }));
     });
 
@@ -1161,14 +1202,16 @@ fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) 
         )
     };
 
-    // Check exclusions
-    if !s.config.should_capture_target(
-        app_name.as_deref().unwrap_or_default(),
-        window_title.as_deref(),
-    ) {
+    // Check exclusions against the cached and the live foreground title.
+    let Some(window_title) = admitted_input_title(
+        &s.config,
+        app_name.as_deref(),
+        window_title,
+        (s.foreground_title)(),
+    ) else {
         discard_text_buffer(s, DiscardCause::Excluded);
         return;
-    }
+    };
 
     // One native sample (no messages or UIA) serves admission and
     // content-free per-application counting of this keystroke.
@@ -1460,12 +1503,14 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                                 .try_lock()
                                 .map(|g| g.clone())
                                 .unwrap_or(None);
-                            if !s.config.should_capture_target(
-                                app_name.as_deref().unwrap_or_default(),
-                                window_title.as_deref(),
-                            ) {
+                            let Some(window_title) = admitted_input_title(
+                                &s.config,
+                                app_name.as_deref(),
+                                window_title,
+                                (s.foreground_title)(),
+                            ) else {
                                 return;
-                            }
+                            };
                             let event = UiEvent {
                                 id: None,
                                 timestamp,
@@ -1506,13 +1551,15 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     )
                 };
 
-                // Check exclusions
-                if !s.config.should_capture_target(
-                    app_name.as_deref().unwrap_or_default(),
-                    window_title.as_deref(),
-                ) {
+                // Check exclusions against the cached and the live title.
+                let Some(window_title) = admitted_input_title(
+                    &s.config,
+                    app_name.as_deref(),
+                    window_title,
+                    (s.foreground_title)(),
+                ) else {
                     return;
-                }
+                };
 
                 // Flush any in-flight scroll aggregation when a non-scroll mouse
                 // event arrives (e.g. a click right after scrolling), so the
@@ -2798,6 +2845,7 @@ mod tests {
                 text_tag: KeystrokeTag::default(),
                 held_vk: None,
                 last_recordable_at: None,
+                foreground_title: || None,
             },
             content_rx,
         )
@@ -2835,6 +2883,51 @@ mod tests {
             }
             _ => panic!("expected Text event, got {:?}", event.data),
         }
+    }
+
+    #[test]
+    fn input_admission_checks_the_live_title_as_well_as_the_cached_one() {
+        let config = UiCaptureConfig::new();
+        let title = |s: &str| Some(s.to_string());
+        // A credential file opened in a tab of the already focused window.
+        assert_eq!(
+            admitted_input_title(
+                &config,
+                Some("code.exe"),
+                title("main.rs - repo - Code"),
+                title(".env - repo - Code")
+            ),
+            None
+        );
+        assert_eq!(
+            admitted_input_title(
+                &config,
+                Some("notepad.exe"),
+                title("id_rsa - Notepad"),
+                title("notes.txt - Notepad")
+            ),
+            None
+        );
+        // Ordinary windows record the live title, or the cached one.
+        assert_eq!(
+            admitted_input_title(&config, Some("code.exe"), None, title("notes.txt - Code")),
+            Some(title("notes.txt - Code"))
+        );
+        assert_eq!(
+            admitted_input_title(&config, Some("code.exe"), title("main.rs - Code"), None),
+            Some(title("main.rs - Code"))
+        );
+    }
+
+    #[test]
+    fn keystrokes_in_a_live_credential_file_title_are_discarded() {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "typed before");
+        state.foreground_title = || Some("*deploy-token.secret - Notepad".to_string());
+        process_key_down(&mut state, 0x41, 0, true);
+        assert!(state.text_buf.is_empty());
+        drain_test_content(&state, &content_rx);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

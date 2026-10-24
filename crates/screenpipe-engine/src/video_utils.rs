@@ -1072,6 +1072,10 @@ pub fn redact_frame_pii(image_data: &[u8], regions: &[PiiRegion]) -> Result<Vec<
     let img = image::load_from_memory(image_data)?;
     let mut img_rgba = img.to_rgba8();
     let (img_width, img_height) = img_rgba.dimensions();
+    // Blurred areas: the disclosure is drawn into them, never over pixels
+    // that stay visible.
+    #[cfg(target_os = "windows")]
+    let mut redacted_areas = Vec::with_capacity(regions.len());
 
     for region in regions {
         // Validate region bounds
@@ -1088,6 +1092,8 @@ pub fn redact_frame_pii(image_data: &[u8], regions: &[PiiRegion]) -> Result<Vec<
         if w == 0 || h == 0 {
             continue;
         }
+        #[cfg(target_os = "windows")]
+        redacted_areas.push((x, y, w, h));
 
         // Extract the region to blur
         let sub_img = img_rgba.view(x, y, w, h).to_image();
@@ -1106,8 +1112,9 @@ pub fn redact_frame_pii(image_data: &[u8], regions: &[PiiRegion]) -> Result<Vec<
     }
 
     #[cfg(target_os = "windows")]
-    screenpipe_screen::capture_screenshot_by_window::draw_windows_capture_notice_banner(
+    screenpipe_screen::capture_screenshot_by_window::draw_windows_capture_notice_in_redacted_area(
         &mut img_rgba,
+        &redacted_areas,
         screenpipe_screen::capture_screenshot_by_window::WindowsCaptureNotice::PiiRedacted,
     );
 
@@ -1266,14 +1273,45 @@ mod pii_redaction_tests {
         assert_eq!(redacted.dimensions(), original.dimensions());
         assert!(mean_rgb_distance(&original, &redacted, 10..40, 10..30) > 25);
         // Re-encoding at JPEG quality 85 introduces small changes outside
-        // the blur. Compare a distant ordinary control with a lossy tolerance.
-        assert!(rgb_distance(*original.get_pixel(80, 80), *redacted.get_pixel(80, 80)) <= 45);
+        // the blur. Compare a distant ordinary control with a lossy tolerance
+        // (above the Windows disclosure strip along the bottom edge).
+        assert!(rgb_distance(*original.get_pixel(80, 60), *redacted.get_pixel(80, 60)) <= 45);
 
         #[cfg(target_os = "windows")]
         {
+            // The region is too small for the label, so a reserved strip at
+            // the bottom carries the disclosure; the top rows stay visible.
             let marked = image::load_from_memory(&result).unwrap().to_rgb8();
-            let banner = marked.get_pixel(0, 0);
+            let banner = marked.get_pixel(0, marked.height() - 1);
             assert!(banner[0] > 100 && banner[1] < 100 && banner[2] < 100);
+            assert!(rgb_distance(*original.get_pixel(0, 0), *marked.get_pixel(0, 0)) <= 45);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn pii_disclosure_is_drawn_inside_a_redacted_region_that_fits_it() {
+        let image_data = create_test_jpeg();
+        let original = image::load_from_memory(&image_data).unwrap().to_rgb8();
+        let (width, height) = original.dimensions();
+        let regions = vec![PiiRegion {
+            x: 0,
+            y: height / 2,
+            width,
+            height: 20,
+            pii_type: "EMAIL".to_string(),
+        }];
+        let result = redact_frame_pii(&image_data, &regions).unwrap();
+        let marked = image::load_from_memory(&result).unwrap().to_rgb8();
+        // Inside the region: the notice colour; outside it: pixels as before
+        // (within JPEG tolerance), including the top and bottom rows.
+        let inside = marked.get_pixel(1, height / 2 + 1);
+        assert!(inside[0] > 100 && inside[1] < 100 && inside[2] < 100);
+        for (x, y) in [(0, 0), (width - 1, 0), (0, height - 1), (width / 2, 2)] {
+            assert!(
+                rgb_distance(*original.get_pixel(x, y), *marked.get_pixel(x, y)) <= 45,
+                "({x}, {y})"
+            );
         }
     }
 
@@ -1297,7 +1335,7 @@ mod pii_redaction_tests {
         let result = redact_frame_pii(&image_data, &regions).unwrap();
         let redacted = image::load_from_memory(&result).unwrap().to_rgb8();
         assert!(mean_rgb_distance(&original, &redacted, 15..45, 15..45) > 25);
-        assert!(rgb_distance(*original.get_pixel(80, 80), *redacted.get_pixel(80, 80)) <= 45);
+        assert!(rgb_distance(*original.get_pixel(80, 60), *redacted.get_pixel(80, 60)) <= 45);
     }
 
     #[test]
@@ -1382,7 +1420,7 @@ mod pii_redaction_tests {
         // Should return valid image unchanged (region was skipped)
         let redacted = image::load_from_memory(&result).unwrap().to_rgb8();
         assert_eq!(redacted.dimensions(), original.dimensions());
-        assert!(rgb_distance(*original.get_pixel(80, 80), *redacted.get_pixel(80, 80)) <= 45);
+        assert!(rgb_distance(*original.get_pixel(80, 60), *redacted.get_pixel(80, 60)) <= 45);
     }
 
     #[test]

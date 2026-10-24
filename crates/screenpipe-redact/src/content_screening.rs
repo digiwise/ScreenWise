@@ -19,6 +19,17 @@
 //! password-manager brand matching use the pure matchers and lists of
 //! `screenpipe-capture-policy`, shared with capture admission.
 //!
+//! Prefixless credentials (incident SI-1, fix B) are found by a
+//! context-gated generic token detector: a long, high-entropy, mixed-class
+//! string is a secret only near a credential word (token, secret, password,
+//! api key, bearer, credential, authorization, ...) or in a frame whose
+//! foreground window title names a credential file
+//! (`screenpipe_capture_policy::credential_files`, see
+//! [`screen_frame_text_plan`]).
+//! Its thresholds are the `GENERIC_TOKEN_*` constants; see
+//! [`generic_token_hits`]. Its hits are ordinary detector secrets, so the
+//! redaction tier below applies to them unchanged.
+//!
 //! Redaction tier (owner decision 2026-10-15): a frame whose only hits are
 //! redactable secrets may be redacted in memory instead of withheld; see
 //! [`screen_text_plan`], [`screening_tier`] and [`crate::content_redaction`].
@@ -39,7 +50,7 @@ use std::ops::Range;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use screenpipe_capture_policy::{drm, password_managers, url_filter};
+use screenpipe_capture_policy::{credential_files, drm, password_managers, url_filter};
 
 use crate::adapters::regex::redact_one;
 use crate::content_redaction::merge_spans;
@@ -311,14 +322,53 @@ impl ContentScreeningPlan {
 /// [`screen_text`] that also records the redactable `Secret` spans per input.
 /// Spans index into the original input (always inside its scanned prefix).
 pub fn screen_text_plan(texts: &[&str], config: &ContentScreeningConfig) -> ContentScreeningPlan {
+    screen_frame_text_plan(texts, false, config)
+}
+
+/// [`screen_text_plan`] for one frame. `credential_title` says the frame's
+/// foreground window title names a credential file
+/// (`credential_files::title_names_credential_file`): every generic token
+/// candidate in the frame is then in credential context. Only the title
+/// counts; a credential file name elsewhere in the frame's text (a file
+/// list, a path in a terminal) does not lift the context-word gate.
+pub fn screen_frame_text_plan(
+    texts: &[&str],
+    credential_title: bool,
+    config: &ContentScreeningConfig,
+) -> ContentScreeningPlan {
+    let context = TokenContext {
+        credential_file: vec![credential_title; texts.len()],
+        ..Default::default()
+    };
+    screen_text_plan_in_context(texts, &context, config)
+}
+
+/// [`screen_text_plan`] with per-input credential context from native window
+/// titles (see [`TokenContext`] and [`generic_token_hits_in`]).
+pub fn screen_text_plan_in_context(
+    texts: &[&str],
+    context: &TokenContext,
+    config: &ContentScreeningConfig,
+) -> ContentScreeningPlan {
     let mut blocking = Vec::new();
     let mut secret_spans = Vec::with_capacity(texts.len());
     let mut secret_hits = Vec::with_capacity(texts.len());
     let mut non_redactable = false;
     let mut urls: BTreeSet<&str> = BTreeSet::new();
 
-    for raw in texts {
+    for (index, raw) in texts.iter().enumerate() {
         let text = bound_input(raw);
+        let ranges: Vec<Range<usize>> = context
+            .ranges
+            .iter()
+            .filter(|(at, range)| *at == index && range.end <= text.len())
+            .map(|(_, range)| range.clone())
+            .collect();
+        let token_context = GenericContext {
+            credential_file: context.credential_file.get(index).copied().unwrap_or(false),
+            titled: context.titled.get(index).copied().unwrap_or(false),
+            ranges: &ranges,
+        };
         if text.is_empty() {
             secret_spans.push(Vec::new());
             secret_hits.push(Vec::new());
@@ -335,7 +385,7 @@ pub fn screen_text_plan(texts: &[&str], config: &ContentScreeningConfig) -> Cont
 
         // Domain checks above ran on the original hosts; URL components are
         // only ever replaced later, by the redaction tier.
-        let found = secret_hits_in(text);
+        let found = secret_hits_in(text, &token_context);
         non_redactable |= found.non_redactable;
         urls.extend(
             found
@@ -575,7 +625,15 @@ fn word_index(starts: &[usize], byte_pos: usize) -> usize {
 /// hit, and the part after the user-info is screened again so a secret in
 /// its host, path or fragment is still a hit (a nested credential URL there
 /// makes that whole part a hit).
-fn secret_hits_in(text: &str) -> TextHits {
+/// Title-derived credential context for one input (see [`TokenContext`]).
+#[derive(Default)]
+struct GenericContext<'a> {
+    credential_file: bool,
+    titled: bool,
+    ranges: &'a [Range<usize>],
+}
+
+fn secret_hits_in(text: &str, context: &GenericContext<'_>) -> TextHits {
     let detected = detector_hits(text);
     let mut out = TextHits {
         hits: detected.spans,
@@ -606,9 +664,241 @@ fn secret_hits_in(text: &str) -> TextHits {
     let (url_spans, url_tokens) = sensitive_url_spans(text);
     out.hits.extend(url_spans);
     out.sensitive_urls.extend(url_tokens);
+    // Generic tokens never replace or narrow a hit found above.
+    let generic: Vec<_> = generic_token_hits_in(
+        text,
+        context.credential_file,
+        context.ranges,
+        context.titled,
+    )
+    .into_iter()
+    .filter(|range| {
+        !out.hits
+            .iter()
+            .any(|(hit, _)| hit.start < range.end && range.start < hit.end)
+    })
+    .map(|range| (range, SecretHitKind::Detector))
+    .collect();
+    out.hits.extend(generic);
     out.hits.sort_by_key(|(r, kind)| (r.start, r.end, *kind));
     out.hits.dedup();
     out
+}
+
+// --- Context-gated generic token detector (SI-1 fix B) ---
+//
+// Measured on synthetic fixtures (`generic_token_*` tests): uniformly random
+// base62/base64/base64url strings of 32 characters are detected about 99% of
+// the time and of 36 or more characters more often; git SHAs, UUIDs (with
+// or without hyphens), hex digests, camelCase/snake_case identifiers, file
+// paths, URLs, build-log hashes and prose produce no hit even beside a
+// credential word.
+
+/// Minimum length, in characters, of a generic token candidate (after
+/// trimming separators and `=` padding).
+pub const GENERIC_TOKEN_MIN_CHARS: usize = 32;
+
+/// Minimum Shannon entropy, in bits per character, of a candidate.
+pub const GENERIC_TOKEN_MIN_ENTROPY_BITS: f64 = 3.5;
+
+/// Minimum share, in percent, of adjacent character pairs whose classes
+/// (upper case, lower case, digit, symbol) differ. Random strings change
+/// class at about 62% of positions; paths and words far less often.
+pub const GENERIC_TOKEN_MIN_CLASS_CHANGE_PERCENT: usize = 30;
+
+/// A candidate whose lower-case letter runs average this many characters or
+/// more reads as words (camelCase identifiers, paths) and is not a token.
+/// Random base62 strings average under two.
+pub const GENERIC_TOKEN_MAX_MEAN_LOWERCASE_RUN: f64 = 3.5;
+
+/// A credential word within this many whitespace-separated words of a
+/// candidate (before or after) is its context.
+pub const GENERIC_TOKEN_CONTEXT_WORDS: usize = 16;
+
+/// Credential context words: the shared
+/// `credential_files::CREDENTIAL_CONTEXT_PATTERN` (token, secret, password,
+/// passwd, passphrase, credential, bearer, authorization, api key, access
+/// key, private key, vault, `.env`).
+fn credential_context() -> &'static Regex {
+    credential_files::credential_context_regex()
+}
+
+/// Candidate runs: letters, digits, `+`, `/`, `_` and `-`, with optional
+/// trailing `=` padding (so `NAME=value` splits at the `=`).
+static GENERIC_TOKEN_RUN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[A-Za-z0-9+/_\-]+=*").expect("valid regex"));
+
+/// Byte ranges of context-gated generic tokens in `text` (see the
+/// `GENERIC_TOKEN_*` thresholds). With `credential_frame` (the frame's
+/// window title names a credential file) every candidate is in context;
+/// otherwise a credential context word outside the candidate must lie
+/// within [`GENERIC_TOKEN_CONTEXT_WORDS`] words of it.
+pub fn generic_token_hits(text: &str, credential_frame: bool) -> Vec<Range<usize>> {
+    generic_token_hits_in(text, credential_frame, &[], false)
+}
+
+/// [`generic_token_hits`] with title-derived context. `title_context`:
+/// the whole text belongs to a window whose native title has a credential
+/// word; `context_ranges`: byte ranges of the text that do (for example the
+/// OCR words inside such a window's region). Title-derived context does not
+/// reach candidates inside URL tokens (document and page IDs in address
+/// bars); proximity to a credential word still does.
+pub fn generic_token_hits_in(
+    text: &str,
+    credential_frame: bool,
+    context_ranges: &[Range<usize>],
+    title_context: bool,
+) -> Vec<Range<usize>> {
+    let candidates: Vec<Range<usize>> = GENERIC_TOKEN_RUN
+        .find_iter(text)
+        .filter_map(|run| {
+            let raw = run.as_str();
+            let lead = raw.len() - raw.trim_start_matches(['+', '/', '_', '-']).len();
+            let core = raw[lead..].trim_end_matches(['=', '+', '/', '_', '-']);
+            let range = run.start() + lead..run.start() + lead + core.len();
+            (looks_like_generic_token(core) && !is_integrity_digest(text, run.start(), core))
+                .then_some(range)
+        })
+        .collect();
+    if candidates.is_empty() || credential_frame {
+        return candidates;
+    }
+    let titled = title_context || !context_ranges.is_empty();
+    let urls: Vec<Range<usize>> = if titled {
+        url_filter::url_token_spans(text).collect()
+    } else {
+        Vec::new()
+    };
+    let starts = word_starts(text);
+    let context: Vec<(Range<usize>, usize)> = credential_context()
+        .find_iter(text)
+        .map(|m| (m.range(), word_index(&starts, m.start())))
+        .collect();
+    candidates
+        .into_iter()
+        .filter(|range| {
+            let overlaps =
+                |other: &Range<usize>| other.start < range.end && range.start < other.end;
+            let in_url = urls.iter().any(overlaps);
+            if !in_url && (title_context || context_ranges.iter().any(overlaps)) {
+                return true;
+            }
+            let word = word_index(&starts, range.start);
+            context.iter().any(|(found, at)| {
+                // A credential word inside the candidate itself is not context.
+                let outside = found.end <= range.start || found.start >= range.end;
+                outside && word.abs_diff(*at) <= GENERIC_TOKEN_CONTEXT_WORDS
+            })
+        })
+        .collect()
+}
+
+/// Credential context for one frame's screened texts (see
+/// [`screen_text_plan_in_context`]). Holds positions only for in-process
+/// screening; `Debug` prints counts.
+#[derive(Clone, Default)]
+pub struct TokenContext {
+    /// Per input index: the frame's window title names a credential file,
+    /// so every candidate of that input is in context.
+    pub credential_file: Vec<bool>,
+    /// Per input index: the input belongs to a window whose native title has
+    /// a credential word.
+    pub titled: Vec<bool>,
+    /// `(input index, byte range)`: parts of an input that belong to such a
+    /// window (OCR words inside its region).
+    pub ranges: Vec<(usize, Range<usize>)>,
+}
+
+impl fmt::Debug for TokenContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenContext")
+            .field(
+                "credential_file",
+                &self.credential_file.iter().filter(|v| **v).count(),
+            )
+            .field("titled", &self.titled.iter().filter(|v| **v).count())
+            .field("ranges", &self.ranges.len())
+            .finish()
+    }
+}
+
+/// Labelled base64 integrity digests are checksums of public artefacts, not
+/// credentials: SRI / npm `sha512-…` values (the label is part of the run)
+/// and values right after an algorithm label such as Go's `h1:` or
+/// `sha256:`/`sha256=`.
+static DIGEST_PREFIX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(?:sha(?:1|224|256|384|512)|md5)-").expect("valid regex"));
+static DIGEST_LABEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:\bh1|\bsha(?:1|224|256|384|512)|\bmd5)[:=]$").expect("valid regex")
+});
+
+fn is_integrity_digest(text: &str, start: usize, core: &str) -> bool {
+    if DIGEST_PREFIX.is_match(core) {
+        return true;
+    }
+    let mut from = start.saturating_sub(8);
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    DIGEST_LABEL.is_match(&text[from..start])
+}
+
+/// Shape test for one trimmed candidate (ASCII only by construction).
+fn looks_like_generic_token(core: &str) -> bool {
+    let bytes = core.as_bytes();
+    if bytes.len() < GENERIC_TOKEN_MIN_CHARS {
+        return false;
+    }
+    let has = |pred: fn(&u8) -> bool| bytes.iter().any(pred);
+    if !(has(u8::is_ascii_uppercase) && has(u8::is_ascii_lowercase) && has(u8::is_ascii_digit)) {
+        return false;
+    }
+    // Hex digests, git SHAs and UUIDs (with or without hyphens).
+    if bytes.iter().all(|b| b.is_ascii_hexdigit() || *b == b'-') {
+        return false;
+    }
+    let mut counts = [0usize; 128];
+    for &b in bytes {
+        counts[usize::from(b & 0x7f)] += 1;
+    }
+    let n = bytes.len() as f64;
+    let entropy: f64 = counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum();
+    if entropy < GENERIC_TOKEN_MIN_ENTROPY_BITS {
+        return false;
+    }
+    let class = |b: u8| match b {
+        b'A'..=b'Z' => 0u8,
+        b'a'..=b'z' => 1,
+        b'0'..=b'9' => 2,
+        _ => 3,
+    };
+    let changes = bytes
+        .windows(2)
+        .filter(|pair| class(pair[0]) != class(pair[1]))
+        .count();
+    if changes * 100 < GENERIC_TOKEN_MIN_CLASS_CHANGE_PERCENT * (bytes.len() - 1) {
+        return false;
+    }
+    let (mut lower, mut runs, mut in_run) = (0usize, 0usize, false);
+    for &b in bytes {
+        if b.is_ascii_lowercase() {
+            lower += 1;
+            if !in_run {
+                runs += 1;
+                in_run = true;
+            }
+        } else {
+            in_run = false;
+        }
+    }
+    (lower as f64) < GENERIC_TOKEN_MAX_MEAN_LOWERCASE_RUN * runs as f64
 }
 
 /// Every hit of one input text (see [`secret_hits_in`]).
@@ -2007,5 +2297,326 @@ mod tests {
                 "4111 1111 1111 1111"
             ]
         );
+    }
+
+    // --- Context-gated generic tokens (SI-1 fix B) ---
+
+    /// Deterministic xorshift64* stream: test tokens are generated, never
+    /// pasted, so no fixture can be a real credential.
+    struct Synthetic(u64);
+
+    impl Synthetic {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn string(&mut self, alphabet: &[u8], len: usize) -> String {
+            (0..len)
+                .map(|_| alphabet[(self.next() % alphabet.len() as u64) as usize] as char)
+                .collect()
+        }
+    }
+
+    const BASE62: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const BASE64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const HEX: &[u8] = b"0123456789abcdef";
+
+    /// A synthetic token with all three character classes.
+    fn synthetic_token(seed: u64, len: usize) -> String {
+        let mut rng = Synthetic(seed);
+        loop {
+            let token = rng.string(BASE62, len);
+            if looks_like_generic_token(&token) {
+                return token;
+            }
+        }
+    }
+
+    fn generic_hit_texts<'a>(text: &'a str, frame: bool) -> Vec<&'a str> {
+        generic_token_hits(text, frame)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect()
+    }
+
+    #[test]
+    fn generic_token_in_ocr_garbled_credential_context_is_a_redactable_secret() {
+        let token = synthetic_token(0x51_0001, 36);
+        // OCR of an editor title bar and body, split and garbled as OCR does.
+        let text =
+            format!(".example-dns- read- token. secret - Notepad\nFile Edit View\n{token}\n");
+        let plan = screen_text_plan(&[text.as_str()], &empty_config());
+        assert_eq!(plan.verdict().reasons, [ContentScreeningReason::Secret]);
+        let spans: Vec<&str> = plan
+            .secret_spans(0)
+            .iter()
+            .map(|r| &text[r.clone()])
+            .collect();
+        assert_eq!(spans, [token.as_str()]);
+        assert_eq!(plan.secret_hits(0)[0].1, SecretHitKind::Detector);
+        assert!(!plan.non_redactable());
+        // Redactable on an ordinary frame, withheld on a fail-open frame.
+        assert_eq!(
+            screening_tier(&plan, 1, false),
+            ContentScreeningTier::Redact
+        );
+        assert_eq!(
+            screening_tier(&plan, 1, true),
+            ContentScreeningTier::Drop(ContentScreeningVerdict::secret())
+        );
+    }
+
+    #[test]
+    fn generic_token_needs_credential_context() {
+        let token = synthetic_token(0x51_0002, 40);
+        for text in [
+            format!("API_TOKEN={token}"),
+            format!("Authorization: Bearer {token}"),
+            format!("{token}  # api key for staging"),
+            format!("client secret\n{token}"),
+            format!("password: {token}"),
+            format!("Your access key is {token}"),
+            format!("credentials.json\n{{ \"value\": \"{token}\" }}"),
+        ] {
+            assert_eq!(generic_hit_texts(&text, false), [token.as_str()], "{text}");
+        }
+        // No credential word nearby: not a hit.
+        for text in [format!("build artefact {token} uploaded"), token.clone()] {
+            assert!(generic_hit_texts(&text, false).is_empty(), "{text}");
+        }
+        // A credential word too far away is not context.
+        let filler = vec!["lorem"; GENERIC_TOKEN_CONTEXT_WORDS + 1].join(" ");
+        let far = format!("token {filler} {token}");
+        assert!(generic_hit_texts(&far, false).is_empty());
+        let near = format!(
+            "token {} {token}",
+            vec!["lorem"; GENERIC_TOKEN_CONTEXT_WORDS - 1].join(" ")
+        );
+        assert_eq!(generic_hit_texts(&near, false), [token.as_str()]);
+    }
+
+    #[test]
+    fn generic_token_context_inside_the_candidate_does_not_count() {
+        // A context word spelt inside the candidate itself is not context.
+        let mut token = synthetic_token(0x51_0003, 36);
+        token.replace_range(10..15, "Token");
+        if looks_like_generic_token(&token) {
+            assert!(generic_hit_texts(&format!("uploaded {token} done"), false).is_empty());
+        }
+    }
+
+    #[test]
+    fn credential_file_title_is_context_for_every_text() {
+        let token = synthetic_token(0x51_0004, 36);
+        let body = format!("first line\n{token}\nlast line");
+        let alone = screen_text_plan(&[body.as_str()], &empty_config());
+        assert!(!alone.verdict().blocked());
+        // A credential file named in other text (a file list, a terminal
+        // path, even title text passed as ordinary text) is not context.
+        // (`secrets.yaml` or `.env` would be context words themselves.)
+        let listed = format!("Explorer\nid_rsa\nserver.pem\nclient.p12\n{token}");
+        let plan = screen_text_plan(
+            &["deploy-key.pem - Editor", listed.as_str()],
+            &empty_config(),
+        );
+        assert!(!plan.verdict().blocked());
+        let framed = screen_frame_text_plan(
+            &["deploy-key.pem - Editor", body.as_str()],
+            true,
+            &empty_config(),
+        );
+        assert_eq!(framed.verdict().reasons, [ContentScreeningReason::Secret]);
+        let spans: Vec<&str> = framed
+            .secret_spans(1)
+            .iter()
+            .map(|r| &body[r.clone()])
+            .collect();
+        assert_eq!(spans, [token.as_str()]);
+    }
+
+    #[test]
+    fn native_title_context_reaches_its_window_text_but_not_urls() {
+        let token = synthetic_token(0x51_0006, 36);
+        let body = format!("first line\n{token}\nlast line");
+        assert!(generic_token_hits_in(&body, false, &[], false).is_empty());
+        // The whole text belongs to a window whose title has a credential word.
+        let hits = generic_token_hits_in(&body, false, &[], true);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&body[hits[0].clone()], token.as_str());
+        // Only the ranges of such a window count.
+        let other = format!("{token} elsewhere {token}x");
+        let first = 0..token.len();
+        let ranged = generic_token_hits_in(&other, false, &[first.clone()], false);
+        assert_eq!(ranged, [first]);
+        // A token-shaped ID inside a URL needs a nearby credential word.
+        let url = format!("https://docs.example.org/view?id={token}");
+        assert!(generic_token_hits_in(&url, false, &[], true).is_empty());
+        let near = format!("api token {url}");
+        assert_eq!(generic_token_hits_in(&near, false, &[], true).len(), 1);
+        // The plan API applies the per-input context.
+        let context = TokenContext {
+            titled: vec![false, true],
+            ..Default::default()
+        };
+        let plan =
+            screen_text_plan_in_context(&[body.as_str(), body.as_str()], &context, &empty_config());
+        assert!(plan.secret_spans(0).is_empty());
+        assert_eq!(plan.secret_spans(1).len(), 1);
+    }
+
+    #[test]
+    fn generic_tokens_do_not_change_existing_detector_hits() {
+        // A provider-shaped key keeps its own span; the generic detector adds
+        // nothing over or inside it.
+        let key = format!("ghp_{}", synthetic_token(0x51_0005, 36));
+        let text = format!("api token {key} and AKIA1234567890ABCDEF");
+        let plan = screen_text_plan(&[text.as_str()], &empty_config());
+        let hits: Vec<(&str, SecretHitKind)> = plan
+            .secret_hits(0)
+            .iter()
+            .map(|(r, kind)| (&text[r.clone()], *kind))
+            .collect();
+        assert_eq!(
+            hits,
+            [
+                (key.as_str(), SecretHitKind::Detector),
+                ("AKIA1234567890ABCDEF", SecretHitKind::Detector)
+            ]
+        );
+    }
+
+    /// Synthetic false-positive corpus, each line placed beside credential
+    /// words. None may produce a generic token hit.
+    fn false_positive_corpus() -> Vec<String> {
+        let mut rng = Synthetic(0x51_00FF);
+        let mut corpus = Vec::new();
+        for _ in 0..200 {
+            let sha = rng.string(HEX, 40);
+            let short_sha = &sha[..12];
+            let sha256 = rng.string(HEX, 64);
+            let uuid_raw = rng.string(HEX, 32);
+            let uuid = format!(
+                "{}-{}-{}-{}-{}",
+                &uuid_raw[..8],
+                &uuid_raw[8..12],
+                &uuid_raw[12..16],
+                &uuid_raw[16..20],
+                &uuid_raw[20..]
+            );
+            let upper_uuid = uuid.to_uppercase();
+            // Short base64/base64url IDs (an encoded UUID is 22 characters,
+            // an encoded SHA-1 27).
+            let id22 = rng.string(BASE64URL, 22);
+            let id27 = rng.string(BASE64, 27);
+            corpus.extend([
+                format!("commit {sha} fixes token refresh"),
+                format!("Merge {short_sha} into secret-rotation branch"),
+                format!("api key id {uuid} (credential)"),
+                format!("token id {uuid_raw} secret"),
+                format!("password reset request {upper_uuid}"),
+                format!("bearer session {id22} / secret ref {id27}"),
+                format!("sha256:{sha256} secret layer digest"),
+                format!("  Compiling token-cache v0.4.1 ({sha})"),
+                format!("integrity check for credential store {sha256}"),
+                // Labelled base64 integrity digests beside package names that
+                // contain credential words.
+                format!(
+                    "\"node_modules/jsonwebtoken\": {{ \"integrity\": \"sha512-{}==\" }}",
+                    rng.string(BASE64, 86)
+                ),
+                format!(
+                    "example.org/go/secretmanager v1.2.3 h1:{}=",
+                    rng.string(BASE64, 43)
+                ),
+                format!(
+                    "<script src=\"token-client.js\" integrity=\"sha384-{}\"></script>",
+                    rng.string(BASE64, 64)
+                ),
+            ]);
+        }
+        corpus.extend(
+            [
+                "let access_token = get_access_token_from_credential_store(user_id);",
+                "const REFRESH_TOKEN_EXPIRATION_TIMEOUT_MS_2_MINUTES = 120000; // token",
+                "fn verify_bearer_authorization_header_value_v2(token: &str) -> bool",
+                "class OAuth2AccessTokenProviderV3Implementation implements TokenSource",
+                "getAccessTokenFromCredentialStore2024() returns the api key",
+                "secret: /home/User/Projects/ScreenWise2026/src/components/AuthTokenProvider",
+                "token path target/release-local/build/screenpipe-redact-3f9c0a1b2c3d4e5f/out",
+                "C:\\Users\\Someone\\AppData\\Local\\TokenCache2026\\credentials\\index.db password",
+                "see https://example.com/api/v1/tokens/refresh?expires=3600 for the token docs",
+                "https://docs.example.org/guides/ManagingApiKeysAndSecretsSafely2026 api key",
+                "Finished `release-local` profile [optimized] target(s) in 3m 12s (token)",
+                "   = note: tokenizer.json loaded; secret sharing disabled; 1203 packages audited",
+                "The password policy requires twelve characters and the token expires daily.",
+                "Please rotate the API key and the client secret before Friday's credential audit.",
+                "Authorization header missing: expected Bearer token, found nothing",
+                "TOKEN_ENDPOINT_URL_FOR_PRODUCTION_ENVIRONMENT_2026 secret",
+                "MyServiceAccountCredentials2025Production password",
+                "RefreshTokenExpirationTimeoutMs2Minutes secret",
+            ]
+            .map(str::to_string),
+        );
+        corpus
+    }
+
+    #[test]
+    fn generic_token_false_positive_corpus_has_no_hits() {
+        let corpus = false_positive_corpus();
+        let hits: Vec<&String> = corpus
+            .iter()
+            .filter(|line| !generic_token_hits(line, false).is_empty())
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "{} of {} fixtures hit",
+            hits.len(),
+            corpus.len()
+        );
+        assert_eq!(corpus.len(), 2418);
+        // The same corpus with title-lent context (every fixture inside a
+        // window whose native title has a credential word).
+        let titled: Vec<&String> = corpus
+            .iter()
+            .filter(|line| !generic_token_hits_in(line, false, &[], true).is_empty())
+            .collect();
+        assert!(titled.is_empty(), "{} titled fixtures hit", titled.len());
+        // Hex and UUID shapes never hit even in a credential-file frame.
+        let mut rng = Synthetic(0x51_00FE);
+        for _ in 0..200 {
+            let sha = rng.string(HEX, 40);
+            assert!(generic_token_hits(&sha, true).is_empty());
+            assert!(generic_token_hits(&sha.to_uppercase(), true).is_empty());
+        }
+    }
+
+    #[test]
+    fn generic_token_detection_rate_on_random_tokens() {
+        // Minimum detection rates per alphabet and length beside a context
+        // word; calibrated with the thresholds above.
+        let mut rng = Synthetic(0x51_0100);
+        for (alphabet, len, min_percent) in [
+            (BASE62, 32, 97),
+            (BASE62, 36, 98),
+            (BASE62, 48, 99),
+            (BASE64, 40, 98),
+            (BASE64URL, 43, 98),
+        ] {
+            let trials = 2000;
+            let detected = (0..trials)
+                .filter(|_| {
+                    let token = rng.string(alphabet, len);
+                    !generic_token_hits(&format!("token: {token}"), false).is_empty()
+                })
+                .count();
+            assert!(
+                detected * 100 >= trials * min_percent,
+                "{len}-char tokens: {detected}/{trials}"
+            );
+        }
     }
 }

@@ -366,22 +366,27 @@ impl WindowFilters {
 
     /// Fixed policy code only; never return the title, URL or configured pattern.
     fn exclusion_reason(&self, app_name: &str, title: &str) -> Option<&'static str> {
+        use screenpipe_capture_policy::target::Exclusion;
         let app_name_lower = app_name.to_lowercase();
-        let title_lower = title.to_lowercase();
 
         // Always reject built-in system apps (lock screen, etc.)
         if Self::BUILTIN_IGNORED.iter().any(|b| app_name_lower == *b) {
             return Some("builtin_exclusion");
         }
 
-        // Check ignore list first — always reject ignored windows
+        // The shared configured decision: a credential-file title or an
+        // ignore pattern (same fixed code; a credential file adds no rule
+        // reference), then the include list.
         let configured = screenpipe_capture_policy::target::configured_exclusion(
             &self.ignore_patterns,
             &self.include_patterns,
             &app_name_lower,
-            &title_lower,
+            Some(title),
         );
-        if configured == Some(screenpipe_capture_policy::target::Exclusion::Ignored) {
+        if matches!(
+            configured,
+            Some(Exclusion::Ignored | Exclusion::CredentialFile)
+        ) {
             return Some("configured_exclusion");
         }
 
@@ -392,7 +397,7 @@ impl WindowFilters {
         }
 
         // Include list: empty = pass; non-empty applies scoped/legacy semantics.
-        if configured == Some(screenpipe_capture_policy::target::Exclusion::OutsideIncludes) {
+        if configured == Some(Exclusion::OutsideIncludes) {
             return Some("outside_include_filter");
         }
         None
@@ -1167,6 +1172,58 @@ pub struct WindowsPrivacyCapture {
     pub outcome: WindowsCaptureOutcome,
     pub duration: std::time::Duration,
     pub privacy: WindowsCapturePrivacy,
+    /// Full-monitor frames only: native titles of the admitted windows that
+    /// overlap the monitor, for in-memory content screening.
+    pub visible_titles: VisibleWindowTitles,
+}
+
+/// Native titles and monitor-relative pixel areas of admitted windows
+/// overlapping a captured monitor, from the capture-selection enumeration.
+/// Held in memory for content screening only: never serialized or logged;
+/// `Debug` prints a count.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Default)]
+pub struct VisibleWindowTitles(pub Vec<(PixelArea, String)>);
+
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for VisibleWindowTitles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("VisibleWindowTitles")
+            .field(&self.0.len())
+            .finish()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl VisibleWindowTitles {
+    /// Union of two samples (pre- and post-acquisition), deduplicated.
+    pub fn union(mut self, other: Self) -> Self {
+        for entry in other.0 {
+            if !self.0.contains(&entry) {
+                self.0.push(entry);
+            }
+        }
+        self
+    }
+}
+
+/// `bounds` relative to `monitor`, clipped to it, in monitor pixels.
+#[cfg(target_os = "windows")]
+fn monitor_relative_area(bounds: Rect, monitor: Rect) -> Option<PixelArea> {
+    let left = i64::from(bounds.x).max(i64::from(monitor.x));
+    let top = i64::from(bounds.y).max(i64::from(monitor.y));
+    let right = (i64::from(bounds.x) + i64::from(bounds.width))
+        .min(i64::from(monitor.x) + i64::from(monitor.width));
+    let bottom = (i64::from(bounds.y) + i64::from(bounds.height))
+        .min(i64::from(monitor.y) + i64::from(monitor.height));
+    (right > left && bottom > top).then(|| {
+        (
+            (left - i64::from(monitor.x)) as u32,
+            (top - i64::from(monitor.y)) as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
+    })
 }
 
 /// Locally persisted disclosure: executable basenames and fixed codes only.
@@ -1742,10 +1799,11 @@ impl WindowsCapturePrivacy {
                 }
             }
         }
+        use screenpipe_config::capture_diagnostics::capture_outcome;
         (self.outcome, self.reason) = match outcome {
-            WindowsCaptureOutcome::FullMonitor => ("full_monitor", None),
+            WindowsCaptureOutcome::FullMonitor => (capture_outcome::FULL_MONITOR, None),
             WindowsCaptureOutcome::BackgroundRedacted => (
-                "active_window_only",
+                capture_outcome::ACTIVE_WINDOW_ONLY,
                 Some(if self.selected_window.is_some() {
                     "maximised_window_only"
                 } else {
@@ -1753,7 +1811,7 @@ impl WindowsCapturePrivacy {
                 }),
             ),
             WindowsCaptureOutcome::CaptureRedacted(reason) => (
-                "redacted",
+                capture_outcome::REDACTED,
                 Some(match reason {
                     WindowsCaptureRedactionReason::ActiveWindowExcluded => "active_window_excluded",
                     WindowsCaptureRedactionReason::NoSafeActiveWindow => "no_safe_active_window",
@@ -1762,7 +1820,7 @@ impl WindowsCapturePrivacy {
                 }),
             ),
             WindowsCaptureOutcome::CaptureFailed(stage) => (
-                "capture_failed",
+                capture_outcome::CAPTURE_FAILED,
                 Some(match stage {
                     WindowsCaptureFailureStage::InitialPrivacyEvaluation => {
                         "initial_privacy_evaluation"
@@ -2440,10 +2498,38 @@ fn draw_notice_label(
     scale: u32,
     color: image::Rgba<u8>,
 ) {
+    let width = image.width();
+    draw_notice_label_within(image, label, 0, width, y, scale, color);
+}
+
+/// Pixel width of `label` drawn at `scale`.
+#[cfg(target_os = "windows")]
+fn notice_label_width(label: &str, scale: u32) -> u32 {
+    (label.chars().count() as u32 * 6 * scale).saturating_sub(scale)
+}
+
+/// Height of the disclosure banner drawn at `scale`.
+#[cfg(target_os = "windows")]
+fn notice_banner_height(scale: u32) -> u32 {
+    7 * scale + 2 * scale + 8
+}
+
+/// `label` centred within columns `x0..x0 + width`, clipped to them.
+#[cfg(target_os = "windows")]
+fn draw_notice_label_within(
+    image: &mut image::RgbaImage,
+    label: &str,
+    x0: u32,
+    width: u32,
+    y: u32,
+    scale: u32,
+    color: image::Rgba<u8>,
+) {
     let glyph_width = 5 * scale;
     let spacing = scale;
-    let text_width = label.chars().count() as u32 * (glyph_width + spacing) - spacing;
-    let start_x = image.width().saturating_sub(text_width) / 2;
+    let text_width = notice_label_width(label, scale);
+    let start_x = x0 + width.saturating_sub(text_width) / 2;
+    let right = (x0 + width).min(image.width());
 
     for (index, character) in label.chars().enumerate() {
         let glyph_x = start_x + index as u32 * (glyph_width + spacing);
@@ -2456,7 +2542,7 @@ fn draw_notice_label(
                     for dx in 0..scale {
                         let x = glyph_x + column * scale + dx;
                         let pixel_y = y + row as u32 * scale + dy;
-                        if x < image.width() && pixel_y < image.height() {
+                        if x < right && pixel_y < image.height() {
                             image.put_pixel(x, pixel_y, color);
                         }
                     }
@@ -2487,6 +2573,148 @@ pub fn draw_windows_capture_notice_banner(
         scale,
         image::Rgba([255, 255, 255, 255]),
     );
+}
+
+/// A rectangle of image pixels: `(x, y, width, height)`.
+#[cfg(target_os = "windows")]
+pub type PixelArea = (u32, u32, u32, u32);
+
+/// Where a disclosure banner was drawn.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticePlacement {
+    /// Inside pixels that were already redacted; no shown pixel changed.
+    RedactedArea(PixelArea),
+    /// No redacted area could hold it: the bottom rows of the frame were
+    /// redacted to carry it (they are no longer shown; nothing hidden
+    /// became visible).
+    ReservedStrip(PixelArea),
+}
+
+/// Draw `notice`'s banner inside one of the `redacted` areas (pixels that
+/// show nothing captured), so it never covers pixels that are shown: OCR and
+/// screening keep every shown pixel (a window's title bar above all). The
+/// largest scale up to the usual banner scale that fits wins; ties prefer
+/// earlier areas. When no area fits even the smallest banner, the frame's
+/// bottom rows are redacted to carry it, so the disclosure is never lost.
+#[cfg(target_os = "windows")]
+pub fn draw_windows_capture_notice_in_redacted_area(
+    image: &mut image::RgbaImage,
+    redacted: &[PixelArea],
+    notice: WindowsCaptureNotice,
+) -> NoticePlacement {
+    let (image_width, image_height) = image.dimensions();
+    let preferred = (image_width / 360).clamp(1, 4);
+    let label = notice.label();
+    let fits = |area: &PixelArea, scale: u32| {
+        area.2 >= notice_label_width(label, scale) + 2 * scale
+            && area.3 >= notice_banner_height(scale)
+    };
+    let mut best: Option<(u32, PixelArea)> = None;
+    for area in redacted {
+        // Clip to the image.
+        let x = area.0.min(image_width);
+        let y = area.1.min(image_height);
+        let area = (
+            x,
+            y,
+            area.2.min(image_width - x),
+            area.3.min(image_height - y),
+        );
+        if let Some(scale) = (1..=preferred).rev().find(|scale| fits(&area, *scale)) {
+            if best.is_none_or(|(chosen, _)| scale > chosen) {
+                best = Some((scale, area));
+            }
+        }
+    }
+    let (scale, area, placement) = match best {
+        Some((scale, area)) => {
+            let height = notice_banner_height(scale);
+            // Hug the frame edge the area touches; otherwise centre it.
+            let y = if area.1 == 0 {
+                0
+            } else if area.1 + area.3 >= image_height {
+                area.1 + area.3 - height
+            } else {
+                area.1 + (area.3 - height) / 2
+            };
+            let banner = (area.0, y, area.2, height);
+            (scale, banner, NoticePlacement::RedactedArea(banner))
+        }
+        None => {
+            let scale = preferred;
+            let height = notice_banner_height(scale).min(image_height);
+            let banner = (0, image_height - height, image_width, height);
+            (scale, banner, NoticePlacement::ReservedStrip(banner))
+        }
+    };
+    for pixel_y in area.1..area.1 + area.3 {
+        for pixel_x in area.0..area.0 + area.2 {
+            image.put_pixel(pixel_x, pixel_y, notice.color());
+        }
+    }
+    let text_height = 7 * scale;
+    let label_y = area.1 + area.3.saturating_sub(text_height) / 2;
+    draw_notice_label_within(
+        image,
+        label,
+        area.0,
+        area.2,
+        label_y,
+        scale,
+        image::Rgba([255, 255, 255, 255]),
+    );
+    placement
+}
+
+/// The redacted areas of an active-window-only frame: everything outside
+/// the shown window (`shown`, image pixels, already clipped) plus the
+/// blacked-out taskbars. Top and bottom bands come first.
+#[cfg(target_os = "windows")]
+fn active_window_redacted_areas(
+    image_width: u32,
+    image_height: u32,
+    shown: Option<PixelArea>,
+    taskbars: &[PixelArea],
+) -> Vec<PixelArea> {
+    let mut areas = Vec::new();
+    match shown {
+        Some((x, y, width, height)) if width > 0 && height > 0 => {
+            let right = (x + width).min(image_width);
+            let bottom = (y + height).min(image_height);
+            areas.push((0, 0, image_width, y));
+            areas.push((0, bottom, image_width, image_height.saturating_sub(bottom)));
+            areas.extend(taskbars.iter().copied());
+            areas.push((0, 0, x, image_height));
+            areas.push((right, 0, image_width.saturating_sub(right), image_height));
+        }
+        // Nothing of a window is shown: the whole frame is redacted.
+        _ => areas.push((0, 0, image_width, image_height)),
+    }
+    areas
+}
+
+/// The shown window's pixels in a monitor-sized frame, clipped.
+#[cfg(target_os = "windows")]
+fn shown_window_area(
+    monitor_bounds: Rect,
+    image_width: u32,
+    image_height: u32,
+    window: &CapturedWindow,
+) -> Option<PixelArea> {
+    let left = i64::from(window.window_x) - i64::from(monitor_bounds.x);
+    let top = i64::from(window.window_y) - i64::from(monitor_bounds.y);
+    let right = (left + i64::from(window.image.width())).min(i64::from(image_width));
+    let bottom = (top + i64::from(window.image.height())).min(i64::from(image_height));
+    let (left, top) = (left.max(0), top.max(0));
+    (right > left && bottom > top).then(|| {
+        (
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
+    })
 }
 
 /// Create a monitor-sized frame that says why real pixels are unavailable.
@@ -2528,6 +2756,7 @@ fn placeholder_capture(
         outcome,
         duration: started_at.elapsed(),
         privacy: privacy.with_outcome(outcome),
+        visible_titles: VisibleWindowTitles::default(),
     }
 }
 
@@ -2549,10 +2778,8 @@ fn compose_active_window(
         i64::from(window_x - monitor_bounds.x),
         i64::from(window_y - monitor_bounds.y),
     );
-    draw_windows_capture_notice_banner(
-        &mut monitor_image,
-        WindowsCaptureNotice::BackgroundRedacted,
-    );
+    // The disclosure is drawn by `finish_windows_capture`, after the taskbar
+    // blackout, into redacted pixels only.
     DynamicImage::ImageRgba8(monitor_image)
 }
 
@@ -2605,6 +2832,8 @@ pub struct WindowsMonitorCaptureEvaluation {
     pub privacy: WindowsCapturePrivacy,
     /// Taskbar bounds to black out in any bitmap acquired around this check.
     taskbars: Vec<Rect>,
+    /// Native titles of admitted windows overlapping the monitor.
+    pub visible_titles: VisibleWindowTitles,
 }
 
 /// Exact native target. Selection is sampled, not an atomic visibility proof.
@@ -2889,6 +3118,7 @@ pub fn evaluate_windows_monitor_capture(
         height: monitor.height(),
     };
     let mut runtime_windows = Vec::new();
+    let mut visible_titles = VisibleWindowTitles::default();
     let selected_window = sample_maximised_target(monitor).inspect_err(|error| {
         sensitive_capture_error("window_selection", "sample_maximised_target", None, error)
     })?;
@@ -2990,12 +3220,13 @@ pub fn evaluate_windows_monitor_capture(
         } else {
             app_name
         };
-        let window_name = source
-            .title()
-            .inspect_err(|error| {
-                sensitive_capture_error("window_metadata", "title", Some(process_id as u32), error)
-            })
-            .unwrap_or_default();
+        let title = source.title().inspect_err(|error| {
+            sensitive_capture_error("window_metadata", "title", Some(process_id as u32), error)
+        });
+        // The built-in credential-file title rule reads every title, so an
+        // unreadable title is unknown privacy state (an empty one is not).
+        let title_unreadable = title.is_err();
+        let window_name = title.unwrap_or_default();
         let executable = get_process_exe_name(process_id as u32);
         let diagnostic_app = diagnostic_executable_name(executable.as_deref());
         if is_focused {
@@ -3047,11 +3278,12 @@ pub fn evaluate_windows_monitor_capture(
         }
 
         let is_screenpipe_ui = app_name_lower.contains("screenpipe");
-        let metadata_uncertain = window_filters.has_configured_privacy_filters()
-            && (app_name.is_empty()
-                || (window_name.is_empty()
-                    && window_filters
-                        .untitled_window_unverified(&app_name_lower, executable.as_deref())));
+        let metadata_uncertain = title_unreadable
+            || (window_filters.has_configured_privacy_filters()
+                && (app_name.is_empty()
+                    || (window_name.is_empty()
+                        && window_filters
+                            .untitled_window_unverified(&app_name_lower, executable.as_deref()))));
         let url_excluded = browser_url
             .as_deref()
             .is_some_and(|url| window_filters.is_url_blocked(url));
@@ -3119,6 +3351,11 @@ pub fn evaluate_windows_monitor_capture(
 
         if !overlaps_monitor {
             continue;
+        }
+        if !is_excluded && !window_name.is_empty() {
+            if let Some(area) = monitor_relative_area(bounds, monitor_bounds) {
+                visible_titles.0.push((area, window_name.clone()));
+            }
         }
 
         runtime_windows.push(RuntimeWindow {
@@ -3304,6 +3541,7 @@ pub fn evaluate_windows_monitor_capture(
         plan,
         privacy,
         taskbars,
+        visible_titles,
     })
 }
 
@@ -3388,6 +3626,7 @@ async fn capture_windows_monitor_privacy_safe_once(
 
     let mut privacy = initial.privacy;
     let initial_taskbars = initial.taskbars;
+    let initial_titles = initial.visible_titles;
     let selected_window = privacy.selected_window;
     // Reserve the walk before any pixels are taken: a busy target defers the
     // whole capture instead of discarding a screenshot after it.
@@ -3524,6 +3763,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                 outcome,
                 duration: started_at.elapsed(),
                 privacy: privacy.with_outcome(outcome),
+                visible_titles: VisibleWindowTitles::default(),
             },
             taskbars,
             started_at,
@@ -3547,6 +3787,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                 outcome: WindowsCaptureOutcome::FullMonitor,
                 duration: started_at.elapsed(),
                 privacy: privacy.with_outcome(WindowsCaptureOutcome::FullMonitor),
+                visible_titles: initial_titles.union(post.visible_titles.clone()),
             }
         }
         WindowsMonitorCapturePlan::FullMonitor => {
@@ -3557,6 +3798,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                 outcome: WindowsCaptureOutcome::BackgroundRedacted,
                 duration: started_at.elapsed(),
                 privacy: privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted),
+                visible_titles: VisibleWindowTitles::default(),
             }
         }
         WindowsMonitorCapturePlan::ActiveWindow(window) => {
@@ -3573,6 +3815,7 @@ async fn capture_windows_monitor_privacy_safe_once(
                         outcome: WindowsCaptureOutcome::BackgroundRedacted,
                         duration: started_at.elapsed(),
                         privacy: privacy.with_outcome(WindowsCaptureOutcome::BackgroundRedacted),
+                        visible_titles: VisibleWindowTitles::default(),
                     }
                 }
                 Err(_) => placeholder_capture(
@@ -3630,13 +3873,37 @@ fn finish_windows_capture(
     };
     black_out_taskbars(&mut capture.image, bounds, &taskbars);
     if capture.outcome == WindowsCaptureOutcome::BackgroundRedacted {
-        // A taskbar along the top edge must not hide the disclosure banner.
-        if let Some(buffer) = capture.image.as_mut_rgba8() {
-            draw_windows_capture_notice_banner(buffer, WindowsCaptureNotice::BackgroundRedacted);
-        }
+        mark_active_window_frame(&mut capture, bounds, &taskbars);
     }
     capture.duration = started_at.elapsed();
     capture
+}
+
+/// Draw the active-window-only disclosure (after the taskbar blackout, so a
+/// taskbar cannot hide it) into redacted pixels only: never over the shown
+/// window, whose title bar OCR and screening must see. An unknown window
+/// area counts as fully shown, so the banner then takes a reserved strip.
+#[cfg(target_os = "windows")]
+fn mark_active_window_frame(capture: &mut WindowsPrivacyCapture, bounds: Rect, taskbars: &[Rect]) {
+    if capture.image.as_rgba8().is_none() {
+        capture.image = DynamicImage::ImageRgba8(capture.image.to_rgba8());
+    }
+    let (width, height) = (capture.image.width(), capture.image.height());
+    let shown = match capture.active_window.as_ref() {
+        Some(window) => shown_window_area(bounds, width, height, window),
+        None => Some((0, 0, width, height)),
+    };
+    let taskbar_areas = taskbar_mask_regions(bounds, width, height, taskbars);
+    let areas = active_window_redacted_areas(width, height, shown, &taskbar_areas);
+    let buffer = capture
+        .image
+        .as_mut_rgba8()
+        .expect("converted to RGBA8 immediately above");
+    draw_windows_capture_notice_in_redacted_area(
+        buffer,
+        &areas,
+        WindowsCaptureNotice::BackgroundRedacted,
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -4893,6 +5160,24 @@ mod tests {
     }
 
     #[test]
+    fn credential_file_titles_are_configured_exclusions_without_any_rule() {
+        let open = WindowFilters::new(&[], &[], &[]);
+        for title in [
+            "*deploy-token.secret - Notepad",
+            ".env.local - repo - Visual Studio Code",
+            "id_ed25519 - Notepad",
+        ] {
+            assert_eq!(
+                open.exclusion_reason("Notepad", title),
+                Some("configured_exclusion"),
+                "{title}"
+            );
+        }
+        assert!(open.is_valid("Notepad", "notes.txt - Notepad"));
+        assert!(open.is_valid("Word", "Secret Santa Planning.docx - Word"));
+    }
+
+    #[test]
     fn capture_exclusion_codes_distinguish_configured_builtin_and_include_filters() {
         assert_eq!(
             WindowFilters::new(&[], &[], &[]).exclusion_reason("logonui", "Synthetic"),
@@ -5202,7 +5487,175 @@ mod tests {
             image::Rgba([200, 30, 10, 255])
         );
         assert_eq!(*composed.get_pixel(159, 99), image::Rgba([0, 0, 0, 255]));
-        assert_ne!(*composed.get_pixel(0, 0), image::Rgba([0, 0, 0, 255]));
+        // The disclosure is added later, into redacted pixels only.
+        assert_eq!(*composed.get_pixel(0, 0), image::Rgba([0, 0, 0, 255]));
+    }
+
+    /// A synthetic window whose top rows hold a known "title bar" pattern.
+    #[cfg(target_os = "windows")]
+    fn titled_window(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            if y < 24 {
+                // Title-bar text stand-in: alternating glyph-like columns.
+                if (x / 3 + y / 4) % 2 == 0 {
+                    image::Rgba([250, 250, 250, 255])
+                } else {
+                    image::Rgba([20, 40, 200, 255])
+                }
+            } else {
+                image::Rgba([90, 160, 60, 255])
+            }
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn active_capture(
+        monitor: Rect,
+        window: &image::RgbaImage,
+        x: i32,
+        y: i32,
+    ) -> WindowsPrivacyCapture {
+        let window_image = DynamicImage::ImageRgba8(window.clone());
+        WindowsPrivacyCapture {
+            image: compose_active_window(monitor, &window_image, x, y),
+            active_window: Some(CapturedWindow {
+                image: window_image,
+                app_name: "synthetic.exe".into(),
+                window_name: "Synthetic".into(),
+                process_id: 1,
+                is_focused: true,
+                browser_url: None,
+                window_x: x,
+                window_y: y,
+                window_width: window.width(),
+                window_height: window.height(),
+            }),
+            outcome: WindowsCaptureOutcome::BackgroundRedacted,
+            duration: std::time::Duration::ZERO,
+            privacy: WindowsCapturePrivacy::default(),
+            visible_titles: VisibleWindowTitles::default(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn banner_pixels(image: &image::RgbaImage, rows: std::ops::Range<u32>) -> usize {
+        let red = WindowsCaptureNotice::BackgroundRedacted.color();
+        rows.flat_map(|y| (0..image.width()).map(move |x| (x, y)))
+            .filter(|(x, y)| *image.get_pixel(*x, *y) == red)
+            .count()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximised_window_title_rows_reach_ocr_unchanged_and_the_banner_uses_the_taskbar() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        // Maximised: the window covers everything above a 48-pixel taskbar.
+        let window = titled_window(800, 552);
+        let taskbar = Rect {
+            x: 0,
+            y: 552,
+            width: 800,
+            height: 48,
+        };
+        let mut capture = active_capture(monitor, &window, 0, 0);
+        black_out_taskbars(&mut capture.image, monitor, &[taskbar]);
+        mark_active_window_frame(&mut capture, monitor, &[taskbar]);
+        // `capture.image` is the image OCR and content screening receive.
+        let frame = capture.image.to_rgba8();
+        for y in 0..552 {
+            for x in 0..800 {
+                assert_eq!(frame.get_pixel(x, y), window.get_pixel(x, y), "({x}, {y})");
+            }
+        }
+        // The disclosure is on the stored frame, inside the blacked-out taskbar.
+        assert!(banner_pixels(&frame, 552..600) > 0);
+        assert!(frame
+            .enumerate_pixels()
+            .any(|(_, y, p)| y >= 552 && *p == image::Rgba([255, 255, 255, 255])));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn active_window_banner_uses_background_pixels_and_never_the_window() {
+        let monitor = Rect {
+            x: 100,
+            y: 200,
+            width: 800,
+            height: 600,
+        };
+        let window = titled_window(500, 400);
+        let mut capture = active_capture(monitor, &window, 250, 300);
+        mark_active_window_frame(&mut capture, monitor, &[]);
+        let frame = capture.image.to_rgba8();
+        for y in 0..400 {
+            for x in 0..500 {
+                assert_eq!(frame.get_pixel(150 + x, 100 + y), window.get_pixel(x, y));
+            }
+        }
+        // Drawn into the redacted band above the window, at the frame edge.
+        assert!(banner_pixels(&frame, 0..100) > 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_window_covering_the_whole_monitor_keeps_its_title_rows_and_a_reserved_strip_discloses() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let window = titled_window(800, 600);
+        let mut capture = active_capture(monitor, &window, 0, 0);
+        let areas = active_window_redacted_areas(800, 600, Some((0, 0, 800, 600)), &[]);
+        let mut probe = capture.image.to_rgba8();
+        let placement = draw_windows_capture_notice_in_redacted_area(
+            &mut probe,
+            &areas,
+            WindowsCaptureNotice::BackgroundRedacted,
+        );
+        let NoticePlacement::ReservedStrip((_, strip_top, _, _)) = placement else {
+            panic!("expected a reserved strip, got {placement:?}");
+        };
+        mark_active_window_frame(&mut capture, monitor, &[]);
+        let frame = capture.image.to_rgba8();
+        assert_eq!(frame, probe);
+        // The title bar (top rows) is untouched; only the bottom strip carries
+        // the disclosure.
+        for y in 0..strip_top {
+            for x in 0..800 {
+                assert_eq!(frame.get_pixel(x, y), window.get_pixel(x, y));
+            }
+        }
+        assert!(strip_top > 500);
+        assert!(banner_pixels(&frame, strip_top..600) > 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn notice_placement_prefers_the_largest_fitting_redacted_area() {
+        let mut image = image::RgbaImage::from_pixel(720, 400, image::Rgba([1, 2, 3, 255]));
+        // Too small for any label, then one that fits at scale 1 only, then
+        // one that fits the preferred scale (2 for 720 pixels).
+        let areas = [(0, 0, 30, 10), (0, 100, 200, 20), (100, 300, 400, 60)];
+        let placement = draw_windows_capture_notice_in_redacted_area(
+            &mut image,
+            &areas,
+            WindowsCaptureNotice::BackgroundRedacted,
+        );
+        assert_eq!(
+            placement,
+            NoticePlacement::RedactedArea((100, 300 + (60 - 26) / 2, 400, 26))
+        );
+        // Pixels outside the chosen area are unchanged.
+        assert_eq!(*image.get_pixel(0, 0), image::Rgba([1, 2, 3, 255]));
+        assert_eq!(*image.get_pixel(0, 105), image::Rgba([1, 2, 3, 255]));
+        assert_eq!(*image.get_pixel(99, 320), image::Rgba([1, 2, 3, 255]));
     }
 
     #[cfg(target_os = "windows")]

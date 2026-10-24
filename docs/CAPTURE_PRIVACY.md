@@ -198,7 +198,9 @@ URL lookup or clipboard render is directed at it. One shared gate,
 `screenpipe_capture_policy::target`, answers this from native identity alone
 (executable name and window title, read without calling into the target). It
 covers protected apps (canonical password managers, credential viewers and
-system UI hosts), the configured ignore list and the include list. An
+system UI hosts), windows whose title names a credential file (2026-10-24, see
+[content screening](CONTENT_SCREENING.md#credential-files-and-prefixless-tokens-2026-10-24)),
+the configured ignore list and the include list. An
 unidentified process is not contacted. Each capture path adds its own
 evidence-based rules (URLs, private windows, DRM, nested windows) on top.
 
@@ -329,6 +331,22 @@ surfaces cannot. Explicit user exclusions still take precedence. The remaining
 monitor pixels stay black; no background-window bitmap is acquired. A new
 background exclusion discovered immediately before UIA invalidates an already
 acquired full-monitor bitmap and produces a placeholder.
+
+**Disclosure banner placement (2026-10-24).** The `BACKGROUND REDACTED`
+banner of an active-window-only frame is drawn only into pixels that are
+already redacted, never over the shown window: the blacked-out band above or
+below the window, a blacked-out taskbar, or a side band, whichever holds the
+largest legible banner (top and bottom bands first). It is drawn after the
+taskbar blackout and before OCR and content screening, which therefore see
+every shown pixel, the window's title bar or tab strip included. A window
+covering the whole monitor with no visible taskbar leaves no redacted area;
+then the bottom banner-height rows of the frame are redacted to carry the
+banner (those rows are neither shown nor OCR'd, so the disclosure is never
+dropped). Before this change the banner covered the top rows of the captured
+pixels, which for a maximised window erased its title from both OCR and the
+stored frame. The PII-redacted image served by the frames API places its
+`PII REDACTED` banner the same way, inside a blurred region that fits it,
+otherwise in a bottom strip. Placeholder notice frames are unchanged.
 
 This is per-persisted-frame evidence, not an exhaustive application-presence
 timeline: throttling, identical-image/content deduplication and recording pauses

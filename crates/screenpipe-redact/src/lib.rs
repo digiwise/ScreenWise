@@ -65,6 +65,9 @@
 //!   domains, password managers, secrets, sensitive URLs, keywords). Secret
 //!   detection reuses [`adapters::regex::redact_one`] with stricter
 //!   frame-level filters.
+//! - [`rescreen`] — pure decisions applying the current window rules and
+//!   content screening to already stored frames and input events (the
+//!   owner-run `screenpipe privacy rescreen` tool performs the I/O).
 //! - [`content_redaction`] — pure helpers for the in-memory redaction tier
 //!   (the shared secret replacement function, exact/partial secret location,
 //!   whole-frame thresholds, OCR-line pixel regions), whose regions are
@@ -80,9 +83,11 @@
 pub mod adapters;
 pub mod content_redaction;
 pub mod content_screening;
+pub mod frame_screening;
 pub mod image;
 pub mod pipeline;
 pub mod provisioning;
+pub mod rescreen;
 pub mod worker;
 
 mod cache;
@@ -90,8 +95,9 @@ mod error;
 mod span;
 
 pub use content_screening::{
-    screen_text, screen_text_plan, screening_tier, ContentScreeningConfig, ContentScreeningPlan,
-    ContentScreeningReason, ContentScreeningTier, ContentScreeningVerdict, SecretHitKind,
+    screen_frame_text_plan, screen_text, screen_text_plan, screen_text_plan_in_context,
+    screening_tier, ContentScreeningConfig, ContentScreeningPlan, ContentScreeningReason,
+    ContentScreeningTier, ContentScreeningVerdict, SecretHitKind, TokenContext,
     MAX_MATCHER_SECRETS, MAX_REDACTED_AREA_PERCENT, MAX_REDACTION_HITS, MAX_SECRET_LOCATIONS,
     MIN_PARTIAL_MATCH_CHARS, SENSITIVE_URL_PARAM_NAMES,
 };

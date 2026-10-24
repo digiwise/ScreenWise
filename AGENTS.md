@@ -412,6 +412,16 @@ do not silently remove rules after a test. Preserve loopback and verify OS state
 
 ## Agent working practices
 
+- One implementation per decision (owner rule, 2026-10-24). When two paths need
+  the same decision (for example capture-time and stored-data screening, live and
+  re-processed frames, frames and input events, or different capture paths), put
+  that logic once, in the crate responsible for it, and call it from every path.
+  Callers only gather their inputs and apply the result. Never write a second,
+  parallel version, not even a "simplified" one for a tool, test or migration.
+  Before adding logic, search for an existing implementation and extend it. When
+  a change affects one caller, prove the shared behaviour through every caller.
+  Reviewers check new code for duplicated decisions and report them as should-fix.
+  Briefs need not repeat this rule.
 - Bulk mechanical edits: exclude applied SQL migrations and generated outputs,
   expect variants of the pattern, and confirm the diff only does what was meant
   (e.g. only removes lines).

@@ -287,7 +287,8 @@ fn native_window_exclusion(
     }
     Some(match exclusion? {
         Exclusion::Unidentified | Exclusion::ProtectedApp => SkipReason::ExcludedApp,
-        Exclusion::Ignored => SkipReason::UserIgnored,
+        // A credential-file title is handled exactly like an ignore match.
+        Exclusion::Ignored | Exclusion::CredentialFile => SkipReason::UserIgnored,
         Exclusion::OutsideIncludes => SkipReason::NotInIncludeList,
     })
 }
@@ -950,13 +951,11 @@ impl WindowsTreeWalker {
                     ))
                 }
             };
-            let applicable_subtree_rules = ignored_patterns.iter().any(|pattern| {
-                !pattern.title.is_empty()
-                    && pattern
-                        .app
-                        .as_ref()
-                        .is_none_or(|app| app_lower.contains(app))
-            });
+            // The built-in credential-file title rule reads nested Window and
+            // Document names in every app, so subtree evidence is always
+            // acquired (as it already was wherever a configured title rule
+            // applied, including any unscoped ignore pattern).
+            let applicable_subtree_rules = true;
             let need_url =
                 self.config.windows_require_browser_url || !self.config.ignored_urls.is_empty();
             let mut rule_refs = AccessibilityFailure::after_native_policy(
@@ -1804,11 +1803,12 @@ fn extract_text_from_tree(
         && ct.eq_ignore_ascii_case("Window")
         && node.name.as_deref().is_some_and(|name| {
             timing::rule_check(timing::RuleGroup::NestedWindow, || {
-                window_pattern::matches_any(
+                screenpipe_capture_policy::target::ignore_exclusion(
                     ignored_patterns,
                     focused_app_lower,
-                    &name.to_lowercase(),
+                    Some(name),
                 )
+                .is_some()
             })
         })
     {
@@ -1893,27 +1893,31 @@ fn extract_text_from_tree(
         if ct.eq_ignore_ascii_case("Document") {
             // Browser extension popup detection: Document nodes for Chrome extensions
             // carry the extension name in `name` and a chrome-extension:// URL in `value`.
-            // If either matches an ignored-window pattern, skip the entire subtree.
-            if !ignored_patterns.is_empty() {
-                let matches = |val: &str, group| {
-                    timing::rule_check(group, || {
-                        let lower = val.to_lowercase();
-                        window_pattern::matches_any(ignored_patterns, focused_app_lower, &lower)
-                    })
-                };
-                if node
-                    .name
+            // If either matches an ignored-window pattern (or names a
+            // credential file: the shared ignore decision), skip the subtree.
+            let matches = |val: &str, group| {
+                timing::rule_check(group, || {
+                    screenpipe_capture_policy::target::ignore_exclusion(
+                        ignored_patterns,
+                        focused_app_lower,
+                        Some(val),
+                    )
+                    .is_some()
+                })
+            };
+            if node
+                .name
+                .as_deref()
+                .is_some_and(|n| matches(n, timing::RuleGroup::DocumentName))
+                || node
+                    .value
                     .as_deref()
-                    .is_some_and(|n| matches(n, timing::RuleGroup::DocumentName))
-                    || node
-                        .value
-                        .as_deref()
-                        .is_some_and(|v| matches(v, timing::RuleGroup::DocumentValue))
-                {
-                    *hit_ignored_subtree = true;
-                    return;
-                }
-
+                    .is_some_and(|v| matches(v, timing::RuleGroup::DocumentValue))
+            {
+                *hit_ignored_subtree = true;
+                return;
+            }
+            if !ignored_patterns.is_empty() {
                 // Fallback for sub-views where the page title doesn't include the
                 // extension brand name (e.g. Bitwarden shows "New Login" for the
                 // add-login route).  Scan 2 levels of children for any text that
@@ -2043,14 +2047,16 @@ fn evaluate_raw_policy_evidence(
     browser_url: &mut Option<String>,
 ) -> Result<RawPolicyResult, bulk::Stop> {
     let mut result = RawPolicyResult::default();
+    // The shared ignore decision: an ignore pattern or a credential-file name.
     let matches = |value: Option<&str>, group| {
         value.is_some_and(|value| {
             timing::rule_check(group, || {
-                window_pattern::matches_any(
+                screenpipe_capture_policy::target::ignore_exclusion(
                     ignored_patterns,
                     focused_app_lower,
-                    &value.to_lowercase(),
+                    Some(value),
                 )
+                .is_some()
             })
         })
     };
@@ -2152,6 +2158,37 @@ fn append_text(buffer: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_policy_nested_credential_file_names_block_without_rules() {
+        use bulk::RawPolicyEvidence as E;
+        for evidence in [
+            E::NestedWindow {
+                name: Some("id_rsa - Notepad".into()),
+            },
+            E::Document {
+                name: Some("client_secret.json".into()),
+                value: None,
+            },
+        ] {
+            let result =
+                evaluate_raw_policy_evidence(&[evidence], &[], "code.exe", &[], false, &mut None)
+                    .unwrap();
+            assert!(result.ignored_subtree);
+        }
+        let ordinary = evaluate_raw_policy_evidence(
+            &[E::NestedWindow {
+                name: Some("Find and replace".into()),
+            }],
+            &[],
+            "code.exe",
+            &[],
+            false,
+            &mut None,
+        )
+        .unwrap();
+        assert!(!ordinary.ignored_subtree);
+    }
 
     #[test]
     fn raw_policy_matching_windows_documents_and_extension_text_block() {
@@ -3705,6 +3742,21 @@ mod tests {
             Some(SkipReason::NotInIncludeList)
         ));
         assert!(native_window_exclusion(&[], &include, &["code.exe"], "draft").is_none());
+    }
+
+    #[test]
+    fn credential_file_titles_are_skipped_as_user_ignored_without_rules() {
+        assert!(matches!(
+            native_window_exclusion(&[], &[], &["notepad.exe"], "*deploy-token.secret - Notepad"),
+            Some(SkipReason::UserIgnored)
+        ));
+        assert!(matches!(
+            native_window_exclusion(&[], &[], &["code.exe"], ".env.local - repo - Code"),
+            Some(SkipReason::UserIgnored)
+        ));
+        assert!(
+            native_window_exclusion(&[], &[], &["notepad.exe"], "Secret plans - Notepad").is_none()
+        );
     }
 
     #[test]

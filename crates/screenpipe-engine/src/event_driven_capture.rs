@@ -26,12 +26,15 @@ use screenpipe_redact::content_redaction::{
     redacted_area_exceeds_limit, replace_secret_spans, OcrWord, SecretCopies, SecretCount,
     SecretMatcher, TextMatches,
 };
+use screenpipe_redact::frame_screening::{screen_frame, FrameTexts, VisibleWindow};
 use screenpipe_redact::image::frame_redactor::{redact_regions_in_place, PixelRect};
 #[cfg(test)]
 use screenpipe_redact::screen_text;
+#[cfg(test)]
+use screenpipe_redact::screening_tier;
 use screenpipe_redact::{
-    screen_text_plan, screening_tier, ContentScreeningConfig, ContentScreeningPlan,
-    ContentScreeningReason, ContentScreeningTier, ContentScreeningVerdict, SecretHitKind,
+    ContentScreeningConfig, ContentScreeningPlan, ContentScreeningReason, ContentScreeningTier,
+    ContentScreeningVerdict, SecretHitKind,
 };
 #[cfg(not(target_os = "windows"))]
 use screenpipe_screen::capture_screenshot_by_window::get_excluded_sck_window_ids;
@@ -2186,6 +2189,11 @@ fn uia_failure_native_metadata(
         window_name: None,
     };
     let title = failure.window_name.trim();
+    // A credential-file window is excluded: no title, app or URL. The walker
+    // skips it before any retrieval failure, so this is defence in depth.
+    if screenpipe_capture_policy::credential_files::title_names_credential_file(title) {
+        return None;
+    }
     if title.is_empty()
         || target::title_may_carry_commands(&app_lc)
         || target::title_names_password_manager(&title.to_lowercase())
@@ -2203,7 +2211,16 @@ fn uia_failure_native_metadata(
         protected_domains: true,
         keywords: screening.map(|c| c.keywords.clone()).unwrap_or_default(),
     };
-    if screen_text_plan(&[title], &config).verdict().blocked() {
+    // The shared frame decision over the title alone (as the re-screen does
+    // for placeholder metadata).
+    let titles = [title];
+    let placeholder = FrameTexts {
+        window_title: Some(title),
+        window_texts: &titles,
+        shows_only_window: true,
+        ..Default::default()
+    };
+    if screen_frame(&placeholder, &config).verdict().blocked() {
         return Some(app_only);
     }
     let redacted = screenpipe_core::pii_removal::remove_pii(title);
@@ -2629,6 +2646,69 @@ struct ChunkSegment {
 struct ScreeningChunks {
     texts: Vec<String>,
     segments: Vec<Vec<ChunkSegment>>,
+    /// The frame window's native title, for the shared frame decision
+    /// (`screenpipe_redact::frame_screening`; in memory only).
+    window_title: Option<String>,
+    /// Full-monitor frames: the windows visible in the captured area (native
+    /// title and normalised area), from the capture-selection enumeration.
+    visible_windows: Vec<(String, [f64; 4])>,
+    /// The image shows only the frame's window (active-window-only frames,
+    /// or no window enumeration).
+    shows_only_window: bool,
+}
+
+impl ScreeningChunks {
+    /// The shared frame decision over these chunks, the OCR text (with its
+    /// word boxes when known) and further image texts: the plan over chunks,
+    /// then OCR, then `image_texts`, and the screening tier.
+    fn screen(
+        &self,
+        config: &ContentScreeningConfig,
+        ocr_text: Option<&str>,
+        ocr_words: Option<&[OcrWord<'_>]>,
+        image_texts: &[&str],
+        fail_open: bool,
+    ) -> (ContentScreeningPlan, ContentScreeningTier) {
+        let window_texts: Vec<&str> = self.texts.iter().map(String::as_str).collect();
+        self.screen_texts(
+            config,
+            &window_texts,
+            ocr_text,
+            ocr_words,
+            image_texts,
+            fail_open,
+        )
+    }
+
+    /// [`Self::screen`] over replacement window texts (the redaction
+    /// self-check), with this frame's title and windows.
+    fn screen_texts(
+        &self,
+        config: &ContentScreeningConfig,
+        window_texts: &[&str],
+        ocr_text: Option<&str>,
+        ocr_words: Option<&[OcrWord<'_>]>,
+        image_texts: &[&str],
+        fail_open: bool,
+    ) -> (ContentScreeningPlan, ContentScreeningTier) {
+        let visible: Vec<VisibleWindow<'_>> = self
+            .visible_windows
+            .iter()
+            .map(|(title, area)| VisibleWindow { title, area: *area })
+            .collect();
+        let frame = FrameTexts {
+            window_title: self.window_title.as_deref(),
+            window_texts,
+            ocr_text,
+            ocr_words,
+            image_texts,
+            visible_windows: &visible,
+            shows_only_window: self.shows_only_window,
+        };
+        let plan = screen_frame(&frame, config);
+        let tier = plan.tier(&frame, fail_open);
+        (plan.plan, tier)
+    }
 }
 
 #[derive(Default)]
@@ -2672,6 +2752,9 @@ impl ScreeningChunkBuilder {
         ScreeningChunks {
             texts: self.texts,
             segments: self.segments,
+            window_title: None,
+            visible_windows: Vec::new(),
+            shows_only_window: true,
         }
     }
 }
@@ -2734,7 +2817,60 @@ fn screening_chunks(
             }
         }
     }
-    Some(builder.finish())
+    let mut chunks = builder.finish();
+    chunks.window_title = metadata.window_name.map(str::to_string);
+    Some(chunks)
+}
+
+/// The windows visible in a full-monitor frame's captured area (from the
+/// capture-selection enumeration): native titles and areas normalised to
+/// `left, top, width, height` in 0..1. Gathered here; the decision is the
+/// shared `screenpipe_redact::frame_screening`. In memory only; `Debug`
+/// prints a count.
+#[derive(Clone, Default)]
+struct NativeTitleScreening {
+    windows: Vec<(String, [f64; 4])>,
+    /// The frame is a full-monitor frame (other windows can be visible).
+    full_monitor: bool,
+}
+
+impl std::fmt::Debug for NativeTitleScreening {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTitleScreening")
+            .field("windows", &self.windows.len())
+            .finish()
+    }
+}
+
+impl NativeTitleScreening {
+    /// From monitor-pixel areas and titles of a `width` x `height` monitor.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn from_titles<'a>(
+        windows: impl IntoIterator<Item = (&'a (u32, u32, u32, u32), &'a str)>,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let mut native = Self {
+            full_monitor: true,
+            ..Self::default()
+        };
+        if width == 0 || height == 0 {
+            return native;
+        }
+        let (w, h) = (f64::from(width), f64::from(height));
+        for (area, title) in windows {
+            native.windows.push((
+                title.to_string(),
+                [
+                    f64::from(area.0) / w,
+                    f64::from(area.1) / h,
+                    f64::from(area.2) / w,
+                    f64::from(area.3) / h,
+                ],
+            ));
+        }
+        native
+    }
 }
 
 /// The screening chunk texts alone (see [`screening_chunks`]).
@@ -2766,18 +2902,35 @@ fn screen_frame_texts(
 
 /// Screening plan for the chunks followed by the OCR text (the last input
 /// when present). `None` when screening cannot cover every persisted text.
+#[cfg(test)]
 fn screen_frame_plan(
     config: &ContentScreeningConfig,
     ocr_text: Option<&str>,
     chunks: Option<&ScreeningChunks>,
 ) -> Option<ContentScreeningPlan> {
+    screen_frame_decision(config, ocr_text, None, chunks, false).map(|(plan, _)| plan)
+}
+
+/// The shared frame decision (`screenpipe_redact::frame_screening`) over the
+/// chunks followed by the OCR text and its word boxes (from the OCR JSON),
+/// with the screening tier. `None` when screening cannot cover every
+/// persisted text.
+fn screen_frame_decision(
+    config: &ContentScreeningConfig,
+    ocr_text: Option<&str>,
+    ocr_json: Option<&str>,
+    chunks: Option<&ScreeningChunks>,
+    fail_open: bool,
+) -> Option<(ContentScreeningPlan, ContentScreeningTier)> {
     let chunks = chunks?;
     if ocr_text.is_some_and(|text| text.len() > CONTENT_SCREENING_MAX_TEXT_BYTES) {
         return None;
     }
-    let mut refs = chunks.texts.iter().map(String::as_str).collect::<Vec<_>>();
-    refs.extend(ocr_text);
-    Some(screen_text_plan(&refs, config))
+    let entries = ocr_json.and_then(|json| {
+        serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(json).ok()
+    });
+    let words = entries.as_deref().and_then(ocr_json_words);
+    Some(chunks.screen(config, ocr_text, words.as_deref(), &[], fail_open))
 }
 
 /// Distinct redactable hit texts across every screened input (borrowed from
@@ -2935,7 +3088,8 @@ fn ocr_json_number(entry: &serde_json::Map<String, serde_json::Value>, key: &str
 }
 
 /// OCR words with their normalised boxes, or `None` if any entry lacks them.
-fn ocr_json_words(
+/// Shared by capture-time screening and the re-screen of stored OCR JSON.
+pub(crate) fn ocr_json_words(
     entries: &[serde_json::Map<String, serde_json::Value>],
 ) -> Option<Vec<OcrWord<'_>>> {
     entries
@@ -3379,6 +3533,7 @@ fn plan_frame_redaction(
     let Some(checked_chunks) = screening_chunks(checked_tree, checked_metadata) else {
         return Err(secret());
     };
+    let window_count = checked_chunks.texts.len();
     let mut checked: Vec<&str> = checked_chunks.texts.iter().map(String::as_str).collect();
     if let Some((text, _)) = &redacted_ocr {
         checked.push(text);
@@ -3400,7 +3555,16 @@ fn plan_frame_redaction(
         .map(|text| mask_secret_labels(text))
         .collect();
     let masked_refs: Vec<&str> = masked.iter().map(|text| text.as_ref()).collect();
-    let recheck = screen_text_plan(&masked_refs, config).verdict();
+    // The same shared frame decision, over the redacted texts, with the
+    // original frame's title and visible windows.
+    let (window_refs, image_refs) = masked_refs.split_at(window_count);
+    let (ocr_ref, image_refs) = match (&redacted_ocr, image_refs.split_first()) {
+        (Some(_), Some((ocr, rest))) => (Some(*ocr), rest),
+        _ => (None, image_refs),
+    };
+    let (recheck_plan, _) =
+        chunks.screen_texts(config, window_refs, ocr_ref, None, image_refs, false);
+    let recheck = recheck_plan.verdict();
     if recheck.blocked() {
         let mut reasons = recheck.reasons;
         reasons.push(ContentScreeningReason::Secret);
@@ -3483,6 +3647,7 @@ async fn screen_frame_content(
     metadata: FrameScreeningMetadata<'_>,
     screenshot_disabled: bool,
     fail_open_pending: bool,
+    native: &NativeTitleScreening,
 ) -> (FrameScreening, ScreeningMetrics) {
     let mut metrics = ScreeningMetrics::default();
     // A fail-open frame has no trustworthy accessibility text; without a
@@ -3523,30 +3688,35 @@ async fn screen_frame_content(
         None
     };
     let screen_started = Instant::now();
-    let chunks = screening_chunks(tree, metadata);
+    let mut chunks = screening_chunks(tree, metadata);
+    if let Some(chunks) = chunks.as_mut() {
+        chunks.visible_windows = native.windows.clone();
+        chunks.shows_only_window = !native.full_monitor;
+    }
     let screening_config = Arc::clone(config);
     // Regex screening is CPU work; keep it off the async worker like OCR.
     let screened = tokio::task::spawn_blocking(move || {
-        let plan = screen_frame_plan(
+        let decision = screen_frame_decision(
             &screening_config,
             ocr.as_ref().map(|(text, _)| text.as_str()),
+            ocr.as_ref().map(|(_, json)| json.as_str()),
             chunks.as_ref(),
+            fail_open_pending,
         );
-        (plan, chunks, ocr)
+        (decision, chunks, ocr)
     })
     .await;
-    let Ok((Some(plan), Some(chunks), ocr)) = screened else {
+    let Ok((Some((plan, tier)), Some(chunks), ocr)) = screened else {
         metrics.screen_ms = Some(millis_u32(screen_started.elapsed()));
         return (
             FrameScreening::Withheld(ContentScreeningVerdict::unavailable()),
             metrics,
         );
     };
+    // Content-free attribution metrics only; the tier above is the decision.
     let sources = secret_hit_sources(&plan, &chunks, ocr.as_ref().map(|(text, _)| text.as_str()));
-    let distinct = sources.len();
     metrics = metrics.with_hit_sources(&sources);
     drop(sources);
-    let tier = screening_tier(&plan, distinct, fail_open_pending);
     metrics.screen_ms = Some(millis_u32(screen_started.elapsed()));
     let screening = match tier {
         ContentScreeningTier::Pass => FrameScreening::Passed(ocr),
@@ -3688,6 +3858,8 @@ async fn do_capture(
     #[cfg(target_os = "windows")]
     let selected_window = windows_capture.privacy.selected_window;
     #[cfg(target_os = "windows")]
+    let mut visible_titles = windows_capture.visible_titles;
+    #[cfg(target_os = "windows")]
     let selected_metadata = selected_window.and(windows_capture.active_window);
     #[cfg(target_os = "windows")]
     let (image, windows_outcome, capture_dur, mut windows_privacy) = (
@@ -3776,6 +3948,7 @@ async fn do_capture(
             Ok(evaluation) => {
                 let scope_changed = evaluation.privacy.selected_window.is_some();
                 windows_privacy.merge(evaluation.privacy);
+                visible_titles = visible_titles.union(evaluation.visible_titles);
                 // New background exclusions invalidate an acquired full-monitor
                 // bitmap. Only a fresh safe acquisition can admit it again.
                 let latest = match evaluation.plan {
@@ -4381,11 +4554,19 @@ async fn do_capture(
     // the patterns parsed above.
     {
         let check_app = app_name_owned.as_deref().unwrap_or_default().to_lowercase();
+        #[cfg(not(target_os = "windows"))]
         let check_win = window_name_owned
             .as_deref()
             .unwrap_or_default()
             .to_lowercase();
-        if window_pattern::matches_any(&ignored_patterns, &check_app, &check_win) {
+        // The shared ignore decision: a credential-file title or a pattern.
+        if screenpipe_capture_policy::target::ignore_exclusion(
+            &ignored_patterns,
+            &check_app,
+            window_name_owned.as_deref(),
+        )
+        .is_some()
+        {
             #[cfg(target_os = "windows")]
             {
                 windows_privacy.foreground_blocked("ignored_window");
@@ -4542,6 +4723,25 @@ async fn do_capture(
     // whose only hits are redactable secrets is redacted in memory instead
     // (owner decision 2026-10-15) and only the redacted data flows on.
     let mut image = Arc::new(image);
+    // Other visible windows' native titles reach screening only on a
+    // full-monitor frame; an active-window-only frame shows one window.
+    #[cfg(target_os = "windows")]
+    let native_titles = if windows_outcome == WindowsCaptureOutcome::FullMonitor {
+        NativeTitleScreening::from_titles(
+            visible_titles
+                .0
+                .iter()
+                .map(|(area, title)| (area, title.as_str())),
+            params.monitor.width(),
+            params.monitor.height(),
+        )
+    } else {
+        NativeTitleScreening::default()
+    };
+    #[cfg(target_os = "windows")]
+    drop(visible_titles);
+    #[cfg(not(target_os = "windows"))]
+    let native_titles = NativeTitleScreening::default();
     #[cfg(target_os = "windows")]
     let fail_open_pending = windows_privacy
         .accessibility
@@ -4570,6 +4770,7 @@ async fn do_capture(
                 },
                 screenshot_disabled,
                 fail_open_pending,
+                &native_titles,
             )
             .await;
             screening_metrics = metrics;
@@ -7875,6 +8076,229 @@ fn content_redaction_metadata_text_content_and_leftovers() {
 }
 
 #[cfg(test)]
+fn shared_fixture_token() -> String {
+    // A generated, never-real token shape: 36 mixed-class characters.
+    (0..36u32)
+        .map(|i| b"Ab3Xq9Lm2Zt7Pk4Rw8Ns5Vy1Hc6Jd0Ge"[((i * 7 + 3) % 32) as usize] as char)
+        .collect()
+}
+
+/// Windows OCR JSON for `words`, each a box at the given left edge.
+#[cfg(test)]
+fn shared_fixture_ocr(words: &[(&str, f64)]) -> (String, String) {
+    let text = words
+        .iter()
+        .map(|(word, _)| *word)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let json = serde_json::Value::Array(
+        words
+            .iter()
+            .map(|(word, left)| {
+                serde_json::json!({"text": word, "left": left.to_string(), "top": "0.5",
+                    "width": "0.05", "height": "0.02"})
+            })
+            .collect(),
+    )
+    .to_string();
+    (text, json)
+}
+
+/// Same fixtures through both callers of the shared frame decision: capture
+/// time (screening chunks of a live frame) and the re-screen of the same
+/// frame as a stored row. They must agree.
+#[cfg(test)]
+#[test]
+fn capture_and_rescreen_reach_the_same_frame_decision() {
+    use screenpipe_redact::rescreen::{decide_frame, FrameDecision, RescreenRules, StoredFrame};
+    let token = shared_fixture_token();
+    let config = redaction_test_config();
+    let rules = RescreenRules::new(&[], &[], &[], false);
+    let words = |line: &str| -> Vec<(String, f64)> {
+        line.split(' ')
+            .enumerate()
+            .map(|(i, word)| (word.to_string(), 0.05 * i as f64))
+            .collect()
+    };
+    // (title, OCR words, active-window-only frame, expected hit)
+    let cases = [
+        (
+            "API token rotation - Docs",
+            format!("first line {token} last line"),
+            true,
+            true,
+        ),
+        (
+            "API token rotation - Docs",
+            format!("first line {token} last line"),
+            false,
+            false,
+        ),
+        (
+            "Quarterly report - Word",
+            format!("first line {token} last line"),
+            true,
+            false,
+        ),
+        (
+            "Quarterly report - Word",
+            format!("read- token. secret {token}"),
+            false,
+            true,
+        ),
+        (
+            "main.rs - repo - Editor",
+            format!("id_rsa server.pem {token}"),
+            true,
+            false,
+        ),
+        (
+            "Vault overview - Browser",
+            format!("https://docs.example.org/view?id={token}"),
+            true,
+            false,
+        ),
+    ];
+    for (title, line, single_window, expected) in cases {
+        let owned = words(&line);
+        let pairs: Vec<(&str, f64)> = owned.iter().map(|(w, l)| (w.as_str(), *l)).collect();
+        let (ocr_text, ocr_json) = shared_fixture_ocr(&pairs);
+        // Capture time.
+        let mut chunks = screening_chunks(
+            None,
+            FrameScreeningMetadata {
+                window_name: Some(title),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        chunks.shows_only_window = single_window;
+        let (_, tier) = screen_frame_decision(
+            &config,
+            Some(&ocr_text),
+            Some(&ocr_json),
+            Some(&chunks),
+            false,
+        )
+        .unwrap();
+        let captured_hit = tier != ContentScreeningTier::Pass;
+        // Re-screen of the same stored frame.
+        let entries: Vec<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(&ocr_json).unwrap();
+        let stored = StoredFrame {
+            app_name: Some("synthetic.exe"),
+            window_name: Some(title),
+            single_window,
+            ocr_text: Some(&ocr_text),
+            ocr_words: ocr_json_words(&entries),
+            ..Default::default()
+        };
+        let rescreen_hit = decide_frame(&stored, &rules) != FrameDecision::Keep;
+        assert_eq!(captured_hit, expected, "capture: {title} / {line}");
+        assert_eq!(rescreen_hit, expected, "rescreen: {title} / {line}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn visible_window_titles_lend_context_to_their_region_and_withhold_on_hits() {
+    let token = shared_fixture_token();
+    // A full-monitor frame: a titled window on the left half, another on the
+    // right half, each showing the same token-shaped string.
+    let native = NativeTitleScreening::from_titles(
+        [
+            (&(0u32, 0u32, 400u32, 600u32), "API token rotation - Docs"),
+            (&(400u32, 0u32, 400u32, 600u32), "Quarterly report - Word"),
+        ],
+        800,
+        600,
+    );
+    assert_eq!(format!("{native:?}"), "NativeTitleScreening { windows: 2 }");
+    let (ocr_text, ocr_json) = shared_fixture_ocr(&[(&token, 0.1), (&token, 0.6)]);
+    let mut chunks = screening_chunks(
+        None,
+        FrameScreeningMetadata {
+            window_name: Some("Quarterly report - Word"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    chunks.visible_windows = native.windows.clone();
+    chunks.shows_only_window = false;
+    let config = redaction_test_config();
+    let (plan, tier) = screen_frame_decision(
+        &config,
+        Some(&ocr_text),
+        Some(&ocr_json),
+        Some(&chunks),
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan.secret_spans(chunks.texts.len()), [0..token.len()]);
+    assert_eq!(tier, ContentScreeningTier::Redact);
+    // A token inside another visible window's native title withholds it.
+    let leaking_title = format!("api key {token} - Browser");
+    chunks.visible_windows = NativeTitleScreening::from_titles(
+        [
+            (&(0u32, 0u32, 400u32, 600u32), "Quarterly report - Word"),
+            (&(400u32, 0u32, 400u32, 600u32), leaking_title.as_str()),
+        ],
+        800,
+        600,
+    )
+    .windows;
+    let (_, tier) =
+        screen_frame_decision(&config, Some("plain words"), None, Some(&chunks), false).unwrap();
+    assert_eq!(
+        tier,
+        ContentScreeningTier::Drop(ContentScreeningVerdict::secret())
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn only_a_credential_file_title_lifts_the_generic_token_context_gate() {
+    // A generated, never-real token shape: 36 mixed-class characters.
+    let token: String = (0..36u32)
+        .map(|i| b"Ab3Xq9Lm2Zt7Pk4Rw8Ns5Vy1Hc6Jd0Ge"[((i * 7 + 3) % 32) as usize] as char)
+        .collect();
+    let ocr = format!(
+        "File Edit View
+{token}
+"
+    );
+    let listed = format!(
+        "id_rsa
+server.pem
+{ocr}"
+    );
+    let config = redaction_test_config();
+    let innocent = screening_chunks(
+        None,
+        FrameScreeningMetadata {
+            window_name: Some("main.rs - repo - Editor"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let plan = screen_frame_plan(&config, Some(listed.as_str()), Some(&innocent)).unwrap();
+    assert!(
+        !plan.has_secret(),
+        "file names in body text are not context"
+    );
+    let credential = screening_chunks(
+        None,
+        FrameScreeningMetadata {
+            window_name: Some("*deploy.secret - Editor"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let plan = screen_frame_plan(&config, Some(ocr.as_str()), Some(&credential)).unwrap();
+    assert!(plan.has_secret());
+}
+
+#[cfg(test)]
 #[test]
 fn content_redaction_tier_keeps_drop_reasons_and_fail_open() {
     let config = ContentScreeningConfig {
@@ -8779,6 +9203,16 @@ fn uia_failure_placeholders_keep_only_screened_native_metadata() {
     ))
     .unwrap();
     assert_eq!(empty.code(), "native_app");
+
+    // A credential-file window keeps no metadata at all.
+    assert_eq!(
+        native(&native_metadata_test_failure(
+            "notepad.exe",
+            "*deploy-token.secret - Notepad",
+            &[]
+        )),
+        None
+    );
 
     // Never for unverified, unidentified or protected windows.
     let mut unverified = native_metadata_test_failure("msedge.exe", "Calendar", &[]);

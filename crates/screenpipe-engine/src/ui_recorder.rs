@@ -10,7 +10,7 @@ use anyhow::Result;
 use screenpipe_a11y::events::UiEvent;
 use screenpipe_a11y::input_accounting::{self, KeystrokeTag, LostCause};
 use screenpipe_a11y::{ExtractionThreadPriority, UiCaptureConfig, UiRecorder};
-use screenpipe_capture_policy::window_pattern::{self, WindowPattern};
+use screenpipe_capture_policy::window_pattern::WindowPattern;
 use screenpipe_db::{DatabaseManager, InsertUiEvent};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -788,8 +788,11 @@ pub async fn start_ui_recording(
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase();
-                    let is_ignored =
-                        window_pattern::matches_any(&ignored_patterns, &app_lower, &title_lower);
+                    let is_ignored = window_title_is_ignored(
+                        &ignored_patterns,
+                        &app_lower,
+                        routing_event.window_title.as_deref(),
+                    );
                     {
                         use screenpipe_config::capture_diagnostics::*;
                         let rules = diagnostic_rules
@@ -1213,6 +1216,19 @@ fn event_target_point(db_event: &InsertUiEvent) -> Option<(i32, i32)> {
     Some((db_event.x?, db_event.y?))
 }
 
+/// An input event is excluded when its window matches a configured ignore
+/// pattern or its title names a credential file (built-in rule plus owner
+/// patterns): the event is neither stored nor turned into a capture trigger.
+/// `app_lower` must be lowercase; `title` keeps its original case.
+fn window_title_is_ignored(
+    ignored_patterns: &[WindowPattern],
+    app_lower: &str,
+    title: Option<&str>,
+) -> bool {
+    screenpipe_capture_policy::target::ignore_exclusion(ignored_patterns, app_lower, title)
+        .is_some()
+}
+
 /// Decide which `CaptureTrigger` (if any) this event should fire
 /// immediately. Pure helper extracted so it's trivially testable.
 ///
@@ -1234,8 +1250,7 @@ fn capture_trigger_kind(
     let app = db_event.app_name.clone().unwrap_or_default();
     let title = db_event.window_title.clone().unwrap_or_default();
     let app_lower = app.to_lowercase();
-    let title_lower = title.to_lowercase();
-    let is_ignored = window_pattern::matches_any(ignored_patterns, &app_lower, &title_lower);
+    let is_ignored = window_title_is_ignored(ignored_patterns, &app_lower, Some(&title));
     let target = event_target_point(db_event);
     match &db_event.event_type {
         screenpipe_db::UiEventType::AppSwitch => {
@@ -1774,6 +1789,30 @@ mod capture_trigger_kind_tests {
         let patterns = parse(&["Slack::#hr"]);
         let result = capture_trigger_kind(&e, &patterns, gates(true, true));
         assert!(matches!(result, Some(CaptureTrigger::WindowFocus { .. })));
+    }
+
+    #[test]
+    fn credential_file_windows_are_ignored_without_configured_patterns() {
+        assert!(window_title_is_ignored(
+            &[],
+            "notepad.exe",
+            Some("*deploy-token.secret - Notepad")
+        ));
+        assert!(window_title_is_ignored(
+            &[],
+            "code.exe",
+            Some(".env - repo - Code")
+        ));
+        assert!(!window_title_is_ignored(
+            &[],
+            "notepad.exe",
+            Some("notes.txt - Notepad")
+        ));
+        assert!(!window_title_is_ignored(&[], "notepad.exe", None));
+        let mut e = evt(UiEventType::WindowFocus);
+        e.app_name = Some("notepad.exe".to_string());
+        e.window_title = Some("id_rsa - Notepad".to_string());
+        assert!(capture_trigger_kind(&e, &[], gates(true, true)).is_none());
     }
 }
 

@@ -341,6 +341,15 @@ pub struct RecordingSettings {
     #[serde(rename = "untitledSafeApps", default)]
     pub untitled_safe_apps: Vec<String>,
 
+    /// Extra credential-file name globs (`*`, `?`; case-insensitive, matched
+    /// against each file name in a window title and each whole title
+    /// segment), added to the built-in credential-file title rule. A window
+    /// whose title matches is excluded on every capture path, like an
+    /// `ignoredWindows` match. Empty by default; the built-in list
+    /// (`screenpipe_capture_policy::credential_files`) always applies.
+    #[serde(rename = "credentialFilePatterns", default)]
+    pub credential_file_patterns: Vec<String>,
+
     /// Automatically detect and skip incognito / private browsing windows.
     #[serde(rename = "ignoreIncognitoWindows")]
     pub ignore_incognito_windows: bool,
@@ -570,6 +579,7 @@ impl Default for RecordingSettings {
             uia_fail_open_windows: vec![],
             accessibility_walk_disabled: false,
             untitled_safe_apps: vec![],
+            credential_file_patterns: vec![],
             ignore_incognito_windows: true,
             pause_on_drm_content: false,
             disable_clipboard_capture: true,
@@ -874,7 +884,28 @@ mod tests {
             assert!(settings.content_screening_enabled);
             assert!(settings.content_screening_keywords.is_empty());
             assert!(settings.uia_fail_open_windows.is_empty());
+            assert!(settings.credential_file_patterns.is_empty());
         }
+    }
+
+    #[test]
+    fn credential_file_patterns_round_trip_with_camel_case_key() {
+        let settings = RecordingSettings {
+            credential_file_patterns: vec!["*.gpg".into()],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            value["credentialFilePatterns"],
+            serde_json::json!(["*.gpg"])
+        );
+        let restored: RecordingSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, settings);
+        let toml_str = toml::to_string_pretty(&settings).unwrap();
+        assert_eq!(
+            toml::from_str::<RecordingSettings>(&toml_str).unwrap(),
+            settings
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod backup;
 pub mod db;
 pub mod diagnostic;
 pub mod export;
+pub mod rescreen;
 pub mod search;
 pub mod status;
 mod store_file;
@@ -202,6 +203,12 @@ pub enum Command {
     Db {
         #[command(subcommand)]
         subcommand: DbCommand,
+    },
+
+    /// Privacy maintenance of stored data (owner-run only)
+    Privacy {
+        #[command(subcommand)]
+        subcommand: PrivacyCommand,
     },
 
     /// Database backup & maintenance (checkpoint WAL, export snapshot)
@@ -1251,6 +1258,42 @@ pub enum DbCommand {
         /// certain no real op is in progress.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PrivacyCommand {
+    /// Re-screen stored frames and input events with the current rules
+    /// (credential-file titles, protected apps, ignored windows/URLs and
+    /// content screening). Dry run by default: prints content-free counts
+    /// and a plan fingerprint and changes nothing. `--apply --confirm
+    /// <fingerprint>` then deletes or redacts exactly what that dry run
+    /// counted, in small resumable batches that are safe beside a running
+    /// recorder. Never prints matched text, titles, URLs or paths.
+    Rescreen {
+        /// Recording data directory that holds db.sqlite and store.bin.
+        /// Required: there is deliberately no default.
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: String,
+        /// Apply the latest dry-run plan (requires --confirm).
+        #[arg(long)]
+        apply: bool,
+        /// Fingerprint printed by the dry run being applied.
+        #[arg(long, requires = "apply")]
+        confirm: Option<String>,
+        /// Rows per batch and per write transaction (1-200).
+        #[arg(long, default_value_t = 100)]
+        batch_size: u32,
+        /// Stop after this many rows in this run; repeat the command to resume.
+        #[arg(long)]
+        max_rows: Option<u64>,
+        /// Pause between applied batches, in milliseconds.
+        #[arg(long, default_value_t = 100)]
+        pause_ms: u64,
+        /// Re-screen with the built-in rules only when the data directory
+        /// holds no settings (otherwise refused).
+        #[arg(long)]
+        allow_default_rules: bool,
     },
 }
 

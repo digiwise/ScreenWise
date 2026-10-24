@@ -331,6 +331,7 @@ let DEFAULT_SETTINGS: Settings = {
 			uiaFailOpenWindows: [],
 			accessibilityWalkDisabled: false,
 			untitledSafeApps: [],
+			credentialFilePatterns: [],
 			ignoredMeetingApps: [],
 			audioChunkDuration: 30,
 			languages: [],

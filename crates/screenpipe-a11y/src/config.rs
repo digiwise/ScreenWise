@@ -324,8 +324,15 @@ impl UiCaptureConfig {
             return false;
         }
 
-        let title_lower = window_title.to_lowercase();
-        !window_pattern::matches_any(&self.resolved_ignored(), "", &title_lower)
+        // The shared ignore decision: a credential-file title (built in,
+        // file-name shapes only, never the bare words above) or an ignore
+        // pattern.
+        screenpipe_capture_policy::target::ignore_exclusion(
+            &self.resolved_ignored(),
+            "",
+            Some(window_title),
+        )
+        .is_none()
     }
 
     /// Check a concrete app/window pair against all capture filters.
@@ -341,7 +348,6 @@ impl UiCaptureConfig {
         }
 
         let app_lower = app_name.to_lowercase();
-        let title_lower = window_title.unwrap_or_default().to_lowercase();
 
         // Scoped ignore patterns (e.g. `Slack::#general`) are evaluated here —
         // they require both app and title context, which is only present at
@@ -350,7 +356,7 @@ impl UiCaptureConfig {
             &self.resolved_ignored(),
             &self.resolved_included(),
             &app_lower,
-            &title_lower,
+            window_title,
         )
         .is_none()
     }
@@ -500,6 +506,16 @@ mod tests {
         assert!(!config.should_capture_window("Secret Notes - App"));
         // "Private Browsing" and "Incognito" are handled by crate::incognito.
         assert!(config.should_capture_window("GitHub - Chrome"));
+    }
+
+    #[test]
+    fn credential_file_titles_are_never_captured_by_default() {
+        let config = UiCaptureConfig::new();
+        assert!(!config.should_capture_window("*deploy-token.secret - Notepad"));
+        assert!(!config.should_capture_target("notepad.exe", Some("id_ed25519 - Notepad")));
+        assert!(!config.may_contact(&["code.exe"], Some(".env - repo - Visual Studio Code")));
+        assert!(config.should_capture_window("Secret Santa Planning - Word"));
+        assert!(config.should_capture_target("notepad.exe", Some("notes.txt - Notepad")));
     }
 
     #[test]

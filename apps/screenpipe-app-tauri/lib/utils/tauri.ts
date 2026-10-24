@@ -2029,6 +2029,15 @@ accessibilityWalkDisabled?: boolean;
  */
 untitledSafeApps?: string[];
 /**
+ * Extra credential-file name globs (`*`, `?`; case-insensitive, matched
+ * against each file name in a window title and each whole title
+ * segment), added to the built-in credential-file title rule. A window
+ * whose title matches is excluded on every capture path, like an
+ * `ignoredWindows` match. Empty by default; the built-in list
+ * (`screenpipe_capture_policy::credential_files`) always applies.
+ */
+credentialFilePatterns?: string[];
+/**
  * Automatically detect and skip incognito / private browsing windows.
  */
 ignoreIncognitoWindows: boolean;
