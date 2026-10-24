@@ -715,6 +715,113 @@ pub const GENERIC_TOKEN_MAX_MEAN_LOWERCASE_RUN: f64 = 3.5;
 /// candidate (before or after) is its context.
 pub const GENERIC_TOKEN_CONTEXT_WORDS: usize = 16;
 
+// Joined names (SI-1 follow-up, 2026-10-24). A candidate that passes the
+// whole-run tests above and contains a separator (`-`, `_`, `/` or `+`) is
+// also judged piece by piece: a hyphen-, underscore- or slash-joined name
+// built from ordinary parts (words, metric and resource names that read as
+// words, hex instance/volume/security-group ids, UUID groups, numbers, a
+// single short piece) can look mixed and random as a whole without being a
+// token, for example the CloudWatch alarm name
+// `awsec2-i-<17 hex>-CPUUtilization`. A run without a separator is judged
+// exactly as before.
+//
+// Pieces: the parts between separators, with every single-case run (`0-9a-f`
+// or `0-9A-F`) of at least [`GENERIC_TOKEN_MIN_HEX_RUN_CHARS`] hex digits
+// that contains a digit split out as its own (ordinary) piece, so a CDK hash
+// or an id glued to a name (`ProcessOrdersFunction3C5D21A7`, `Api3F2A9B1C`)
+// leaves the name on its own.
+//
+// Uniformly mixed pieces: when every piece has at least
+// [`GENERIC_TOKEN_MIN_PART_CHARS`] characters, is not hex-only and has at
+// least two of upper case, lower case and digits, the candidate is a random
+// token printed in groups (`<10>-<10>-<10>`) as far as this rule can tell,
+// and the whole-run decision stands. Joined names of that shape that also
+// pass the whole-run tests (every piece six or more characters and mixing
+// case or digits: `WebTier01-AppTier02-DbTier03-CacheTier04`,
+// `vmWebProd01-nicWebProd01-ipconfig1`) are therefore flagged as before; a
+// hex id, a single-class part or a short piece makes the pieces below
+// decide.
+//
+// Otherwise short pieces (shorter than [`GENERIC_TOKEN_MIN_PART_CHARS`],
+// other than hex runs) join their neighbours, so a random token printed in
+// short or unequal groups (`xK9m-Pq2v-L7wZ-Rt4n-...`, `<5>-<10>-<5>-<10>-<5>`)
+// is judged in long pieces: two or more consecutive short pieces become one
+// piece, and a piece that is still short joins the following piece when that
+// is long and not a hex run, or, when it is the last piece, the preceding
+// piece when that is long and not a hex run. Otherwise (before a hex run, or
+// last after one) it stays on its own and is not random: the `i` of
+// `awsec2-i-<hex>`, the `Api` of `MyStack-Api<hash>-...`. A short piece is
+// thus judged with its neighbour and can make an abbreviation neighbour read
+// as random (`Lvl3-WebSrv01-SqlDb02-AppGw03-Prod`, a limit below). A piece is *random* when it has
+// at least [`GENERIC_TOKEN_MIN_PART_CHARS`] characters, is not hex-only, has
+// lower case and at least one upper-case letter or digit, and either passes
+// the whole-run class-change and lower-case-run tests or, failing them, has
+// lower case that does not read as words: fewer than
+// [`GENERIC_TOKEN_MIN_WORD_VOWEL_PERCENT`] percent of its lower-case letters
+// are `a e i o u y` (`tilization` has 50%; a random clump such as
+// `sxqhmzj7` has none). Pieces without lower case (acronyms with years,
+// CloudFormation's upper-case-and-digit name suffixes) are not random.
+// Entropy is judged on the whole run only. The candidate is a token when its
+// random pieces hold at least [`GENERIC_TOKEN_MIN_RANDOM_PART_CHARS`]
+// characters and at least [`GENERIC_TOKEN_MIN_RANDOM_PART_PERCENT`] percent
+// of its non-separator characters, and the randomness is not concentrated in
+// one short piece: the longest random piece has at least
+// [`GENERIC_TOKEN_MIN_LONGEST_RANDOM_PART_CHARS`] characters or the random
+// pieces together at least [`GENERIC_TOKEN_MIN_SPREAD_RANDOM_CHARS`]. That
+// keeps a generated resource name whose only random piece is a 12- or
+// 13-character suffix after a hash or a short name (CloudFormation, Lambda)
+// from becoming a token.
+//
+// Detection is below the whole-run tests alone for some tokens that contain
+// a separator (accepted by the owner, 2026-10-24; the measured table is in
+// docs/CONTENT_SCREENING.md). When the pieces are not all uniformly mixed and,
+// after short pieces join their neighbours, no piece reaches 14 characters
+// and the pieces other than the shortest hold fewer than 24 characters,
+// every piece must read as random on its own, and a random base62 piece
+// fails the piece test about 8% of the time at 6 characters, 5 to 6% at 7 to
+// 8, 3 to 4% at 9 to 10 and 2 to 3% at 11 to 13. In calibration runs (4,000
+// random tokens per shape): four groups of 6 to 8 characters plus a short
+// group (`<7>-<7>-<7>-<7>-<2>`, `<8>-<8>-<8>-<3>-<3>`) lose 16 to 22
+// percentage points, the largest loss found; three groups of 9 to 11 whose
+// short group leaves the merged piece under 14 characters
+// (`<10>-<10>-<10>-<2>`, `<9>-<9>-<9>-<3>`) about 6 to 11 points; other
+// grouped shapes measured up to about 5 points; base64url/base64 tokens that
+// happen to contain a separator under 1 point.
+// Label-prefixed tokens (`acme_live_<32 random>`) are detected with
+// their whole span. Limits: a token with a label longer than its random part
+// is missed; joined names built from abbreviations and digits (above, and
+// `MyVm01Prod-WebSrv01Test-AppGw02Prod`), short stack and construct names
+// (`ApiStack-OrdersFn<hash>-<12-character suffix>`, `MyStack-ApiHandler-
+// <13-character suffix>`, a CDK hash without a digit) and dated names built
+// from short pieces (`Report_Q4_FY26_v2_Final_2026_10_24_Draft1_JDoe`) still
+// read as random, as they did before this rule.
+
+/// Minimum length, in characters, of a piece judged random (see above).
+pub const GENERIC_TOKEN_MIN_PART_CHARS: usize = 6;
+
+/// Minimum length of a single-case hex-digit run (with a digit) split out
+/// of a part.
+pub const GENERIC_TOKEN_MIN_HEX_RUN_CHARS: usize = 8;
+
+/// Minimum total length, in characters, of a candidate's random pieces.
+pub const GENERIC_TOKEN_MIN_RANDOM_PART_CHARS: usize = 16;
+
+/// Minimum share, in percent, of a candidate's non-separator characters
+/// that lie in random pieces.
+pub const GENERIC_TOKEN_MIN_RANDOM_PART_PERCENT: usize = 50;
+
+/// The longest random piece must have this many characters, unless the
+/// random pieces hold [`GENERIC_TOKEN_MIN_SPREAD_RANDOM_CHARS`] together.
+pub const GENERIC_TOKEN_MIN_LONGEST_RANDOM_PART_CHARS: usize = 14;
+
+/// See [`GENERIC_TOKEN_MIN_LONGEST_RANDOM_PART_CHARS`].
+pub const GENERIC_TOKEN_MIN_SPREAD_RANDOM_CHARS: usize = 24;
+
+/// A piece whose lower-case letters are at least this many percent vowels
+/// (`a e i o u y`) reads as words when it fails the class-change or
+/// lower-case-run test. Uniformly random letters are about 23% vowels.
+pub const GENERIC_TOKEN_MIN_WORD_VOWEL_PERCENT: usize = 25;
+
 /// Credential context words: the shared
 /// `credential_files::CREDENTIAL_CONTEXT_PATTERN` (token, secret, password,
 /// passwd, passphrase, credential, bearer, authorization, api key, access
@@ -843,7 +950,8 @@ fn is_integrity_digest(text: &str, start: usize, core: &str) -> bool {
     DIGEST_LABEL.is_match(&text[from..start])
 }
 
-/// Shape test for one trimmed candidate (ASCII only by construction).
+/// Shape test for one trimmed candidate (ASCII only by construction): the
+/// whole run, then its parts (see [`GENERIC_TOKEN_MIN_PART_CHARS`]).
 fn looks_like_generic_token(core: &str) -> bool {
     let bytes = core.as_bytes();
     if bytes.len() < GENERIC_TOKEN_MIN_CHARS {
@@ -857,6 +965,172 @@ fn looks_like_generic_token(core: &str) -> bool {
     if bytes.iter().all(|b| b.is_ascii_hexdigit() || *b == b'-') {
         return false;
     }
+    if !(has_token_entropy(bytes) && mixes_like_random(bytes)) {
+        return false;
+    }
+    if !bytes.iter().any(|b| is_name_separator(*b)) {
+        return true;
+    }
+    let raw = joined_name_raw_pieces(bytes);
+    // Uniformly mixed pieces (a random token split into groups): keep the
+    // whole-run decision.
+    if raw
+        .iter()
+        .all(|(piece, hex_run)| !hex_run && is_uniformly_mixed_piece(piece))
+    {
+        return true;
+    }
+    let (mut chars, mut random, mut longest) = (0usize, 0usize, 0usize);
+    for piece in merge_short_pieces(raw) {
+        chars += piece.len();
+        if looks_like_random_part(&piece) {
+            random += piece.len();
+            longest = longest.max(piece.len());
+        }
+    }
+    random >= GENERIC_TOKEN_MIN_RANDOM_PART_CHARS
+        && random * 100 >= GENERIC_TOKEN_MIN_RANDOM_PART_PERCENT * chars
+        && (longest >= GENERIC_TOKEN_MIN_LONGEST_RANDOM_PART_CHARS
+            || random >= GENERIC_TOKEN_MIN_SPREAD_RANDOM_CHARS)
+}
+
+fn is_name_separator(b: u8) -> bool {
+    matches!(b, b'-' | b'_' | b'/' | b'+')
+}
+
+/// A piece that could be one group of a random token: long enough, not
+/// hex-only, and with at least two of upper case, lower case and digits.
+fn is_uniformly_mixed_piece(piece: &[u8]) -> bool {
+    let classes = [
+        piece.iter().any(u8::is_ascii_uppercase),
+        piece.iter().any(u8::is_ascii_lowercase),
+        piece.iter().any(u8::is_ascii_digit),
+    ];
+    piece.len() >= GENERIC_TOKEN_MIN_PART_CHARS
+        && !piece.iter().all(u8::is_ascii_hexdigit)
+        && classes.iter().filter(|present| **present).count() >= 2
+}
+
+/// The non-empty pieces of a joined candidate before merging (see
+/// [`GENERIC_TOKEN_MIN_PART_CHARS`]): separator-free parts with single-case
+/// hex runs split out, each flagged when it is such a hex run.
+fn joined_name_raw_pieces(core: &[u8]) -> Vec<(&[u8], bool)> {
+    let run = |part: &[u8], digits: fn(&u8) -> bool| part.iter().take_while(|b| digits(b)).count();
+    let lower_hex = |b: &u8| b.is_ascii_digit() || (b'a'..=b'f').contains(b);
+    let upper_hex = |b: &u8| b.is_ascii_digit() || (b'A'..=b'F').contains(b);
+    let mut raw: Vec<(&[u8], bool)> = Vec::new();
+    for part in core.split(|b| is_name_separator(*b)) {
+        let (mut start, mut i) = (0, 0);
+        while i < part.len() {
+            let (lower, upper) = (run(&part[i..], lower_hex), run(&part[i..], upper_hex));
+            let len = if lower >= GENERIC_TOKEN_MIN_HEX_RUN_CHARS {
+                lower
+            } else if upper >= GENERIC_TOKEN_MIN_HEX_RUN_CHARS {
+                upper
+            } else {
+                i += 1;
+                continue;
+            };
+            let end = i + len;
+            if part[i..end].iter().any(u8::is_ascii_digit) {
+                raw.push((&part[start..i], false));
+                raw.push((&part[i..end], true));
+                start = end;
+            }
+            i = end;
+        }
+        raw.push((&part[start..], false));
+    }
+    raw.retain(|(piece, _)| !piece.is_empty());
+    raw
+}
+
+/// Joins short pieces (other than hex runs) to their neighbours: two or
+/// more consecutive short pieces become one piece, and a piece that is still
+/// short joins the following piece when that is a long piece other than a
+/// hex run, or, when it is the last piece, the preceding such piece.
+/// Otherwise it stays as it is.
+fn merge_short_pieces(raw: Vec<(&[u8], bool)>) -> Vec<Vec<u8>> {
+    let is_short =
+        |piece: &[u8], hex_run: bool| !hex_run && piece.len() < GENERIC_TOKEN_MIN_PART_CHARS;
+    // (piece, is a hex run)
+    let mut grouped: Vec<(Vec<u8>, bool)> = Vec::new();
+    let mut short: Vec<&[u8]> = Vec::new();
+    let flush = |short: &mut Vec<&[u8]>, grouped: &mut Vec<(Vec<u8>, bool)>| {
+        if short.len() >= 2 {
+            grouped.push((short.concat(), false));
+        } else {
+            grouped.extend(short.iter().map(|piece| (piece.to_vec(), false)));
+        }
+        short.clear();
+    };
+    for (piece, hex_run) in raw {
+        if is_short(piece, hex_run) {
+            short.push(piece);
+        } else {
+            flush(&mut short, &mut grouped);
+            grouped.push((piece.to_vec(), hex_run));
+        }
+    }
+    flush(&mut short, &mut grouped);
+    let mut pieces: Vec<(Vec<u8>, bool)> = Vec::with_capacity(grouped.len());
+    let mut iter = grouped.into_iter().peekable();
+    while let Some((piece, hex_run)) = iter.next() {
+        if !is_short(&piece, hex_run) {
+            pieces.push((piece, hex_run));
+            continue;
+        }
+        match iter.peek_mut() {
+            Some((next, next_hex)) if !is_short(next, *next_hex) && !*next_hex => {
+                next.splice(0..0, piece);
+            }
+            Some(_) => pieces.push((piece, hex_run)),
+            None => match pieces.last_mut() {
+                Some((previous, previous_hex))
+                    if !is_short(previous, *previous_hex) && !*previous_hex =>
+                {
+                    previous.extend_from_slice(&piece);
+                }
+                _ => pieces.push((piece, hex_run)),
+            },
+        }
+    }
+    pieces.into_iter().map(|(piece, _)| piece).collect()
+}
+
+/// The pieces of a joined candidate after joining short pieces (see
+/// [`GENERIC_TOKEN_MIN_PART_CHARS`]).
+#[cfg(test)]
+fn joined_name_pieces(core: &[u8]) -> Vec<Vec<u8>> {
+    merge_short_pieces(joined_name_raw_pieces(core))
+}
+
+/// One piece of a joined candidate is random (see
+/// [`GENERIC_TOKEN_MIN_PART_CHARS`]).
+fn looks_like_random_part(part: &[u8]) -> bool {
+    if part.len() < GENERIC_TOKEN_MIN_PART_CHARS || part.iter().all(u8::is_ascii_hexdigit) {
+        return false;
+    }
+    let lower = part.iter().filter(|b| b.is_ascii_lowercase()).count();
+    let upper_or_digit = part
+        .iter()
+        .any(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    if lower == 0 || !upper_or_digit {
+        return false;
+    }
+    if mixes_like_random(part) {
+        return true;
+    }
+    // Failing the mixing tests: random only if its lower case is not words.
+    let vowels = part
+        .iter()
+        .filter(|b| matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'y'))
+        .count();
+    vowels * 100 < GENERIC_TOKEN_MIN_WORD_VOWEL_PERCENT * lower
+}
+
+/// [`GENERIC_TOKEN_MIN_ENTROPY_BITS`] for a whole candidate.
+fn has_token_entropy(bytes: &[u8]) -> bool {
     let mut counts = [0usize; 128];
     for &b in bytes {
         counts[usize::from(b & 0x7f)] += 1;
@@ -870,9 +1144,13 @@ fn looks_like_generic_token(core: &str) -> bool {
             -p * p.log2()
         })
         .sum();
-    if entropy < GENERIC_TOKEN_MIN_ENTROPY_BITS {
-        return false;
-    }
+    entropy >= GENERIC_TOKEN_MIN_ENTROPY_BITS
+}
+
+/// The class-change ([`GENERIC_TOKEN_MIN_CLASS_CHANGE_PERCENT`]) and
+/// lower-case-run ([`GENERIC_TOKEN_MAX_MEAN_LOWERCASE_RUN`]) tests, shared by
+/// whole candidates and their pieces.
+fn mixes_like_random(bytes: &[u8]) -> bool {
     let class = |b: u8| match b {
         b'A'..=b'Z' => 0u8,
         b'a'..=b'z' => 1,
@@ -2561,7 +2839,375 @@ mod tests {
             ]
             .map(str::to_string),
         );
+        corpus.extend(joined_name_corpus());
         corpus
+    }
+
+    const DIGITS: &[u8] = b"0123456789";
+    const UPPER_HEX: &[u8] = b"0123456789ABCDEF";
+    const UPPER_DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const BASE36: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    /// Kubernetes generated-name alphabet (no vowels, no 0/1/3).
+    const K8S: &[u8] = b"bcdfghjklmnpqrstvwxz2456789";
+
+    const ALARM_METRICS: [&str; 15] = [
+        "NetworkOut",
+        "DiskReadOps",
+        "DiskWriteBytes",
+        "MemoryUtilization",
+        "HealthyHostCount",
+        "RequestCount",
+        "TargetResponseTime",
+        "HTTPCode_Target_5XX_Count",
+        "CPUSurplusCreditsCharged",
+        "StatusCheckFailed_System",
+        "VolumeQueueLength",
+        "BurstBalance",
+        "FreeStorageSpace",
+        "DatabaseConnections",
+        "ReplicaLag",
+    ];
+
+    fn synthetic_uuid(rng: &mut Synthetic) -> String {
+        let raw = rng.string(HEX, 32);
+        format!(
+            "{}-{}-{}-{}-{}",
+            &raw[..8],
+            &raw[8..12],
+            &raw[12..16],
+            &raw[16..20],
+            &raw[20..]
+        )
+    }
+
+    /// Joined names built from ordinary parts (SI-1 follow-up), each beside
+    /// a credential word: AWS alarm names, ARNs, resource names and
+    /// instance/volume/security-group ids; Kubernetes, Docker and Azure
+    /// names and ids; UUID-like and slug identifiers; kebab-case and
+    /// snake_case names. Ids are generated; names are documentation-style.
+    fn joined_name_corpus() -> Vec<String> {
+        let mut rng = Synthetic(0x51_0200);
+        let mut corpus = Vec::new();
+        for _ in 0..200 {
+            let instance = rng.string(HEX, 17);
+            let volume = rng.string(HEX, 17);
+            let group = rng.string(HEX, 17);
+            let account = rng.string(DIGITS, 12);
+            let uuid = synthetic_uuid(&mut rng);
+            let upper_uuid = synthetic_uuid(&mut rng).to_uppercase();
+            let cdk_hash = rng.string(UPPER_HEX, 8);
+            let cfn_suffix = rng.string(UPPER_DIGITS, 13);
+            let lambda_suffix = rng.string(BASE62, 12);
+            let secret_suffix = rng.string(BASE62, 6);
+            let pod_hash = rng.string(K8S, 10);
+            let pod_suffix = rng.string(K8S, 5);
+            let container = rng.string(HEX, 12);
+            let digest = rng.string(HEX, 64);
+            let page = rng.string(HEX, 32);
+            let class_hash = rng.string(BASE36, 7);
+            let node = rng.string(DIGITS, 8);
+            corpus.extend([
+                // AWS alarm names (the SI-1 follow-up case) and ARNs.
+                format!("ALARM: \"awsec2-i-{instance}-CPUUtilization\" in Asia Pacific (Sydney)"),
+                format!("Re: rotate the API key | ALARM: \"awsec2-i-{instance}-StatusCheckFailed\""),
+                format!("OK: \"awsec2-i-{instance}-NetworkPacketsOut\" token expiry notice"),
+                format!("ALARM: \"awsec2-i-{instance}-EBSIOBalance\" secret scan"),
+                format!("ALARM: \"awsec2-MyWebServer01-i-{instance}-NetworkIn\" api key"),
+                format!(
+                    "arn:aws:cloudwatch:ap-southeast-2:{account}:alarm:awsec2-i-{instance}-CPUCreditBalance api key"
+                ),
+                format!(
+                    "ALARM: \"TargetTracking-table/OrdersTable-ProvisionedCapacityHigh-{uuid}\" token"
+                ),
+                format!(
+                    "arn:aws:secretsmanager:us-east-1:{account}:secret:Prod/PaymentService/DatabaseCredentials-{secret_suffix}"
+                ),
+                format!(
+                    "arn:aws:lambda:us-east-1:{account}:function:MyAppStack-ProcessOrdersFunction{cdk_hash}-{lambda_suffix} api key"
+                ),
+                format!(
+                    "arn:aws:iam::{account}:role/MyAppStack-WebServerInstanceRole{cdk_hash}-{cfn_suffix} credential"
+                ),
+                format!(
+                    "arn:aws:ec2:ap-southeast-2:{account}:security-group/sg-{group} access key"
+                ),
+                // AWS resource names and ids.
+                format!("AWSReservedSSO_AdministratorAccess_{} session token", &page[..16]),
+                format!("MyAppStack-WebServerInstanceRole{cdk_hash}-{cfn_suffix} secret"),
+                format!("MyWebServer-Prod-i-{instance} vol-{volume} sg-{group} access key"),
+                format!("WebServerSecurityGroup-sg-{group}-InboundHTTPS2026 secret"),
+                format!("ProdDataVolume-vol-{volume}-DailySnapshot2026-i-{instance} token"),
+                format!("i-{instance}_vol-{volume}_sg-{group}_WebTier01 password"),
+                // Kubernetes.
+                format!("ReplicaSet/payments-api-{pod_hash} scaled up; Secret default-token-{pod_suffix}"),
+                format!("Deployment/CheckoutService-Canary-v2-{pod_hash}-{pod_suffix} bearer token"),
+                format!(
+                    "Successfully assigned default/AuthTokenRefresher-{pod_hash}-{pod_suffix} to aks-nodepool1-{node}-vmss000000"
+                ),
+                format!("kube-system/CoreDNS-Autoscaler2026-{pod_hash}-{pod_suffix} service account token"),
+                // Docker.
+                format!("Container MyProject_WebFrontend_1 ({container}) uses secret db_password"),
+                format!("MyProject_PostgresData2026_{digest} volume, password file mounted"),
+                format!("buildx_buildkit_MyBuilder0-{container}_CredentialHelper secret"),
+                format!("docker.io/MyTeam/AuthService2026:v2-{} token", &container[..7]),
+                // Azure resource ids.
+                format!(
+                    "/subscriptions/{uuid}/resourceGroups/rg-MyApp-Prod-001/providers/Microsoft.KeyVault/vaults/kv-MyApp-Prod01 secret"
+                ),
+                format!(
+                    "/subscriptions/{uuid}/resourceGroups/MyResourceGroup/providers/Microsoft.Compute/virtualMachines/vmWebProd01 password"
+                ),
+                format!(
+                    "/subscriptions/{upper_uuid}/resourceGroups/RG-Identity-Prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-TokenBroker-01 credential"
+                ),
+                // UUID-like and slug identifiers.
+                format!("Order-{upper_uuid}-Receipt2026 token"),
+                format!("{uuid}_{upper_uuid} credential"),
+                format!("Project-Plan-Q4-2026-{page} api key"),
+                format!("How-to-Rotate-Your-API-Key-in-2026-{} token", &page[..12]),
+                format!("Invoice_2026_10_{upper_uuid}_Final secret"),
+                format!("session-{uuid}-UserProfile2026-Cache token"),
+                format!("css-{class_hash}-MuiInputBase-input-MuiOutlinedInput-input token"),
+            ]);
+            // Further CloudWatch metric names in EC2 alarm names.
+            corpus.extend(
+                ALARM_METRICS
+                    .iter()
+                    .map(|metric| format!("ALARM: \"awsec2-i-{instance}-{metric}\" | new API key")),
+            );
+            corpus.extend([
+                format!("MyAppStack2-ProcessOrdersFunction{cdk_hash}-{lambda_suffix} token"),
+                format!("ProdApiStack-MyFunctionServiceRole{cdk_hash}-{cfn_suffix} secret"),
+                format!(
+                    "MyApp-Prod-Stack-ApiGatewayCloudWatchRole{cdk_hash}-{cfn_suffix} credential"
+                ),
+                format!("vmWebProd01_OsDisk_1_{page} password"),
+                // Short stack and construct names (CDK physical names).
+                format!("MyStack-Api{cdk_hash}-{cfn_suffix} api key"),
+                format!("ProdStack-WebFn{cdk_hash}-{cfn_suffix} secret"),
+                format!("MyStack-Handler{cdk_hash}-{lambda_suffix} token"),
+                format!("ApiStack-Queue{cdk_hash}-{cfn_suffix} credential"),
+            ]);
+        }
+        corpus.extend(
+            [
+                "get-user-access-token-for-ServiceAccount-v2-2026 token",
+                "MAX_RETRY_COUNT_FOR_TOKEN_REFRESH_2026_Q4 secret",
+                "My_Service_Account_Credentials_2025_Prod password",
+                "Invoke-ScreenWiseBuild-Task-RootTest-Package-Redact2026 token",
+                "Get-AzKeyVaultSecret-VaultName-ProdVault-Name-ServiceApiKey secret",
+                "feature/JIRA-1234-Add-Api-Key-Rotation-For-OAuth2-Clients secret",
+                "test_generic_token_false_positive_corpus_has_no_hits_2026_V2 token",
+                "release-local-build-x86_64-pc-windows-msvc-ScreenWise2026 token",
+                "Microsoft-Windows-TokenBroker/Operational-Event1098 credential",
+                "x86_64-pc-windows-msvc/release-local/deps/screenpipe_redact-0a1b2c3d4e5f6a7b token",
+                "aws-sdk-secretsmanager-1.48.0_Cargo.lock-ScreenWise2026 secret",
+                "user_profile_v2_2026_10_24_MigrationBackfill_Step3 password",
+                "MyStack-Api3F2A9B1C-K3XQ9ZT2M7VWA api key",
+            ]
+            .map(str::to_string),
+        );
+        corpus
+    }
+
+    #[test]
+    fn joined_alarm_name_is_mixed_as_a_whole_but_ordinary_part_by_part() {
+        // The SI-1 follow-up false positive: for most instance ids the joined
+        // run passes every whole-run test, and only the part rule rejects it.
+        let mut rng = Synthetic(0x51_0201);
+        for metric in ["CPUUtilization", "StatusCheckFailed", "NetworkPacketsOut"] {
+            let mut mixed = 0;
+            for _ in 0..100 {
+                let name = format!("awsec2-i-{}-{metric}", rng.string(HEX, 17));
+                let bytes = name.as_bytes();
+                assert!(bytes.len() >= GENERIC_TOKEN_MIN_CHARS, "{name}");
+                if has_token_entropy(bytes) && mixes_like_random(bytes) {
+                    mixed += 1;
+                }
+                assert!(!looks_like_generic_token(&name), "{name}");
+                let text = format!("ALARM: \"{name}\" | Re: new API key");
+                assert!(generic_token_hits(&text, false).is_empty(), "{text}");
+                assert!(generic_token_hits_in(&text, false, &[], true).is_empty());
+            }
+            assert!(mixed >= 50, "{metric}: {mixed} of 100 mixed as a whole");
+        }
+    }
+
+    #[test]
+    fn joined_name_pieces_split_hex_runs_and_merge_short_groups() {
+        let pieces = |core: &str| -> Vec<String> {
+            joined_name_pieces(core.as_bytes())
+                .into_iter()
+                .map(|piece| String::from_utf8(piece).unwrap())
+                .collect()
+        };
+        assert_eq!(
+            pieces("MyStack-Api3F2A9B1C-K3XQ9ZT2M7VWA"),
+            ["MyStack", "Api", "3F2A9B1C", "K3XQ9ZT2M7VWA"]
+        );
+        // A hex-letter run without a digit is not split out.
+        assert_eq!(
+            pieces("Feedface-deadbeefCafe"),
+            ["Feedface", "deadbeefCafe"]
+        );
+        assert_eq!(pieces("xK9m-Pq2v-L7wZ_Rt4n"), ["xK9mPq2vL7wZRt4n"]);
+        // Only single-case hex runs are split out.
+        // (A short piece joins the following long piece.)
+        assert_eq!(pieces("MyApp-ulcF93bB27Xy"), ["MyAppulcF93bB27Xy"]);
+        // Short groups between longer ones join them; the last joins the
+        // preceding piece. A short piece before a hex run stays alone.
+        assert_eq!(
+            pieces("pU0QO-0nB40lM7jx-PVI6U-HFTveSLabB-2TGNT"),
+            ["pU0QO0nB40lM7jx", "PVI6UHFTveSLabB2TGNT"]
+        );
+        assert_eq!(
+            generic_hit_texts("password: pU0QO-0nB40lM7jx-PVI6U-HFTveSLabB-2TGNT", false),
+            ["pU0QO-0nB40lM7jx-PVI6U-HFTveSLabB-2TGNT"]
+        );
+        assert_eq!(
+            pieces("WebServerInstanceRoleFEF57500-x"),
+            ["WebServerInstanceRole", "FEF57500", "x"]
+        );
+        assert_eq!(
+            pieces("awsec2-i-0123456789abcdef0-CPUUtilization"),
+            ["awsec2", "i", "0123456789abcdef0", "CPUUtilization"]
+        );
+    }
+
+    #[test]
+    fn joined_abbreviation_names_are_a_known_limit() {
+        // Documented limit: names joined from vowel-poor abbreviations and
+        // digits still read as random beside a credential word.
+        for text in [
+            "api key: MyVm01Prod-WebSrv01Test-AppGw02Prod",
+            "password: Report_Q4_FY26_v2_Final_2026_10_24_Draft1_JDoe",
+        ] {
+            assert_eq!(generic_hit_texts(text, false).len(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn generic_tokens_with_separators_are_still_detected() {
+        let mut rng = Synthetic(0x51_0300);
+        // Random base64url/base64 tokens that contain a separator.
+        for (alphabet, separators, len, min_percent) in [
+            (BASE64URL, b"-_", 32, 88),
+            (BASE64URL, b"-_", 36, 97),
+            (BASE64URL, b"-_", 43, 98),
+            (BASE64, b"+/", 40, 98),
+        ] {
+            let (mut trials, mut detected) = (0, 0);
+            while trials < 2000 {
+                let token = rng.string(alphabet, len);
+                let inner = &token.as_bytes()[1..len - 1];
+                if !inner.iter().any(|b| separators.contains(b)) {
+                    continue;
+                }
+                trials += 1;
+                if !generic_token_hits(&format!("token: {token}"), false).is_empty() {
+                    detected += 1;
+                }
+            }
+            assert!(
+                detected * 100 >= trials * min_percent,
+                "{len}-char tokens with separators: {detected}/{trials}"
+            );
+        }
+        // Random base62 tokens printed in groups (detected by the whole-run
+        // tests alone): equal groups of 3 to 11 characters, and unequal
+        // groups with short groups between longer ones.
+        // Measured losses against the whole-run tests (accepted by the
+        // owner, 2026-10-24) are asserted at their floors: three groups of 9 to 11 or
+        // four of 7 to 8 with a short group lose about 6 to 20 points.
+        let groups: [(&[usize], usize); 22] = [
+            (&[4; 8], 98),
+            (&[5; 7], 98),
+            (&[3; 11], 98),
+            (&[6; 6], 98),
+            (&[7; 5], 98),
+            (&[8; 4], 98),
+            (&[10; 3], 98),
+            (&[11; 3], 98),
+            (&[5, 10, 5, 10, 5], 98),
+            (&[4, 8, 4, 8, 4, 8], 98),
+            (&[8, 4, 8, 4, 8, 4], 97),
+            (&[10, 5, 10, 5, 10], 98),
+            (&[10, 3, 10, 3, 10], 95),
+            (&[12, 4, 12, 4], 97),
+            (&[10, 10, 10, 2], 88),
+            (&[11, 11, 5, 5], 88),
+            (&[10, 2, 10, 2, 10], 92),
+            (&[9, 3, 9, 3, 9], 92),
+            (&[7, 7, 7, 7, 2], 77),
+            (&[9, 9, 9, 3], 85),
+            (&[9, 4, 9, 9], 85),
+            (&[8, 8, 8, 3, 3], 80),
+        ];
+        for (sizes, min_percent) in groups {
+            let trials = 2000;
+            let detected = (0..trials)
+                .filter(|_| {
+                    let token = sizes
+                        .iter()
+                        .map(|size| rng.string(BASE62, *size))
+                        .collect::<Vec<_>>()
+                        .join("-");
+                    let text = format!("password: {token}");
+                    generic_token_hits(&text, false)
+                        .into_iter()
+                        .any(|r| &text[r] == token.as_str())
+                })
+                .count();
+            assert!(
+                detected * 100 >= trials * min_percent,
+                "{sizes:?} groups: {detected}/{trials}"
+            );
+        }
+        // 32 base62 characters with three separators at random positions.
+        let trials = 2000;
+        let detected = (0..trials)
+            .filter(|_| {
+                let mut token = rng.string(BASE62, 32).into_bytes();
+                let mut placed = 0;
+                while placed < 3 {
+                    let at = 1 + (rng.next() % 30) as usize;
+                    if token[at] != b'-' {
+                        token[at] = b'-';
+                        placed += 1;
+                    }
+                }
+                let token = String::from_utf8(token).unwrap();
+                let text = format!("password: {token}");
+                generic_token_hits(&text, false)
+                    .into_iter()
+                    .any(|r| &text[r] == token.as_str())
+            })
+            .count();
+        assert!(
+            detected * 100 >= trials * 93,
+            "32 characters, three separators: {detected}/{trials}"
+        );
+        // Random tokens joined to a label or split into long pieces keep
+        // their whole span.
+        for seed in 0..50 {
+            let a = synthetic_token(0x51_0400 + seed, 32);
+            let mut rng = Synthetic(0x51_0500 + seed);
+            let (b, c) = (rng.string(BASE62, 16), rng.string(BASE62, 16));
+            for token in [
+                format!("acme_live_{a}"),
+                format!("prod-api-{a}"),
+                format!("{a}_{}", &c[..8]),
+                format!("{}-{}", &a[..16], &a[16..]),
+                format!("{}_{}_{}", &a[..12], &b[..12], &c[..12]),
+            ] {
+                let text = format!("api key: {token}");
+                let hits: Vec<&str> = generic_token_hits(&text, false)
+                    .into_iter()
+                    .map(|r| &text[r])
+                    .collect();
+                assert_eq!(hits, [token.as_str()], "{token}");
+            }
+        }
     }
 
     #[test]
@@ -2577,7 +3223,7 @@ mod tests {
             hits.len(),
             corpus.len()
         );
-        assert_eq!(corpus.len(), 2418);
+        assert_eq!(corpus.len(), 14031);
         // The same corpus with title-lent context (every fixture inside a
         // window whose native title has a credential word).
         let titled: Vec<&String> = corpus

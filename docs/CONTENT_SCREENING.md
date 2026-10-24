@@ -181,22 +181,176 @@ digests (`sha512-…`, `sha384-…`, Go `h1:…`, `sha256:`/`sha256=` values) ar
 not candidates. Its hits follow the
 existing tiers: redacted when the redaction tier allows, otherwise (fail-open
 frames, thresholds, unlocatable copies) the frame is withheld. Existing
-detectors are unchanged; generic hits never overlap them. Synthetic
-measurements: 0 hits, both with proximity context and with title-lent context, on 2,418
-false-positive fixtures placed beside credential
+detectors are unchanged; generic hits never overlap them.
+
+Joined names (2026-10-24, after a false positive on an AWS CloudWatch alarm
+name `awsec2-i-<hex id>-<Metric>` in a mail subject line withheld whole
+frames): a candidate containing `-`, `_`, `/` or `+` is also judged piece by
+piece; a run without a separator is judged exactly as before. Pieces are the
+parts between separators, with single-case runs of 8 or more hex digits that
+contain a digit (ids, CDK hashes glued to a name) split out as ordinary
+pieces. When every piece has 6 or more characters, is not hex-only and has two
+of upper case, lower case and digits (a random token printed in groups), the
+whole-run decision stands; joined names of that shape (every piece six or more
+characters and mixing case or digits, such as
+`WebTier01-AppTier02-DbTier03-CacheTier04`) are flagged as before. Otherwise
+short pieces (under 6 characters) join their neighbours: two or more
+consecutive short pieces become one piece, and a piece that is still short
+joins the following long piece other than a hex run, or, when it is the last
+piece, the preceding long piece other than a hex run; otherwise (before a hex
+run, or last after one) it stays alone and is not random. A short piece is
+thus judged together with its neighbour and can make an abbreviation
+neighbour read as random (`Lvl3-WebSrv01-SqlDb02-AppGw03-Prod`). A piece is random when it has at least 6 characters, is not
+hex-only, has lower case and an upper-case letter or digit, and either passes
+the class-change and lower-case-run tests above or has lower case with under
+25% vowels (`a e i o u y`: random letter clumps rather than words); pieces
+without lower case are not random. The random pieces must hold at least 16
+characters and at least half of the candidate's non-separator characters,
+and either the longest random piece has 14 or more characters or the random
+pieces 24 or more together. So names joined from words, metric and resource
+names that read as words, hex ids, UUID groups and numbers are not
+candidates, and neither are generated resource names whose
+only random piece is a 12- or 13-character CloudFormation or Lambda suffix
+after a hash or a short name. The thresholds are documented beside
+`GENERIC_TOKEN_MIN_PART_CHARS`.
+
+Synthetic measurements: 0 hits, both with proximity context and with
+title-lent context, on 14,031 false-positive fixtures placed beside credential
 words (git SHAs, short SHAs, UUIDs, hyphen-free UUIDs, upper-case UUIDs,
 22/27-character base64 IDs, sha256 digests, npm/SRI/Go base64 integrity
 digests beside `jsonwebtoken`-style names, build-log lines, paths, URLs,
-identifiers, prose); hex never hits even in a credential-file frame. Detection
-of uniformly random tokens beside a credential word is asserted at no less than
-97% (32 base62 characters), 98% (36 base62, 40 base64, 43 base64url) and 99%
-(48 base62); a calibration run of the same rules measured about 99.4% for
-32-character base62 tokens. Known limits: a 32+ character random-looking ID (for example a
-long base64 document ID) beside a credential word is redacted or, on a
-fail-open frame, withholds the frame; tokens shorter than 32 characters, split
-by OCR into shorter pieces, single-case or without a digit (for example
-upper-case base32 seeds) and hex-only tokens (32/40/64-hex API keys) are not
-detected by this rule. Only the window title counts as credential-file
+identifiers, prose; and joined names: AWS alarm names with 21 metric names,
+ARNs, CloudFormation/CDK resource names with long and short stack and
+construct names and a hash, instance, volume and security-group ids,
+Kubernetes, Docker and Azure names and resource ids, UUID-like and slug
+identifiers, kebab-case and snake_case names); hex never hits even in a
+credential-file frame. Detection of uniformly random tokens beside a credential
+word is asserted at no less than 97% (32 base62 characters), 98% (36 base62,
+40 base64, 43 base64url) and 99% (48 base62); for random tokens that contain a
+separator, at no less than 88% (32 base64url), 97% (36 base64url) and 98% (40
+base64, 43 base64url); for base62 tokens printed in groups, 98% (8 groups of
+4, 7 of 5, 11 of 3, 6 of 6, 5 of 7, 4 of 8, 3 of 10, 3 of 11; 5-10-5-10-5,
+4-8-4-8-4-8, 10-5-10-5-10), 97% (8-4-8-4-8-4, 12-4-12-4), 95%
+(10-3-10-3-10), 92% (10-2-10-2-10, 9-3-9-3-9), 88% (10-10-10-2,
+11-11-5-5), 85% (9-9-9-3, 9-4-9-9), 80% (8-8-8-3-3) and 77% (7-7-7-7-2), and
+for 32 base62 characters with three separators at random positions, 93%; label-prefixed tokens (`acme_live_<32 random>`) and tokens
+split into 12- or 16-character pieces are detected with their whole span. A
+calibration run of the same rules measured about 99.4% for 32-character base62
+tokens.
+
+**Detection loss against the whole-run tests alone (accepted by the
+owner, 2026-10-24).** The joined-name rule detects fewer of some random tokens that
+contain a separator. Mechanism: when the pieces are not all uniformly mixed
+and, after short pieces join their neighbours, no piece reaches 14
+characters and the pieces other than the shortest hold fewer than 24
+characters together, every piece must read as random on its own, and a
+random base62 piece fails the piece test about 8% of the time at 6
+characters, 5 to 6% at 7 to 8, 3 to 4% at 9 to 10 and 2 to 3% at 11 to 13
+(a lower-case clump with vowels, or no lower case). The largest losses found
+are for about 30 random characters printed as four groups of 6 to 8 plus a
+short group (`<7>-<7>-<7>-<7>-<2>`, `<8>-<8>-<8>-<3>-<3>`): 16 to 22
+percentage points. Three groups of 9 to 11 whose short group leaves the
+merged piece under 14 characters (`<10>-<10>-<10>-<2>`, `<9>-<9>-<9>-<3>`)
+lose about 6 to 11 points (`<9>-<9>-<9>-<5>` reaches 14 and loses 1.5);
+other grouped shapes measured lose up to about 5 points; ordinary base64url
+and base64 tokens that happen to contain a separator lose under 1 point.
+Restoring these was not possible without re-admitting false positives the
+rule is meant to remove (dated and kebab-case names, CSS class names). Calibration runs, detected of 4,000 random tokens per shape (all
+containing a separator), sorted by loss:
+
+| Shape | Detected by the joined-name rule | By the whole-run tests alone | Points lost |
+|---|---|---|---|
+| base62, groups 7-7-7-7-1 | 3,166 | 3,978 | 20.30 |
+| base62, groups 6-7-7-7-2 | 3,181 | 3,978 | 19.93 |
+| base62, groups 7-7-7-6-2 | 3,185 | 3,979 | 19.85 |
+| base62, groups 7-7-7-7-2 | 3,197 | 3,978 | 19.52 |
+| base62, groups 2-7-7-7-7 | 3,259 | 3,978 | 17.98 |
+| base62, groups 8-8-8-3-3 | 3,330 | 3,973 | 16.07 |
+| base62, groups 9-9-9-3 | 3,591 | 3,986 | 9.88 |
+| base62, groups 9-9-3-9 | 3,587 | 3,981 | 9.85 |
+| base62, groups 7-3-7-3-7-3 | 3,596 | 3,978 | 9.55 |
+| base62, groups 9-9-9-2 | 3,578 | 3,959 | 9.53 |
+| base62, groups 9-4-9-9 | 3,604 | 3,984 | 9.50 |
+| base62, groups 2-10-10-10 | 3,627 | 3,986 | 8.97 |
+| base62, groups 9-9-9-4 | 3,639 | 3,982 | 8.57 |
+| base62, groups 10-2-10-10 | 3,642 | 3,983 | 8.53 |
+| base62, groups 9-2-9-9-2 | 3,639 | 3,980 | 8.53 |
+| base62, groups 10-10-10-2 | 3,662 | 3,981 | 7.97 |
+| base62, groups 10-10-3-10 | 3,680 | 3,991 | 7.78 |
+| base62, groups 10-10-4-4-4 | 3,666 | 3,977 | 7.78 |
+| base62, groups 3-10-10-10 | 3,686 | 3,989 | 7.58 |
+| base62, groups 11-11-5-5 | 3,694 | 3,982 | 7.20 |
+| base62, groups 11-11-11-1 | 3,736 | 3,988 | 6.30 |
+| base62, groups 6-6-6-6-6-2 | 3,784 | 3,988 | 5.10 |
+| base62, groups 12-12-2-2-2 | 3,771 | 3,972 | 5.03 |
+| base62, groups 10-2-10-2-10 | 3,805 | 3,990 | 4.62 |
+| base62, groups 9-3-9-3-9 | 3,812 | 3,993 | 4.53 |
+| base62, groups 8-5-8-5-8 | 3,840 | 3,991 | 3.77 |
+| base62, groups 10-3-10-3-10 | 3,849 | 3,996 | 3.67 |
+| base62, groups 9-4-9-4-9 | 3,840 | 3,986 | 3.65 |
+| base62, 32 characters, with 3 separators at random positions | 3,842 | 3,965 | 3.08 |
+| base62, groups 8-3-8-3-8-3 | 3,913 | 3,982 | 1.73 |
+| base62, groups 6-2-6-2-6-2-6-2-6 | 3,923 | 3,991 | 1.70 |
+| base62, groups 6-3-6-3-6-3-6 | 3,925 | 3,990 | 1.62 |
+| base62, groups 9-9-9-5 | 3,925 | 3,987 | 1.55 |
+| base62, groups 5-9-9-9 | 3,915 | 3,976 | 1.52 |
+| base62, 36 characters, with 3 separators at random positions | 3,937 | 3,984 | 1.18 |
+| base62, groups 8-4-8-4-8-4 | 3,950 | 3,996 | 1.15 |
+| base62, groups 14-2-14-2 | 3,944 | 3,988 | 1.10 |
+| base62, groups 4-10-4-10-4 | 3,943 | 3,979 | 0.90 |
+| base62, groups 7-2-7-2-7-2-7 | 3,960 | 3,995 | 0.88 |
+| base62, groups 13-3-13-3 | 3,952 | 3,983 | 0.78 |
+| base62, groups 12-4-12-4 | 3,953 | 3,982 | 0.72 |
+| base62, groups 5-10-5-10-5 | 3,967 | 3,990 | 0.57 |
+| base62, 40 characters, with 3 separators at random positions | 3,964 | 3,986 | 0.55 |
+| base64url, 32 characters, with a separator | 3,699 | 3,719 | 0.50 |
+| base62, 32 characters, with 2 separators at random positions | 3,959 | 3,978 | 0.47 |
+| base62, 6 groups of 6 | 3,977 | 3,993 | 0.40 |
+| base62, 36 characters, with 2 separators at random positions | 3,969 | 3,984 | 0.38 |
+| `key-` + 32 base62 | 3,966 | 3,980 | 0.35 |
+| base62, groups 3-3-26 | 3,978 | 3,991 | 0.33 |
+| 32 base62 + `-prod` | 3,949 | 3,961 | 0.30 |
+| base64url, 36, with a separator | 3,971 | 3,982 | 0.28 |
+| base62, 5 groups of 7 | 3,974 | 3,985 | 0.28 |
+| `api-` + 32 base62 | 3,958 | 3,969 | 0.28 |
+| base62, groups 4-8-4-8-4-8 | 3,983 | 3,993 | 0.25 |
+| base64, 40, with a separator | 3,985 | 3,994 | 0.23 |
+| base62, 8 groups of 4 | 3,974 | 3,980 | 0.15 |
+| base62, 4 groups of 8 | 3,977 | 3,982 | 0.12 |
+| base62, groups 10-5-10-5-10 | 3,990 | 3,995 | 0.12 |
+| base62, 7 groups of 5 | 3,984 | 3,988 | 0.10 |
+| base62, 32 characters, with 1 separator at a random position | 3,961 | 3,965 | 0.10 |
+| base62, 40 characters, with 2 separators at random positions | 3,988 | 3,992 | 0.10 |
+| `tok_` + 32 base62 | 3,974 | 3,978 | 0.10 |
+| base62, 3 groups of 11 | 3,987 | 3,990 | 0.07 |
+| base64url, 40, with a separator | 3,990 | 3,993 | 0.07 |
+| base64url, 48, with a separator | 3,995 | 3,998 | 0.07 |
+| base62, 11 groups of 3 | 3,994 | 3,996 | 0.05 |
+| base62, 3 groups of 10 | 3,966 | 3,968 | 0.05 |
+| base62, groups 4-4-4-4-4-4-4-4-4 | 3,993 | 3,995 | 0.05 |
+| base64url, 43, with a separator | 3,996 | 3,997 | 0.03 |
+| base62, groups 5-5-5-5-5-5-5-5 | 3,997 | 3,998 | 0.03 |
+| base62, groups 8-8-8-8-8 | 3,996 | 3,996 | 0.00 |
+| base62, groups 8-8-8-8-8-8 | 3,999 | 3,999 | 0.00 |
+| base62, 36 characters, with 1 separator at a random position | 3,984 | 3,984 | 0.00 |
+| base62, 40 characters, with 1 separator at a random position | 3,989 | 3,989 | 0.00 |
+| base64, 44, with a separator | 3,999 | 3,999 | 0.00 |
+
+Shapes not listed were not measured. A random token of a listed shape that is
+missed is stored unredacted unless another detector matches it.
+
+Known limits: a 32+ character random-looking ID (for example a long base64
+document ID) beside a credential word is redacted or, on a fail-open frame,
+withholds the frame, and so do joined names built from abbreviations and
+digits (`MyVm01Prod-WebSrv01Test-AppGw02Prod`, `vmWebProd01-nicWebProd01-ipconfig1`,
+`Lvl3-WebSrv01-SqlDb02-AppGw03-Prod`),
+short stack and construct names (`ApiStack-OrdersFn<hash>-<12 characters>`,
+`MyStack-ApiHandler-<13 characters>`, a CDK hash without a digit) and dated
+names built from short pieces (`Report_Q4_FY26_v2_Final_2026_10_24_Draft1_JDoe`),
+as they did before the joined-name rule; tokens shorter than 32 characters,
+split by OCR into shorter pieces, carrying a label longer than their random
+part, single-case or without a digit (for example upper-case base32 seeds) and
+hex-only tokens (32/40/64-hex API keys) are not detected by this rule. Only the window title counts as credential-file
 context; a credential file named elsewhere in the frame does not.
 
 **Re-screening stored data** (`screenpipe privacy rescreen`, owner-run only).
