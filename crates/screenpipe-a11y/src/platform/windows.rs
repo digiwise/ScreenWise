@@ -658,6 +658,13 @@ struct HookState {
     text_focus: Option<NativeKeyboardFocus>,
     /// Since when an idle flush has been waiting for re-verification.
     text_hold_since: Option<Instant>,
+    /// The latest UIA focus event classified while the current text was
+    /// buffered (content-free discard diagnostics only; never admission).
+    text_focus_event: Option<input_admission::FocusClass>,
+    /// The most recently emitted or discarded text (diagnostics only).
+    previous_text: Option<input_admission::EndedText>,
+    /// Highest focus-event sequence classified so far (diagnostics only).
+    focus_events_classified: u64,
     /// Buffers confirmed permissible immediately before navigation changes
     /// focus. PII processing is deferred out of the low-level hook.
     pending_text: Vec<UiEvent>,
@@ -798,6 +805,9 @@ fn run_native_hooks(
             text_element: None,
             text_focus: None,
             text_hold_since: None,
+            text_focus_event: None,
+            previous_text: None,
+            focus_events_classified: 0,
             pending_text: Vec::new(),
             current_app,
             current_window,
@@ -863,6 +873,7 @@ fn run_native_hooks(
                         for event in std::mem::take(&mut s.pending_text) {
                             emit_text(s, event);
                         }
+                        drain_focus_events(s);
                         if let Some(last_time) = s.last_text_time {
                             if last_time.elapsed().as_millis() as u64 >= s.config.text_timeout_ms {
                                 flush_text_buffer(s);
@@ -1012,8 +1023,7 @@ fn rebind_reverified_text(
     }
     let reverified = has_buffered_text(state)
         && may_await_reverification(state, focus)
-        && grant.element.is_some()
-        && grant.element == state.text_element
+        && windows_uia::same_element(grant.element, state.text_element) == Some(true)
         && state
             .text_generation
             .is_some_and(|generation| windows_uia::same_focus_epoch(generation, grant.generation));
@@ -1047,11 +1057,14 @@ fn take_text_buffer_with_permit(
     focus: Option<NativeKeyboardFocus>,
     cause: DiscardCause,
 ) -> Option<UiEvent> {
+    // Diagnostics: classify focus events against this text before it goes.
+    drain_focus_events(state);
     let same_focus = !state.config.skip_password_fields || focus == state.text_focus;
     if permit.is_none() || permit != state.text_privacy_generation || !same_focus {
         discard_text_buffer(state, cause);
         return None;
     }
+    note_text_ended(state);
     let content = std::mem::take(&mut state.text_buf);
     let accounting = std::mem::take(&mut state.text_tag);
     clear_text_identity(state);
@@ -1089,13 +1102,21 @@ fn drop_pending_text(state: &mut HookState) {
 }
 
 fn discard_text_buffer(state: &mut HookState, cause: DiscardCause) {
+    drain_focus_events(state);
+    let focus = discard_focus(state);
+    note_text_ended(state);
     // Each buffered keystroke was admitted; count what the recheck drops.
     let tag = std::mem::take(&mut state.text_tag);
     let epoch = input_accounting::epoch_at(state.start, Instant::now());
     let source = state.keyboard_privacy.last_invalidation_source();
-    state
-        .key_tally
-        .discarded(state.text_pid, epoch, tag.keystrokes(), cause, source);
+    state.key_tally.discarded(
+        state.text_pid,
+        epoch,
+        tag.keystrokes(),
+        cause,
+        source,
+        focus,
+    );
     input_accounting::note_lost(&tag, LostCause::BufferDiscarded);
     state.text_buf.clear();
     clear_text_identity(state);
@@ -1109,6 +1130,104 @@ fn clear_text_identity(state: &mut HookState) {
     state.text_element = None;
     state.text_focus = None;
     state.text_hold_since = None;
+    state.text_focus_event = None;
+}
+
+/// Focus epoch (generation >> 32) the buffered text was admitted in. Every
+/// character of one buffer shares it: a strong invalidation ends the buffer.
+fn text_epoch(state: &HookState) -> Option<u64> {
+    state.text_generation.map(|generation| generation >> 32)
+}
+
+fn text_binding(state: &HookState) -> input_admission::TextBinding {
+    input_admission::TextBinding {
+        element: state.text_element,
+        focus: state.text_focus,
+    }
+}
+
+/// Diagnostics only: remember the buffer being emitted or discarded, so a
+/// focus event classified after it ended can still be compared with it.
+fn note_text_ended(state: &mut HookState) {
+    if has_buffered_text(state) {
+        state.previous_text = Some(input_admission::EndedText {
+            epoch: text_epoch(state),
+            ended_generation: state.keyboard_privacy.generation(),
+            binding: text_binding(state),
+        });
+    }
+}
+
+/// Content-free diagnostics only (never admission): classify the UIA focus
+/// events queued by the diagnostic resolver, count them per epoch, and keep
+/// the latest one that may concern the current text for discard
+/// attribution. Never waits: a contended queue is read on a later call (the
+/// classification does not depend on when it runs). Each event is compared
+/// with the text buffered when its own invalidation ran, decided from focus
+/// epochs (`input_admission::text_at_invalidation`): text admitted in an
+/// earlier epoch than that invalidation produced existed before it, text
+/// admitted in its epoch or later did not. An event that could not be
+/// matched with its invalidation, or whose text is otherwise uncertain, is
+/// `ambiguous`, never same or different.
+fn drain_focus_events(state: &mut HookState) {
+    let Some((events, dropped)) = state.keyboard_privacy.take_focus_events() else {
+        return;
+    };
+    let epoch = input_accounting::epoch_at(state.start, Instant::now());
+    state.key_tally.focus_events_dropped(epoch, dropped);
+    for facts in events {
+        let current = has_buffered_text(state).then(|| input_admission::CurrentText {
+            epoch: text_epoch(state),
+            binding: text_binding(state),
+        });
+        let text =
+            input_admission::text_at_invalidation(facts.invalidation, current, state.previous_text);
+        let class = input_admission::classify_focus_event(&facts, text);
+        state.key_tally.focus_event(
+            input_accounting::epoch_at(state.start, facts.at),
+            class,
+            facts.invalidation.is_some(),
+        );
+        if matches!(
+            text,
+            input_admission::TextAtEvent::Current(_)
+                | input_admission::TextAtEvent::Ambiguous {
+                    current_possible: true
+                }
+        ) {
+            state.text_focus_event = Some(class);
+        }
+        if let Some(sequence) = facts.sequence {
+            state.focus_events_classified = state.focus_events_classified.max(sequence);
+        }
+    }
+}
+
+/// What a recheck discard of the current text is attributed to: the last
+/// focus event classified while it was buffered, `NoFocusEvent` only when
+/// every focus event so far is classified, and `Unclassified` when the
+/// latest focus invalidation may postdate the text but its event is not
+/// classified yet (or cannot be correlated).
+fn discard_focus(state: &HookState) -> input_admission::DiscardFocus {
+    use input_admission::DiscardFocus;
+    let latest = state.keyboard_privacy.focus_invalidation_count();
+    if latest > state.focus_events_classified {
+        let before_text = match (
+            state.keyboard_privacy.focus_invalidation(latest),
+            text_epoch(state),
+        ) {
+            (windows_uia::FocusInvalidation::Recorded(generation), Some(epoch)) => {
+                generation >> 32 <= epoch
+            }
+            _ => false,
+        };
+        if !before_text {
+            return DiscardFocus::Unclassified;
+        }
+    }
+    state
+        .text_focus_event
+        .map_or(DiscardFocus::NoFocusEvent, DiscardFocus::Last)
 }
 
 /// Whether buffered text may stay after this key press's admission result.
@@ -2830,6 +2949,9 @@ mod tests {
                 text_element: None,
                 text_focus: None,
                 text_hold_since: None,
+                text_focus_event: None,
+                previous_text: None,
+                focus_events_classified: 0,
                 pending_text: Vec::new(),
                 current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
                 current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
@@ -3107,6 +3229,120 @@ mod tests {
         assert!(
             state.text_buf.is_empty(),
             "a newer generation is never awaited"
+        );
+        drain_test_content(&state, &content_rx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn focus_event_diagnostics_label_discards_without_changing_text_admission() {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let privacy = state.keyboard_privacy.clone();
+        let facts = |sequence, invalidation| windows_uia::FocusEventFacts {
+            at: Instant::now(),
+            sequence,
+            invalidation,
+            relation: windows_uia::SenderRelation::Foreground,
+            control_type: Some(50004),
+            element: Some(1),
+            native: Some(focus),
+        };
+        let type_text = |state: &mut HookState| {
+            NativeKeyboardFocus::test_grant(
+                &state.keyboard_privacy,
+                focus,
+                Some(1),
+                Instant::now(),
+            );
+            let grant = state
+                .keyboard_privacy
+                .grant_classified(Some(focus))
+                .unwrap();
+            bound_test_text(state, focus, grant.token);
+            state.text_generation = Some(grant.generation);
+            state.text_element = grant.element;
+            state.text_pid = 12;
+            state.text_tag.push(12, 0, false);
+            state.text_tag.push(12, 0, false);
+        };
+        let classes = |state: &mut HookState| {
+            let report = state.key_tally.take_due(0, true).unwrap();
+            let epoch = &report.epochs[&0];
+            (
+                epoch.focus_events.events_json()["classes"].clone(),
+                epoch.discard_focus.discards_json()["classes"].clone(),
+            )
+        };
+        // A focus change, then text typed in the newly focused field before
+        // the event is classified: never compared with that newer text.
+        let (first, first_generation) = privacy.test_focus_event_invalidation();
+        type_text(&mut state);
+        // A later event while the text is buffered, at the same element and
+        // native focus.
+        let (second, second_generation) = privacy.test_focus_event_invalidation();
+        privacy.note_focus_event(facts(Some(first), Some(first_generation)));
+        privacy.note_focus_event(facts(Some(second), Some(second_generation)));
+        let admission = privacy.grant_classified(Some(focus));
+        let outcome = |state: &HookState| {
+            (
+                buffered_text_discard(state, admission, Some(focus), false),
+                buffered_text_discard(state, admission, Some(focus), true),
+                may_await_reverification(state, Some(focus)),
+                state.text_buf.clone(),
+                state.text_privacy_generation,
+                state.text_generation,
+                state.keyboard_privacy.generation(),
+            )
+        };
+        let expected = outcome(&state);
+        drain_focus_events(&mut state);
+        assert_eq!(outcome(&state), expected, "admission is unchanged");
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        assert!(state.text_focus_event.is_none());
+        assert_eq!(
+            classes(&mut state),
+            (
+                serde_json::json!({
+                    "foreground|no_text|no_text": 1,
+                    "foreground|same_element|native_same": 1,
+                }),
+                serde_json::json!({"foreground|same_element|native_same": 2}),
+            )
+        );
+        // A focus invalidation after the text began whose event is not
+        // classified yet: the discard is unclassified, never `none`.
+        type_text(&mut state);
+        let (third, third_generation) = privacy.test_focus_event_invalidation();
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        assert_eq!(
+            classes(&mut state).1,
+            serde_json::json!({"unclassified": 2})
+        );
+        // Text typed after that invalidation: certainly no focus event while
+        // it was buffered, even before that event is classified.
+        type_text(&mut state);
+        discard_text_buffer(&mut state, DiscardCause::FlushUnverified);
+        assert_eq!(classes(&mut state).1, serde_json::json!({"none": 2}));
+        // The late event arrives after newer text ended and more began: an
+        // older text may have spanned it (ambiguous), and the current text
+        // began after it, so it labels nothing.
+        privacy.note_focus_event(facts(Some(third), Some(third_generation)));
+        type_text(&mut state);
+        drain_focus_events(&mut state);
+        assert!(state.text_focus_event.is_none());
+        // An event that cannot be matched with its invalidation is ambiguous,
+        // and so is the discard it may concern.
+        privacy.note_focus_event(facts(None, None));
+        drain_focus_events(&mut state);
+        discard_text_buffer(&mut state, DiscardCause::ElementChanged);
+        assert_eq!(
+            classes(&mut state),
+            (
+                serde_json::json!({"foreground|ambiguous|ambiguous": 2}),
+                serde_json::json!({"foreground|ambiguous|ambiguous": 2}),
+            )
         );
         drain_test_content(&state, &content_rx);
         assert!(rx.try_recv().is_err());

@@ -394,6 +394,35 @@ keystrokes, clipboard values, pixels, audio or bearer tokens. Arbitrary provider
 exception strings and window metadata may themselves be sensitive. Do not attach
 these files to issues or commit them.
 
+When this sink is enabled, the keyboard privacy worker also registers a second,
+observation-only UIA focus subscription (2026-10-25); the invalidating
+subscription is unchanged. Its cache request makes UI Automation fetch the
+sender's process id, control type and runtime id from the newly focused
+application's provider when each focus event is raised, including excluded
+applications and password fields. The diagnostic callback itself only reads
+those cached values and samples native focus; a separate diagnostics thread
+resolves the sender's process relation. The identity numbers stay in memory;
+only a fixed control-type label and fixed classes reach the counts.
+
+The per-epoch `input_keystroke_epoch` record then adds bounded, content-free
+`focus_events` and `discard_focus` counters: sender relation to the foreground
+application (same process; a `msedgewebview2.exe` process it started, which is
+keyboard admission's process test without its window-containment check;
+another process; unknown), same or other UIA element and same or different
+native keyboard focus than the text buffered when the event's own invalidation
+ran, and the sender's control type. Events are matched with their invalidation
+by sequence; anything uncertain is labelled `ambiguous` (or `unclassified` for
+a discard whose last focus event is not classified yet), never same or
+different. Native focus is sampled when the diagnostic callback runs, after
+the event, and may already reflect a later change; dropped or unmatched events
+are counted (`dropped`, `uncorrelated`), so the classes can undercount.
+
+The extra subscription's provider-side cost and any effect on event-delivery
+timing have not been measured live. To check, compare the
+`invalidations_focus_event...` counts of `input_probe_summary` and the
+`generation_changed`/`decision_stale` keystroke losses in otherwise similar
+periods with sensitive diagnostics on and off.
+
 Ordinary input status now identifies native focus sampling, focused UIA element,
 focus ownership, IsPassword read versus unsupported property value, final focus
 verification, worker initialization and a closed visual privacy gate. These are

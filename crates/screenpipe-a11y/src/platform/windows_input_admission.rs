@@ -17,7 +17,36 @@
 //! writes totals to the app log and per-process counts (with executable
 //! basenames) only to the opt-in sensitive diagnostics. No key, text, title or
 //! URL enters these counters.
+//!
+//! With sensitive diagnostics enabled, a separate observation-only UIA focus
+//! subscription (the invalidating one is unchanged) classifies every focus
+//! event by fixed codes `relation|element|native` plus the sender's UIA
+//! control type:
+//! - relation: `foreground` (the foreground process), `webview2_child` (a
+//!   `msedgewebview2.exe` process started by the foreground process: the
+//!   process test keyboard admission uses; admission's additional check that
+//!   the focused window lies inside the foreground window is not applied,
+//!   since a sender has no window), `other_process`, `unknown`;
+//! - element / native: the sender against the UIA element, and native
+//!   keyboard focus (sampled when the diagnostic callback ran, after the
+//!   event) against the native focus, of the text buffered when the event's
+//!   own invalidation ran. Each event is matched with its invalidation by
+//!   sequence (both subscriptions see the same events in order); text
+//!   admitted in an earlier focus epoch than that invalidation produced
+//!   existed before it. `no_text` only when certainly nothing was buffered
+//!   then; `ambiguous` whenever that is uncertain (an unmatched event, an
+//!   older text that may have spanned it), never same or different.
+//! The epoch record counts all focus events (`focus_events`, with `dropped`
+//! and `uncorrelated` counts) and attributes each recheck discard's
+//! keystrokes to the last focus event classified while its text was
+//! buffered (`discard_focus`, in total and per process keyed like `by_pid`):
+//! `none` only when every focus event so far is classified and none
+//! concerned the text, `unclassified` when a focus invalidation after the
+//! text began has no classified event yet. Element identities are compared
+//! in memory only and never logged. Native focus may have changed again
+//! between the event and its sample, so `native_*` is an approximation.
 
+use super::{FocusEventFacts, NativeKeyboardFocus, SenderRelation, SENDER_RELATIONS};
 use super::{InvalidationSource, INVALIDATION_SOURCES};
 use super::{KeyboardPrivacyDenial, KEYBOARD_PRIVACY_DENIAL_REASONS};
 use serde_json::{json, Value};
@@ -146,6 +175,340 @@ impl KeyCounts {
     }
 }
 
+/// A focus event's sender against the UIA element of the text buffered at
+/// the event's invalidation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ElementMatch {
+    Same,
+    Other,
+    Unknown,
+    /// Certainly no text was buffered at the event's invalidation.
+    NoText,
+    /// Whether, or which, text was buffered then is not certain.
+    Ambiguous,
+}
+
+/// Native keyboard focus when a focus event was handled against the
+/// buffered text's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeMatch {
+    Same,
+    Differs,
+    Unknown,
+    /// Certainly no text was buffered at the event's invalidation.
+    NoText,
+    /// Whether, or which, text was buffered then is not certain.
+    Ambiguous,
+}
+
+const MATCH_STATES: usize = 5;
+const ELEMENT_CODES: [&str; MATCH_STATES] = [
+    "same_element",
+    "other_element",
+    "element_unknown",
+    "no_text",
+    "ambiguous",
+];
+const NATIVE_CODES: [&str; MATCH_STATES] = [
+    "native_same",
+    "native_differs",
+    "native_unknown",
+    "no_text",
+    "ambiguous",
+];
+/// Every relation x element x native combination, then `none` (a discard
+/// certainly without a focus event while its text was buffered) and
+/// `unclassified` (a discard whose last focus event was not yet classified).
+const EVENT_CLASSES: usize = SENDER_RELATIONS * MATCH_STATES * MATCH_STATES;
+const NO_FOCUS_EVENT: usize = EVENT_CLASSES;
+const UNCLASSIFIED: usize = EVENT_CLASSES + 1;
+const FOCUS_CLASSES: usize = EVENT_CLASSES + 2;
+/// UIA control type ids 50000..=50040 by their fixed labels, then
+/// `unavailable` (no cached control type) and `other` (any other id).
+const FIRST_CONTROL_TYPE: i32 = 50000;
+const KNOWN_CONTROL_TYPES: usize = 41;
+const CONTROL_TYPE_SLOTS: usize = KNOWN_CONTROL_TYPES + 2;
+
+/// Content-free class of one focus event (fixed codes; no identities).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FocusClass {
+    pub(crate) relation: SenderRelation,
+    pub(crate) element: ElementMatch,
+    pub(crate) native: NativeMatch,
+    pub(crate) control_type: Option<i32>,
+}
+
+impl FocusClass {
+    fn index(self) -> usize {
+        (self.relation.index() * MATCH_STATES + self.element as usize) * MATCH_STATES
+            + self.native as usize
+    }
+
+    fn label(index: usize) -> String {
+        match index {
+            NO_FOCUS_EVENT => "none".to_string(),
+            UNCLASSIFIED => "unclassified".to_string(),
+            index => format!(
+                "{}|{}|{}",
+                SenderRelation::CODES[index / (MATCH_STATES * MATCH_STATES)],
+                ELEMENT_CODES[index / MATCH_STATES % MATCH_STATES],
+                NATIVE_CODES[index % MATCH_STATES]
+            ),
+        }
+    }
+
+    /// Whether the event was compared with certainly buffered text.
+    pub(crate) fn compared(self) -> bool {
+        !matches!(self.element, ElementMatch::NoText | ElementMatch::Ambiguous)
+    }
+}
+
+/// What a recheck discard is attributed to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiscardFocus {
+    /// The last focus event classified while the text was buffered.
+    Last(FocusClass),
+    /// Certainly no focus event while the text was buffered.
+    NoFocusEvent,
+    /// A focus event after the text began is not classified yet.
+    Unclassified,
+}
+
+fn control_type_slot(control_type: Option<i32>) -> usize {
+    match control_type {
+        None => KNOWN_CONTROL_TYPES,
+        Some(id) => id
+            .checked_sub(FIRST_CONTROL_TYPE)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| *offset < KNOWN_CONTROL_TYPES)
+            .unwrap_or(KNOWN_CONTROL_TYPES + 1),
+    }
+}
+
+fn control_type_label(slot: usize) -> &'static str {
+    match slot {
+        KNOWN_CONTROL_TYPES => "unavailable",
+        slot if slot > KNOWN_CONTROL_TYPES => "other",
+        slot => super::control_type_id_to_name(FIRST_CONTROL_TYPE + slot as i32),
+    }
+}
+
+/// What buffered text was admitted for: its UIA element identity and native
+/// keyboard focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TextBinding {
+    pub(crate) element: Option<u64>,
+    pub(crate) focus: Option<NativeKeyboardFocus>,
+}
+
+/// The text buffered now: its binding and the focus epoch (generation >> 32)
+/// it was admitted in (`None` if unknown).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CurrentText {
+    pub(crate) epoch: Option<u64>,
+    pub(crate) binding: TextBinding,
+}
+
+/// The most recently ended buffered text: as `CurrentText`, plus the
+/// privacy generation when it was emitted or discarded.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EndedText {
+    pub(crate) epoch: Option<u64>,
+    pub(crate) ended_generation: u64,
+    pub(crate) binding: TextBinding,
+}
+
+/// Which text was buffered when a focus event's own invalidation ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextAtEvent {
+    /// The current buffer (admitted before it, still buffered after it).
+    Current(TextBinding),
+    /// The most recently ended buffer (admitted before it, ended after it).
+    Ended(TextBinding),
+    /// Certainly none.
+    None,
+    /// Not certain; `current_possible` when that could be the current
+    /// buffer.
+    Ambiguous { current_possible: bool },
+}
+
+/// Decide which text was buffered at a focus event's invalidation, from the
+/// generation that invalidation produced (`None`: the event could not be
+/// correlated with it). Text admitted in an earlier focus epoch existed
+/// before that invalidation; text admitted in its epoch or later did not.
+/// Only the latest ended buffer is known, so when it began after the
+/// invalidation an older one may have spanned it: ambiguous.
+pub(crate) fn text_at_invalidation(
+    invalidation: Option<u64>,
+    current: Option<CurrentText>,
+    previous: Option<EndedText>,
+) -> TextAtEvent {
+    let Some(invalidation) = invalidation else {
+        return TextAtEvent::Ambiguous {
+            current_possible: current.is_some(),
+        };
+    };
+    let epoch = invalidation >> 32;
+    if let Some(current) = current {
+        match current.epoch {
+            Some(admitted) if admitted < epoch => return TextAtEvent::Current(current.binding),
+            Some(_) => {}
+            None => {
+                return TextAtEvent::Ambiguous {
+                    current_possible: true,
+                }
+            }
+        }
+    }
+    match previous {
+        None => TextAtEvent::None,
+        Some(previous) => match previous.epoch {
+            Some(admitted) if admitted < epoch => {
+                if previous.ended_generation >= invalidation {
+                    TextAtEvent::Ended(previous.binding)
+                } else {
+                    TextAtEvent::None
+                }
+            }
+            _ => TextAtEvent::Ambiguous {
+                current_possible: false,
+            },
+        },
+    }
+}
+
+/// Compare one focus event with the text buffered at its invalidation.
+/// Missing facts classify as unknown, uncertain text as ambiguous (never
+/// same/different); nothing here affects admission. Native focus is the
+/// sample taken when the diagnostic callback ran, after the event.
+pub(crate) fn classify_focus_event(facts: &FocusEventFacts, text: TextAtEvent) -> FocusClass {
+    let (element, native) = match text {
+        TextAtEvent::None => (ElementMatch::NoText, NativeMatch::NoText),
+        TextAtEvent::Ambiguous { .. } => (ElementMatch::Ambiguous, NativeMatch::Ambiguous),
+        TextAtEvent::Current(text) | TextAtEvent::Ended(text) => (
+            match super::same_element(facts.element, text.element) {
+                Some(true) => ElementMatch::Same,
+                Some(false) => ElementMatch::Other,
+                None => ElementMatch::Unknown,
+            },
+            match (facts.native, text.focus) {
+                (Some(event), Some(text)) if event == text => NativeMatch::Same,
+                (Some(_), Some(_)) => NativeMatch::Differs,
+                _ => NativeMatch::Unknown,
+            },
+        ),
+    };
+    FocusClass {
+        relation: facts.relation,
+        element,
+        native,
+        control_type: facts.control_type,
+    }
+}
+
+/// Bounded focus-event counts: per class and per sender control type.
+/// For all focus events each event weighs 1; for discards each discard
+/// weighs its keystrokes (`events` then counts discards).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FocusEventCounts {
+    pub(crate) events: u64,
+    /// Focus events dropped by the bounded hand-offs before classification.
+    pub(crate) dropped: u64,
+    /// Focus events that could not be correlated with their invalidation.
+    pub(crate) uncorrelated: u64,
+    classes: [u64; FOCUS_CLASSES],
+    control_types: [u64; CONTROL_TYPE_SLOTS],
+}
+
+impl Default for FocusEventCounts {
+    fn default() -> Self {
+        Self {
+            events: 0,
+            dropped: 0,
+            uncorrelated: 0,
+            classes: [0; FOCUS_CLASSES],
+            control_types: [0; CONTROL_TYPE_SLOTS],
+        }
+    }
+}
+
+impl FocusEventCounts {
+    fn record_event(&mut self, class: FocusClass, correlated: bool) {
+        self.events += 1;
+        self.uncorrelated += u64::from(!correlated);
+        self.classes[class.index()] += 1;
+        self.control_types[control_type_slot(class.control_type)] += 1;
+    }
+
+    fn record_discard(&mut self, focus: DiscardFocus, keys: u64) {
+        self.events += 1;
+        match focus {
+            DiscardFocus::Last(class) => {
+                self.classes[class.index()] += keys;
+                self.control_types[control_type_slot(class.control_type)] += keys;
+            }
+            DiscardFocus::NoFocusEvent => self.classes[NO_FOCUS_EVENT] += keys,
+            DiscardFocus::Unclassified => self.classes[UNCLASSIFIED] += keys,
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.events += other.events;
+        self.dropped += other.dropped;
+        self.uncorrelated += other.uncorrelated;
+        for (total, value) in self.classes.iter_mut().zip(other.classes) {
+            *total += value;
+        }
+        for (total, value) in self.control_types.iter_mut().zip(other.control_types) {
+            *total += value;
+        }
+    }
+
+    fn classes_json(&self) -> Value {
+        Value::Object(
+            (0..FOCUS_CLASSES)
+                .filter(|index| self.classes[*index] > 0)
+                .map(|index| (FocusClass::label(index), json!(self.classes[index])))
+                .collect(),
+        )
+    }
+
+    fn control_types_json(&self) -> Value {
+        Value::Object(
+            (0..CONTROL_TYPE_SLOTS)
+                .filter(|slot| self.control_types[*slot] > 0)
+                .map(|slot| {
+                    (
+                        control_type_label(slot).to_string(),
+                        json!(self.control_types[slot]),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// All focus events: counts of events.
+    pub(crate) fn events_json(&self) -> Value {
+        json!({
+            "events": self.events,
+            "dropped": self.dropped,
+            "uncorrelated": self.uncorrelated,
+            "classes": self.classes_json(),
+            "control_types": self.control_types_json(),
+        })
+    }
+
+    /// Recheck discards by their last focus event: keystroke counts.
+    pub(crate) fn discards_json(&self) -> Value {
+        json!({
+            "discards": self.events,
+            "keys": self.classes.iter().sum::<u64>(),
+            "classes": self.classes_json(),
+            "control_types": self.control_types_json(),
+        })
+    }
+}
+
 /// One epoch's hook-side counts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct EpochKeys {
@@ -153,6 +516,13 @@ pub(crate) struct EpochKeys {
     /// Active typing time attributed to this epoch, in milliseconds.
     pub(crate) active_ms: u64,
     pub(crate) by_pid: HashMap<u32, KeyCounts>,
+    /// Every classified UIA focus event handled in this epoch.
+    pub(crate) focus_events: FocusEventCounts,
+    /// Recheck discards by the last focus event while their text was
+    /// buffered, in total and by the text's foreground process (keyed
+    /// exactly as `by_pid`, including its shared overflow pid 0).
+    pub(crate) discard_focus: FocusEventCounts,
+    pub(crate) discard_focus_by_pid: HashMap<u32, FocusEventCounts>,
 }
 
 impl EpochKeys {
@@ -162,6 +532,31 @@ impl EpochKeys {
         for (pid, counts) in &other.by_pid {
             bounded_entry(&mut self.by_pid, *pid).add(counts);
         }
+        self.focus_events.add(&other.focus_events);
+        self.discard_focus.add(&other.discard_focus);
+        for (pid, counts) in &other.discard_focus_by_pid {
+            let key = by_pid_key(&self.by_pid, *pid);
+            self.discard_focus_by_pid
+                .entry(key)
+                .or_default()
+                .add(counts);
+        }
+    }
+
+    /// Keystroke counts or active time (focus-event diagnostics alone also
+    /// create an epoch).
+    pub(crate) fn has_keystrokes(&self) -> bool {
+        self.totals != KeyCounts::default() || self.active_ms > 0
+    }
+}
+
+/// The key `bounded_entry` gave `pid` in `by_pid` (its own pid or the shared
+/// overflow pid 0), so per-process diagnostics never name another process.
+fn by_pid_key(by_pid: &HashMap<u32, KeyCounts>, pid: u32) -> u32 {
+    if by_pid.contains_key(&pid) {
+        pid
+    } else {
+        0
     }
 }
 
@@ -231,7 +626,8 @@ impl KeyAdmissionTally {
     }
 
     /// `source` is the latest invalidation (`InvalidationSource::CODES`
-    /// index), counted for recheck discards only (not pauses or exclusions).
+    /// index) and `focus` what the discard is attributed to, both counted
+    /// for recheck discards only (not pauses or exclusions).
     pub(crate) fn discarded(
         &mut self,
         pid: u32,
@@ -239,6 +635,7 @@ impl KeyAdmissionTally {
         keys: u64,
         cause: DiscardCause,
         source: usize,
+        focus: DiscardFocus,
     ) {
         if keys == 0 {
             return;
@@ -251,6 +648,30 @@ impl KeyAdmissionTally {
             if recheck {
                 counts.discarded_after[source.min(INVALIDATION_SOURCES)] += keys;
             }
+        }
+        if recheck {
+            entry.discard_focus.record_discard(focus, keys);
+            let key = by_pid_key(&entry.by_pid, pid);
+            entry
+                .discard_focus_by_pid
+                .entry(key)
+                .or_default()
+                .record_discard(focus, keys);
+        }
+    }
+
+    /// One classified focus event, in the epoch it was handled.
+    /// `correlated`: matched with its own invalidation.
+    pub(crate) fn focus_event(&mut self, epoch: u32, class: FocusClass, correlated: bool) {
+        self.epoch(epoch)
+            .focus_events
+            .record_event(class, correlated);
+    }
+
+    /// Focus events the bounded hand-off dropped before classification.
+    pub(crate) fn focus_events_dropped(&mut self, epoch: u32, dropped: u64) {
+        if dropped > 0 {
+            self.epoch(epoch).focus_events.dropped += dropped;
         }
     }
 
@@ -570,8 +991,15 @@ mod tests {
         tally.denied(2, 3, KeyboardPrivacyDenial::PasswordField);
         tally.denied(3, 4, KeyboardPrivacyDenial::Excluded);
         tally.active(3, Duration::from_millis(1500));
-        tally.discarded(1, 4, 2, DiscardCause::GenerationChanged, 4);
-        tally.discarded(1, 4, 1, DiscardCause::Paused, 0);
+        tally.discarded(
+            1,
+            4,
+            2,
+            DiscardCause::GenerationChanged,
+            4,
+            DiscardFocus::NoFocusEvent,
+        );
+        tally.discarded(1, 4, 1, DiscardCause::Paused, 0, DiscardFocus::NoFocusEvent);
         let report = tally.take_due(4, false).unwrap();
         assert_eq!(report.epochs.len(), 1, "the current epoch stays open");
         let three = &report.epochs[&3];
@@ -611,6 +1039,285 @@ mod tests {
             Some(Duration::from_secs(3))
         );
         assert_eq!(active_gap(Some(t), t + Duration::from_secs(10)), None);
+    }
+
+    fn focus_facts(element: Option<u64>, native: Option<NativeKeyboardFocus>) -> FocusEventFacts {
+        FocusEventFacts {
+            at: Instant::now(),
+            sequence: Some(1),
+            invalidation: Some(5 << 32),
+            relation: SenderRelation::WebView2Child,
+            control_type: Some(50004),
+            element,
+            native,
+        }
+    }
+
+    fn binding(element: Option<u64>, focus: Option<NativeKeyboardFocus>) -> TextBinding {
+        TextBinding { element, focus }
+    }
+
+    #[test]
+    fn focus_events_compare_only_with_text_certainly_buffered_at_their_invalidation() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let text = binding(Some(4), Some(focus));
+        let older = binding(Some(8), Some(focus));
+        let current = |epoch| {
+            Some(CurrentText {
+                epoch,
+                binding: text,
+            })
+        };
+        let ended = |epoch, ended_generation| {
+            Some(EndedText {
+                epoch,
+                ended_generation,
+                binding: older,
+            })
+        };
+        let at = |current, previous| text_at_invalidation(Some(5 << 32), current, previous);
+        use TextAtEvent as T;
+        // Admitted in an earlier focus epoch and still buffered.
+        assert_eq!(at(current(Some(4)), None), T::Current(text));
+        // Admitted in the event's own epoch or later: began after it.
+        assert_eq!(at(current(Some(5)), None), T::None);
+        assert_eq!(at(current(Some(6)), ended(Some(3), 4 << 32)), T::None);
+        // An ended buffer spanning the invalidation; one ended before it.
+        assert_eq!(at(None, ended(Some(4), 5 << 32)), T::Ended(older));
+        assert_eq!(at(current(Some(5)), ended(Some(4), (5 << 32) - 1)), T::None);
+        // The latest ended buffer began after it: an older one may have
+        // spanned it.
+        assert_eq!(
+            at(current(Some(6)), ended(Some(5), 6 << 32)),
+            T::Ambiguous {
+                current_possible: false
+            }
+        );
+        // Unknown epochs and uncorrelated events are never compared.
+        assert_eq!(
+            at(current(None), None),
+            T::Ambiguous {
+                current_possible: true
+            }
+        );
+        assert_eq!(
+            at(None, ended(None, 9 << 32)),
+            T::Ambiguous {
+                current_possible: false
+            }
+        );
+        assert_eq!(
+            text_at_invalidation(None, current(Some(1)), None),
+            T::Ambiguous {
+                current_possible: true
+            }
+        );
+        assert_eq!(
+            text_at_invalidation(None, None, None),
+            T::Ambiguous {
+                current_possible: false
+            }
+        );
+        assert_eq!(at(None, None), T::None);
+    }
+
+    #[test]
+    fn focus_events_classify_missing_facts_as_unknown_and_uncertain_text_as_ambiguous() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let other = NativeKeyboardFocus::for_test(1, 9, 3);
+        let class = |facts: FocusEventFacts, text| {
+            let class = classify_focus_event(&facts, text);
+            assert_eq!(class.relation, SenderRelation::WebView2Child);
+            assert_eq!(class.control_type, Some(50004));
+            (class.element, class.native)
+        };
+        use ElementMatch as E;
+        use NativeMatch as N;
+        use TextAtEvent as T;
+        let facts = focus_facts(Some(4), Some(focus));
+        assert_eq!(class(facts, T::None), (E::NoText, N::NoText));
+        for current_possible in [false, true] {
+            assert_eq!(
+                class(facts, T::Ambiguous { current_possible }),
+                (E::Ambiguous, N::Ambiguous),
+                "uncertain text is never same or different"
+            );
+        }
+        for found in [T::Current, T::Ended] {
+            assert_eq!(
+                class(facts, found(binding(Some(4), Some(focus)))),
+                (E::Same, N::Same)
+            );
+            assert_eq!(
+                class(facts, found(binding(Some(8), Some(other)))),
+                (E::Other, N::Differs)
+            );
+            assert_eq!(
+                class(facts, found(binding(None, Some(focus)))),
+                (E::Unknown, N::Same)
+            );
+            assert_eq!(
+                class(facts, found(binding(Some(4), None))),
+                (E::Same, N::Unknown)
+            );
+            assert_eq!(
+                class(
+                    focus_facts(None, None),
+                    found(binding(Some(4), Some(focus)))
+                ),
+                (E::Unknown, N::Unknown)
+            );
+        }
+
+        // Every class has its own slot and fixed label.
+        let mut labels = std::collections::HashSet::new();
+        for relation in [
+            SenderRelation::Foreground,
+            SenderRelation::WebView2Child,
+            SenderRelation::OtherProcess,
+            SenderRelation::Unknown,
+        ] {
+            for element in [E::Same, E::Other, E::Unknown, E::NoText, E::Ambiguous] {
+                for native in [N::Same, N::Differs, N::Unknown, N::NoText, N::Ambiguous] {
+                    let class = FocusClass {
+                        relation,
+                        element,
+                        native,
+                        control_type: None,
+                    };
+                    assert!(class.index() < EVENT_CLASSES);
+                    assert!(labels.insert(FocusClass::label(class.index())));
+                    assert_eq!(
+                        class.compared(),
+                        !matches!(element, E::NoText | E::Ambiguous)
+                    );
+                }
+            }
+        }
+        assert_eq!(labels.len(), EVENT_CLASSES);
+        assert_eq!(FocusClass::label(NO_FOCUS_EVENT), "none");
+        assert_eq!(FocusClass::label(UNCLASSIFIED), "unclassified");
+        assert_eq!(control_type_label(control_type_slot(Some(50004))), "Edit");
+        assert_eq!(control_type_label(control_type_slot(Some(50040))), "AppBar");
+        assert_eq!(control_type_label(control_type_slot(None)), "unavailable");
+        for id in [50041, 49999, 0, i32::MIN, i32::MAX] {
+            assert_eq!(control_type_label(control_type_slot(Some(id))), "other");
+        }
+    }
+
+    #[test]
+    fn focus_counters_attribute_recheck_discards_per_process_with_bounded_fixed_labels() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let same = classify_focus_event(
+            &focus_facts(Some(4), Some(focus)),
+            TextAtEvent::Current(binding(Some(4), Some(focus))),
+        );
+        let no_text = classify_focus_event(&focus_facts(None, None), TextAtEvent::None);
+        let mut tally = KeyAdmissionTally::default();
+        tally.focus_event(2, same, true);
+        tally.focus_event(2, no_text, false);
+        tally.focus_events_dropped(2, 3);
+        tally.focus_events_dropped(2, 0);
+        let last = DiscardFocus::Last(same);
+        tally.discarded(7, 2, 3, DiscardCause::GenerationChanged, 0, last);
+        tally.discarded(
+            7,
+            2,
+            2,
+            DiscardCause::ElementChanged,
+            0,
+            DiscardFocus::NoFocusEvent,
+        );
+        tally.discarded(
+            7,
+            2,
+            1,
+            DiscardCause::HoldExpired,
+            0,
+            DiscardFocus::Unclassified,
+        );
+        tally.discarded(8, 2, 0, DiscardCause::GenerationChanged, 0, last);
+        // Pauses and exclusions are not rechecks: no focus attribution.
+        tally.discarded(7, 2, 4, DiscardCause::Paused, 0, last);
+        tally.discarded(7, 2, 4, DiscardCause::Excluded, 0, last);
+        let report = tally.take_due(3, false).unwrap();
+        let epoch = &report.epochs[&2];
+        assert_eq!(
+            epoch.focus_events.events_json(),
+            json!({
+                "events": 2,
+                "dropped": 3,
+                "uncorrelated": 1,
+                "classes": {
+                    "webview2_child|same_element|native_same": 1,
+                    "webview2_child|no_text|no_text": 1,
+                },
+                "control_types": {"Edit": 2},
+            })
+        );
+        let discards = json!({
+            "discards": 3,
+            "keys": 6,
+            "classes": {
+                "webview2_child|same_element|native_same": 3,
+                "none": 2,
+                "unclassified": 1,
+            },
+            "control_types": {"Edit": 3},
+        });
+        assert_eq!(epoch.discard_focus.discards_json(), discards);
+        assert_eq!(epoch.discard_focus_by_pid[&7].discards_json(), discards);
+        assert!(
+            !epoch.discard_focus_by_pid.contains_key(&8),
+            "no keys, no entry"
+        );
+        assert_eq!(epoch.totals.discarded, 14, "discard totals are unchanged");
+        assert!(epoch.has_keystrokes());
+        // Merging keeps every counter.
+        let mut merged = epoch.clone();
+        merged.add(epoch);
+        assert_eq!(merged.focus_events.events, 4);
+        assert_eq!(merged.focus_events.dropped, 6);
+        assert_eq!(merged.focus_events.uncorrelated, 2);
+        assert_eq!(merged.discard_focus_by_pid[&7].discards_json()["keys"], 12);
+        // Focus events alone create an epoch without keystrokes (the app log
+        // skips it).
+        tally.focus_event(4, no_text, true);
+        tally.focus_events_dropped(5, 1);
+        let only_focus = tally.take_due(9, false).unwrap();
+        assert!(only_focus
+            .epochs
+            .values()
+            .all(|epoch| !epoch.has_keystrokes()));
+        // Per-process discards follow `by_pid`'s bound and its overflow pid 0:
+        // no process appears that `by_pid` does not name.
+        for pid in 100..200 {
+            tally.discarded(pid, 3, 1, DiscardCause::HoldExpired, 0, last);
+        }
+        let report = tally.take_due(0, true).unwrap();
+        let epoch = &report.epochs[&3];
+        assert!(epoch.discard_focus_by_pid.len() <= MAX_TRACKED_PROCESSES + 1);
+        assert!(epoch
+            .discard_focus_by_pid
+            .keys()
+            .all(|pid| epoch.by_pid.contains_key(pid)));
+        assert_eq!(epoch.discard_focus_by_pid[&0].discards_json()["keys"], 68);
+        assert_eq!(epoch.discard_focus.discards_json()["keys"], 100);
+        // Merging into an epoch whose `by_pid` is full keeps that mapping.
+        let mut full = EpochKeys::default();
+        for pid in 1000..1000 + MAX_TRACKED_PROCESSES as u32 {
+            bounded_entry(&mut full.by_pid, pid).admitted += 1;
+        }
+        let mut extra = EpochKeys::default();
+        bounded_entry(&mut extra.by_pid, 5).discarded += 1;
+        extra
+            .discard_focus_by_pid
+            .entry(5)
+            .or_default()
+            .record_discard(last, 1);
+        full.add(&extra);
+        assert!(!full.discard_focus_by_pid.contains_key(&5));
+        assert!(full.by_pid.contains_key(&0) && full.discard_focus_by_pid.contains_key(&0));
     }
 
     #[test]

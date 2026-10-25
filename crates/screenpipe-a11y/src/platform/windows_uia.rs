@@ -396,6 +396,44 @@ fn parent_process_id(pid: u32) -> Option<u32> {
     }
 }
 
+/// Whether `child` is a WebView2 browser process (`msedgewebview2.exe`)
+/// started by `host`: the one process relation keyboard admission attributes
+/// to the foreground application. `None` when the executable name or parent
+/// process is unavailable (admission treats that as "no"). The parent is only
+/// looked up (a process snapshot) for a WebView2 executable.
+fn webview2_child_of(child: u32, host: u32) -> Option<bool> {
+    let name = process_image_basename(child)?;
+    if !name.eq_ignore_ascii_case("msedgewebview2.exe") {
+        return Some(false);
+    }
+    Some(parent_process_id(child)? == host)
+}
+
+/// The latest `webview2_child_of` answer for one host/child pair, reused for
+/// at most a few seconds. Each user keeps its own memo.
+#[derive(Clone, Copy, Default)]
+struct WebView2ChildMemo(Option<(u32, u32, Option<bool>, Instant)>);
+
+impl WebView2ChildMemo {
+    const TTL: Duration = Duration::from_secs(5);
+
+    fn check(
+        &mut self,
+        host: u32,
+        child: u32,
+        resolve: impl FnOnce() -> Option<bool>,
+    ) -> Option<bool> {
+        if let Some((last_host, last_child, answer, at)) = self.0 {
+            if last_host == host && last_child == child && at.elapsed() < Self::TTL {
+                return answer;
+            }
+        }
+        let answer = resolve();
+        self.0 = Some((host, child, answer, Instant::now()));
+        answer
+    }
+}
+
 /// The only accepted cross-process keyboard focus: a WebView2 browser
 /// process (`msedgewebview2.exe`) started by the foreground application,
 /// whose focused window lies inside the foreground window. Any other process
@@ -403,15 +441,13 @@ fn parent_process_id(pid: u32) -> Option<u32> {
 /// UWP frames) remains denied without a UIA call. The answer is cached for
 /// one control process for at most a few seconds.
 struct CrossProcessFocusCheck {
-    last: std::cell::Cell<Option<(u32, u32, bool, Instant)>>,
+    memo: std::cell::Cell<WebView2ChildMemo>,
 }
 
 impl CrossProcessFocusCheck {
-    const TTL: Duration = Duration::from_secs(5);
-
     fn new() -> Self {
         Self {
-            last: std::cell::Cell::new(None),
+            memo: std::cell::Cell::new(WebView2ChildMemo::default()),
         }
     }
 
@@ -423,22 +459,112 @@ impl CrossProcessFocusCheck {
         {
             return false;
         }
-        if let Some((pid, control_pid, allowed, at)) = self.last.get() {
-            if pid == focus.pid && control_pid == focus.control_pid && at.elapsed() < Self::TTL {
-                return allowed;
-            }
-        }
-        let allowed = process_image_basename(focus.control_pid)
-            .is_some_and(|name| name.eq_ignore_ascii_case("msedgewebview2.exe"))
-            && parent_process_id(focus.control_pid) == Some(focus.pid);
-        self.last.set(Some((
-            focus.pid,
-            focus.control_pid,
-            allowed,
-            Instant::now(),
-        )));
-        allowed
+        let mut memo = self.memo.get();
+        let allowed = memo.check(focus.pid, focus.control_pid, || {
+            webview2_child_of(focus.control_pid, focus.pid)
+        });
+        self.memo.set(memo);
+        allowed == Some(true)
     }
+}
+
+/// How a UIA focus event's sender relates to the foreground application
+/// (content-free diagnostics only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SenderRelation {
+    /// The foreground application's own process.
+    Foreground,
+    /// A WebView2 child of the foreground application (`webview2_child_of`).
+    WebView2Child,
+    OtherProcess,
+    /// The sender's or the foreground's process, or their relation, was
+    /// unavailable.
+    Unknown,
+}
+pub(crate) const SENDER_RELATIONS: usize = 4;
+
+impl SenderRelation {
+    /// Fixed labels by `index`.
+    pub(crate) const CODES: [&'static str; SENDER_RELATIONS] =
+        ["foreground", "webview2_child", "other_process", "unknown"];
+
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Classify a sender's process against the foreground process; the
+/// WebView2 relation comes from `webview2_child(host, child)` (`None` when
+/// unavailable).
+fn sender_relation(
+    sender: Option<u32>,
+    foreground: Option<u32>,
+    webview2_child: impl FnOnce(u32, u32) -> Option<bool>,
+) -> SenderRelation {
+    let (Some(sender), Some(foreground)) = (sender, foreground) else {
+        return SenderRelation::Unknown;
+    };
+    if sender == foreground {
+        return SenderRelation::Foreground;
+    }
+    match webview2_child(foreground, sender) {
+        Some(true) => SenderRelation::WebView2Child,
+        Some(false) => SenderRelation::OtherProcess,
+        None => SenderRelation::Unknown,
+    }
+}
+
+/// Content-free facts about one UIA focus-changed event, for diagnostics
+/// only: they never grant, deny or invalidate anything. `element` is an
+/// in-memory runtime-id hash for comparison; it is never logged.
+#[derive(Clone, Copy)]
+pub(crate) struct FocusEventFacts {
+    pub(crate) at: Instant,
+    /// The matching focus-event invalidation's sequence, when the event
+    /// could be correlated with it.
+    pub(crate) sequence: Option<u64>,
+    /// The generation that matching invalidation produced (`None` when the
+    /// event could not be correlated).
+    pub(crate) invalidation: Option<u64>,
+    pub(crate) relation: SenderRelation,
+    /// The sender's cached UIA control type id.
+    pub(crate) control_type: Option<i32>,
+    /// Hash of the sender's cached runtime id (`cached_runtime_id`).
+    pub(crate) element: Option<u64>,
+    /// Native keyboard focus when the event was classified.
+    pub(crate) native: Option<NativeKeyboardFocus>,
+}
+
+/// Focus events held for the hook thread; older ones are dropped and counted.
+const MAX_QUEUED_FOCUS_EVENTS: usize = 64;
+/// Recent focus-event invalidations remembered for correlation.
+const FOCUS_INVALIDATION_SLOTS: usize = 32;
+
+/// A recorded focus-event invalidation, looked up by sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusInvalidation {
+    /// The generation that invalidation produced.
+    Recorded(u64),
+    /// Not recorded yet.
+    Pending,
+    /// Overwritten, or never correlatable.
+    Gone,
+}
+
+/// One focus event as the diagnostic UIA callback saw it, before its
+/// sender's process relation is resolved off that callback.
+struct RawFocusEvent {
+    at: Instant,
+    /// The focus-event invalidation this event is expected to match.
+    sequence: u64,
+    /// Whether the invalidation count when the callback ran was consistent
+    /// with `sequence` (this event's invalidation or the one before it).
+    aligned: bool,
+    sender_pid: Option<u32>,
+    foreground_pid: Option<u32>,
+    control_type: Option<i32>,
+    element: Option<u64>,
+    native: Option<NativeKeyboardFocus>,
 }
 
 #[derive(Debug)]
@@ -654,6 +780,27 @@ fn grant_token(generation: u64, focus: NativeKeyboardFocus, element: Option<u64>
     hasher.finish()
 }
 
+/// Hash of an element's cached runtime id (a local read, no provider call):
+/// the element identity keyboard admission compares.
+fn cached_runtime_id(element: &IUIAutomationElement) -> Option<u64> {
+    unsafe { element.GetCachedPropertyValueEx(UIA_RuntimeIdPropertyId, true) }
+        .ok()
+        .and_then(|value| runtime_id_hash(&value))
+}
+
+/// Whether two element identities (`cached_runtime_id` hashes) are the same
+/// element; `None` when either is unknown.
+pub(crate) fn same_element(first: Option<u64>, second: Option<u64>) -> Option<bool> {
+    Some(first? == second?)
+}
+
+/// A cached integer property (a local read, no provider call).
+fn cached_i32(element: &IUIAutomationElement, property: UIA_PROPERTY_ID) -> Option<i32> {
+    unsafe { element.GetCachedPropertyValueEx(property, true) }
+        .ok()
+        .and_then(|value| i32::try_from(&value).ok())
+}
+
 /// Hash of a cached UIA runtime id (VT_ARRAY | VT_I4); `None` if absent.
 fn runtime_id_hash(value: &VARIANT) -> Option<u64> {
     unsafe {
@@ -712,6 +859,13 @@ pub struct KeyboardPrivacy {
     invalidations: [AtomicU64; INVALIDATION_SOURCES],
     reported_invalidations: [AtomicU64; INVALIDATION_SOURCES],
     last_invalidation: AtomicU8,
+    /// Classified focus events awaiting the hook thread (diagnostics only).
+    focus_events: Mutex<std::collections::VecDeque<FocusEventFacts>>,
+    focus_events_dropped: AtomicU64,
+    /// Generation produced by recent focus-event invalidations, by sequence
+    /// (a small seqlock ring; diagnostics only).
+    focus_invalidation_sequences: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
+    focus_invalidation_generations: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -744,7 +898,13 @@ impl KeyboardPrivacy {
     /// As `invalidate`, counting its source for diagnostics; a weak source
     /// keeps the focus epoch.
     pub(crate) fn invalidate_from(&self, source: InvalidationSource) {
-        self.invalidations[source as usize].fetch_add(1, Ordering::Relaxed);
+        self.invalidate_counted(source);
+    }
+
+    /// `invalidate_from`, returning this source's invalidation count
+    /// including this one and the generation it produced (diagnostics only).
+    fn invalidate_counted(&self, source: InvalidationSource) -> (u64, u64) {
+        let sequence = self.invalidations[source as usize].fetch_add(1, Ordering::Relaxed) + 1;
         self.last_invalidation
             .store(source as u8, Ordering::Relaxed);
         let step = if source.weak() {
@@ -752,7 +912,56 @@ impl KeyboardPrivacy {
         } else {
             STRONG_INVALIDATION
         };
-        self.generation.fetch_add(step, Ordering::SeqCst);
+        let generation = self
+            .generation
+            .fetch_add(step, Ordering::SeqCst)
+            .wrapping_add(step);
+        (sequence, generation)
+    }
+
+    /// The invalidating focus handler, after its invalidation: remember the
+    /// generation the `sequence`-th focus event produced, for diagnostics.
+    /// Atomic stores only; nothing reads it for admission.
+    fn note_focus_invalidation(&self, sequence: u64, generation: u64) {
+        let slot = (sequence % FOCUS_INVALIDATION_SLOTS as u64) as usize;
+        self.focus_invalidation_sequences[slot].store(0, Ordering::SeqCst);
+        self.focus_invalidation_generations[slot].store(generation, Ordering::SeqCst);
+        self.focus_invalidation_sequences[slot].store(sequence, Ordering::SeqCst);
+    }
+
+    /// What the invalidating focus handler does with keyboard privacy.
+    #[cfg(test)]
+    pub(crate) fn test_focus_event_invalidation(&self) -> (u64, u64) {
+        let (sequence, generation) = self.invalidate_counted(InvalidationSource::FocusEvent);
+        self.note_focus_invalidation(sequence, generation);
+        (sequence, generation)
+    }
+
+    /// Focus-event invalidations so far.
+    pub(crate) fn focus_invalidation_count(&self) -> u64 {
+        self.invalidations[InvalidationSource::FocusEvent as usize].load(Ordering::Relaxed)
+    }
+
+    /// The generation produced by the `sequence`-th focus-event invalidation,
+    /// if it is recorded and not yet overwritten (never waits).
+    pub(crate) fn focus_invalidation(&self, sequence: u64) -> FocusInvalidation {
+        // Sequences start at 1; 0 marks an empty or rewriting slot.
+        if sequence == 0 {
+            return FocusInvalidation::Gone;
+        }
+        let slot = (sequence % FOCUS_INVALIDATION_SLOTS as u64) as usize;
+        let before = self.focus_invalidation_sequences[slot].load(Ordering::SeqCst);
+        let generation = self.focus_invalidation_generations[slot].load(Ordering::SeqCst);
+        let after = self.focus_invalidation_sequences[slot].load(Ordering::SeqCst);
+        if before == sequence && after == sequence {
+            FocusInvalidation::Recorded(generation)
+        } else if before > sequence
+            || self.focus_invalidation_count() >= sequence + FOCUS_INVALIDATION_SLOTS as u64
+        {
+            FocusInvalidation::Gone
+        } else {
+            FocusInvalidation::Pending
+        }
     }
 
     /// Index into `InvalidationSource::CODES` of the latest invalidation
@@ -834,6 +1043,35 @@ impl KeyboardPrivacy {
 
     fn take_admission_reports(&self) -> Vec<input_admission::KeyAdmissionReport> {
         std::mem::take(&mut *self.admission_reports.lock())
+    }
+
+    /// Diagnostic resolver: queue one event's facts for the hook thread.
+    /// Bounded: the oldest queued event is dropped and counted.
+    pub(crate) fn note_focus_event(&self, facts: FocusEventFacts) {
+        let mut events = self.focus_events.lock();
+        if events.len() >= MAX_QUEUED_FOCUS_EVENTS {
+            events.pop_front();
+            self.note_focus_event_dropped();
+        }
+        events.push_back(facts);
+    }
+
+    /// A focus event lost before classification (bounded hand-offs).
+    fn note_focus_event_dropped(&self) {
+        self.focus_events_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Hook thread, never waiting: the queued focus events and how many were
+    /// dropped since the last call; `None` when contended or nothing is new.
+    pub(crate) fn take_focus_events(
+        &self,
+    ) -> Option<(std::collections::VecDeque<FocusEventFacts>, u64)> {
+        let mut events = self.focus_events.try_lock()?;
+        let dropped = self.focus_events_dropped.swap(0, Ordering::Relaxed);
+        if events.is_empty() && dropped == 0 {
+            return None;
+        }
+        Some((std::mem::take(&mut *events), dropped))
     }
 
     #[cfg(test)]
@@ -1428,12 +1666,7 @@ impl UiaContext {
                 })?;
             let evidence_at = Instant::now();
             // Local cached reads (no provider call).
-            element_id.set(
-                element
-                    .GetCachedPropertyValueEx(UIA_RuntimeIdPropertyId, true)
-                    .ok()
-                    .and_then(|value| runtime_id_hash(&value)),
-            );
+            element_id.set(cached_runtime_id(&element));
             if let Ok(value) = element.GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true) {
                 password_read.set(explicit_cached_password_state(&value).ok());
             }
@@ -2033,6 +2266,24 @@ impl UiaContext {
         unsafe { self.automation.AddFocusChangedEventHandler(None, handler) }
     }
 
+    /// Subscribe the observation-only diagnostic handler, with a cache
+    /// request for the sender's process id, control type and runtime id
+    /// (fixed numbers; no names, values or descendants).
+    fn subscribe_focus_diagnostics(
+        &self,
+        handler: &IUIAutomationFocusChangedEventHandler,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            let cache = self.automation.CreateCacheRequest()?;
+            cache.AddProperty(UIA_ProcessIdPropertyId)?;
+            cache.AddProperty(UIA_ControlTypePropertyId)?;
+            cache.AddProperty(UIA_RuntimeIdPropertyId)?;
+            cache.SetTreeScope(TreeScope_Element)?;
+            cache.SetAutomationElementMode(AutomationElementMode_None)?;
+            self.automation.AddFocusChangedEventHandler(&cache, handler)
+        }
+    }
+
     /// Unsubscribe from focus change events
     fn unsubscribe_focus_changes(
         &self,
@@ -2164,18 +2415,8 @@ fn failure_without_focus_evidence(failure: &PrivacyProbeFailure, timed_out: bool
 /// cached control types, whether the process and runtime id match, and the
 /// new element's HasKeyboardFocus. No names or values.
 fn changed_element_detail(first: &IUIAutomationElement, second: &IUIAutomationElement) -> String {
-    let int = |element: &IUIAutomationElement, property| unsafe {
-        element
-            .GetCachedPropertyValueEx(property, true)
-            .ok()
-            .and_then(|value| i32::try_from(&value).ok())
-    };
-    let runtime = |element: &IUIAutomationElement| unsafe {
-        element
-            .GetCachedPropertyValueEx(UIA_RuntimeIdPropertyId, true)
-            .ok()
-            .and_then(|value| runtime_id_hash(&value))
-    };
+    let int = cached_i32;
+    let runtime = cached_runtime_id;
     let focused = unsafe {
         second
             .GetCachedPropertyValueEx(UIA_HasKeyboardFocusPropertyId, true)
@@ -2270,7 +2511,10 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
         _sender: Option<&IUIAutomationElement>,
     ) -> windows::core::Result<()> {
         if let Some(keyboard_privacy) = &self.keyboard_privacy {
-            keyboard_privacy.invalidate_from(InvalidationSource::FocusEvent);
+            let (sequence, generation) =
+                keyboard_privacy.invalidate_counted(InvalidationSource::FocusEvent);
+            // Diagnostics only, after the invalidation: two atomic stores.
+            keyboard_privacy.note_focus_invalidation(sequence, generation);
         }
         // Record the time of focus change; the UIA thread will debounce and capture
         let hwnd = unsafe { GetForegroundWindow() };
@@ -2281,6 +2525,126 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
             });
         }
         Ok(())
+    }
+}
+
+/// A separate, observation-only focus subscription for content-free
+/// diagnostics (opt-in sensitive diagnostics only). It never invalidates,
+/// grants or denies anything: `FocusChangedHandler`'s own subscription,
+/// which carries no cache request, keeps doing the invalidation unchanged.
+/// Its cache request makes UIA fetch the sender's process id, control type
+/// and runtime id from the provider when the event is raised; this callback
+/// then only reads those cached values and samples native focus, and hands
+/// the rest (process relation) to `run_focus_diagnostic_resolver` without
+/// waiting. A missing value is classified as unknown.
+#[implement(IUIAutomationFocusChangedEventHandler)]
+struct FocusDiagnosticHandler {
+    keyboard_privacy: Arc<KeyboardPrivacy>,
+    raw: crossbeam_channel::Sender<RawFocusEvent>,
+    /// Focus-event invalidations counted before this subscription began.
+    base: u64,
+    /// Events this subscription has delivered.
+    delivered: AtomicU64,
+}
+
+impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl {
+    fn HandleFocusChangedEvent(
+        &self,
+        sender: Option<&IUIAutomationElement>,
+    ) -> windows::core::Result<()> {
+        let at = Instant::now();
+        // Both subscriptions receive the same events in order, so this is
+        // the n-th event after the base; its own invalidation has run or is
+        // the next one.
+        let sequence = self.base + self.delivered.fetch_add(1, Ordering::Relaxed) + 1;
+        let invalidations = self.keyboard_privacy.focus_invalidation_count();
+        let int = |property| sender.and_then(|element| cached_i32(element, property));
+        // Bounded native user32 reads only (the hook's own sampler).
+        let native = NativeKeyboardFocus::sample();
+        let foreground_pid = match &native {
+            Ok(focus) => Some(focus.pid),
+            Err(failure) => Some(failure.foreground_pid).filter(|pid| *pid != 0),
+        };
+        let event = RawFocusEvent {
+            at,
+            sequence,
+            aligned: focus_event_aligned(invalidations, sequence),
+            sender_pid: int(UIA_ProcessIdPropertyId)
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid != 0),
+            foreground_pid,
+            control_type: int(UIA_ControlTypePropertyId),
+            element: sender.and_then(cached_runtime_id),
+            native: native.ok(),
+        };
+        if self.raw.try_send(event).is_err() {
+            self.keyboard_privacy.note_focus_event_dropped();
+        }
+        Ok(())
+    }
+}
+
+/// Whether the focus-event invalidation count seen by the diagnostic
+/// callback fits the event's expected `sequence`: its own invalidation has
+/// run, or is the next one. Anything else means the two subscriptions are
+/// not matched one to one (a lost event, or a burst), so the event is left
+/// uncorrelated.
+fn focus_event_aligned(invalidations: u64, sequence: u64) -> bool {
+    invalidations == sequence || invalidations + 1 == sequence
+}
+
+/// How long the resolver waits for an event's own invalidation to be
+/// recorded before leaving the event uncorrelated.
+const FOCUS_INVALIDATION_WAIT: Duration = Duration::from_millis(100);
+
+/// Diagnostics thread (never the hook, the UIA callback or the probe
+/// worker): resolve each focus event's sender relation with the one WebView2
+/// relation keyboard admission uses (its own memo), correlate the event with
+/// its invalidation, and queue the facts for the hook. Process lookups and
+/// waits here cannot delay invalidations or probes.
+fn run_focus_diagnostic_resolver(
+    raw: crossbeam_channel::Receiver<RawFocusEvent>,
+    privacy: Arc<KeyboardPrivacy>,
+    correlatable: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut memo = WebView2ChildMemo::default();
+    while !stop.load(Ordering::Relaxed) {
+        let event = match raw.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+        let relation = sender_relation(event.sender_pid, event.foreground_pid, |host, child| {
+            memo.check(host, child, || webview2_child_of(child, host))
+        });
+        let correlated = event.aligned && correlatable.load(Ordering::Relaxed);
+        let invalidation = correlated
+            .then(|| {
+                let deadline = Instant::now() + FOCUS_INVALIDATION_WAIT;
+                loop {
+                    match privacy.focus_invalidation(event.sequence) {
+                        FocusInvalidation::Recorded(generation) => break Some(generation),
+                        FocusInvalidation::Gone => break None,
+                        FocusInvalidation::Pending
+                            if Instant::now() < deadline && !stop.load(Ordering::Relaxed) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        FocusInvalidation::Pending => break None,
+                    }
+                }
+            })
+            .flatten();
+        privacy.note_focus_event(FocusEventFacts {
+            at: event.at,
+            sequence: correlated.then_some(event.sequence),
+            invalidation,
+            relation,
+            control_type: event.control_type,
+            element: event.element,
+            native: event.native,
+        });
     }
 }
 
@@ -2391,6 +2755,46 @@ pub(crate) fn run_keyboard_privacy_thread(
         keyboard_privacy.invalidate();
         return;
     }
+    // Registered after the invalidating subscription and only when the
+    // opt-in sensitive diagnostics that report it are enabled. A failure
+    // only leaves those diagnostics without focus-event classes.
+    let mut diagnostics = None;
+    if screenpipe_config::sensitive_debug::enabled() {
+        let (raw_tx, raw_rx) = crossbeam_channel::bounded(MAX_QUEUED_FOCUS_EVENTS);
+        // Events delivered while subscribing cannot be matched reliably:
+        // if the invalidation count moved meanwhile, nothing is correlated.
+        let correlatable = Arc::new(AtomicBool::new(true));
+        let base = keyboard_privacy.focus_invalidation_count();
+        let handler: IUIAutomationFocusChangedEventHandler = FocusDiagnosticHandler {
+            keyboard_privacy: keyboard_privacy.clone(),
+            raw: raw_tx,
+            base,
+            delivered: AtomicU64::new(0),
+        }
+        .into();
+        match uia.subscribe_focus_diagnostics(&handler) {
+            Ok(()) => {
+                if keyboard_privacy.focus_invalidation_count() != base {
+                    correlatable.store(false, Ordering::Relaxed);
+                }
+                let resolver = {
+                    let privacy = keyboard_privacy.clone();
+                    let correlatable = correlatable.clone();
+                    let stop = stop.clone();
+                    std::thread::Builder::new()
+                        .name("uia-focus-diagnostics".into())
+                        .spawn(move || {
+                            run_focus_diagnostic_resolver(raw_rx, privacy, correlatable, stop)
+                        })
+                        .ok()
+                };
+                diagnostics = Some((handler, resolver));
+            }
+            Err(_) => {
+                debug!("diagnostic focus subscription unavailable; focus events stay unclassified");
+            }
+        }
+    }
 
     let mut msg = MSG::default();
     let cross_process = CrossProcessFocusCheck::new();
@@ -2451,7 +2855,15 @@ pub(crate) fn run_keyboard_privacy_thread(
 
     report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, true);
     keyboard_privacy.invalidate();
+    let resolver = diagnostics.and_then(|(diagnostic, resolver)| {
+        let _ = uia.unsubscribe_focus_changes(&diagnostic);
+        resolver
+    });
     let _ = uia.unsubscribe_focus_changes(&handler_interface);
+    // Stops within its 100 ms receive timeout (stop is set).
+    if let Some(resolver) = resolver {
+        let _ = resolver.join();
+    }
     debug!("UIA keyboard privacy worker stopped");
 }
 
@@ -2519,7 +2931,11 @@ fn report_keyboard_admission(
                 .saturating_sub(totals.persisted() + totals.lost_unintended() + totals.intended());
             let (run, epoch_start) = input_accounting::epoch_start_unix_ms(epoch).unwrap_or((0, 0));
             let denied = |denial: KeyboardPrivacyDenial| keys.totals.denied[denial.index()];
-            info!(
+            // Focus-event diagnostics alone also create an epoch; the app log
+            // keeps one line per epoch with keystrokes, as before them.
+            let keystroke_epoch = keys.has_keystrokes() || done.is_some();
+            if keystroke_epoch {
+                info!(
                 reason_code = "keystroke_accounting",
                 run,
                 epoch,
@@ -2547,7 +2963,8 @@ fn report_keyboard_admission(
                         .map(|cause| (cause.code(), totals.lost[cause.index()]))
                 ),
                 "keystroke accounting for one settled 10 s epoch (counts only; no content)"
-            );
+                );
+            }
             screenpipe_config::sensitive_debug::record("input_keystroke_epoch", || {
                 let mut pids: Vec<u32> = keys.by_pid.keys().copied().collect();
                 if let Some(done) = &done {
@@ -2562,6 +2979,8 @@ fn report_keyboard_admission(
                     "active_ms": keys.active_ms,
                     "discarded_by": keys.totals.discarded_json(),
                     "discarded_after": keys.totals.discarded_after_json(),
+                    "focus_events": keys.focus_events.events_json(),
+                    "discard_focus": keys.discard_focus.discards_json(),
                     "processes": pids.into_iter().map(|pid| {
                         let gate = keys.by_pid.get(&pid).copied().unwrap_or_default();
                         let after = done
@@ -2582,6 +3001,12 @@ fn report_keyboard_admission(
                             "persisted_key": after.persisted_key,
                             "discarded_by": gate.discarded_json(),
                             "discarded_after": gate.discarded_after_json(),
+                            "discard_focus": keys
+                                .discard_focus_by_pid
+                                .get(&pid)
+                                .copied()
+                                .unwrap_or_default()
+                                .discards_json(),
                         })
                     }).collect::<Vec<_>>(),
                 })
@@ -3355,6 +3780,237 @@ mod tests {
             pid: 12,
             control_pid: 12,
         }
+    }
+
+    #[test]
+    fn focus_event_sender_relation_uses_the_admission_webview2_relation_or_unknown() {
+        let never = |_: u32, _: u32| -> Option<bool> { panic!("no process lookup needed") };
+        assert_eq!(
+            sender_relation(None, Some(1), never),
+            SenderRelation::Unknown
+        );
+        assert_eq!(
+            sender_relation(Some(1), None, never),
+            SenderRelation::Unknown
+        );
+        assert_eq!(
+            sender_relation(Some(7), Some(7), never),
+            SenderRelation::Foreground
+        );
+        let asked = std::cell::Cell::new(None);
+        let relation = |answer: Option<bool>| {
+            sender_relation(Some(9), Some(7), |host, child| {
+                asked.set(Some((host, child)));
+                answer
+            })
+        };
+        assert_eq!(relation(Some(true)), SenderRelation::WebView2Child);
+        assert_eq!(asked.get(), Some((7, 9)), "host is the foreground process");
+        assert_eq!(relation(Some(false)), SenderRelation::OtherProcess);
+        assert_eq!(relation(None), SenderRelation::Unknown);
+        assert_eq!(
+            SenderRelation::CODES,
+            ["foreground", "webview2_child", "other_process", "unknown"]
+        );
+        for (index, relation) in [
+            SenderRelation::Foreground,
+            SenderRelation::WebView2Child,
+            SenderRelation::OtherProcess,
+            SenderRelation::Unknown,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(relation.index(), index);
+        }
+
+        // The memo reuses one pair's answer (including an unavailable one)
+        // and asks again for another pair.
+        let mut memo = WebView2ChildMemo::default();
+        let calls = std::cell::Cell::new(0);
+        let resolve = |answer| {
+            calls.set(calls.get() + 1);
+            answer
+        };
+        assert_eq!(memo.check(1, 2, || resolve(None)), None);
+        assert_eq!(memo.check(1, 2, || resolve(Some(true))), None);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(memo.check(1, 3, || resolve(Some(true))), Some(true));
+        assert_eq!(memo.check(1, 3, || resolve(Some(false))), Some(true));
+        assert_eq!(calls.get(), 2);
+        // A sender in the foreground's own process needs no lookup; the
+        // admission check keeps its native same-process fast path.
+        assert!(CrossProcessFocusCheck::new().allows(test_keyboard_focus()));
+    }
+
+    #[test]
+    fn focus_invalidations_are_recorded_by_sequence_exactly_as_before() {
+        let privacy = KeyboardPrivacy::default();
+        let reference = KeyboardPrivacy::default();
+        // `invalidate_counted` is `invalidate_from` with its results returned.
+        for source in [
+            InvalidationSource::FocusEvent,
+            InvalidationSource::ProbeTimeout,
+            InvalidationSource::Navigation,
+        ] {
+            let (_, generation) = privacy.invalidate_counted(source);
+            reference.invalidate_from(source);
+            assert_eq!(generation, reference.generation());
+            assert_eq!(privacy.generation(), reference.generation());
+            assert_eq!(
+                privacy.last_invalidation_source(),
+                reference.last_invalidation_source()
+            );
+        }
+        assert_eq!(
+            privacy.take_invalidation_deltas(),
+            reference.take_invalidation_deltas()
+        );
+        assert_eq!(privacy.focus_invalidation_count(), 1);
+        assert_eq!(privacy.focus_invalidation(1), FocusInvalidation::Pending);
+        privacy.note_focus_invalidation(1, 77);
+        assert_eq!(privacy.generation(), reference.generation(), "notes only");
+        assert_eq!(
+            privacy.focus_invalidation(1),
+            FocusInvalidation::Recorded(77)
+        );
+        assert_eq!(privacy.focus_invalidation(2), FocusInvalidation::Pending);
+        assert_eq!(privacy.focus_invalidation(0), FocusInvalidation::Gone);
+        let mut last = (0, 0);
+        for _ in 0..40 {
+            last = privacy.test_focus_event_invalidation();
+        }
+        assert_eq!(privacy.focus_invalidation_count(), 41);
+        assert_eq!(last.0, 41);
+        assert_eq!(
+            privacy.focus_invalidation(41),
+            FocusInvalidation::Recorded(last.1)
+        );
+        assert_eq!(privacy.focus_invalidation(1), FocusInvalidation::Gone);
+        assert_eq!(privacy.focus_invalidation(42), FocusInvalidation::Pending);
+    }
+
+    #[test]
+    fn focus_diagnostic_resolver_correlates_only_aligned_recorded_events() {
+        let privacy = Arc::new(KeyboardPrivacy::default());
+        let (first, generation) = privacy.test_focus_event_invalidation();
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        let correlatable = Arc::new(AtomicBool::new(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let resolver = {
+            let (privacy, correlatable, stop) =
+                (privacy.clone(), correlatable.clone(), stop.clone());
+            std::thread::spawn(move || {
+                run_focus_diagnostic_resolver(rx, privacy, correlatable, stop)
+            })
+        };
+        // Same process as the foreground, or an unknown sender: no process
+        // lookup is needed.
+        let raw = |sequence, aligned, sender_pid| RawFocusEvent {
+            at: Instant::now(),
+            sequence,
+            aligned,
+            sender_pid,
+            foreground_pid: Some(7),
+            control_type: Some(50004),
+            element: Some(3),
+            native: None,
+        };
+        tx.send(raw(first, true, Some(7))).unwrap();
+        tx.send(raw(first, false, None)).unwrap();
+        // Never recorded: given up after the bounded wait.
+        tx.send(raw(first + 1, true, None)).unwrap();
+        drop(tx);
+        resolver.join().unwrap();
+        let (events, dropped) = privacy.take_focus_events().unwrap();
+        assert_eq!(dropped, 0);
+        let summary: Vec<_> = events
+            .iter()
+            .map(|f| (f.sequence, f.invalidation, f.relation, f.element))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    Some(first),
+                    Some(generation),
+                    SenderRelation::Foreground,
+                    Some(3)
+                ),
+                (None, None, SenderRelation::Unknown, Some(3)),
+                (Some(first + 1), None, SenderRelation::Unknown, Some(3)),
+            ]
+        );
+        // Subscribing while the count moved: nothing is correlated.
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        correlatable.store(false, Ordering::Relaxed);
+        let resolver = {
+            let (privacy, correlatable, stop) =
+                (privacy.clone(), correlatable.clone(), stop.clone());
+            std::thread::spawn(move || {
+                run_focus_diagnostic_resolver(rx, privacy, correlatable, stop)
+            })
+        };
+        tx.send(raw(first, true, None)).unwrap();
+        drop(tx);
+        resolver.join().unwrap();
+        let (events, _) = privacy.take_focus_events().unwrap();
+        assert!(events
+            .iter()
+            .all(|f| f.sequence.is_none() && f.invalidation.is_none()));
+        // The stop flag ends it even while the channel stays open.
+        let (_tx, rx) = crossbeam_channel::bounded::<RawFocusEvent>(1);
+        stop.store(true, Ordering::Relaxed);
+        run_focus_diagnostic_resolver(rx, privacy.clone(), correlatable, stop);
+    }
+
+    #[test]
+    fn focus_event_queue_is_bounded_and_never_changes_admission() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = test_keyboard_focus();
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        let before = privacy.grant_classified(Some(focus)).unwrap();
+        let generation = privacy.generation();
+        assert!(privacy.take_focus_events().is_none());
+        let facts = |sequence| FocusEventFacts {
+            at: Instant::now(),
+            sequence: Some(sequence),
+            invalidation: None,
+            relation: SenderRelation::Unknown,
+            control_type: None,
+            element: None,
+            native: None,
+        };
+        for index in 0..(MAX_QUEUED_FOCUS_EVENTS as u64 + 6) {
+            privacy.note_focus_event(facts(index));
+        }
+        assert_eq!(
+            privacy.generation(),
+            generation,
+            "diagnostics never invalidate"
+        );
+        assert_eq!(privacy.grant_classified(Some(focus)), Ok(before));
+        let (events, dropped) = privacy.take_focus_events().unwrap();
+        assert_eq!(events.len(), MAX_QUEUED_FOCUS_EVENTS);
+        assert_eq!(dropped, 6);
+        assert_eq!(
+            events.front().and_then(|f| f.sequence),
+            Some(6),
+            "oldest dropped"
+        );
+        assert!(privacy.take_focus_events().is_none());
+        // A contended queue is skipped by the hook, never waited on.
+        privacy.note_focus_event(facts(1));
+        let held = privacy.focus_events.lock();
+        assert!(privacy.take_focus_events().is_none());
+        drop(held);
+        assert_eq!(privacy.take_focus_events().map(|(e, _)| e.len()), Some(1));
+        assert!(focus_event_aligned(5, 5) && focus_event_aligned(4, 5));
+        assert!(!focus_event_aligned(6, 5) && !focus_event_aligned(3, 5));
+        assert_eq!(same_element(Some(1), Some(1)), Some(true));
+        assert_eq!(same_element(Some(1), Some(2)), Some(false));
+        assert_eq!(same_element(None, Some(2)), None);
+        assert_eq!(same_element(Some(1), None), None);
     }
 
     #[test]

@@ -81,6 +81,13 @@ impl NoticeRelay {
     }
 }
 
+/// Whether this process records sensitive diagnostics, so a producer can skip
+/// observation work nobody will read. Starts the writer as `record` would.
+/// Never a capture-admission input.
+pub fn enabled() -> bool {
+    WRITER.get_or_init(start_writer).is_some()
+}
+
 /// Enable with SCREENWISE_SENSITIVE_DEBUG=1 before process startup. Producers
 /// must not include keystrokes, clipboard/password values, images, audio or tokens.
 /// Best-effort diagnosis, never a capture-admission requirement.
