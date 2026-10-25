@@ -410,12 +410,39 @@ application (same process; a `msedgewebview2.exe` process it started, which is
 keyboard admission's process test without its window-containment check;
 another process; unknown), same or other UIA element and same or different
 native keyboard focus than the text buffered when the event's own invalidation
-ran, and the sender's control type. Events are matched with their invalidation
-by sequence; anything uncertain is labelled `ambiguous` (or `unclassified` for
-a discard whose last focus event is not classified yet), never same or
-different. Native focus is sampled when the diagnostic callback runs, after
+ran, and the sender's control type. Each diagnostic event is matched by time
+with the invalidations the invalidating handler records (a clock read and
+atomic stores after it has invalidated): only exactly one invalidation within
+25 ms, with no other within 50 ms (so a late callback is not paired with the
+next event's invalidation) and not also near another diagnostic event, counts
+as a match, so lost, extra or early events on either subscription affect only
+their neighbours. The record counts the match outcome per event (`matched`,
+`no_candidate`, `several_candidates`, `shared_candidate`, `too_late`,
+`nearby_candidate`), matched time offsets
+and the nearest-invalidation distance for unmatched events, to explain a low
+match rate. Anything uncertain is labelled `ambiguous` (or `unclassified` for
+a discard whose last focus event could not be classified), never same or
+different. Matching waits about 60 ms per event, so a discard soon after a
+focus event waits for that event's class (bounded: 16 discards, 2 s; it is
+then counted in the discard's own epoch and process, with `attributed_late`;
+a full list records it `unclassified` and counts `pending_overflow`). The
+diagnostic cache request uses the raw view, like the
+invalidating subscription, rather than the cache request's default control
+view. Native focus is sampled when the diagnostic callback runs, after
 the event, and may already reflect a later change; dropped or unmatched events
 are counted (`dropped`, `uncorrelated`), so the classes can undercount.
+
+Reading the counts:
+- The diagnostic subscription observes raw-view senders, while keyboard
+  admission binds text to the focused element in the control view, so
+  `other_element` may look more common than it is. Compare with a run using a
+  control-view diagnostic subscription before concluding from it.
+- A slow provider property fetch delays the diagnostic callback: it shows as
+  `no_candidate` with `unmatched_nearest=lt100ms`.
+- A dropped diagnostic event or a stalled resolver shows as a burst of
+  `too_late`.
+- Events waiting to be matched are bounded by the focus-event rate times the
+  60 ms hold; the 64-slot hand-off channel caps the inflow (drops counted).
 
 The extra subscription's provider-side cost and any effect on event-delivery
 timing have not been measured live. To check, compare the

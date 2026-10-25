@@ -520,24 +520,25 @@ fn sender_relation(
 #[derive(Clone, Copy)]
 pub(crate) struct FocusEventFacts {
     pub(crate) at: Instant,
-    /// The matching focus-event invalidation's sequence, when the event
-    /// could be correlated with it.
+    /// The sequence of the focus-event invalidation this event was matched
+    /// with, when the match was unambiguous.
     pub(crate) sequence: Option<u64>,
-    /// The generation that matching invalidation produced (`None` when the
-    /// event could not be correlated).
+    /// The generation that invalidation produced (`None` when unmatched).
     pub(crate) invalidation: Option<u64>,
+    /// How matching with the recorded invalidations went.
+    pub(crate) matching: FocusMatch,
     pub(crate) relation: SenderRelation,
     /// The sender's cached UIA control type id.
     pub(crate) control_type: Option<i32>,
     /// Hash of the sender's cached runtime id (`cached_runtime_id`).
     pub(crate) element: Option<u64>,
-    /// Native keyboard focus when the event was classified.
+    /// Native keyboard focus when the diagnostic callback ran.
     pub(crate) native: Option<NativeKeyboardFocus>,
 }
 
 /// Focus events held for the hook thread; older ones are dropped and counted.
 const MAX_QUEUED_FOCUS_EVENTS: usize = 64;
-/// Recent focus-event invalidations remembered for correlation.
+/// Recent focus-event invalidations remembered for matching.
 const FOCUS_INVALIDATION_SLOTS: usize = 32;
 
 /// A recorded focus-event invalidation, looked up by sequence.
@@ -547,19 +548,193 @@ pub(crate) enum FocusInvalidation {
     Recorded(u64),
     /// Not recorded yet.
     Pending,
-    /// Overwritten, or never correlatable.
+    /// Overwritten, or never recorded.
     Gone,
 }
 
-/// One focus event as the diagnostic UIA callback saw it, before its
-/// sender's process relation is resolved off that callback.
+/// Nanoseconds on one process-wide monotonic clock (0 is reserved for an
+/// empty record), shared by both focus handlers.
+fn focus_clock_ns(at: Instant) -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    duration_nanos(at.saturating_duration_since(origin)).saturating_add(1)
+}
+
+fn duration_nanos(value: Duration) -> u64 {
+    value.as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// One recorded focus-event invalidation (the invalidating handler's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecordedInvalidation {
+    pub(crate) sequence: u64,
+    pub(crate) generation: u64,
+    /// `focus_clock_ns` just after the invalidation.
+    pub(crate) at_ns: u64,
+}
+
+/// A diagnostic event and an invalidation match when their times differ by
+/// at most this. Both handlers run for the same raised event; the matched
+/// offsets are reported so the window can be checked.
+const FOCUS_MATCH_WINDOW: Duration = Duration::from_millis(25);
+/// No other invalidation may lie this close to a matched diagnostic event.
+const FOCUS_MATCH_GUARD: Duration = Duration::from_millis(2 * 25);
+/// The resolver holds each event this long after it, so every invalidation
+/// within the guard band and every other diagnostic event that could share
+/// its match has arrived.
+const FOCUS_MATCH_HOLD: Duration = Duration::from_millis(2 * 25 + 10);
+
+/// How a diagnostic focus event was matched with the recorded focus-event
+/// invalidations, by time (content-free codes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusMatch {
+    /// Exactly one invalidation within the window, and no other diagnostic
+    /// event within the window of it. `offset` indexes `OFFSET_CODES`.
+    Matched { offset: usize },
+    /// No invalidation within the window. `nearest` indexes `NEAREST_CODES`.
+    NoCandidate { nearest: usize },
+    /// Several invalidations within the window.
+    SeveralCandidates,
+    /// One invalidation, but another diagnostic event is also within its
+    /// window.
+    SharedCandidate,
+    /// The records needed to decide were no longer complete.
+    TooLate,
+    /// One invalidation within the window, but another just outside it
+    /// (within `FOCUS_MATCH_GUARD`): a slow callback could be paired with
+    /// the next event's invalidation.
+    NearbyCandidate,
+}
+
+impl FocusMatch {
+    pub(crate) const CODES: [&'static str; 6] = [
+        "matched",
+        "no_candidate",
+        "several_candidates",
+        "shared_candidate",
+        "too_late",
+        "nearby_candidate",
+    ];
+    /// Diagnostic event time minus matched invalidation time.
+    pub(crate) const OFFSET_CODES: [&'static str; 6] = [
+        "invalidation_before_lt1ms",
+        "invalidation_before_lt5ms",
+        "invalidation_before_le25ms",
+        "invalidation_after_lt1ms",
+        "invalidation_after_lt5ms",
+        "invalidation_after_le25ms",
+    ];
+    /// Distance to the nearest recorded invalidation when none matched.
+    pub(crate) const NEAREST_CODES: [&'static str; 4] =
+        ["lt100ms", "lt1s", "ge1s", "none_recorded"];
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Matched { .. } => 0,
+            Self::NoCandidate { .. } => 1,
+            Self::SeveralCandidates => 2,
+            Self::SharedCandidate => 3,
+            Self::TooLate => 4,
+            Self::NearbyCandidate => 5,
+        }
+    }
+}
+
+fn offset_bucket(event_ns: u64, invalidation_ns: u64) -> usize {
+    let (after, distance) = if event_ns >= invalidation_ns {
+        (0, event_ns - invalidation_ns)
+    } else {
+        (3, invalidation_ns - event_ns)
+    };
+    after
+        + match distance {
+            0..1_000_000 => 0,
+            1_000_000..5_000_000 => 1,
+            _ => 2,
+        }
+}
+
+fn nearest_bucket(distance: Option<u64>) -> usize {
+    match distance {
+        Some(0..100_000_000) => 0,
+        Some(100_000_000..1_000_000_000) => 1,
+        Some(_) => 2,
+        None => 3,
+    }
+}
+
+/// Match one diagnostic event (time `event_ns`) with the recorded
+/// focus-event invalidations, by time only, so it does not depend on the two
+/// subscriptions delivering the same events: a lost, extra or reordered event
+/// on either side affects only the events near it. Accepts only an
+/// unambiguous match: exactly one invalidation within the window, no other
+/// invalidation within the wider guard band, and no other diagnostic event
+/// (`diagnostic_ns`, including this one) near that invalidation.
+/// `invalidations_complete_after` / `diagnostics_complete_after`: every
+/// record later than that time is present (older ones may be gone); `None`
+/// when every record so far is present.
+pub(crate) fn match_focus_event(
+    event_ns: u64,
+    invalidations: &[RecordedInvalidation],
+    invalidations_complete_after: Option<u64>,
+    diagnostic_ns: &[u64],
+    diagnostics_complete_after: Option<u64>,
+) -> (FocusMatch, Option<RecordedInvalidation>) {
+    let window = duration_nanos(FOCUS_MATCH_WINDOW);
+    let guard = duration_nanos(FOCUS_MATCH_GUARD);
+    let near = |a: u64, b: u64| a.abs_diff(b) <= window;
+    let incomplete = |after: Option<u64>, from: u64, band: u64| {
+        after.is_some_and(|after| after >= from.saturating_sub(band))
+    };
+    if incomplete(invalidations_complete_after, event_ns, guard) {
+        return (FocusMatch::TooLate, None);
+    }
+    let mut candidates = invalidations.iter().filter(|i| near(i.at_ns, event_ns));
+    let Some(candidate) = candidates.next().copied() else {
+        let nearest = invalidations
+            .iter()
+            .map(|i| i.at_ns.abs_diff(event_ns))
+            .min();
+        return (
+            FocusMatch::NoCandidate {
+                nearest: nearest_bucket(nearest),
+            },
+            None,
+        );
+    };
+    if candidates.next().is_some() {
+        return (FocusMatch::SeveralCandidates, None);
+    }
+    if invalidations
+        .iter()
+        .any(|i| i.sequence != candidate.sequence && i.at_ns.abs_diff(event_ns) <= guard)
+    {
+        return (FocusMatch::NearbyCandidate, None);
+    }
+    if incomplete(diagnostics_complete_after, candidate.at_ns, window) {
+        return (FocusMatch::TooLate, None);
+    }
+    if diagnostic_ns
+        .iter()
+        .filter(|at| near(**at, candidate.at_ns))
+        .count()
+        != 1
+    {
+        return (FocusMatch::SharedCandidate, None);
+    }
+    (
+        FocusMatch::Matched {
+            offset: offset_bucket(event_ns, candidate.at_ns),
+        },
+        Some(candidate),
+    )
+}
+
+/// One focus event as the diagnostic UIA callback saw it, before it is
+/// matched and its sender's process relation resolved off that callback.
 struct RawFocusEvent {
     at: Instant,
-    /// The focus-event invalidation this event is expected to match.
-    sequence: u64,
-    /// Whether the invalidation count when the callback ran was consistent
-    /// with `sequence` (this event's invalidation or the one before it).
-    aligned: bool,
+    at_ns: u64,
     sender_pid: Option<u32>,
     foreground_pid: Option<u32>,
     control_type: Option<i32>,
@@ -866,6 +1041,7 @@ pub struct KeyboardPrivacy {
     /// (a small seqlock ring; diagnostics only).
     focus_invalidation_sequences: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
     focus_invalidation_generations: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
+    focus_invalidation_times: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -920,21 +1096,61 @@ impl KeyboardPrivacy {
     }
 
     /// The invalidating focus handler, after its invalidation: remember the
-    /// generation the `sequence`-th focus event produced, for diagnostics.
-    /// Atomic stores only; nothing reads it for admission.
-    fn note_focus_invalidation(&self, sequence: u64, generation: u64) {
+    /// generation the `sequence`-th focus event produced and when
+    /// (`focus_clock_ns`), for diagnostics. Atomic stores only; nothing reads
+    /// it for admission.
+    fn note_focus_invalidation(&self, sequence: u64, generation: u64, at_ns: u64) {
         let slot = (sequence % FOCUS_INVALIDATION_SLOTS as u64) as usize;
         self.focus_invalidation_sequences[slot].store(0, Ordering::SeqCst);
         self.focus_invalidation_generations[slot].store(generation, Ordering::SeqCst);
+        self.focus_invalidation_times[slot].store(at_ns, Ordering::SeqCst);
         self.focus_invalidation_sequences[slot].store(sequence, Ordering::SeqCst);
     }
 
-    /// What the invalidating focus handler does with keyboard privacy.
+    /// What the invalidating focus handler does with keyboard privacy, at
+    /// `at_ns` (`focus_clock_ns`).
+    #[cfg(test)]
+    pub(crate) fn test_focus_event_invalidation_at(&self, at_ns: u64) -> (u64, u64) {
+        let (sequence, generation) = self.invalidate_counted(InvalidationSource::FocusEvent);
+        self.note_focus_invalidation(sequence, generation, at_ns);
+        (sequence, generation)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_focus_event_invalidation(&self) -> (u64, u64) {
-        let (sequence, generation) = self.invalidate_counted(InvalidationSource::FocusEvent);
-        self.note_focus_invalidation(sequence, generation);
-        (sequence, generation)
+        self.test_focus_event_invalidation_at(focus_clock_ns(Instant::now()))
+    }
+
+    /// The consistently readable recorded focus-event invalidations, and
+    /// the time after which the record is complete (`None`: nothing has been
+    /// overwritten yet). A slot being rewritten is skipped; it belongs to an
+    /// invalidation newer than every complete one.
+    fn recorded_focus_invalidations(&self) -> (Vec<RecordedInvalidation>, Option<u64>) {
+        let count = self.focus_invalidation_count();
+        let mut recorded = Vec::with_capacity(FOCUS_INVALIDATION_SLOTS);
+        for slot in 0..FOCUS_INVALIDATION_SLOTS {
+            let before = self.focus_invalidation_sequences[slot].load(Ordering::SeqCst);
+            let generation = self.focus_invalidation_generations[slot].load(Ordering::SeqCst);
+            let at_ns = self.focus_invalidation_times[slot].load(Ordering::SeqCst);
+            let after = self.focus_invalidation_sequences[slot].load(Ordering::SeqCst);
+            if before != 0 && before == after {
+                recorded.push(RecordedInvalidation {
+                    sequence: before,
+                    generation,
+                    at_ns,
+                });
+            }
+        }
+        // Once slots are reused, only invalidations newer than the oldest
+        // one still recorded are certainly all present.
+        let complete_after = (count > FOCUS_INVALIDATION_SLOTS as u64).then(|| {
+            recorded
+                .iter()
+                .map(|record| record.at_ns)
+                .min()
+                .unwrap_or(u64::MAX)
+        });
+        (recorded, complete_after)
     }
 
     /// Focus-event invalidations so far.
@@ -2279,6 +2495,10 @@ impl UiaContext {
             cache.AddProperty(UIA_ControlTypePropertyId)?;
             cache.AddProperty(UIA_RuntimeIdPropertyId)?;
             cache.SetTreeScope(TreeScope_Element)?;
+            // A cache request filters to the control view by default; the
+            // invalidating subscription has no such filter, so use the raw
+            // view to observe the same senders.
+            cache.SetTreeFilter(&self.automation.RawViewCondition()?)?;
             cache.SetAutomationElementMode(AutomationElementMode_None)?;
             self.automation.AddFocusChangedEventHandler(&cache, handler)
         }
@@ -2513,8 +2733,13 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
         if let Some(keyboard_privacy) = &self.keyboard_privacy {
             let (sequence, generation) =
                 keyboard_privacy.invalidate_counted(InvalidationSource::FocusEvent);
-            // Diagnostics only, after the invalidation: two atomic stores.
-            keyboard_privacy.note_focus_invalidation(sequence, generation);
+            // Diagnostics only, after the invalidation: a clock read and
+            // atomic stores.
+            keyboard_privacy.note_focus_invalidation(
+                sequence,
+                generation,
+                focus_clock_ns(Instant::now()),
+            );
         }
         // Record the time of focus change; the UIA thread will debounce and capture
         let hwnd = unsafe { GetForegroundWindow() };
@@ -2534,17 +2759,16 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
 /// which carries no cache request, keeps doing the invalidation unchanged.
 /// Its cache request makes UIA fetch the sender's process id, control type
 /// and runtime id from the provider when the event is raised; this callback
-/// then only reads those cached values and samples native focus, and hands
-/// the rest (process relation) to `run_focus_diagnostic_resolver` without
-/// waiting. A missing value is classified as unknown.
+/// then only reads those cached values, the clock and native focus, and
+/// hands the event to `run_focus_diagnostic_resolver` without waiting. A
+/// missing value is classified as unknown.
 #[implement(IUIAutomationFocusChangedEventHandler)]
 struct FocusDiagnosticHandler {
     keyboard_privacy: Arc<KeyboardPrivacy>,
     raw: crossbeam_channel::Sender<RawFocusEvent>,
-    /// Focus-event invalidations counted before this subscription began.
-    base: u64,
-    /// Events this subscription has delivered.
-    delivered: AtomicU64,
+    /// Events this callback could not hand over (the resolver then treats
+    /// its record of diagnostic events as incomplete).
+    raw_dropped: Arc<AtomicU64>,
 }
 
 impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl {
@@ -2553,11 +2777,7 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl 
         sender: Option<&IUIAutomationElement>,
     ) -> windows::core::Result<()> {
         let at = Instant::now();
-        // Both subscriptions receive the same events in order, so this is
-        // the n-th event after the base; its own invalidation has run or is
-        // the next one.
-        let sequence = self.base + self.delivered.fetch_add(1, Ordering::Relaxed) + 1;
-        let invalidations = self.keyboard_privacy.focus_invalidation_count();
+        let at_ns = focus_clock_ns(at);
         let int = |property| sender.and_then(|element| cached_i32(element, property));
         // Bounded native user32 reads only (the hook's own sampler).
         let native = NativeKeyboardFocus::sample();
@@ -2567,8 +2787,7 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl 
         };
         let event = RawFocusEvent {
             at,
-            sequence,
-            aligned: focus_event_aligned(invalidations, sequence),
+            at_ns,
             sender_pid: int(UIA_ProcessIdPropertyId)
                 .and_then(|pid| u32::try_from(pid).ok())
                 .filter(|pid| *pid != 0),
@@ -2578,73 +2797,114 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl 
             native: native.ok(),
         };
         if self.raw.try_send(event).is_err() {
+            self.raw_dropped.fetch_add(1, Ordering::Relaxed);
             self.keyboard_privacy.note_focus_event_dropped();
         }
         Ok(())
     }
 }
 
-/// Whether the focus-event invalidation count seen by the diagnostic
-/// callback fits the event's expected `sequence`: its own invalidation has
-/// run, or is the next one. Anything else means the two subscriptions are
-/// not matched one to one (a lost event, or a burst), so the event is left
-/// uncorrelated.
-fn focus_event_aligned(invalidations: u64, sequence: u64) -> bool {
-    invalidations == sequence || invalidations + 1 == sequence
-}
-
-/// How long the resolver waits for an event's own invalidation to be
-/// recorded before leaving the event uncorrelated.
-const FOCUS_INVALIDATION_WAIT: Duration = Duration::from_millis(100);
+/// Recent diagnostic event times the resolver keeps for `SharedCandidate`
+/// checks (bounded by count and age).
+const MAX_RECENT_FOCUS_EVENTS: usize = 128;
+const RECENT_FOCUS_EVENT_AGE: Duration = Duration::from_secs(1);
 
 /// Diagnostics thread (never the hook, the UIA callback or the probe
-/// worker): resolve each focus event's sender relation with the one WebView2
-/// relation keyboard admission uses (its own memo), correlate the event with
-/// its invalidation, and queue the facts for the hook. Process lookups and
-/// waits here cannot delay invalidations or probes.
+/// worker): hold each focus event until `FOCUS_MATCH_HOLD` has passed, match
+/// it by time with the recorded focus-event invalidations
+/// (`match_focus_event`), resolve its sender relation with the one WebView2
+/// relation keyboard admission uses (its own memo), and queue the facts for
+/// the hook. Process lookups and waits here cannot delay invalidations or
+/// probes.
 fn run_focus_diagnostic_resolver(
     raw: crossbeam_channel::Receiver<RawFocusEvent>,
     privacy: Arc<KeyboardPrivacy>,
-    correlatable: Arc<AtomicBool>,
+    raw_dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 ) {
     let mut memo = WebView2ChildMemo::default();
-    while !stop.load(Ordering::Relaxed) {
-        let event = match raw.recv_timeout(Duration::from_millis(100)) {
-            Ok(event) => event,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-        };
-        let relation = sender_relation(event.sender_pid, event.foreground_pid, |host, child| {
-            memo.check(host, child, || webview2_child_of(child, host))
-        });
-        let correlated = event.aligned && correlatable.load(Ordering::Relaxed);
-        let invalidation = correlated
-            .then(|| {
-                let deadline = Instant::now() + FOCUS_INVALIDATION_WAIT;
-                loop {
-                    match privacy.focus_invalidation(event.sequence) {
-                        FocusInvalidation::Recorded(generation) => break Some(generation),
-                        FocusInvalidation::Gone => break None,
-                        FocusInvalidation::Pending
-                            if Instant::now() < deadline && !stop.load(Ordering::Relaxed) =>
-                        {
-                            std::thread::sleep(Duration::from_millis(5))
-                        }
-                        FocusInvalidation::Pending => break None,
+    let mut pending: std::collections::VecDeque<RawFocusEvent> = Default::default();
+    let mut recent: std::collections::VecDeque<u64> = Default::default();
+    // Every diagnostic event later than this is in `recent`.
+    let mut recent_complete_after: Option<u64> = None;
+    let mut seen_dropped = 0;
+    let hold = duration_nanos(FOCUS_MATCH_HOLD);
+    let max_age = duration_nanos(RECENT_FOCUS_EVENT_AGE);
+    let mut disconnected = false;
+    while !stop.load(Ordering::Relaxed) && !(disconnected && pending.is_empty()) {
+        if !disconnected {
+            // Take everything delivered so far, so every diagnostic event
+            // near a due one is known before it is matched.
+            let mut received = raw.recv_timeout(Duration::from_millis(10));
+            loop {
+                match received {
+                    Ok(event) => {
+                        recent.push_back(event.at_ns);
+                        pending.push_back(event);
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        disconnected = true;
+                        break;
                     }
                 }
-            })
-            .flatten();
-        privacy.note_focus_event(FocusEventFacts {
-            at: event.at,
-            sequence: correlated.then_some(event.sequence),
-            invalidation,
-            relation,
-            control_type: event.control_type,
-            element: event.element,
-            native: event.native,
-        });
+                received = raw.try_recv().map_err(|error| match error {
+                    crossbeam_channel::TryRecvError::Empty => {
+                        crossbeam_channel::RecvTimeoutError::Timeout
+                    }
+                    crossbeam_channel::TryRecvError::Disconnected => {
+                        crossbeam_channel::RecvTimeoutError::Disconnected
+                    }
+                });
+            }
+        }
+        let now_ns = focus_clock_ns(Instant::now());
+        let dropped = raw_dropped.load(Ordering::Relaxed);
+        if dropped != seen_dropped {
+            // A lost diagnostic event's time is unknown: nothing before now
+            // can be checked for a shared match.
+            seen_dropped = dropped;
+            recent_complete_after = Some(recent_complete_after.unwrap_or(0).max(now_ns));
+        }
+        while let Some(&oldest) = recent.front() {
+            if recent.len() <= MAX_RECENT_FOCUS_EVENTS && now_ns.saturating_sub(oldest) <= max_age {
+                break;
+            }
+            recent.pop_front();
+            recent_complete_after = Some(recent_complete_after.unwrap_or(0).max(oldest));
+        }
+        while pending
+            .front()
+            .is_some_and(|event| disconnected || now_ns >= event.at_ns.saturating_add(hold))
+        {
+            let Some(event) = pending.pop_front() else {
+                break;
+            };
+            let (invalidations, invalidations_complete_after) =
+                privacy.recorded_focus_invalidations();
+            let recent: Vec<u64> = recent.iter().copied().collect();
+            let (matching, matched) = match_focus_event(
+                event.at_ns,
+                &invalidations,
+                invalidations_complete_after,
+                &recent,
+                recent_complete_after,
+            );
+            let relation =
+                sender_relation(event.sender_pid, event.foreground_pid, |host, child| {
+                    memo.check(host, child, || webview2_child_of(child, host))
+                });
+            privacy.note_focus_event(FocusEventFacts {
+                at: event.at,
+                sequence: matched.map(|record| record.sequence),
+                invalidation: matched.map(|record| record.generation),
+                matching,
+                relation,
+                control_type: event.control_type,
+                element: event.element,
+                native: event.native,
+            });
+        }
     }
 }
 
@@ -2761,30 +3021,25 @@ pub(crate) fn run_keyboard_privacy_thread(
     let mut diagnostics = None;
     if screenpipe_config::sensitive_debug::enabled() {
         let (raw_tx, raw_rx) = crossbeam_channel::bounded(MAX_QUEUED_FOCUS_EVENTS);
-        // Events delivered while subscribing cannot be matched reliably:
-        // if the invalidation count moved meanwhile, nothing is correlated.
-        let correlatable = Arc::new(AtomicBool::new(true));
-        let base = keyboard_privacy.focus_invalidation_count();
+        let raw_dropped = Arc::new(AtomicU64::new(0));
+        // Start the shared clock if the invalidating handler (subscribed
+        // first) has not; its first reading may precede this and saturate.
+        focus_clock_ns(Instant::now());
         let handler: IUIAutomationFocusChangedEventHandler = FocusDiagnosticHandler {
             keyboard_privacy: keyboard_privacy.clone(),
             raw: raw_tx,
-            base,
-            delivered: AtomicU64::new(0),
+            raw_dropped: raw_dropped.clone(),
         }
         .into();
         match uia.subscribe_focus_diagnostics(&handler) {
             Ok(()) => {
-                if keyboard_privacy.focus_invalidation_count() != base {
-                    correlatable.store(false, Ordering::Relaxed);
-                }
                 let resolver = {
                     let privacy = keyboard_privacy.clone();
-                    let correlatable = correlatable.clone();
                     let stop = stop.clone();
                     std::thread::Builder::new()
                         .name("uia-focus-diagnostics".into())
                         .spawn(move || {
-                            run_focus_diagnostic_resolver(raw_rx, privacy, correlatable, stop)
+                            run_focus_diagnostic_resolver(raw_rx, privacy, raw_dropped, stop)
                         })
                         .ok()
                 };
@@ -2860,7 +3115,7 @@ pub(crate) fn run_keyboard_privacy_thread(
         resolver
     });
     let _ = uia.unsubscribe_focus_changes(&handler_interface);
-    // Stops within its 100 ms receive timeout (stop is set).
+    // Stops within its 10 ms receive timeout (stop is set).
     if let Some(resolver) = resolver {
         let _ = resolver.join();
     }
@@ -3868,7 +4123,18 @@ mod tests {
         );
         assert_eq!(privacy.focus_invalidation_count(), 1);
         assert_eq!(privacy.focus_invalidation(1), FocusInvalidation::Pending);
-        privacy.note_focus_invalidation(1, 77);
+        privacy.note_focus_invalidation(1, 77, 5);
+        assert_eq!(
+            privacy.recorded_focus_invalidations(),
+            (
+                vec![RecordedInvalidation {
+                    sequence: 1,
+                    generation: 77,
+                    at_ns: 5
+                }],
+                None
+            )
+        );
         assert_eq!(privacy.generation(), reference.generation(), "notes only");
         assert_eq!(
             privacy.focus_invalidation(1),
@@ -3888,80 +4154,254 @@ mod tests {
         );
         assert_eq!(privacy.focus_invalidation(1), FocusInvalidation::Gone);
         assert_eq!(privacy.focus_invalidation(42), FocusInvalidation::Pending);
+        // Slots reused: complete only after the oldest invalidation still recorded.
+        let (recorded, complete_after) = privacy.recorded_focus_invalidations();
+        assert_eq!(recorded.len(), FOCUS_INVALIDATION_SLOTS);
+        assert_eq!(complete_after, recorded.iter().map(|r| r.at_ns).min());
+    }
+
+    const MS: u64 = 1_000_000;
+
+    fn record(sequence: u64, at_ms: u64) -> RecordedInvalidation {
+        RecordedInvalidation {
+            sequence,
+            generation: sequence << 32,
+            at_ns: at_ms * MS,
+        }
     }
 
     #[test]
-    fn focus_diagnostic_resolver_correlates_only_aligned_recorded_events() {
-        let privacy = Arc::new(KeyboardPrivacy::default());
-        let (first, generation) = privacy.test_focus_event_invalidation();
-        let (tx, rx) = crossbeam_channel::bounded(8);
-        let correlatable = Arc::new(AtomicBool::new(true));
-        let stop = Arc::new(AtomicBool::new(false));
-        let resolver = {
-            let (privacy, correlatable, stop) =
-                (privacy.clone(), correlatable.clone(), stop.clone());
-            std::thread::spawn(move || {
-                run_focus_diagnostic_resolver(rx, privacy, correlatable, stop)
-            })
+    fn focus_events_match_one_invalidation_by_time_or_stay_unmatched() {
+        let matched = |event_ns: u64, records: &[RecordedInvalidation]| {
+            match_focus_event(event_ns, records, None, &[event_ns], None)
         };
-        // Same process as the foreground, or an unknown sender: no process
-        // lookup is needed.
-        let raw = |sequence, aligned, sender_pid| RawFocusEvent {
+        // One invalidation within the window, before or after the event.
+        let records = [record(1, 500), record(2, 1003)];
+        assert_eq!(
+            matched(1000 * MS, &records),
+            (FocusMatch::Matched { offset: 4 }, Some(records[1]))
+        );
+        assert_eq!(
+            matched(1000 * MS + MS / 2, &[record(3, 1000)]).0,
+            FocusMatch::Matched { offset: 0 }
+        );
+        assert_eq!(
+            matched(1000 * MS, &[record(3, 980)]).0,
+            FocusMatch::Matched { offset: 2 }
+        );
+        assert_eq!(
+            matched(1000 * MS, &[record(3, 1025)]).0,
+            FocusMatch::Matched { offset: 5 }
+        );
+        // None within the window: the nearest distance is reported.
+        for (records, nearest) in [
+            (vec![record(1, 950)], 0),
+            (vec![record(1, 500)], 1),
+            (vec![record(1, 0)], 2),
+            (vec![], 3),
+        ] {
+            assert_eq!(
+                matched(1000 * MS, &records),
+                (FocusMatch::NoCandidate { nearest }, None)
+            );
+        }
+        assert_eq!(
+            matched(1000 * MS, &[record(1, 1026)]).0,
+            FocusMatch::NoCandidate { nearest: 0 }
+        );
+        // Several invalidations, or another diagnostic event near the one
+        // invalidation: never matched.
+        assert_eq!(
+            matched(1000 * MS, &[record(1, 990), record(2, 1010)]),
+            (FocusMatch::SeveralCandidates, None)
+        );
+        let one = [record(1, 1000)];
+        assert_eq!(
+            match_focus_event(1000 * MS, &one, None, &[1000 * MS, 1020 * MS], None),
+            (FocusMatch::SharedCandidate, None)
+        );
+        assert_eq!(
+            match_focus_event(1000 * MS, &one, None, &[1000 * MS, 1030 * MS], None).0,
+            FocusMatch::Matched { offset: 0 }
+        );
+        // Records that may be incomplete for the window: too late.
+        assert_eq!(
+            match_focus_event(1000 * MS, &one, Some(980 * MS), &[1000 * MS], None),
+            (FocusMatch::TooLate, None)
+        );
+        assert_eq!(
+            match_focus_event(1000 * MS, &one, Some(940 * MS), &[1000 * MS], None).0,
+            FocusMatch::Matched { offset: 0 }
+        );
+        assert_eq!(
+            match_focus_event(1000 * MS, &one, None, &[1000 * MS], Some(980 * MS)),
+            (FocusMatch::TooLate, None)
+        );
+        // The completeness check covers the whole guard band.
+        assert_eq!(
+            match_focus_event(1000 * MS, &one, Some(960 * MS), &[1000 * MS], None).0,
+            FocusMatch::TooLate
+        );
+        assert_eq!(FocusMatch::CODES.len(), 6);
+        for (index, outcome) in [
+            FocusMatch::Matched { offset: 0 },
+            FocusMatch::NoCandidate { nearest: 0 },
+            FocusMatch::SeveralCandidates,
+            FocusMatch::SharedCandidate,
+            FocusMatch::TooLate,
+            FocusMatch::NearbyCandidate,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(outcome.index(), index);
+        }
+    }
+
+    #[test]
+    fn a_slow_diagnostic_callback_is_never_paired_with_the_next_invalidation() {
+        // I1 at 1000; its diagnostic event D1 arrives 30 ms late (a slow
+        // cache fetch), 15 ms before the next event's invalidation I2 at
+        // 1045, whose D2 is also 30 ms late. Without the guard band D1 would
+        // match I2, the wrong event.
+        let records = [record(1, 1000), record(2, 1045)];
+        let diagnostics = [1030 * MS, 1075 * MS];
+        let outcome = |event| match_focus_event(event, &records, None, &diagnostics, None);
+        assert_eq!(outcome(1030 * MS), (FocusMatch::NearbyCandidate, None));
+        assert_eq!(
+            outcome(1075 * MS),
+            (FocusMatch::NoCandidate { nearest: 0 }, None)
+        );
+        // Another invalidation just beyond the guard band does not block.
+        let apart = [record(1, 1000), record(2, 1052)];
+        assert_eq!(
+            match_focus_event(1001 * MS, &apart, None, &[1001 * MS], None),
+            (FocusMatch::Matched { offset: 1 }, Some(apart[0]))
+        );
+    }
+
+    #[test]
+    fn focus_event_matching_survives_offsets_and_lost_or_extra_events_on_either_side() {
+        // Invalidations: five before the diagnostic subscription existed
+        // (an initial offset), then one per event with jitter, one whose
+        // diagnostic event was lost (2500), none for a lost invalidation
+        // (3500), one shared by two diagnostic events (4500), and two near
+        // one diagnostic event (5000, 5010).
+        let records: Vec<RecordedInvalidation> = [
+            0, 100, 200, 300, 400, 999, 1502, 2001, 2500, 3002, 4001, 4500, 5000, 5010, 6003,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, at)| record(index as u64 + 1, at))
+        .collect();
+        let diagnostics: Vec<u64> = [1000, 1500, 2000, 3000, 3500, 4000, 4500, 4510, 5005, 6000]
+            .into_iter()
+            .map(|at| at * MS)
+            .collect();
+        let outcomes: Vec<(FocusMatch, Option<u64>)> = diagnostics
+            .iter()
+            .map(|event| {
+                let (outcome, matched) =
+                    match_focus_event(*event, &records, None, &diagnostics, None);
+                (outcome, matched.map(|record| record.sequence))
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                (FocusMatch::Matched { offset: 1 }, Some(6)),
+                (FocusMatch::Matched { offset: 4 }, Some(7)),
+                (FocusMatch::Matched { offset: 4 }, Some(8)),
+                (FocusMatch::Matched { offset: 4 }, Some(10)),
+                (FocusMatch::NoCandidate { nearest: 1 }, None),
+                (FocusMatch::Matched { offset: 4 }, Some(11)),
+                (FocusMatch::SharedCandidate, None),
+                (FocusMatch::SharedCandidate, None),
+                (FocusMatch::SeveralCandidates, None),
+                (FocusMatch::Matched { offset: 4 }, Some(15)),
+            ],
+            "each event is matched on its own; neighbours of a lost or extra \
+             event are unaffected"
+        );
+    }
+
+    #[test]
+    fn focus_diagnostic_resolver_matches_recorded_invalidations_by_time() {
+        let privacy = Arc::new(KeyboardPrivacy::default());
+        // Times below are in the past of the shared clock.
+        let start = focus_clock_ns(Instant::now());
+        if start < 500 * MS {
+            std::thread::sleep(Duration::from_nanos(500 * MS - start));
+        }
+        let now = focus_clock_ns(Instant::now());
+        // An invalidation with no diagnostic event (an initial offset), one
+        // with its event 1 ms later, and an event without an invalidation.
+        privacy.test_focus_event_invalidation_at(now - 400 * MS);
+        let (second, generation) = privacy.test_focus_event_invalidation_at(now - 300 * MS);
+        let raw = |at_ns, sender_pid| RawFocusEvent {
             at: Instant::now(),
-            sequence,
-            aligned,
+            at_ns,
             sender_pid,
             foreground_pid: Some(7),
             control_type: Some(50004),
             element: Some(3),
             native: None,
         };
-        tx.send(raw(first, true, Some(7))).unwrap();
-        tx.send(raw(first, false, None)).unwrap();
-        // Never recorded: given up after the bounded wait.
-        tx.send(raw(first + 1, true, None)).unwrap();
-        drop(tx);
-        resolver.join().unwrap();
-        let (events, dropped) = privacy.take_focus_events().unwrap();
-        assert_eq!(dropped, 0);
-        let summary: Vec<_> = events
-            .iter()
-            .map(|f| (f.sequence, f.invalidation, f.relation, f.element))
-            .collect();
+        let run = |events: Vec<RawFocusEvent>, dropped: u64| {
+            let (tx, rx) = crossbeam_channel::bounded(8);
+            for event in events {
+                tx.send(event).unwrap();
+            }
+            drop(tx);
+            let stop = Arc::new(AtomicBool::new(false));
+            run_focus_diagnostic_resolver(
+                rx,
+                privacy.clone(),
+                Arc::new(AtomicU64::new(dropped)),
+                stop,
+            );
+            let (events, _) = privacy.take_focus_events().unwrap();
+            events
+                .iter()
+                .map(|f| (f.matching, f.sequence, f.invalidation, f.relation))
+                .collect::<Vec<_>>()
+        };
+        // Same process as the foreground, or an unknown sender: no process
+        // lookup is needed.
         assert_eq!(
-            summary,
+            run(
+                vec![raw(now - 299 * MS, Some(7)), raw(now - 200 * MS, None)],
+                0
+            ),
             vec![
                 (
-                    Some(first),
+                    FocusMatch::Matched { offset: 1 },
+                    Some(second),
                     Some(generation),
-                    SenderRelation::Foreground,
-                    Some(3)
+                    SenderRelation::Foreground
                 ),
-                (None, None, SenderRelation::Unknown, Some(3)),
-                (Some(first + 1), None, SenderRelation::Unknown, Some(3)),
+                (
+                    FocusMatch::NoCandidate { nearest: 1 },
+                    None,
+                    None,
+                    SenderRelation::Unknown
+                ),
             ]
         );
-        // Subscribing while the count moved: nothing is correlated.
-        let (tx, rx) = crossbeam_channel::bounded(8);
-        correlatable.store(false, Ordering::Relaxed);
-        let resolver = {
-            let (privacy, correlatable, stop) =
-                (privacy.clone(), correlatable.clone(), stop.clone());
-            std::thread::spawn(move || {
-                run_focus_diagnostic_resolver(rx, privacy, correlatable, stop)
-            })
-        };
-        tx.send(raw(first, true, None)).unwrap();
-        drop(tx);
-        resolver.join().unwrap();
-        let (events, _) = privacy.take_focus_events().unwrap();
-        assert!(events
-            .iter()
-            .all(|f| f.sequence.is_none() && f.invalidation.is_none()));
+        // A diagnostic event lost before the resolver: earlier matches can
+        // no longer be checked for sharing.
+        assert_eq!(
+            run(vec![raw(now - 299 * MS, None)], 1)[0].0,
+            FocusMatch::TooLate
+        );
         // The stop flag ends it even while the channel stays open.
         let (_tx, rx) = crossbeam_channel::bounded::<RawFocusEvent>(1);
-        stop.store(true, Ordering::Relaxed);
-        run_focus_diagnostic_resolver(rx, privacy.clone(), correlatable, stop);
+        run_focus_diagnostic_resolver(
+            rx,
+            privacy.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(true)),
+        );
     }
 
     #[test]
@@ -3973,6 +4413,7 @@ mod tests {
         let generation = privacy.generation();
         assert!(privacy.take_focus_events().is_none());
         let facts = |sequence| FocusEventFacts {
+            matching: FocusMatch::TooLate,
             at: Instant::now(),
             sequence: Some(sequence),
             invalidation: None,
@@ -4005,8 +4446,6 @@ mod tests {
         assert!(privacy.take_focus_events().is_none());
         drop(held);
         assert_eq!(privacy.take_focus_events().map(|(e, _)| e.len()), Some(1));
-        assert!(focus_event_aligned(5, 5) && focus_event_aligned(4, 5));
-        assert!(!focus_event_aligned(6, 5) && !focus_event_aligned(3, 5));
         assert_eq!(same_element(Some(1), Some(1)), Some(true));
         assert_eq!(same_element(Some(1), Some(2)), Some(false));
         assert_eq!(same_element(None, Some(2)), None);

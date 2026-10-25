@@ -665,6 +665,8 @@ struct HookState {
     previous_text: Option<input_admission::EndedText>,
     /// Highest focus-event sequence classified so far (diagnostics only).
     focus_events_classified: u64,
+    /// Recheck discards waiting for their last focus event (diagnostics).
+    pending_discards: Vec<PendingDiscard>,
     /// Buffers confirmed permissible immediately before navigation changes
     /// focus. PII processing is deferred out of the low-level hook.
     pending_text: Vec<UiEvent>,
@@ -808,6 +810,7 @@ fn run_native_hooks(
             text_focus_event: None,
             previous_text: None,
             focus_events_classified: 0,
+            pending_discards: Vec::new(),
             pending_text: Vec::new(),
             current_app,
             current_window,
@@ -874,6 +877,7 @@ fn run_native_hooks(
                             emit_text(s, event);
                         }
                         drain_focus_events(s);
+                        expire_pending_discards(s, false);
                         if let Some(last_time) = s.last_text_time {
                             if last_time.elapsed().as_millis() as u64 >= s.config.text_timeout_ms {
                                 flush_text_buffer(s);
@@ -931,6 +935,8 @@ fn run_native_hooks(
                 if let Some(agg) = s.scroll_aggregator.take() {
                     emit_aggregated_scroll(&s.tx, agg);
                 }
+                drain_focus_events(s);
+                expire_pending_discards(s, true);
                 if let Some(report) = s.key_tally.take_due(0, true) {
                     let _ = s.keyboard_privacy.offer_admission_report(report);
                 }
@@ -1103,20 +1109,24 @@ fn drop_pending_text(state: &mut HookState) {
 
 fn discard_text_buffer(state: &mut HookState, cause: DiscardCause) {
     drain_focus_events(state);
-    let focus = discard_focus(state);
+    let attribution = discard_focus(state);
     note_text_ended(state);
     // Each buffered keystroke was admitted; count what the recheck drops.
     let tag = std::mem::take(&mut state.text_tag);
     let epoch = input_accounting::epoch_at(state.start, Instant::now());
     let source = state.keyboard_privacy.last_invalidation_source();
-    state.key_tally.discarded(
-        state.text_pid,
-        epoch,
-        tag.keystrokes(),
-        cause,
-        source,
-        focus,
-    );
+    let keys = tag.keystrokes();
+    let focus = match attribution {
+        DiscardAttribution::Now(focus) => Some(focus),
+        DiscardAttribution::Await(_) if !cause.rechecks() || keys == 0 => None,
+        DiscardAttribution::Await(sequence) => {
+            await_discard_attribution(state, sequence, epoch, keys);
+            None
+        }
+    };
+    state
+        .key_tally
+        .discarded(state.text_pid, epoch, keys, cause, source, focus);
     input_accounting::note_lost(&tag, LostCause::BufferDiscarded);
     state.text_buf.clear();
     clear_text_identity(state);
@@ -1186,7 +1196,7 @@ fn drain_focus_events(state: &mut HookState) {
         state.key_tally.focus_event(
             input_accounting::epoch_at(state.start, facts.at),
             class,
-            facts.invalidation.is_some(),
+            facts.matching,
         );
         if matches!(
             text,
@@ -1199,35 +1209,134 @@ fn drain_focus_events(state: &mut HookState) {
         }
         if let Some(sequence) = facts.sequence {
             state.focus_events_classified = state.focus_events_classified.max(sequence);
+            attribute_pending_discards(state, sequence, class);
         }
     }
 }
 
+/// How a recheck discard of the current text is attributed.
+enum DiscardAttribution {
+    Now(input_admission::DiscardFocus),
+    /// The latest focus invalidation (this sequence) came after the text
+    /// began, but its event is not classified yet: attribute it later.
+    Await(u64),
+}
+
 /// What a recheck discard of the current text is attributed to: the last
 /// focus event classified while it was buffered, `NoFocusEvent` only when
-/// every focus event so far is classified, and `Unclassified` when the
-/// latest focus invalidation may postdate the text but its event is not
-/// classified yet (or cannot be correlated).
-fn discard_focus(state: &HookState) -> input_admission::DiscardFocus {
+/// every focus event so far is classified, `Await` when the latest focus
+/// invalidation came after the text began but its event is still being
+/// matched, and `Unclassified` when that cannot be told.
+fn discard_focus(state: &HookState) -> DiscardAttribution {
     use input_admission::DiscardFocus;
     let latest = state.keyboard_privacy.focus_invalidation_count();
     if latest > state.focus_events_classified {
-        let before_text = match (
+        match (
             state.keyboard_privacy.focus_invalidation(latest),
             text_epoch(state),
         ) {
-            (windows_uia::FocusInvalidation::Recorded(generation), Some(epoch)) => {
-                generation >> 32 <= epoch
+            (windows_uia::FocusInvalidation::Recorded(generation), Some(epoch))
+                if generation >> 32 <= epoch => {}
+            (windows_uia::FocusInvalidation::Recorded(_), Some(_)) => {
+                return DiscardAttribution::Await(latest)
             }
-            _ => false,
-        };
-        if !before_text {
-            return DiscardFocus::Unclassified;
+            _ => return DiscardAttribution::Now(DiscardFocus::Unclassified),
         }
     }
-    state
-        .text_focus_event
-        .map_or(DiscardFocus::NoFocusEvent, DiscardFocus::Last)
+    DiscardAttribution::Now(
+        state
+            .text_focus_event
+            .map_or(DiscardFocus::NoFocusEvent, DiscardFocus::Last),
+    )
+}
+
+/// Recheck discards waiting for their last focus event (bounded; a full
+/// list records the discard as unclassified at once and counts it).
+const MAX_PENDING_DISCARDS: usize = 16;
+/// How long a discard waits before it is recorded as unclassified.
+const PENDING_DISCARD_AGE: Duration = Duration::from_secs(2);
+
+/// A recheck discard whose last focus event (invalidation `sequence`) is
+/// not classified yet (diagnostics only).
+#[derive(Clone, Copy, Debug)]
+struct PendingDiscard {
+    sequence: u64,
+    epoch: u32,
+    pid: u32,
+    keys: u64,
+    since: Instant,
+}
+
+fn await_discard_attribution(state: &mut HookState, sequence: u64, epoch: u32, keys: u64) {
+    if state.pending_discards.len() >= MAX_PENDING_DISCARDS {
+        state.key_tally.discard_attributed(
+            state.text_pid,
+            epoch,
+            keys,
+            input_admission::DiscardFocus::Unclassified,
+            input_admission::DiscardTiming::Overflow,
+        );
+        return;
+    }
+    state.pending_discards.push(PendingDiscard {
+        sequence,
+        epoch,
+        pid: state.text_pid,
+        keys,
+        since: Instant::now(),
+    });
+}
+
+/// Attribute waiting discards once the event of `sequence` is classified
+/// as `class`: those waiting for it get that class; those waiting for an
+/// earlier sequence never will (a later one is classified): unclassified.
+fn attribute_pending_discards(
+    state: &mut HookState,
+    sequence: u64,
+    class: input_admission::FocusClass,
+) {
+    let mut index = 0;
+    while index < state.pending_discards.len() {
+        let pending = state.pending_discards[index];
+        if pending.sequence > sequence {
+            index += 1;
+            continue;
+        }
+        state.pending_discards.swap_remove(index);
+        let focus = if pending.sequence == sequence {
+            input_admission::DiscardFocus::Last(class)
+        } else {
+            input_admission::DiscardFocus::Unclassified
+        };
+        state.key_tally.discard_attributed(
+            pending.pid,
+            pending.epoch,
+            pending.keys,
+            focus,
+            input_admission::DiscardTiming::Late,
+        );
+    }
+}
+
+/// Record discards that waited too long (or all, at shutdown) as
+/// unclassified.
+fn expire_pending_discards(state: &mut HookState, all: bool) {
+    let mut index = 0;
+    while index < state.pending_discards.len() {
+        let pending = state.pending_discards[index];
+        if !all && pending.since.elapsed() < PENDING_DISCARD_AGE {
+            index += 1;
+            continue;
+        }
+        state.pending_discards.swap_remove(index);
+        state.key_tally.discard_attributed(
+            pending.pid,
+            pending.epoch,
+            pending.keys,
+            input_admission::DiscardFocus::Unclassified,
+            input_admission::DiscardTiming::Late,
+        );
+    }
 }
 
 /// Whether buffered text may stay after this key press's admission result.
@@ -2952,6 +3061,7 @@ mod tests {
                 text_focus_event: None,
                 previous_text: None,
                 focus_events_classified: 0,
+                pending_discards: Vec::new(),
                 pending_text: Vec::new(),
                 current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
                 current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
@@ -3236,14 +3346,23 @@ mod tests {
 
     #[test]
     fn focus_event_diagnostics_label_discards_without_changing_text_admission() {
+        // Discards settle keystrokes in the shared ledger other tests read.
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = crossbeam_channel::bounded(64);
         let (mut state, content_rx) = make_test_state(tx, "");
         let focus = NativeKeyboardFocus::for_test(10, 11, 12);
         let privacy = state.keyboard_privacy.clone();
-        let facts = |sequence, invalidation| windows_uia::FocusEventFacts {
+        let facts = |sequence: Option<u64>, invalidation| windows_uia::FocusEventFacts {
             at: Instant::now(),
             sequence,
             invalidation,
+            matching: if sequence.is_some() {
+                windows_uia::FocusMatch::Matched { offset: 0 }
+            } else {
+                windows_uia::FocusMatch::SeveralCandidates
+            },
             relation: windows_uia::SenderRelation::Foreground,
             control_type: Some(50004),
             element: Some(1),
@@ -3311,38 +3430,90 @@ mod tests {
                 serde_json::json!({"foreground|same_element|native_same": 2}),
             )
         );
-        // A focus invalidation after the text began whose event is not
-        // classified yet: the discard is unclassified, never `none`.
+        // A discard right after a focus event mid-typing (before the event
+        // is matched, as within the resolver's hold): attributed to that
+        // event once it is classified, compared with the discarded text.
         type_text(&mut state);
         let (third, third_generation) = privacy.test_focus_event_invalidation();
         discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        assert_eq!(state.pending_discards.len(), 1);
+        assert_eq!(classes(&mut state).1, serde_json::json!({}));
+        privacy.note_focus_event(facts(Some(third), Some(third_generation)));
+        drain_focus_events(&mut state);
+        assert!(state.pending_discards.is_empty());
+        let report = state.key_tally.take_due(0, true).unwrap();
+        let epoch = &report.epochs[&0];
+        assert_eq!(
+            epoch.focus_events.events_json()["classes"],
+            serde_json::json!({"foreground|same_element|native_same": 1})
+        );
+        assert_eq!(
+            epoch.discard_focus.discards_json()["classes"],
+            serde_json::json!({"foreground|same_element|native_same": 2})
+        );
+        assert_eq!(epoch.discard_focus.discards_json()["attributed_late"], 1);
+        assert_eq!(epoch.discard_focus_by_pid[&12].discards_json()["keys"], 2);
+        // Its event never matched: a later classified event proves it, and
+        // the discard is unclassified.
+        type_text(&mut state);
+        privacy.test_focus_event_invalidation();
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        let (fifth, fifth_generation) = privacy.test_focus_event_invalidation();
+        privacy.note_focus_event(facts(Some(fifth), Some(fifth_generation)));
+        drain_focus_events(&mut state);
+        assert!(state.pending_discards.is_empty());
+        assert_eq!(
+            classes(&mut state),
+            (
+                serde_json::json!({"foreground|no_text|no_text": 1}),
+                serde_json::json!({"unclassified": 2}),
+            )
+        );
+        // Or it waited too long (here: shutdown) and is unclassified.
+        type_text(&mut state);
+        privacy.test_focus_event_invalidation();
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        expire_pending_discards(&mut state, false);
+        assert_eq!(state.pending_discards.len(), 1, "not yet expired");
+        expire_pending_discards(&mut state, true);
         assert_eq!(
             classes(&mut state).1,
             serde_json::json!({"unclassified": 2})
         );
-        // Text typed after that invalidation: certainly no focus event while
-        // it was buffered, even before that event is classified.
+        // Text typed after the latest invalidation: certainly no focus event
+        // while it was buffered, even before that event is classified.
         type_text(&mut state);
         discard_text_buffer(&mut state, DiscardCause::FlushUnverified);
         assert_eq!(classes(&mut state).1, serde_json::json!({"none": 2}));
-        // The late event arrives after newer text ended and more began: an
-        // older text may have spanned it (ambiguous), and the current text
-        // began after it, so it labels nothing.
-        privacy.note_focus_event(facts(Some(third), Some(third_generation)));
-        type_text(&mut state);
-        drain_focus_events(&mut state);
-        assert!(state.text_focus_event.is_none());
         // An event that cannot be matched with its invalidation is ambiguous,
         // and so is the discard it may concern.
+        type_text(&mut state);
         privacy.note_focus_event(facts(None, None));
         drain_focus_events(&mut state);
         discard_text_buffer(&mut state, DiscardCause::ElementChanged);
         assert_eq!(
             classes(&mut state),
             (
-                serde_json::json!({"foreground|ambiguous|ambiguous": 2}),
+                serde_json::json!({"foreground|ambiguous|ambiguous": 1}),
                 serde_json::json!({"foreground|ambiguous|ambiguous": 2}),
             )
+        );
+        // The waiting list is bounded: overflow is recorded unclassified at
+        // once and counted.
+        for _ in 0..MAX_PENDING_DISCARDS + 1 {
+            type_text(&mut state);
+            privacy.test_focus_event_invalidation();
+            discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        }
+        assert_eq!(state.pending_discards.len(), MAX_PENDING_DISCARDS);
+        expire_pending_discards(&mut state, true);
+        let report = state.key_tally.take_due(0, true).unwrap();
+        let discards = report.epochs[&0].discard_focus.discards_json();
+        assert_eq!(discards["pending_overflow"], 1);
+        assert_eq!(discards["attributed_late"], MAX_PENDING_DISCARDS);
+        assert_eq!(
+            discards["classes"],
+            serde_json::json!({"unclassified": 2 * (MAX_PENDING_DISCARDS + 1)})
         );
         drain_test_content(&state, &content_rx);
         assert!(rx.try_recv().is_err());

@@ -30,23 +30,35 @@
 //! - element / native: the sender against the UIA element, and native
 //!   keyboard focus (sampled when the diagnostic callback ran, after the
 //!   event) against the native focus, of the text buffered when the event's
-//!   own invalidation ran. Each event is matched with its invalidation by
-//!   sequence (both subscriptions see the same events in order); text
-//!   admitted in an earlier focus epoch than that invalidation produced
-//!   existed before it. `no_text` only when certainly nothing was buffered
-//!   then; `ambiguous` whenever that is uncertain (an unmatched event, an
-//!   older text that may have spanned it), never same or different.
+//!   own invalidation ran. Each event is matched with the invalidating
+//!   handler's recorded invalidations by time only (no shared sequence, so a
+//!   lost, extra or early event on either side affects only its neighbours):
+//!   exactly one invalidation within 25 ms, no other within 50 ms, and no
+//!   other diagnostic event near it. Text admitted in an earlier focus epoch than that
+//!   invalidation produced existed before it. `no_text` only when certainly
+//!   nothing was buffered then; `ambiguous` whenever that is uncertain (an
+//!   unmatched event, an older text that may have spanned it), never same
+//!   or different.
 //! The epoch record counts all focus events (`focus_events`, with `dropped`
-//! and `uncorrelated` counts) and attributes each recheck discard's
+//! and `uncorrelated` counts, the match outcome `match`: `matched`,
+//! `no_candidate`, `several_candidates`, `shared_candidate`, `too_late`,
+//! `nearby_candidate`, matched time offsets `matched_offset` and, without a candidate, the
+//! distance to the nearest invalidation `unmatched_nearest`) and attributes
+//! each recheck discard's
 //! keystrokes to the last focus event classified while its text was
 //! buffered (`discard_focus`, in total and per process keyed like `by_pid`):
 //! `none` only when every focus event so far is classified and none
-//! concerned the text, `unclassified` when a focus invalidation after the
-//! text began has no classified event yet. Element identities are compared
+//! concerned the text. A discard whose last focus invalidation came after
+//! the text began but whose event is still being matched waits (at most 16
+//! discards, 2 s): it gets that event's class once it is classified, or
+//! `unclassified` once a later event is classified instead or the wait
+//! ends; it is then counted in its own epoch and process, with
+//! `attributed_late` (and `pending_overflow` for a full list, recorded
+//! `unclassified` at once). Element identities are compared
 //! in memory only and never logged. Native focus may have changed again
 //! between the event and its sample, so `native_*` is an approximation.
 
-use super::{FocusEventFacts, NativeKeyboardFocus, SenderRelation, SENDER_RELATIONS};
+use super::{FocusEventFacts, FocusMatch, NativeKeyboardFocus, SenderRelation, SENDER_RELATIONS};
 use super::{InvalidationSource, INVALIDATION_SOURCES};
 use super::{KeyboardPrivacyDenial, KEYBOARD_PRIVACY_DENIAL_REASONS};
 use serde_json::{json, Value};
@@ -81,6 +93,12 @@ pub(crate) enum DiscardCause {
 pub(crate) const DISCARD_CAUSES: usize = 9;
 
 impl DiscardCause {
+    /// A recheck discard (not a pause or exclusion): counted with its
+    /// invalidation source and focus-event attribution.
+    pub(crate) fn rechecks(self) -> bool {
+        !matches!(self, Self::Paused | Self::Excluded)
+    }
+
     fn code(index: usize) -> &'static str {
         [
             "denied_key",
@@ -263,6 +281,18 @@ impl FocusClass {
     }
 }
 
+/// When a recheck discard's focus attribution was recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiscardTiming {
+    /// With the discard.
+    AtDiscard,
+    /// Later, once its last focus event was classified (or proven never to
+    /// be).
+    Late,
+    /// At once as unclassified: the list of discards waiting was full.
+    Overflow,
+}
+
 /// What a recheck discard is attributed to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DiscardFocus {
@@ -414,11 +444,24 @@ pub(crate) struct FocusEventCounts {
     pub(crate) events: u64,
     /// Focus events dropped by the bounded hand-offs before classification.
     pub(crate) dropped: u64,
-    /// Focus events that could not be correlated with their invalidation.
+    /// Focus events not matched with their invalidation.
     pub(crate) uncorrelated: u64,
+    /// Discards attributed after waiting for their last focus event, and
+    /// those recorded unclassified because the waiting list was full.
+    pub(crate) late: u64,
+    pub(crate) overflow: u64,
     classes: [u64; FOCUS_CLASSES],
     control_types: [u64; CONTROL_TYPE_SLOTS],
+    /// Focus events by `FocusMatch` outcome, matched ones by time offset,
+    /// unmatched ones without a candidate by distance to the nearest record.
+    matches: [u64; MATCH_OUTCOMES],
+    offsets: [u64; MATCH_OFFSETS],
+    nearest: [u64; MATCH_NEAREST],
 }
+
+const MATCH_OUTCOMES: usize = FocusMatch::CODES.len();
+const MATCH_OFFSETS: usize = FocusMatch::OFFSET_CODES.len();
+const MATCH_NEAREST: usize = FocusMatch::NEAREST_CODES.len();
 
 impl Default for FocusEventCounts {
     fn default() -> Self {
@@ -426,22 +469,40 @@ impl Default for FocusEventCounts {
             events: 0,
             dropped: 0,
             uncorrelated: 0,
+            late: 0,
+            overflow: 0,
             classes: [0; FOCUS_CLASSES],
             control_types: [0; CONTROL_TYPE_SLOTS],
+            matches: [0; MATCH_OUTCOMES],
+            offsets: [0; MATCH_OFFSETS],
+            nearest: [0; MATCH_NEAREST],
         }
     }
 }
 
 impl FocusEventCounts {
-    fn record_event(&mut self, class: FocusClass, correlated: bool) {
+    fn record_event(&mut self, class: FocusClass, matching: FocusMatch) {
         self.events += 1;
-        self.uncorrelated += u64::from(!correlated);
+        self.matches[matching.index()] += 1;
+        match matching {
+            FocusMatch::Matched { offset } => self.offsets[offset.min(MATCH_OFFSETS - 1)] += 1,
+            FocusMatch::NoCandidate { nearest } => {
+                self.uncorrelated += 1;
+                self.nearest[nearest.min(MATCH_NEAREST - 1)] += 1;
+            }
+            _ => self.uncorrelated += 1,
+        }
         self.classes[class.index()] += 1;
         self.control_types[control_type_slot(class.control_type)] += 1;
     }
 
-    fn record_discard(&mut self, focus: DiscardFocus, keys: u64) {
+    fn record_discard(&mut self, focus: DiscardFocus, keys: u64, timing: DiscardTiming) {
         self.events += 1;
+        match timing {
+            DiscardTiming::AtDiscard => {}
+            DiscardTiming::Late => self.late += 1,
+            DiscardTiming::Overflow => self.overflow += 1,
+        }
         match focus {
             DiscardFocus::Last(class) => {
                 self.classes[class.index()] += keys;
@@ -456,10 +517,21 @@ impl FocusEventCounts {
         self.events += other.events;
         self.dropped += other.dropped;
         self.uncorrelated += other.uncorrelated;
+        self.late += other.late;
+        self.overflow += other.overflow;
         for (total, value) in self.classes.iter_mut().zip(other.classes) {
             *total += value;
         }
         for (total, value) in self.control_types.iter_mut().zip(other.control_types) {
+            *total += value;
+        }
+        for (total, value) in self.matches.iter_mut().zip(other.matches) {
+            *total += value;
+        }
+        for (total, value) in self.offsets.iter_mut().zip(other.offsets) {
+            *total += value;
+        }
+        for (total, value) in self.nearest.iter_mut().zip(other.nearest) {
             *total += value;
         }
     }
@@ -493,6 +565,9 @@ impl FocusEventCounts {
             "events": self.events,
             "dropped": self.dropped,
             "uncorrelated": self.uncorrelated,
+            "match": fixed_json(&FocusMatch::CODES, &self.matches),
+            "matched_offset": fixed_json(&FocusMatch::OFFSET_CODES, &self.offsets),
+            "unmatched_nearest": fixed_json(&FocusMatch::NEAREST_CODES, &self.nearest),
             "classes": self.classes_json(),
             "control_types": self.control_types_json(),
         })
@@ -503,10 +578,24 @@ impl FocusEventCounts {
         json!({
             "discards": self.events,
             "keys": self.classes.iter().sum::<u64>(),
+            "attributed_late": self.late,
+            "pending_overflow": self.overflow,
             "classes": self.classes_json(),
             "control_types": self.control_types_json(),
         })
     }
+}
+
+/// Non-zero counts under fixed codes.
+fn fixed_json(codes: &[&str], counts: &[u64]) -> Value {
+    Value::Object(
+        codes
+            .iter()
+            .zip(counts)
+            .filter(|(_, count)| **count > 0)
+            .map(|(code, count)| (code.to_string(), json!(count)))
+            .collect(),
+    )
 }
 
 /// One epoch's hook-side counts.
@@ -635,12 +724,12 @@ impl KeyAdmissionTally {
         keys: u64,
         cause: DiscardCause,
         source: usize,
-        focus: DiscardFocus,
+        focus: Option<DiscardFocus>,
     ) {
         if keys == 0 {
             return;
         }
-        let recheck = !matches!(cause, DiscardCause::Paused | DiscardCause::Excluded);
+        let recheck = cause.rechecks();
         let entry = self.epoch(epoch);
         for counts in [&mut entry.totals, bounded_entry(&mut entry.by_pid, pid)] {
             counts.discarded += keys;
@@ -649,23 +738,51 @@ impl KeyAdmissionTally {
                 counts.discarded_after[source.min(INVALIDATION_SOURCES)] += keys;
             }
         }
-        if recheck {
-            entry.discard_focus.record_discard(focus, keys);
-            let key = by_pid_key(&entry.by_pid, pid);
-            entry
-                .discard_focus_by_pid
-                .entry(key)
-                .or_default()
-                .record_discard(focus, keys);
+        if let Some(focus) = focus.filter(|_| recheck) {
+            Self::record_discard_focus(entry, pid, keys, focus, DiscardTiming::AtDiscard);
         }
     }
 
-    /// One classified focus event, in the epoch it was handled.
-    /// `correlated`: matched with its own invalidation.
-    pub(crate) fn focus_event(&mut self, epoch: u32, class: FocusClass, correlated: bool) {
-        self.epoch(epoch)
-            .focus_events
-            .record_event(class, correlated);
+    /// The focus attribution of a recheck discard recorded earlier with
+    /// `focus: None`, in that discard's epoch and process.
+    pub(crate) fn discard_attributed(
+        &mut self,
+        pid: u32,
+        epoch: u32,
+        keys: u64,
+        focus: DiscardFocus,
+        timing: DiscardTiming,
+    ) {
+        if keys == 0 {
+            return;
+        }
+        let entry = self.epoch(epoch);
+        // The epoch may already have been handed over: key the process as
+        // the original discard did (its own pid, or the overflow pid 0).
+        bounded_entry(&mut entry.by_pid, pid);
+        Self::record_discard_focus(entry, pid, keys, focus, timing);
+    }
+
+    fn record_discard_focus(
+        entry: &mut EpochKeys,
+        pid: u32,
+        keys: u64,
+        focus: DiscardFocus,
+        timing: DiscardTiming,
+    ) {
+        entry.discard_focus.record_discard(focus, keys, timing);
+        let key = by_pid_key(&entry.by_pid, pid);
+        entry
+            .discard_focus_by_pid
+            .entry(key)
+            .or_default()
+            .record_discard(focus, keys, timing);
+    }
+
+    /// One classified focus event, in the epoch it was handled, with how
+    /// it was matched with its invalidation.
+    pub(crate) fn focus_event(&mut self, epoch: u32, class: FocusClass, matching: FocusMatch) {
+        self.epoch(epoch).focus_events.record_event(class, matching);
     }
 
     /// Focus events the bounded hand-off dropped before classification.
@@ -997,9 +1114,16 @@ mod tests {
             2,
             DiscardCause::GenerationChanged,
             4,
-            DiscardFocus::NoFocusEvent,
+            Some(DiscardFocus::NoFocusEvent),
         );
-        tally.discarded(1, 4, 1, DiscardCause::Paused, 0, DiscardFocus::NoFocusEvent);
+        tally.discarded(
+            1,
+            4,
+            1,
+            DiscardCause::Paused,
+            0,
+            Some(DiscardFocus::NoFocusEvent),
+        );
         let report = tally.take_due(4, false).unwrap();
         assert_eq!(report.epochs.len(), 1, "the current epoch stays open");
         let three = &report.epochs[&3];
@@ -1046,6 +1170,7 @@ mod tests {
             at: Instant::now(),
             sequence: Some(1),
             invalidation: Some(5 << 32),
+            matching: FocusMatch::Matched { offset: 0 },
             relation: SenderRelation::WebView2Child,
             control_type: Some(50004),
             element,
@@ -1214,19 +1339,19 @@ mod tests {
         );
         let no_text = classify_focus_event(&focus_facts(None, None), TextAtEvent::None);
         let mut tally = KeyAdmissionTally::default();
-        tally.focus_event(2, same, true);
-        tally.focus_event(2, no_text, false);
+        tally.focus_event(2, same, FocusMatch::Matched { offset: 4 });
+        tally.focus_event(2, no_text, FocusMatch::NoCandidate { nearest: 1 });
         tally.focus_events_dropped(2, 3);
         tally.focus_events_dropped(2, 0);
         let last = DiscardFocus::Last(same);
-        tally.discarded(7, 2, 3, DiscardCause::GenerationChanged, 0, last);
+        tally.discarded(7, 2, 3, DiscardCause::GenerationChanged, 0, Some(last));
         tally.discarded(
             7,
             2,
             2,
             DiscardCause::ElementChanged,
             0,
-            DiscardFocus::NoFocusEvent,
+            Some(DiscardFocus::NoFocusEvent),
         );
         tally.discarded(
             7,
@@ -1234,12 +1359,12 @@ mod tests {
             1,
             DiscardCause::HoldExpired,
             0,
-            DiscardFocus::Unclassified,
+            Some(DiscardFocus::Unclassified),
         );
-        tally.discarded(8, 2, 0, DiscardCause::GenerationChanged, 0, last);
+        tally.discarded(8, 2, 0, DiscardCause::GenerationChanged, 0, Some(last));
         // Pauses and exclusions are not rechecks: no focus attribution.
-        tally.discarded(7, 2, 4, DiscardCause::Paused, 0, last);
-        tally.discarded(7, 2, 4, DiscardCause::Excluded, 0, last);
+        tally.discarded(7, 2, 4, DiscardCause::Paused, 0, Some(last));
+        tally.discarded(7, 2, 4, DiscardCause::Excluded, 0, Some(last));
         let report = tally.take_due(3, false).unwrap();
         let epoch = &report.epochs[&2];
         assert_eq!(
@@ -1248,6 +1373,9 @@ mod tests {
                 "events": 2,
                 "dropped": 3,
                 "uncorrelated": 1,
+                "match": {"matched": 1, "no_candidate": 1},
+                "matched_offset": {"invalidation_after_lt5ms": 1},
+                "unmatched_nearest": {"lt1s": 1},
                 "classes": {
                     "webview2_child|same_element|native_same": 1,
                     "webview2_child|no_text|no_text": 1,
@@ -1258,6 +1386,8 @@ mod tests {
         let discards = json!({
             "discards": 3,
             "keys": 6,
+            "attributed_late": 0,
+            "pending_overflow": 0,
             "classes": {
                 "webview2_child|same_element|native_same": 3,
                 "none": 2,
@@ -1282,7 +1412,7 @@ mod tests {
         assert_eq!(merged.discard_focus_by_pid[&7].discards_json()["keys"], 12);
         // Focus events alone create an epoch without keystrokes (the app log
         // skips it).
-        tally.focus_event(4, no_text, true);
+        tally.focus_event(4, no_text, FocusMatch::TooLate);
         tally.focus_events_dropped(5, 1);
         let only_focus = tally.take_due(9, false).unwrap();
         assert!(only_focus
@@ -1292,7 +1422,7 @@ mod tests {
         // Per-process discards follow `by_pid`'s bound and its overflow pid 0:
         // no process appears that `by_pid` does not name.
         for pid in 100..200 {
-            tally.discarded(pid, 3, 1, DiscardCause::HoldExpired, 0, last);
+            tally.discarded(pid, 3, 1, DiscardCause::HoldExpired, 0, Some(last));
         }
         let report = tally.take_due(0, true).unwrap();
         let epoch = &report.epochs[&3];
@@ -1314,10 +1444,55 @@ mod tests {
             .discard_focus_by_pid
             .entry(5)
             .or_default()
-            .record_discard(last, 1);
+            .record_discard(last, 1, DiscardTiming::AtDiscard);
         full.add(&extra);
         assert!(!full.discard_focus_by_pid.contains_key(&5));
         assert!(full.by_pid.contains_key(&0) && full.discard_focus_by_pid.contains_key(&0));
+    }
+
+    #[test]
+    fn late_discard_attribution_keeps_the_discards_epoch_process_and_counts() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let same = classify_focus_event(
+            &focus_facts(Some(4), Some(focus)),
+            TextAtEvent::Ended(binding(Some(4), Some(focus))),
+        );
+        let mut tally = KeyAdmissionTally::default();
+        // Waiting: the discard's totals now, its focus attribution later.
+        tally.discarded(7, 2, 3, DiscardCause::GenerationChanged, 4, None);
+        tally.discarded(7, 2, 2, DiscardCause::Paused, 0, None);
+        let first = tally.take_due(3, false).unwrap();
+        let epoch = &first.epochs[&2];
+        assert_eq!(epoch.totals.discarded, 5);
+        assert_eq!(epoch.discard_focus.events, 0, "not attributed yet");
+        // Attributed after the epoch was handed over: same epoch and pid.
+        let late = DiscardTiming::Late;
+        tally.discard_attributed(7, 2, 3, DiscardFocus::Last(same), late);
+        tally.discard_attributed(7, 2, 0, DiscardFocus::Unclassified, late);
+        tally.discard_attributed(7, 2, 1, DiscardFocus::Unclassified, DiscardTiming::Overflow);
+        let second = tally.take_due(3, false).unwrap();
+        let epoch = &second.epochs[&2];
+        assert!(!epoch.has_keystrokes(), "no second app-log line");
+        let expected = json!({
+            "discards": 2,
+            "keys": 4,
+            "attributed_late": 1,
+            "pending_overflow": 1,
+            "classes": {
+                "webview2_child|same_element|native_same": 3,
+                "unclassified": 1,
+            },
+            "control_types": {"Edit": 3},
+        });
+        assert_eq!(epoch.discard_focus.discards_json(), expected);
+        assert_eq!(epoch.discard_focus_by_pid[&7].discards_json(), expected);
+        // The worker merges both hand-overs into one epoch.
+        let mut merged = first.epochs[&2].clone();
+        merged.add(epoch);
+        assert_eq!(merged.discard_focus_by_pid[&7].discards_json(), expected);
+        assert_eq!(merged.totals.discarded, 5);
+        assert!(DiscardCause::GenerationChanged.rechecks());
+        assert!(!DiscardCause::Paused.rechecks() && !DiscardCause::Excluded.rechecks());
     }
 
     #[test]
