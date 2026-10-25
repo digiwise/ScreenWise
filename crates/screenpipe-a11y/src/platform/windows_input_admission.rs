@@ -18,10 +18,12 @@
 //! basenames) only to the opt-in sensitive diagnostics. No key, text, title or
 //! URL enters these counters.
 //!
-//! With sensitive diagnostics enabled, a separate observation-only UIA focus
-//! subscription (the invalidating one is unchanged) classifies every focus
-//! event by fixed codes `relation|element|native` plus the sender's UIA
-//! control type:
+//! Whenever keyboard text is captured (or sensitive diagnostics are on), a
+//! separate UIA focus subscription (the invalidating one is unchanged)
+//! classifies every focus event by fixed codes `relation|element|native`
+//! plus the sender's UIA control type. The classes prove relaxation B (so
+//! they feed admission, positive proof only, fail closed) and are counted
+//! here for the sensitive diagnostics:
 //! - relation: `foreground` (the foreground process), `webview2_child` (a
 //!   `msedgewebview2.exe` process started by the foreground process: the
 //!   process test keyboard admission uses; admission's additional check that
@@ -55,7 +57,12 @@
 //! ends; it is then counted in its own epoch and process, with
 //! `attributed_late` (and `pending_overflow` for a full list, recorded
 //! `unclassified` at once). Element identities are compared
-//! in memory only and never logged. Native focus may have changed again
+//! in memory only and never logged. Relaxation B (owner decision
+//! 2026-10-25): `focus_event_weak` decides, once, whether a classified event
+//! is weak for the current text (another process's Window sender with
+//! native focus unchanged); the hook then lets the existing re-verification
+//! path keep that text, and `treated`, `weak_reverified` and
+//! `weak_focus_senders` count it. Native focus may have changed again
 //! between the event and its sample, so `native_*` is an approximation.
 
 use super::{FocusEventFacts, FocusMatch, NativeKeyboardFocus, SenderRelation, SENDER_RELATIONS};
@@ -241,6 +248,8 @@ const EVENT_CLASSES: usize = SENDER_RELATIONS * MATCH_STATES * MATCH_STATES;
 const NO_FOCUS_EVENT: usize = EVENT_CLASSES;
 const UNCLASSIFIED: usize = EVENT_CLASSES + 1;
 const FOCUS_CLASSES: usize = EVENT_CLASSES + 2;
+/// UIA's Window control type id.
+pub(crate) const WINDOW_CONTROL_TYPE: i32 = 50032;
 /// UIA control type ids 50000..=50040 by their fixed labels, then
 /// `unavailable` (no cached control type) and `other` (any other id).
 const FIRST_CONTROL_TYPE: i32 = 50000;
@@ -279,6 +288,32 @@ impl FocusClass {
     pub(crate) fn compared(self) -> bool {
         !matches!(self.element, ElementMatch::NoText | ElementMatch::Ambiguous)
     }
+
+    /// Owner decision 2026-10-25 (relaxation B): the three facts that let a
+    /// focus event be weak. The sender is another process (neither the
+    /// foreground process nor its WebView2 child), native keyboard focus is
+    /// the buffered text's, and the sender is a Window. Any other or unknown
+    /// value (including `unknown` relation, `ambiguous` or `native_unknown`)
+    /// keeps the event strong.
+    fn weak_facts(self) -> bool {
+        weak_sender_candidate(self.relation, self.control_type) && self.native == NativeMatch::Same
+    }
+}
+
+/// The sender facts of `FocusClass::weak_facts` (another process's Window),
+/// also used to pick which senders the sensitive diagnostics name.
+pub(crate) fn weak_sender_candidate(relation: SenderRelation, control_type: Option<i32>) -> bool {
+    relation == SenderRelation::OtherProcess && control_type == Some(WINDOW_CONTROL_TYPE)
+}
+
+/// The single decision whether a focus event is weak for the current
+/// buffered text: it was matched with its own invalidation, compared with
+/// that text (`TextAtEvent::Current`) and has all three facts of
+/// `FocusClass::weak_facts`. Weak only lets the existing re-verification
+/// path keep the text (`same_focus_epoch_except`); the invalidation itself
+/// stays strong. Used by both admission and the diagnostics' counts.
+pub(crate) fn focus_event_weak(text: TextAtEvent, class: FocusClass) -> bool {
+    matches!(text, TextAtEvent::Current(_)) && class.weak_facts()
 }
 
 /// When a recheck discard's focus attribution was recorded.
@@ -446,6 +481,8 @@ pub(crate) struct FocusEventCounts {
     pub(crate) dropped: u64,
     /// Focus events not matched with their invalidation.
     pub(crate) uncorrelated: u64,
+    /// Focus events treated as weak for the buffered text (`focus_event_weak`).
+    pub(crate) weak: u64,
     /// Discards attributed after waiting for their last focus event, and
     /// those recorded unclassified because the waiting list was full.
     pub(crate) late: u64,
@@ -469,6 +506,7 @@ impl Default for FocusEventCounts {
             events: 0,
             dropped: 0,
             uncorrelated: 0,
+            weak: 0,
             late: 0,
             overflow: 0,
             classes: [0; FOCUS_CLASSES],
@@ -481,8 +519,9 @@ impl Default for FocusEventCounts {
 }
 
 impl FocusEventCounts {
-    fn record_event(&mut self, class: FocusClass, matching: FocusMatch) {
+    fn record_event(&mut self, class: FocusClass, matching: FocusMatch, weak: bool) {
         self.events += 1;
+        self.weak += u64::from(weak);
         self.matches[matching.index()] += 1;
         match matching {
             FocusMatch::Matched { offset } => self.offsets[offset.min(MATCH_OFFSETS - 1)] += 1,
@@ -517,6 +556,7 @@ impl FocusEventCounts {
         self.events += other.events;
         self.dropped += other.dropped;
         self.uncorrelated += other.uncorrelated;
+        self.weak += other.weak;
         self.late += other.late;
         self.overflow += other.overflow;
         for (total, value) in self.classes.iter_mut().zip(other.classes) {
@@ -565,6 +605,7 @@ impl FocusEventCounts {
             "events": self.events,
             "dropped": self.dropped,
             "uncorrelated": self.uncorrelated,
+            "treated": {"weak": self.weak, "strong": self.events - self.weak},
             "match": fixed_json(&FocusMatch::CODES, &self.matches),
             "matched_offset": fixed_json(&FocusMatch::OFFSET_CODES, &self.offsets),
             "unmatched_nearest": fixed_json(&FocusMatch::NEAREST_CODES, &self.nearest),
@@ -612,6 +653,11 @@ pub(crate) struct EpochKeys {
     /// exactly as `by_pid`, including its shared overflow pid 0).
     pub(crate) discard_focus: FocusEventCounts,
     pub(crate) discard_focus_by_pid: HashMap<u32, FocusEventCounts>,
+    /// Buffers kept by a re-verification that relied on a weak focus event.
+    pub(crate) weak_reverified: u64,
+    /// Weak focus events by sender process (bounded; reported by
+    /// executable basename only, in the sensitive diagnostics).
+    pub(crate) weak_focus_senders: HashMap<u32, u64>,
 }
 
 impl EpochKeys {
@@ -630,6 +676,10 @@ impl EpochKeys {
                 .or_default()
                 .add(counts);
         }
+        self.weak_reverified += other.weak_reverified;
+        for (pid, count) in &other.weak_focus_senders {
+            *bounded_entry(&mut self.weak_focus_senders, *pid) += count;
+        }
     }
 
     /// Keystroke counts or active time (focus-event diagnostics alone also
@@ -637,6 +687,30 @@ impl EpochKeys {
     pub(crate) fn has_keystrokes(&self) -> bool {
         self.totals != KeyCounts::default() || self.active_ms > 0
     }
+}
+
+/// Weak focus events by sender executable basename (at most
+/// `MAX_TRACKED_PROCESSES` processes; the rest under `overflow`, senders
+/// without a known name under `unnamed`). Sensitive diagnostics only.
+pub(crate) fn weak_senders_json(counts: &HashMap<u32, u64>, names: &HashMap<u32, String>) -> Value {
+    let mut named: BTreeMap<String, u64> = BTreeMap::new();
+    for (pid, count) in counts {
+        let label = if *pid == 0 {
+            "overflow".to_string()
+        } else {
+            names
+                .get(pid)
+                .cloned()
+                .unwrap_or_else(|| "unnamed".to_string())
+        };
+        *named.entry(label).or_default() += count;
+    }
+    Value::Object(
+        named
+            .into_iter()
+            .map(|(label, count)| (label, json!(count)))
+            .collect(),
+    )
 }
 
 /// The key `bounded_entry` gave `pid` in `by_pid` (its own pid or the shared
@@ -781,8 +855,26 @@ impl KeyAdmissionTally {
 
     /// One classified focus event, in the epoch it was handled, with how
     /// it was matched with its invalidation.
-    pub(crate) fn focus_event(&mut self, epoch: u32, class: FocusClass, matching: FocusMatch) {
-        self.epoch(epoch).focus_events.record_event(class, matching);
+    pub(crate) fn focus_event(
+        &mut self,
+        epoch: u32,
+        class: FocusClass,
+        matching: FocusMatch,
+        weak: bool,
+    ) {
+        self.epoch(epoch)
+            .focus_events
+            .record_event(class, matching, weak);
+    }
+
+    /// A weak focus event's sender process (named later by the worker).
+    pub(crate) fn weak_focus_sender(&mut self, epoch: u32, pid: u32) {
+        *bounded_entry(&mut self.epoch(epoch).weak_focus_senders, pid) += 1;
+    }
+
+    /// A buffer kept by a re-verification that relied on a weak focus event.
+    pub(crate) fn weak_reverified(&mut self, epoch: u32) {
+        self.epoch(epoch).weak_reverified += 1;
     }
 
     /// Focus events the bounded hand-off dropped before classification.
@@ -1175,6 +1267,7 @@ mod tests {
             control_type: Some(50004),
             element,
             native,
+            sender: None,
         }
     }
 
@@ -1339,8 +1432,8 @@ mod tests {
         );
         let no_text = classify_focus_event(&focus_facts(None, None), TextAtEvent::None);
         let mut tally = KeyAdmissionTally::default();
-        tally.focus_event(2, same, FocusMatch::Matched { offset: 4 });
-        tally.focus_event(2, no_text, FocusMatch::NoCandidate { nearest: 1 });
+        tally.focus_event(2, same, FocusMatch::Matched { offset: 4 }, true);
+        tally.focus_event(2, no_text, FocusMatch::NoCandidate { nearest: 1 }, false);
         tally.focus_events_dropped(2, 3);
         tally.focus_events_dropped(2, 0);
         let last = DiscardFocus::Last(same);
@@ -1373,6 +1466,7 @@ mod tests {
                 "events": 2,
                 "dropped": 3,
                 "uncorrelated": 1,
+                "treated": {"weak": 1, "strong": 1},
                 "match": {"matched": 1, "no_candidate": 1},
                 "matched_offset": {"invalidation_after_lt5ms": 1},
                 "unmatched_nearest": {"lt1s": 1},
@@ -1412,7 +1506,7 @@ mod tests {
         assert_eq!(merged.discard_focus_by_pid[&7].discards_json()["keys"], 12);
         // Focus events alone create an epoch without keystrokes (the app log
         // skips it).
-        tally.focus_event(4, no_text, FocusMatch::TooLate);
+        tally.focus_event(4, no_text, FocusMatch::TooLate, false);
         tally.focus_events_dropped(5, 1);
         let only_focus = tally.take_due(9, false).unwrap();
         assert!(only_focus
@@ -1493,6 +1587,105 @@ mod tests {
         assert_eq!(merged.totals.discarded, 5);
         assert!(DiscardCause::GenerationChanged.rechecks());
         assert!(!DiscardCause::Paused.rechecks() && !DiscardCause::Excluded.rechecks());
+    }
+
+    #[test]
+    fn a_focus_event_is_weak_only_with_all_three_facts_for_the_current_text() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let elsewhere = NativeKeyboardFocus::for_test(1, 9, 3);
+        let event = |relation, control_type, native| FocusEventFacts {
+            relation,
+            control_type,
+            native,
+            element: Some(99),
+            ..focus_facts(Some(99), Some(focus))
+        };
+        let text = TextAtEvent::Current(binding(Some(4), Some(focus)));
+        let weak = |facts: FocusEventFacts, text| {
+            focus_event_weak(text, classify_focus_event(&facts, text))
+        };
+        let window = Some(WINDOW_CONTROL_TYPE);
+        let other = SenderRelation::OtherProcess;
+        // All three: weak, whatever the element.
+        assert!(weak(event(other, window, Some(focus)), text));
+        assert!(weak(
+            event(other, window, Some(focus)),
+            TextAtEvent::Current(binding(Some(99), Some(focus)))
+        ));
+        // Each fact failing alone keeps it strong.
+        for relation in [
+            SenderRelation::Foreground,
+            SenderRelation::WebView2Child,
+            SenderRelation::Unknown,
+        ] {
+            assert!(!weak(event(relation, window, Some(focus)), text));
+        }
+        for control_type in [Some(50004), Some(50033), None] {
+            assert!(!weak(event(other, control_type, Some(focus)), text));
+        }
+        assert!(
+            !weak(event(other, window, Some(elsewhere)), text),
+            "native changed"
+        );
+        assert!(!weak(event(other, window, None), text), "native unknown");
+        assert!(!weak(
+            event(other, window, Some(focus)),
+            TextAtEvent::Current(binding(Some(4), None))
+        ));
+        // Only for text certainly buffered now: never ended, absent or
+        // uncertain text.
+        for uncertain in [
+            TextAtEvent::Ended(binding(Some(4), Some(focus))),
+            TextAtEvent::None,
+            TextAtEvent::Ambiguous {
+                current_possible: true,
+            },
+            TextAtEvent::Ambiguous {
+                current_possible: false,
+            },
+        ] {
+            assert!(!weak(event(other, window, Some(focus)), uncertain));
+        }
+    }
+
+    #[test]
+    fn weak_focus_senders_are_reported_by_bounded_basename_only() {
+        let mut tally = KeyAdmissionTally::default();
+        for pid in [5, 5, 6, 7] {
+            tally.weak_focus_sender(1, pid);
+        }
+        for pid in 100..140 {
+            tally.weak_focus_sender(1, pid);
+        }
+        tally.weak_reverified(1);
+        let report = tally.take_due(0, true).unwrap();
+        let epoch = &report.epochs[&1];
+        assert!(epoch.weak_focus_senders.len() <= MAX_TRACKED_PROCESSES + 1);
+        assert_eq!(epoch.weak_reverified, 1);
+        let names: HashMap<u32, String> =
+            [(5, "a.exe".to_string()), (6, "a.exe".to_string())].into();
+        let json = weak_senders_json(&epoch.weak_focus_senders, &names);
+        assert_eq!(json["a.exe"], 3, "same basename merges");
+        let total: u64 = json
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 44);
+        assert!(json.get("overflow").is_some() && json.get("unnamed").is_some());
+        assert!(
+            json.as_object()
+                .unwrap()
+                .keys()
+                .all(|key| key.parse::<u32>().is_err()),
+            "no pids"
+        );
+        // Merging keeps the bound.
+        let mut merged = epoch.clone();
+        merged.add(epoch);
+        assert!(merged.weak_focus_senders.len() <= MAX_TRACKED_PROCESSES + 1);
+        assert_eq!(merged.weak_reverified, 2);
     }
 
     #[test]

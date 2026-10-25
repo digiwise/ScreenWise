@@ -14,6 +14,7 @@ use crossbeam_channel::{Sender, TrySendError};
 use parking_lot::Mutex;
 use screenpipe_config::capture_diagnostics::CaptureReason;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -469,7 +470,7 @@ impl CrossProcessFocusCheck {
 }
 
 /// How a UIA focus event's sender relates to the foreground application
-/// (content-free diagnostics only).
+/// (content-free; input to relaxation B's weak-event decision).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SenderRelation {
     /// The foreground application's own process.
@@ -514,9 +515,12 @@ fn sender_relation(
     }
 }
 
-/// Content-free facts about one UIA focus-changed event, for diagnostics
-/// only: they never grant, deny or invalidate anything. `element` is an
-/// in-memory runtime-id hash for comparison; it is never logged.
+/// Content-free facts about one UIA focus-changed event. They never grant,
+/// deny or invalidate anything themselves, but they are the proof relaxation
+/// B (owner decision 2026-10-25) needs before the hook may treat a focus
+/// event as weak (`input_admission::focus_event_weak`), and they feed the
+/// sensitive diagnostics. `element` is an in-memory runtime-id hash for
+/// comparison; it is never logged.
 #[derive(Clone, Copy)]
 pub(crate) struct FocusEventFacts {
     pub(crate) at: Instant,
@@ -534,10 +538,15 @@ pub(crate) struct FocusEventFacts {
     pub(crate) element: Option<u64>,
     /// Native keyboard focus when the diagnostic callback ran.
     pub(crate) native: Option<NativeKeyboardFocus>,
+    /// The sender's process (in memory, to count weak senders by executable
+    /// basename in the sensitive diagnostics only; never logged as a pid).
+    pub(crate) sender: Option<u32>,
 }
 
 /// Focus events held for the hook thread; older ones are dropped and counted.
 const MAX_QUEUED_FOCUS_EVENTS: usize = 64;
+/// Candidate weak-event sender processes named at once (sensitive only).
+const MAX_FOCUS_SENDER_NAMES: usize = 32;
 /// Recent focus-event invalidations remembered for matching.
 const FOCUS_INVALIDATION_SLOTS: usize = 32;
 
@@ -807,6 +816,30 @@ pub(crate) fn same_focus_epoch(earlier: u64, later: u64) -> bool {
     earlier >> 32 == later >> 32
 }
 
+/// As `same_focus_epoch`, except that strong focus-event invalidations whose
+/// resulting generation is listed in `weak_focus` (events proven weak for
+/// the buffered text, owner decision 2026-10-25) do not separate them. Exact
+/// and fail closed: every focus epoch step between the two generations must
+/// be one of those events, so any other strong invalidation, or a carry
+/// from the low half, still separates them.
+pub(crate) fn same_focus_epoch_except(earlier: u64, later: u64, weak_focus: &[u64]) -> bool {
+    if same_focus_epoch(earlier, later) {
+        return true;
+    }
+    if later < earlier {
+        return false;
+    }
+    let steps = (later >> 32) - (earlier >> 32);
+    let mut proven: Vec<u64> = weak_focus
+        .iter()
+        .copied()
+        .filter(|generation| *generation > earlier && *generation <= later)
+        .collect();
+    proven.sort_unstable();
+    proven.dedup();
+    proven.len() as u64 == steps
+}
+
 /// A process list setting: none (default), all, or executable basenames.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ProcessList {
@@ -1034,11 +1067,15 @@ pub struct KeyboardPrivacy {
     invalidations: [AtomicU64; INVALIDATION_SOURCES],
     reported_invalidations: [AtomicU64; INVALIDATION_SOURCES],
     last_invalidation: AtomicU8,
-    /// Classified focus events awaiting the hook thread (diagnostics only).
+    /// Classified focus events awaiting the hook thread: relaxation B's
+    /// proofs and the focus diagnostics.
     focus_events: Mutex<std::collections::VecDeque<FocusEventFacts>>,
+    /// Executable basenames of recent candidate weak-event senders, by
+    /// process (bounded; sensitive diagnostics only).
+    focus_sender_names: Mutex<HashMap<u32, (Option<String>, Instant)>>,
     focus_events_dropped: AtomicU64,
     /// Generation produced by recent focus-event invalidations, by sequence
-    /// (a small seqlock ring; diagnostics only).
+    /// (a small seqlock ring), for matching classified focus events.
     focus_invalidation_sequences: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
     focus_invalidation_generations: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
     focus_invalidation_times: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
@@ -1097,8 +1134,8 @@ impl KeyboardPrivacy {
 
     /// The invalidating focus handler, after its invalidation: remember the
     /// generation the `sequence`-th focus event produced and when
-    /// (`focus_clock_ns`), for diagnostics. Atomic stores only; nothing reads
-    /// it for admission.
+    /// (`focus_clock_ns`), so classified focus events can be matched with
+    /// it. Atomic stores only, after the invalidation; never delays it.
     fn note_focus_invalidation(&self, sequence: u64, generation: u64, at_ns: u64) {
         let slot = (sequence % FOCUS_INVALIDATION_SLOTS as u64) as usize;
         self.focus_invalidation_sequences[slot].store(0, Ordering::SeqCst);
@@ -1261,7 +1298,15 @@ impl KeyboardPrivacy {
         std::mem::take(&mut *self.admission_reports.lock())
     }
 
-    /// Diagnostic resolver: queue one event's facts for the hook thread.
+    /// Holds the classified-event queue, as a busy resolver would.
+    #[cfg(test)]
+    pub(crate) fn test_hold_focus_events(
+        &self,
+    ) -> parking_lot::MutexGuard<'_, std::collections::VecDeque<FocusEventFacts>> {
+        self.focus_events.lock()
+    }
+
+    /// Focus-event resolver: queue one event's facts for the hook thread.
     /// Bounded: the oldest queued event is dropped and counted.
     pub(crate) fn note_focus_event(&self, facts: FocusEventFacts) {
         let mut events = self.focus_events.lock();
@@ -1273,6 +1318,40 @@ impl KeyboardPrivacy {
     }
 
     /// A focus event lost before classification (bounded hand-offs).
+    /// Resolver thread: remember a candidate weak-event sender's executable
+    /// basename (one cheap query per process, at most
+    /// `MAX_FOCUS_SENDER_NAMES` processes; the oldest is forgotten).
+    fn note_focus_sender_name(&self, pid: u32) {
+        if self.focus_sender_names.lock().contains_key(&pid) {
+            return;
+        }
+        // The kernel query runs without the lock the worker reads.
+        let name = process_image_basename(pid);
+        let mut names = self.focus_sender_names.lock();
+        if names.contains_key(&pid) {
+            return;
+        }
+        if names.len() >= MAX_FOCUS_SENDER_NAMES {
+            if let Some(oldest) = names
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(pid, _)| *pid)
+            {
+                names.remove(&oldest);
+            }
+        }
+        names.insert(pid, (name, Instant::now()));
+    }
+
+    /// Worker: the remembered sender basenames.
+    fn focus_sender_names(&self) -> HashMap<u32, String> {
+        self.focus_sender_names
+            .lock()
+            .iter()
+            .filter_map(|(pid, (name, _))| name.clone().map(|name| (*pid, name)))
+            .collect()
+    }
+
     fn note_focus_event_dropped(&self) {
         self.focus_events_dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -2482,10 +2561,10 @@ impl UiaContext {
         unsafe { self.automation.AddFocusChangedEventHandler(None, handler) }
     }
 
-    /// Subscribe the observation-only diagnostic handler, with a cache
+    /// Subscribe the focus classification handler, with a cache
     /// request for the sender's process id, control type and runtime id
     /// (fixed numbers; no names, values or descendants).
-    fn subscribe_focus_diagnostics(
+    fn subscribe_focus_classification(
         &self,
         handler: &IUIAutomationFocusChangedEventHandler,
     ) -> windows::core::Result<()> {
@@ -2733,8 +2812,8 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
         if let Some(keyboard_privacy) = &self.keyboard_privacy {
             let (sequence, generation) =
                 keyboard_privacy.invalidate_counted(InvalidationSource::FocusEvent);
-            // Diagnostics only, after the invalidation: a clock read and
-            // atomic stores.
+            // After the invalidation, for matching classified focus events:
+            // a clock read and atomic stores.
             keyboard_privacy.note_focus_invalidation(
                 sequence,
                 generation,
@@ -2753,17 +2832,19 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
     }
 }
 
-/// A separate, observation-only focus subscription for content-free
-/// diagnostics (opt-in sensitive diagnostics only). It never invalidates,
-/// grants or denies anything: `FocusChangedHandler`'s own subscription,
-/// which carries no cache request, keeps doing the invalidation unchanged.
+/// A separate focus subscription that classifies focus events: the proof
+/// relaxation B needs (active whenever keyboard text is captured) and the
+/// sensitive focus diagnostics. It never invalidates, grants or denies
+/// anything itself: `FocusChangedHandler`'s own subscription, which carries
+/// no cache request, keeps doing every (strong) invalidation unchanged, and
+/// without this handler's facts every focus event simply stays strong.
 /// Its cache request makes UIA fetch the sender's process id, control type
 /// and runtime id from the provider when the event is raised; this callback
 /// then only reads those cached values, the clock and native focus, and
-/// hands the event to `run_focus_diagnostic_resolver` without waiting. A
+/// hands the event to `run_focus_event_resolver` without waiting. A
 /// missing value is classified as unknown.
 #[implement(IUIAutomationFocusChangedEventHandler)]
-struct FocusDiagnosticHandler {
+struct FocusClassificationHandler {
     keyboard_privacy: Arc<KeyboardPrivacy>,
     raw: crossbeam_channel::Sender<RawFocusEvent>,
     /// Events this callback could not hand over (the resolver then treats
@@ -2771,7 +2852,7 @@ struct FocusDiagnosticHandler {
     raw_dropped: Arc<AtomicU64>,
 }
 
-impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl {
+impl IUIAutomationFocusChangedEventHandler_Impl for FocusClassificationHandler_Impl {
     fn HandleFocusChangedEvent(
         &self,
         sender: Option<&IUIAutomationElement>,
@@ -2809,18 +2890,20 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusDiagnosticHandler_Impl 
 const MAX_RECENT_FOCUS_EVENTS: usize = 128;
 const RECENT_FOCUS_EVENT_AGE: Duration = Duration::from_secs(1);
 
-/// Diagnostics thread (never the hook, the UIA callback or the probe
-/// worker): hold each focus event until `FOCUS_MATCH_HOLD` has passed, match
+/// Focus-event resolver thread (never the hook, the UIA callback or the
+/// probe worker): hold each focus event until `FOCUS_MATCH_HOLD` has passed, match
 /// it by time with the recorded focus-event invalidations
 /// (`match_focus_event`), resolve its sender relation with the one WebView2
 /// relation keyboard admission uses (its own memo), and queue the facts for
 /// the hook. Process lookups and waits here cannot delay invalidations or
-/// probes.
-fn run_focus_diagnostic_resolver(
+/// probes. `name_senders`: also resolve candidate senders' basenames for the
+/// sensitive diagnostics (only when that sink is on).
+fn run_focus_event_resolver(
     raw: crossbeam_channel::Receiver<RawFocusEvent>,
     privacy: Arc<KeyboardPrivacy>,
     raw_dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    name_senders: bool,
 ) {
     let mut memo = WebView2ChildMemo::default();
     let mut pending: std::collections::VecDeque<RawFocusEvent> = Default::default();
@@ -2894,6 +2977,13 @@ fn run_focus_diagnostic_resolver(
                 sender_relation(event.sender_pid, event.foreground_pid, |host, child| {
                     memo.check(host, child, || webview2_child_of(child, host))
                 });
+            // Name only senders that could make a weak event, and only for
+            // the sensitive sink; the hook decides with the buffered text.
+            if let Some(pid) = event.sender_pid.filter(|_| {
+                name_senders && input_admission::weak_sender_candidate(relation, event.control_type)
+            }) {
+                privacy.note_focus_sender_name(pid);
+            }
             privacy.note_focus_event(FocusEventFacts {
                 at: event.at,
                 sequence: matched.map(|record| record.sequence),
@@ -2903,6 +2993,7 @@ fn run_focus_diagnostic_resolver(
                 control_type: event.control_type,
                 element: event.element,
                 native: event.native,
+                sender: event.sender_pid,
             });
         }
     }
@@ -2915,6 +3006,62 @@ fn run_focus_diagnostic_resolver(
 fn keyboard_privacy_capture_enabled(config: &UiCaptureConfig) -> bool {
     config.skip_password_fields
         && (config.capture_text || config.capture_keystrokes || config.capture_clipboard_content)
+}
+
+/// Whether the focus classification pipeline runs: whenever keyboard text
+/// is captured (relaxation B needs its proofs, independent of the sensitive
+/// sink) or the sensitive sink reports focus diagnostics.
+fn focus_classification_wanted(config: &UiCaptureConfig, sensitive: bool) -> bool {
+    config.capture_text || sensitive
+}
+
+/// The running focus classification pipeline.
+struct FocusClassification {
+    handler: IUIAutomationFocusChangedEventHandler,
+    resolver: Option<std::thread::JoinHandle<()>>,
+    raw_dropped: Arc<AtomicU64>,
+    reported: bool,
+}
+
+impl FocusClassification {
+    /// Worker loop: report once if the resolver stopped early or events had
+    /// to be dropped; affected focus events simply stay strong.
+    fn check(&mut self, stop: &AtomicBool) {
+        if self.reported || stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let finished = self
+            .resolver
+            .as_ref()
+            .is_none_or(|resolver| resolver.is_finished());
+        let Some(stage) =
+            classification_degraded_stage(finished, self.raw_dropped.load(Ordering::Relaxed))
+        else {
+            return;
+        };
+        self.reported = true;
+        report_focus_classification_degraded(stage);
+    }
+}
+
+fn classification_degraded_stage(resolver_finished: bool, dropped: u64) -> Option<&'static str> {
+    if resolver_finished {
+        Some("resolver_stopped")
+    } else if dropped > 0 {
+        Some("events_dropped")
+    } else {
+        None
+    }
+}
+
+/// Once per stage and process: relaxation B is unavailable or degraded and
+/// the affected focus events stay strong (fixed codes; no content).
+fn report_focus_classification_degraded(stage: &'static str) {
+    warn!(
+        reason_code = "keyboard_focus_classification_degraded",
+        stage,
+        "focus-event classification unavailable or behind; affected focus events stay strong (relaxation B inactive for them)"
+    );
 }
 
 /// Run the password-state probe on its own STA. Tree capture and element
@@ -3015,39 +3162,48 @@ pub(crate) fn run_keyboard_privacy_thread(
         keyboard_privacy.invalidate();
         return;
     }
-    // Registered after the invalidating subscription and only when the
-    // opt-in sensitive diagnostics that report it are enabled. A failure
-    // only leaves those diagnostics without focus-event classes.
-    let mut diagnostics = None;
-    if screenpipe_config::sensitive_debug::enabled() {
+    // Registered after the invalidating subscription, whenever keyboard
+    // text is captured (relaxation B's proofs) or the sensitive sink is on
+    // (focus diagnostics). Without it every focus event stays strong.
+    let sensitive = screenpipe_config::sensitive_debug::enabled();
+    let mut classification = None;
+    if focus_classification_wanted(&config, sensitive) {
         let (raw_tx, raw_rx) = crossbeam_channel::bounded(MAX_QUEUED_FOCUS_EVENTS);
         let raw_dropped = Arc::new(AtomicU64::new(0));
         // Start the shared clock if the invalidating handler (subscribed
         // first) has not; its first reading may precede this and saturate.
         focus_clock_ns(Instant::now());
-        let handler: IUIAutomationFocusChangedEventHandler = FocusDiagnosticHandler {
+        let handler: IUIAutomationFocusChangedEventHandler = FocusClassificationHandler {
             keyboard_privacy: keyboard_privacy.clone(),
             raw: raw_tx,
             raw_dropped: raw_dropped.clone(),
         }
         .into();
-        match uia.subscribe_focus_diagnostics(&handler) {
+        match uia.subscribe_focus_classification(&handler) {
             Ok(()) => {
                 let resolver = {
                     let privacy = keyboard_privacy.clone();
+                    let raw_dropped = raw_dropped.clone();
                     let stop = stop.clone();
                     std::thread::Builder::new()
-                        .name("uia-focus-diagnostics".into())
+                        .name("uia-focus-classifier".into())
                         .spawn(move || {
-                            run_focus_diagnostic_resolver(raw_rx, privacy, raw_dropped, stop)
+                            run_focus_event_resolver(raw_rx, privacy, raw_dropped, stop, sensitive)
                         })
                         .ok()
                 };
-                diagnostics = Some((handler, resolver));
+                let start_failed = resolver.is_none();
+                if start_failed {
+                    report_focus_classification_degraded("resolver_start_failed");
+                }
+                classification = Some(FocusClassification {
+                    handler,
+                    resolver,
+                    raw_dropped,
+                    reported: start_failed,
+                });
             }
-            Err(_) => {
-                debug!("diagnostic focus subscription unavailable; focus events stay unclassified");
-            }
+            Err(_) => report_focus_classification_degraded("subscription_failed"),
         }
     }
 
@@ -3097,6 +3253,9 @@ pub(crate) fn run_keyboard_privacy_thread(
             std::thread::sleep(LOCKED_SCREEN_UIA_BACKOFF);
             continue;
         }
+        if let Some(classification) = &mut classification {
+            classification.check(&stop);
+        }
         probes.record(uia.refresh_keyboard_privacy(
             &keyboard_privacy,
             &config,
@@ -3110,9 +3269,9 @@ pub(crate) fn run_keyboard_privacy_thread(
 
     report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, true);
     keyboard_privacy.invalidate();
-    let resolver = diagnostics.and_then(|(diagnostic, resolver)| {
-        let _ = uia.unsubscribe_focus_changes(&diagnostic);
-        resolver
+    let resolver = classification.and_then(|classification| {
+        let _ = uia.unsubscribe_focus_changes(&classification.handler);
+        classification.resolver
     });
     let _ = uia.unsubscribe_focus_changes(&handler_interface);
     // Stops within its 10 ms receive timeout (stop is set).
@@ -3235,6 +3394,11 @@ fn report_keyboard_admission(
                     "discarded_by": keys.totals.discarded_json(),
                     "discarded_after": keys.totals.discarded_after_json(),
                     "focus_events": keys.focus_events.events_json(),
+                    "weak_reverified": keys.weak_reverified,
+                    "weak_focus_senders": input_admission::weak_senders_json(
+                        &keys.weak_focus_senders,
+                        &privacy.focus_sender_names(),
+                    ),
                     "discard_focus": keys.discard_focus.discards_json(),
                     "processes": pids.into_iter().map(|pid| {
                         let gate = keys.by_pid.get(&pid).copied().unwrap_or_default();
@@ -4354,11 +4518,12 @@ mod tests {
             }
             drop(tx);
             let stop = Arc::new(AtomicBool::new(false));
-            run_focus_diagnostic_resolver(
+            run_focus_event_resolver(
                 rx,
                 privacy.clone(),
                 Arc::new(AtomicU64::new(dropped)),
                 stop,
+                true,
             );
             let (events, _) = privacy.take_focus_events().unwrap();
             events
@@ -4396,12 +4561,95 @@ mod tests {
         );
         // The stop flag ends it even while the channel stays open.
         let (_tx, rx) = crossbeam_channel::bounded::<RawFocusEvent>(1);
-        run_focus_diagnostic_resolver(
+        run_focus_event_resolver(
             rx,
             privacy.clone(),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicBool::new(true)),
+            true,
         );
+    }
+
+    #[test]
+    fn focus_classification_runs_without_the_sensitive_sink_and_names_senders_only_with_it() {
+        let mut config = UiCaptureConfig::default();
+        config.capture_text = true;
+        assert!(focus_classification_wanted(&config, false), "relaxation B");
+        assert!(focus_classification_wanted(&config, true));
+        config.capture_text = false;
+        assert!(focus_classification_wanted(&config, true), "diagnostics");
+        assert!(!focus_classification_wanted(&config, false));
+        // This test process as the sender of a Window event while another
+        // process is in the foreground: another process (not WebView2).
+        let own = std::process::id();
+        for name_senders in [false, true] {
+            let privacy = Arc::new(KeyboardPrivacy::default());
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            tx.send(RawFocusEvent {
+                at: Instant::now(),
+                at_ns: 1,
+                sender_pid: Some(own),
+                foreground_pid: Some(own.wrapping_add(1)),
+                control_type: Some(input_admission::WINDOW_CONTROL_TYPE),
+                element: Some(3),
+                native: None,
+            })
+            .unwrap();
+            drop(tx);
+            run_focus_event_resolver(
+                rx,
+                privacy.clone(),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicBool::new(false)),
+                name_senders,
+            );
+            let (events, _) = privacy.take_focus_events().unwrap();
+            assert_eq!(events[0].relation, SenderRelation::OtherProcess);
+            assert_eq!(events[0].sender, Some(own));
+            assert_eq!(
+                privacy.focus_sender_names().contains_key(&own),
+                name_senders,
+                "basenames are resolved only for the sensitive sink"
+            );
+        }
+        // Degraded pipeline: reported once per stage, events stay strong.
+        assert_eq!(classification_degraded_stage(false, 0), None);
+        assert_eq!(
+            classification_degraded_stage(true, 0),
+            Some("resolver_stopped")
+        );
+        assert_eq!(
+            classification_degraded_stage(false, 2),
+            Some("events_dropped")
+        );
+    }
+
+    #[test]
+    fn only_proven_weak_focus_events_keep_the_focus_epoch() {
+        let text = 3 << 32 | 7;
+        let weak = text + STRONG_INVALIDATION;
+        let later = weak + 2;
+        assert!(same_focus_epoch_except(text, text + 1, &[]), "weak bumps");
+        assert!(!same_focus_epoch_except(text, later, &[]));
+        assert!(same_focus_epoch_except(text, later, &[weak]));
+        assert!(
+            same_focus_epoch_except(text, later, &[weak, weak]),
+            "listed twice"
+        );
+        // Another strong invalidation besides the proven one separates them.
+        let other = later + STRONG_INVALIDATION;
+        assert!(!same_focus_epoch_except(text, other, &[weak]));
+        assert!(same_focus_epoch_except(text, other, &[weak, other]));
+        // Proofs outside the range, or an earlier later, never count.
+        assert!(!same_focus_epoch_except(text, later, &[text, later + 1]));
+        assert!(!same_focus_epoch_except(later, text, &[weak]));
+        // A carry from the low half adds an epoch step no event explains.
+        let carried = (3 << 32 | 0xFFFF_FFFF) + 1;
+        assert!(!same_focus_epoch_except(
+            3 << 32 | 0xFFFF_FFFF,
+            carried,
+            &[]
+        ));
     }
 
     #[test]
@@ -4414,6 +4662,7 @@ mod tests {
         assert!(privacy.take_focus_events().is_none());
         let facts = |sequence| FocusEventFacts {
             matching: FocusMatch::TooLate,
+            sender: None,
             at: Instant::now(),
             sequence: Some(sequence),
             invalidation: None,

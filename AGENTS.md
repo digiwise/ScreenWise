@@ -57,7 +57,11 @@ are separate UIA work, not prerequisites for completing content screening.
 These diagnostics do not establish production hardening or measured performance.
 
 Keep diagnostics observational: they must not change admission decisions,
-extend deadlines or relax privacy checks. Keep trace storage and process
+extend deadlines or relax privacy checks. Owner exception (2026-10-25): the
+focus-event classification that proves keyboard relaxation B (see
+[capture decision metadata](docs/CAPTURE_PRIVACY.md)) feeds admission and is
+not observational; it may only make an event weak with positive proof and must
+fail closed. Keep trace storage and process
 cardinality bounded, messages content-free and warnings sampled. Preserve fixed
 schema labels/vector ordering; version any incompatible schema change and update
 its consumers. Shared provider acquisition time cannot be assigned to individual

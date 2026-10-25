@@ -667,6 +667,9 @@ struct HookState {
     focus_events_classified: u64,
     /// Recheck discards waiting for their last focus event (diagnostics).
     pending_discards: Vec<PendingDiscard>,
+    /// Generations produced by focus events proven weak for the current
+    /// text (bounded; relaxation B). Cleared with the text's identity.
+    text_weak_focus: Vec<u64>,
     /// Buffers confirmed permissible immediately before navigation changes
     /// focus. PII processing is deferred out of the low-level hook.
     pending_text: Vec<UiEvent>,
@@ -811,6 +814,7 @@ fn run_native_hooks(
             previous_text: None,
             focus_events_classified: 0,
             pending_discards: Vec::new(),
+            text_weak_focus: Vec::new(),
             pending_text: Vec::new(),
             current_app,
             current_window,
@@ -966,6 +970,7 @@ fn flush_text_buffer_at(state: &mut HookState, focus: Option<NativeKeyboardFocus
     if !has_buffered_text(state) {
         return;
     }
+    drain_focus_events(state);
     let admission = diagnosed_keyboard_capture_permit(state, focus);
     if let Ok(grant) = admission {
         rebind_reverified_text(state, grant, focus);
@@ -990,6 +995,7 @@ fn take_permitted_text_buffer(state: &mut HookState, cause: DiscardCause) -> Opt
     if !has_buffered_text(state) {
         return None;
     }
+    drain_focus_events(state);
     // Recheck at every emission (navigation and shutdown). Text from an old
     // or uncertain focus must never survive into a later allowed field.
     let focus = NativeKeyboardFocus::current();
@@ -1030,10 +1036,20 @@ fn rebind_reverified_text(
     let reverified = has_buffered_text(state)
         && may_await_reverification(state, focus)
         && windows_uia::same_element(grant.element, state.text_element) == Some(true)
-        && state
-            .text_generation
-            .is_some_and(|generation| windows_uia::same_focus_epoch(generation, grant.generation));
+        && text_epoch_kept(state, grant.generation);
     if reverified {
+        if state
+            .text_generation
+            .is_some_and(|generation| !windows_uia::same_focus_epoch(generation, grant.generation))
+        {
+            // Kept only because the focus events in between were weak.
+            let epoch = input_accounting::epoch_at(state.start, Instant::now());
+            state.key_tally.weak_reverified(epoch);
+        }
+        // Proofs at or before the new generation can no longer matter.
+        state
+            .text_weak_focus
+            .retain(|generation| *generation > grant.generation);
         state.text_privacy_generation = Some(grant.token);
         state.text_generation = Some(grant.generation);
         state.text_hold_since = None;
@@ -1052,9 +1068,17 @@ fn may_await_reverification(state: &HookState, focus: Option<NativeKeyboardFocus
         && state.text_element_bound
         && focus.is_some()
         && focus == state.text_focus
-        && state.text_generation.is_some_and(|generation| {
-            windows_uia::same_focus_epoch(generation, state.keyboard_privacy.generation())
-        })
+        && text_epoch_kept(state, state.keyboard_privacy.generation())
+}
+
+/// No strong invalidation separates the buffered text's generation from
+/// `later`, except focus events proven weak for this text (owner decision
+/// 2026-10-25, relaxation B; `windows_uia::same_focus_epoch_except`). A
+/// focus event is strong unless the hook already holds that proof.
+fn text_epoch_kept(state: &HookState, later: u64) -> bool {
+    state.text_generation.is_some_and(|generation| {
+        windows_uia::same_focus_epoch_except(generation, later, &state.text_weak_focus)
+    })
 }
 
 fn take_text_buffer_with_permit(
@@ -1141,6 +1165,7 @@ fn clear_text_identity(state: &mut HookState) {
     state.text_focus = None;
     state.text_hold_since = None;
     state.text_focus_event = None;
+    state.text_weak_focus.clear();
 }
 
 /// Focus epoch (generation >> 32) the buffered text was admitted in. Every
@@ -1168,11 +1193,14 @@ fn note_text_ended(state: &mut HookState) {
     }
 }
 
-/// Content-free diagnostics only (never admission): classify the UIA focus
-/// events queued by the diagnostic resolver, count them per epoch, and keep
-/// the latest one that may concern the current text for discard
-/// attribution. Never waits: a contended queue is read on a later call (the
-/// classification does not depend on when it runs). Each event is compared
+/// Classify the UIA focus events queued by the focus-event resolver against
+/// the buffered text: record relaxation B's proofs for the current text
+/// (`input_admission::focus_event_weak`, which feeds admission), count the
+/// events per epoch, and keep the latest one that may concern the current
+/// text for discard attribution. Called before every buffered-text decision
+/// (key press, flush, emission, discard) and on the timer tick. Never waits:
+/// a contended queue is read on a later call, and until then those events
+/// stay strong (the classification does not depend on when it runs). Each event is compared
 /// with the text buffered when its own invalidation ran, decided from focus
 /// epochs (`input_admission::text_at_invalidation`): text admitted in an
 /// earlier epoch than that invalidation produced existed before it, text
@@ -1193,11 +1221,26 @@ fn drain_focus_events(state: &mut HookState) {
         let text =
             input_admission::text_at_invalidation(facts.invalidation, current, state.previous_text);
         let class = input_admission::classify_focus_event(&facts, text);
-        state.key_tally.focus_event(
-            input_accounting::epoch_at(state.start, facts.at),
-            class,
-            facts.matching,
-        );
+        let event_epoch = input_accounting::epoch_at(state.start, facts.at);
+        // Relaxation B: remember the proof (its invalidation's generation)
+        // for this text; without it the event stays strong.
+        let weak = input_admission::focus_event_weak(text, class)
+            && match facts.invalidation {
+                Some(generation) if state.text_weak_focus.contains(&generation) => true,
+                Some(generation) if state.text_weak_focus.len() < MAX_WEAK_FOCUS_PROOFS => {
+                    state.text_weak_focus.push(generation);
+                    true
+                }
+                _ => false,
+            };
+        if weak {
+            if let Some(sender) = facts.sender {
+                state.key_tally.weak_focus_sender(event_epoch, sender);
+            }
+        }
+        state
+            .key_tally
+            .focus_event(event_epoch, class, facts.matching, weak);
         if matches!(
             text,
             input_admission::TextAtEvent::Current(_)
@@ -1249,6 +1292,10 @@ fn discard_focus(state: &HookState) -> DiscardAttribution {
             .map_or(DiscardFocus::NoFocusEvent, DiscardFocus::Last),
     )
 }
+
+/// Weak focus-event proofs kept for one buffer; a further event stays
+/// strong.
+const MAX_WEAK_FOCUS_PROOFS: usize = 8;
 
 /// Recheck discards waiting for their last focus event (bounded; a full
 /// list records the discard as unclassified at once and counts it).
@@ -1407,6 +1454,16 @@ fn invalidate_keyboard_focus(state: &mut HookState) {
         .invalidate_from(windows_uia::InvalidationSource::Navigation);
 }
 
+/// Before a keystroke's decision: take any focus events already classified
+/// (bounded, never waiting), so relaxation B's proof is available as soon
+/// as it exists (about 60 ms after the event) rather than on the next timer
+/// tick. If the queue is busy the keystroke is decided as before: strong.
+fn begin_key_decision(state: &mut HookState) {
+    if has_buffered_text(state) {
+        drain_focus_events(state);
+    }
+}
+
 /// Key-down handling after the pause gate (see `keyboard_hook_proc`).
 fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) {
     let timestamp = Utc::now();
@@ -1441,6 +1498,7 @@ fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) 
         return;
     };
 
+    begin_key_decision(s);
     // One native sample (no messages or UIA) serves admission and
     // content-free per-application counting of this keystroke.
     // Intended blocks (password field, exclusion) are not counted.
@@ -3062,6 +3120,7 @@ mod tests {
                 previous_text: None,
                 focus_events_classified: 0,
                 pending_discards: Vec::new(),
+                text_weak_focus: Vec::new(),
                 pending_text: Vec::new(),
                 current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
                 current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
@@ -3367,6 +3426,7 @@ mod tests {
             control_type: Some(50004),
             element: Some(1),
             native: Some(focus),
+            sender: None,
         };
         let type_text = |state: &mut HookState| {
             NativeKeyboardFocus::test_grant(
@@ -3517,6 +3577,206 @@ mod tests {
         );
         drain_test_content(&state, &content_rx);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Relaxation B end to end: text typed, a focus event (always a strong
+    /// invalidation at once), its classified facts, then a fresh decision
+    /// for the same field and an idle flush. Returns whether the text was
+    /// emitted, and the epoch's report.
+    fn relaxation_b_flush(
+        relation: windows_uia::SenderRelation,
+        control_type: Option<i32>,
+        event_native: Option<NativeKeyboardFocus>,
+        matched: bool,
+        extra_strong: bool,
+        reverify_element: Option<u64>,
+    ) -> (bool, input_admission::KeyAdmissionReport) {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let privacy = state.keyboard_privacy.clone();
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        let grant = privacy.grant_classified(Some(focus)).unwrap();
+        bound_test_text(&mut state, focus, grant.token);
+        state.text_generation = Some(grant.generation);
+        state.text_element = grant.element;
+        state.text_pid = 12;
+        let (sequence, generation) = privacy.test_focus_event_invalidation();
+        assert_ne!(
+            privacy.generation() >> 32,
+            grant.generation >> 32,
+            "strong at once"
+        );
+        privacy.note_focus_event(windows_uia::FocusEventFacts {
+            at: Instant::now(),
+            sequence: matched.then_some(sequence),
+            invalidation: matched.then_some(generation),
+            matching: if matched {
+                windows_uia::FocusMatch::Matched { offset: 0 }
+            } else {
+                windows_uia::FocusMatch::NearbyCandidate
+            },
+            relation,
+            control_type,
+            element: Some(99),
+            native: event_native,
+            sender: Some(4242),
+        });
+        drain_focus_events(&mut state);
+        if extra_strong {
+            privacy.invalidate_from(windows_uia::InvalidationSource::Navigation);
+        }
+        if let Some(element) = reverify_element {
+            NativeKeyboardFocus::test_grant(&privacy, focus, Some(element), Instant::now());
+        } else {
+            // No re-verification within the hold.
+            state.text_hold_since = Instant::now().checked_sub(Duration::from_secs(4));
+        }
+        flush_text_buffer_at(&mut state, Some(focus));
+        let emitted = state.text_buf.is_empty() && content_rx.len() == 1;
+        assert!(state.text_buf.is_empty(), "never held past this flush");
+        drain_test_content(&state, &content_rx);
+        let _ = rx.try_iter().count();
+        let report = state.key_tally.take_due(0, true).unwrap_or_default();
+        (emitted, report)
+    }
+
+    #[test]
+    fn relaxation_b_keeps_text_only_after_a_proven_weak_focus_event_and_reverification() {
+        use windows_uia::SenderRelation::*;
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let window = Some(input_admission::WINDOW_CONTROL_TYPE);
+        // All three facts, then the same field re-verified: kept.
+        let (kept, report) =
+            relaxation_b_flush(OtherProcess, window, Some(focus), true, false, Some(1));
+        assert!(kept);
+        let epoch = &report.epochs[&0];
+        assert_eq!(epoch.weak_reverified, 1);
+        assert_eq!(
+            epoch.focus_events.events_json()["treated"],
+            serde_json::json!({"weak": 1, "strong": 0})
+        );
+        assert_eq!(epoch.weak_focus_senders.get(&4242), Some(&1));
+        // Each fact failing alone, or an unmatched event: strong.
+        let elsewhere = NativeKeyboardFocus::for_test(10, 99, 12);
+        for (relation, control_type, native, matched) in [
+            (Foreground, window, Some(focus), true),
+            (WebView2Child, window, Some(focus), true),
+            (Unknown, window, Some(focus), true),
+            (OtherProcess, Some(50004), Some(focus), true),
+            (OtherProcess, None, Some(focus), true),
+            (OtherProcess, window, Some(elsewhere), true),
+            (OtherProcess, window, None, true),
+            (OtherProcess, window, Some(focus), false),
+        ] {
+            let (kept, report) =
+                relaxation_b_flush(relation, control_type, native, matched, false, Some(1));
+            assert!(!kept, "{relation:?} {control_type:?} {native:?} {matched}");
+            let epoch = &report.epochs[&0];
+            assert_eq!(epoch.weak_reverified, 0);
+            assert_eq!(epoch.focus_events.weak, 0);
+            assert!(epoch.weak_focus_senders.is_empty());
+        }
+        // Weak still discards when re-verification fails or never comes,
+        // and when another strong invalidation happened as well.
+        assert!(!relaxation_b_flush(OtherProcess, window, Some(focus), true, false, Some(2)).0);
+        assert!(!relaxation_b_flush(OtherProcess, window, Some(focus), true, false, None).0);
+        assert!(!relaxation_b_flush(OtherProcess, window, Some(focus), true, true, Some(1)).0);
+    }
+
+    #[test]
+    fn relaxation_b_proof_reaches_the_next_key_decision_unless_the_queue_is_busy() {
+        use windows_uia::SenderRelation::OtherProcess;
+        let window = Some(input_admission::WINDOW_CONTROL_TYPE);
+        for busy in [false, true] {
+            let (tx, _rx) = crossbeam_channel::bounded(64);
+            let (mut state, _content_rx) = make_test_state(tx, "");
+            let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+            let privacy = state.keyboard_privacy.clone();
+            NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+            let grant = privacy.grant_classified(Some(focus)).unwrap();
+            bound_test_text(&mut state, focus, grant.token);
+            state.text_generation = Some(grant.generation);
+            state.text_element = grant.element;
+            let (sequence, generation) = privacy.test_focus_event_invalidation();
+            // Classified by the resolver, not yet taken by the hook.
+            privacy.note_focus_event(windows_uia::FocusEventFacts {
+                at: Instant::now(),
+                sequence: Some(sequence),
+                invalidation: Some(generation),
+                matching: windows_uia::FocusMatch::Matched { offset: 0 },
+                relation: OtherProcess,
+                control_type: window,
+                element: Some(99),
+                native: Some(focus),
+                sender: None,
+            });
+            NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+            let held = busy.then(|| privacy.test_hold_focus_events());
+            // The key decision as `process_key_down` makes it.
+            begin_key_decision(&mut state);
+            let admission = privacy.grant_classified(Some(focus));
+            let kept = rebind_reverified_text(&mut state, admission.unwrap(), Some(focus));
+            drop(held);
+            assert_eq!(kept, !busy, "busy queue: decided strong");
+            assert_eq!(
+                buffered_text_discard(&state, admission, Some(focus), false),
+                if busy {
+                    Some(DiscardCause::GenerationChanged)
+                } else {
+                    None
+                }
+            );
+            if !busy {
+                // Stale proofs are pruned once the text moved to the new
+                // generation.
+                assert!(state.text_weak_focus.is_empty());
+                assert_eq!(state.text_generation, Some(admission.unwrap().generation));
+            }
+        }
+    }
+
+    #[test]
+    fn relaxation_b_needs_the_proof_before_the_decision() {
+        // The event's facts arrive only after the next keystroke's decision:
+        // the text is discarded (strong), and the late proof changes nothing.
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (tx, _rx) = crossbeam_channel::bounded(64);
+        let (mut state, _content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let privacy = state.keyboard_privacy.clone();
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        let grant = privacy.grant_classified(Some(focus)).unwrap();
+        bound_test_text(&mut state, focus, grant.token);
+        state.text_generation = Some(grant.generation);
+        state.text_element = grant.element;
+        state.text_tag.push(12, 0, false);
+        let (sequence, generation) = privacy.test_focus_event_invalidation();
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        let admission = privacy.grant_classified(Some(focus));
+        if let Ok(grant) = admission {
+            assert!(!rebind_reverified_text(&mut state, grant, Some(focus)));
+        }
+        assert_eq!(
+            buffered_text_discard(&state, admission, Some(focus), false),
+            Some(DiscardCause::GenerationChanged)
+        );
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        privacy.note_focus_event(windows_uia::FocusEventFacts {
+            at: Instant::now(),
+            sequence: Some(sequence),
+            invalidation: Some(generation),
+            matching: windows_uia::FocusMatch::Matched { offset: 0 },
+            relation: windows_uia::SenderRelation::OtherProcess,
+            control_type: Some(input_admission::WINDOW_CONTROL_TYPE),
+            element: Some(99),
+            native: Some(focus),
+            sender: Some(4242),
+        });
+        drain_focus_events(&mut state);
+        assert!(state.text_weak_focus.is_empty() && state.text_buf.is_empty());
     }
 
     #[test]

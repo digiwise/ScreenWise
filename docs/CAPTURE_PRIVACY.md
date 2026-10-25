@@ -394,9 +394,10 @@ keystrokes, clipboard values, pixels, audio or bearer tokens. Arbitrary provider
 exception strings and window metadata may themselves be sensitive. Do not attach
 these files to issues or commit them.
 
-When this sink is enabled, the keyboard privacy worker also registers a second,
-observation-only UIA focus subscription (2026-10-25); the invalidating
-subscription is unchanged. Its cache request makes UI Automation fetch the
+The keyboard privacy worker also registers a second UIA focus subscription
+(2026-10-25) that classifies focus events, whenever keyboard text is captured
+(it supplies relaxation B's proofs, below) or this sink is enabled; the
+invalidating subscription is unchanged. Its cache request makes UI Automation fetch the
 sender's process id, control type and runtime id from the newly focused
 application's provider when each focus event is raised, including excluded
 applications and password fields. The diagnostic callback itself only reads
@@ -449,6 +450,59 @@ timing have not been measured live. To check, compare the
 `invalidations_focus_event...` counts of `input_probe_summary` and the
 `generation_changed`/`decision_stale` keystroke losses in otherwise similar
 periods with sensitive diagnostics on and off.
+
+### Weak focus events from another process's window (relaxation B, 2026-10-25)
+
+Owner decision (2026-10-25): a UIA focus event may be treated like the weak
+invalidations of a probe timeout only when all three hold for that event: its
+sender is another process (neither the foreground process nor the foreground
+application's WebView2 child), native keyboard focus is still the buffered
+text's, and the sender's control type is Window. Same-element events, WebView2
+children, same-process senders and every other event stay strong; probe,
+password, exclusion, pause and lock handling are unchanged.
+
+Every focus event still invalidates strongly at once in the invalidating
+handler. The weak treatment exists only on the keyboard hook: when the focus
+classification above has matched the event with its own invalidation, compared
+it with the text buffered then and found all three facts, the hook records that
+proof for the current buffer (at most eight; proofs older than a later
+re-verification are dropped). The cycle-4 re-verification path
+may then treat that event's focus epoch step as not separating the text from a
+later decision: buffered text is kept only if a fresh probe decision names the
+same native focus and the same UIA element within the existing three-second
+hold, and new keystrokes always need their own decision. Without the proof at
+the moment the hook decides (an unknown, unmatched or ambiguous event, or facts
+not yet classified), the event stays strong. Any other strong invalidation in
+between still separates the text.
+
+Latency: an event is classified about 60 ms after it (the matching hold), and
+the hook takes classified events, without ever waiting, before every keystroke
+decision, flush or emission and on its 100 ms timer. A keystroke or flush
+within roughly 60-70 ms of the focus event therefore still treats it as strong;
+so does any decision made while the hand-off queue happens to be busy.
+
+Relaxation B is active whether or not sensitive diagnostics are enabled: the
+classification runs whenever keyboard text is captured. Sender basenames are
+resolved only when the sensitive sink is enabled, and the per-epoch detail
+(classes, histograms, weak counts, basenames) is written only to that sink. If
+the classification cannot start or falls behind (subscription or resolver start
+failure, a stopped resolver, dropped events), the affected focus events stay
+strong and the app log records once per process the fixed code
+`keyboard_focus_classification_degraded` with a fixed stage
+(`subscription_failed`, `resolver_start_failed`, `resolver_stopped`,
+`events_dropped`), nothing more.
+
+Residual risk: native focus is sampled when the diagnostic callback runs, after
+the event, and could miss a change and change back in between; the sender's
+facts come from its own provider. The mandatory re-verification of the same
+native focus and UIA element limits what such an error can keep.
+
+New counts in `input_keystroke_epoch`: `focus_events.treated` (`weak`,
+`strong`), `weak_reverified` (buffers kept by a re-verification that relied on
+a weak event) and, in this sensitive sink only, `weak_focus_senders`: weak
+events by the sender's executable basename (at most 32 processes, then
+`overflow`; `unnamed` when no name was resolved). Basenames never reach app
+logs, notices or public metrics.
 
 Ordinary input status now identifies native focus sampling, focused UIA element,
 focus ownership, IsPassword read versus unsupported property value, final focus
