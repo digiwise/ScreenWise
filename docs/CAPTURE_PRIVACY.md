@@ -378,14 +378,16 @@ by the recorder; remove them manually when the diagnosis is finished. Disable
 the option when no longer needed. Each process's file has separate byte
 budgets (2026-10-27), so one high-volume record type cannot starve another:
 32 MiB for the periodic summaries (`input_keystroke_epoch`,
-`input_probe_summary`, sized for a full day of heavy use), 8 MiB for the
-per-frame `capture_privacy_decision` records, 8 MiB for every other record and
-64 KiB for drop reports, about 48 MiB in all. A full budget drops only its own
+`input_probe_summary`; estimated to last a full day of heavy use, to be
+checked on the first heavy day), 8 MiB for the per-frame
+`capture_privacy_decision` records, 8 MiB for every other record and 256 KiB
+for drop reports, about 48 MiB in all. A full budget drops only its own
 records: the writer continues, the app log records the fixed code
 `sensitive_debug_budget_reached` with the budget (`summary`,
 `capture_privacy_decision`, `detail`) once, and the sink writes a
 `sensitive_sink_budget` record with drop counts per budget at most once a
-minute. Repeated identical category/details are deduplicated for 30 seconds. Details larger than
+minute (drops in the last minute before the process exits may go
+unreported). Repeated identical category/details are deduplicated for 30 seconds. Details larger than
 32 KiB are explicitly omitted (records have a 64 KiB ceiling). A bounded
 128-record queue drops with content-free count warnings instead of blocking
 capture; writer failures/limits also produce a fixed ordinary warning through the engine
@@ -512,13 +514,32 @@ every recordable keystroke lost because no privacy decision was available,
 other per-process counts), the last probe outcome (`none_yet`, `allowed`,
 `allowed_relaxed`, `password`, `skipped_excluded`, `skipped_breaker`,
 `skipped_long_walk`, `visual_gate_closed`, the probe's fixed failure codes, or
-`failed_other`), the time since that probe completed (`lt25ms`, `lt75ms`,
+`failed_other`; `before_sample` when the keystroke's foreground window is not
+yet the one the worker last sampled, so that outcome described the previous
+window), the time since that probe completed (`lt25ms`, `lt75ms`,
 `lt250ms`, `lt1000ms`, `ge1000ms`, `no_probe`), the time since the native
-foreground window last changed (`lt1s`, `lt10s`, `ge10s`, `unknown`) and whether
+foreground window last changed (`lt1s`, `lt10s`, `ge10s`, `unknown`, or
+`unsampled` with `before_sample`) and whether
 the probe breaker was open for the keystroke's focused control process (`open`,
 `closed`, `unknown`), under `decision_unavailable_context`. The worker publishes
 this state through atomics; the hook only reads them. Nothing about it reaches
-the app log, and it never changes admission, probing or the breaker.
+the app log, and it never changes admission, probing or the breaker. The last
+outcome is published right after the probe's decision is stored, and the
+breaker state also as soon as a probe timeout opens it. Only a timeout opens
+the breaker and a timeout clears the decision, so keystrokes in that process
+while it is open count as `decision_unavailable` with `breaker: open` until a
+probe succeeds. A long-walk skip keeps the last decision but advances the
+generation, so its keystrokes count as `generation_changed`.
+
+Reading limits: the comparison is by top-level window, so a focus move inside
+one window (or a reused window handle) keeps the previous outcome. Keystrokes
+typed after the worker sampled a new window but before that window's first
+probe completed still show the previous window's outcome, with
+`since_foreground_change: lt1s`. While the visual gate is closed, and before the
+worker's first sample, the worker does not sample the foreground, so keystrokes
+in a newly focused window show as `before_sample` rather than
+`visual_gate_closed` or `none_yet`; read `before_sample` beside the epoch's
+`visual_gate_closed` probe count.
 
 New counts in `input_keystroke_epoch`: `focus_events.treated` (`weak`,
 `strong`), `weak_reverified` (buffers kept by a re-verification that relied on

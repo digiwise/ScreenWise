@@ -146,15 +146,26 @@ pub(crate) struct KeyCounts {
 
 /// The last probe outcome before a `decision_unavailable` denial: fixed
 /// outcomes, then each `PROBE_FAILURE_REASONS` entry, then `failed_other`.
-const UNAVAILABLE_AFTER_FIXED: [&str; 8] = [
+/// Fixed labels of probe outcomes, shared by the probe summaries and the
+/// `decision_unavailable` context.
+const OUTCOME_ALLOWED: &str = "allowed";
+const OUTCOME_PASSWORD: &str = "password";
+const OUTCOME_VISUAL_GATE_CLOSED: &str = "visual_gate_closed";
+/// By `ProbeSkip` order: excluded, breaker, long walk.
+const OUTCOME_SKIPPED: [&str; 3] = ["skipped_excluded", "skipped_breaker", "skipped_long_walk"];
+/// The keystroke's native foreground differs from the worker's last sample:
+/// the last outcome describes the previous foreground.
+const BEFORE_SAMPLE: usize = 8;
+const UNAVAILABLE_AFTER_FIXED: [&str; 9] = [
     "none_yet",
-    "allowed",
+    OUTCOME_ALLOWED,
     "allowed_relaxed",
-    "password",
-    "skipped_excluded",
-    "skipped_breaker",
-    "skipped_long_walk",
-    "visual_gate_closed",
+    OUTCOME_PASSWORD,
+    OUTCOME_SKIPPED[0],
+    OUTCOME_SKIPPED[1],
+    OUTCOME_SKIPPED[2],
+    OUTCOME_VISUAL_GATE_CLOSED,
+    "before_sample",
 ];
 const UNAVAILABLE_AFTER_SLOTS: usize =
     UNAVAILABLE_AFTER_FIXED.len() + super::PROBE_FAILURE_REASONS.len() + 1;
@@ -163,7 +174,10 @@ const PROBE_AGE_CODES: [&str; 6] = [
     "lt25ms", "lt75ms", "lt250ms", "lt1000ms", "ge1000ms", "no_probe",
 ];
 /// Time since the native foreground window last changed.
-const SINCE_SWITCH_CODES: [&str; 4] = ["lt1s", "lt10s", "ge10s", "unknown"];
+/// `unsampled`: the keystroke's foreground is not yet the worker's sample.
+const SINCE_SWITCH_CODES: [&str; 5] = ["lt1s", "lt10s", "ge10s", "unknown", "unsampled"];
+const UNKNOWN_SWITCH: usize = 3;
+const UNSAMPLED: usize = 4;
 /// The probe breaker for the keystroke's focused control process.
 const BREAKER_CODES: [&str; 3] = ["open", "closed", "unknown"];
 
@@ -213,11 +227,34 @@ fn unavailable_after_label(slot: usize) -> &'static str {
 /// `foreground_changed_ms` 0 when unknown, `breaker` `(pid << 8) | 1 open /
 /// 2 closed` (0: unknown), compared with the keystroke's focused control
 /// process. All times in milliseconds of one monotonic clock.
+#[cfg(test)]
 pub(crate) fn classify_unavailable(
     last_probe: u64,
     foreground_changed_ms: u64,
     breaker: u64,
     control_pid: Option<u32>,
+    now_ms: u64,
+) -> UnavailableContext {
+    classify_unavailable_at(
+        last_probe,
+        foreground_changed_ms,
+        breaker,
+        control_pid,
+        None,
+        now_ms,
+    )
+}
+
+/// As `classify_unavailable`; `foregrounds` is the keystroke's native
+/// foreground and the worker's last sampled one. When they differ the
+/// worker has not yet seen this foreground: `before_sample` / `unsampled`
+/// instead of describing the previous one.
+pub(crate) fn classify_unavailable_at(
+    last_probe: u64,
+    foreground_changed_ms: u64,
+    breaker: u64,
+    control_pid: Option<u32>,
+    foregrounds: Option<(u64, u64)>,
     now_ms: u64,
 ) -> UnavailableContext {
     let (after, probe_age) = if last_probe == 0 {
@@ -235,7 +272,7 @@ pub(crate) fn classify_unavailable(
         (slot, bucket)
     };
     let since_switch = if foreground_changed_ms == 0 {
-        SINCE_SWITCH_CODES.len() - 1
+        UNKNOWN_SWITCH
     } else {
         match now_ms.saturating_sub(foreground_changed_ms) {
             0..1000 => 0,
@@ -252,6 +289,10 @@ pub(crate) fn classify_unavailable(
             }
         }
         _ => 2,
+    };
+    let (after, since_switch) = match foregrounds {
+        Some((key, sampled)) if key != sampled => (BEFORE_SAMPLE, UNSAMPLED),
+        _ => (after, since_switch),
     };
     UnavailableContext {
         after,
@@ -1232,16 +1273,10 @@ impl ProbeCounts {
     }
 
     fn to_json(&self) -> Value {
-        json!({
+        let mut out = json!({
             "probes": self.probes,
-            "allowed": self.allowed,
             "allowed_password_state_assumed": self.allowed_relaxed[0],
             "allowed_focus_assumed": self.allowed_relaxed[1],
-            "password": self.password,
-            "visual_gate_closed": self.visual_gate_closed,
-            "skipped_excluded": self.skipped[0],
-            "skipped_breaker": self.skipped[1],
-            "skipped_long_walk": self.skipped[2],
             "failed": self.failures_total(),
             "failures": self.failures.iter().map(|((reason, stage, hresult), count)| {
                 json!({"reason": reason, "stage": stage, "hresult": hresult, "count": count})
@@ -1249,7 +1284,19 @@ impl ProbeCounts {
             "duration_ms_buckets_lt10_lt25_lt50_lt75_ge75": self.duration_buckets,
             "max_duration_us": self.max_duration_us,
             "other_control_process": self.other_control_process,
-        })
+        });
+        let fixed = [
+            (OUTCOME_ALLOWED, self.allowed),
+            (OUTCOME_PASSWORD, self.password),
+            (OUTCOME_VISUAL_GATE_CLOSED, self.visual_gate_closed),
+        ];
+        let skipped = OUTCOME_SKIPPED.into_iter().zip(self.skipped);
+        if let Some(map) = out.as_object_mut() {
+            for (code, count) in fixed.into_iter().chain(skipped) {
+                map.insert(code.to_string(), json!(count));
+            }
+        }
+        out
     }
 }
 
@@ -1950,6 +1997,37 @@ mod tests {
                 bucket,
                 "switch {age}"
             );
+        }
+        // A keystroke at a foreground the worker has not sampled yet.
+        let at = |foregrounds| {
+            classify_unavailable_at(
+                packed(now - 10, ProbeOutcome::Allowed),
+                now - 20_000,
+                0,
+                None,
+                foregrounds,
+                now,
+            )
+        };
+        let unsampled = at(Some((5, 6)));
+        assert_eq!(unavailable_after_label(unsampled.after), "before_sample");
+        assert_eq!(SINCE_SWITCH_CODES[unsampled.since_switch], "unsampled");
+        assert_eq!(unsampled.probe_age, 0);
+        let sampled = at(Some((5, 5)));
+        assert_eq!(
+            (unavailable_after_label(sampled.after), sampled.since_switch),
+            ("allowed", 2)
+        );
+        assert_eq!(at(None), sampled);
+        // The probe summary uses the same outcome labels.
+        let summary = ProbeCounts::default().to_json();
+        for code in OUTCOME_SKIPPED.into_iter().chain([
+            OUTCOME_ALLOWED,
+            OUTCOME_PASSWORD,
+            OUTCOME_VISUAL_GATE_CLOSED,
+        ]) {
+            assert!(summary.get(code).is_some(), "{code}");
+            assert!(UNAVAILABLE_AFTER_FIXED.contains(&code));
         }
         // Breaker: only for the keystroke's own control process.
         assert_eq!(classify(0, 0, 7 << 8 | 1, Some(7)).breaker, 0);

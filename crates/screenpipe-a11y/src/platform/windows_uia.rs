@@ -1103,6 +1103,8 @@ pub struct KeyboardPrivacy {
     /// probe breaker state of the last checked control process
     /// (`(pid << 8) | 1 open / 2 closed`, 0 = unknown).
     last_probe: AtomicU64,
+    /// An outcome waiting for its decision store (slot + 1; 0 = none).
+    staged_probe_outcome: AtomicU64,
     native_foreground: AtomicU64,
     foreground_changed_ms: AtomicU64,
     probe_breaker: AtomicU64,
@@ -1224,6 +1226,21 @@ impl KeyboardPrivacy {
             .store(diagnostic_clock_ms() << 8 | slot, Ordering::Relaxed);
     }
 
+    /// Worker, diagnostics only: the outcome the next decision store
+    /// (`update_probe_weak`) publishes right after storing the decision.
+    fn stage_probe_outcome(&self, outcome: input_admission::ProbeOutcome) {
+        let slot = input_admission::probe_outcome_slot(outcome) as u64;
+        self.staged_probe_outcome.store(slot + 1, Ordering::Relaxed);
+    }
+
+    fn publish_staged_probe_outcome(&self) {
+        let staged = self.staged_probe_outcome.swap(0, Ordering::Relaxed);
+        if staged != 0 {
+            self.last_probe
+                .store(diagnostic_clock_ms() << 8 | (staged - 1), Ordering::Relaxed);
+        }
+    }
+
     /// Worker, diagnostics only: the sampled native foreground window.
     fn note_native_foreground(&self, foreground: isize) {
         let foreground = foreground as u64;
@@ -1247,11 +1264,13 @@ impl KeyboardPrivacy {
         &self,
         focus: Option<NativeKeyboardFocus>,
     ) -> input_admission::UnavailableContext {
-        input_admission::classify_unavailable(
+        let sampled = self.native_foreground.load(Ordering::Relaxed);
+        input_admission::classify_unavailable_at(
             self.last_probe.load(Ordering::Relaxed),
             self.foreground_changed_ms.load(Ordering::Relaxed),
             self.probe_breaker.load(Ordering::Relaxed),
             focus.map(|focus| focus.control_pid),
+            focus.map(|focus| (focus.foreground as u64, sampled)),
             diagnostic_clock_ms(),
         )
     }
@@ -1794,6 +1813,7 @@ impl KeyboardPrivacy {
             }
         };
         *self.decision.lock() = decision;
+        self.publish_staged_probe_outcome();
         match (focus, is_password) {
             (Some(focus), Some(true)) => {
                 self.set_block(Some((focus, KeyboardPrivacyDenial::PasswordField)))
@@ -1949,6 +1969,7 @@ impl UiaContext {
             crate::uia_breaker::note_exclusion_skip();
             privacy.set_block(focus.map(|focus| (focus, KeyboardPrivacyDenial::Excluded)));
             privacy.invalidate();
+            privacy.note_probe_outcome(ProbeOutcome::Skipped(ProbeSkip::Excluded));
             return record(ProbeOutcome::Skipped(ProbeSkip::Excluded));
         }
         // A focus window owned by another process is only probed for the
@@ -1988,6 +2009,7 @@ impl UiaContext {
         }) {
             crate::uia_breaker::note_probe_skipped();
             privacy.invalidate_from(InvalidationSource::ProbeSkip);
+            privacy.note_probe_outcome(ProbeOutcome::Skipped(skip));
             return record(ProbeOutcome::Skipped(skip));
         }
         let provider_called = std::cell::Cell::new(false);
@@ -2198,6 +2220,8 @@ impl UiaContext {
         if let Some(focus) = focus {
             if provider_timed_out.get() {
                 crate::uia_breaker::record_probe(focus.control_pid, true);
+                // Diagnostics: the breaker is open from now on.
+                privacy.note_probe_breaker(focus.control_pid, true);
             } else if provider_called.get() && !provider_failed.get() {
                 crate::uia_breaker::record_probe(focus.control_pid, false);
             }
@@ -2236,6 +2260,7 @@ impl UiaContext {
             Err(_) => (None, checked_at),
         };
         let failed = is_password.is_none();
+        privacy.stage_probe_outcome(outcome);
         privacy.update_probe_weak(
             generation,
             focus,
@@ -3304,7 +3329,7 @@ pub(crate) fn run_keyboard_privacy_thread(
         }
         report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, false);
         if !screenpipe_config::audio_privacy::visual_capture_allowed() {
-            keyboard_privacy.note_probe_outcome(input_admission::ProbeOutcome::VisualGateClosed);
+            keyboard_privacy.stage_probe_outcome(input_admission::ProbeOutcome::VisualGateClosed);
             probes.record(input_admission::ProbeRecord {
                 pid: 0,
                 control_pid: None,
@@ -3330,7 +3355,6 @@ pub(crate) fn run_keyboard_privacy_thread(
         }
         let probe =
             uia.refresh_keyboard_privacy(&keyboard_privacy, &config, &cross_process, &relaxations);
-        keyboard_privacy.note_probe_outcome(probe.outcome);
         probes.record(probe);
         unsafe {
             MsgWaitForMultipleObjects(None, false, KEYBOARD_PRIVACY_POLL_MS as u32, QS_ALLINPUT);
@@ -4728,40 +4752,36 @@ mod tests {
     fn the_worker_publishes_decision_unavailable_context_lock_free() {
         let privacy = KeyboardPrivacy::default();
         let focus = test_keyboard_focus();
-        let before = privacy.unavailable_context(Some(focus));
-        assert_eq!(
-            (
-                before.after,
-                before.probe_age,
-                before.since_switch,
-                before.breaker
-            ),
-            (0, 5, 3, 2),
-            "nothing published yet"
-        );
+        let context = |focus| {
+            let c = privacy.unavailable_context(Some(focus));
+            (c.after, c.probe_age, c.since_switch, c.breaker)
+        };
+        // Nothing sampled yet: this foreground is not the worker's sample.
+        assert_eq!(context(focus), (8, 5, 4, 2));
         privacy.note_native_foreground(focus.foreground);
         privacy.note_probe_breaker(focus.control_pid, true);
-        privacy.note_probe_outcome(input_admission::ProbeOutcome::Failed {
+        // A staged outcome is published only by the decision store.
+        privacy.stage_probe_outcome(input_admission::ProbeOutcome::Allowed);
+        assert_eq!(context(focus).1, 5, "not yet published");
+        privacy.update_diagnosed(privacy.generation(), None, None, Instant::now(), None);
+        let allowed = input_admission::probe_outcome_slot(input_admission::ProbeOutcome::Allowed);
+        assert_eq!(context(focus), (allowed, 0, 0, 0));
+        // Without a decision store nothing staged is published.
+        privacy.stage_probe_outcome(input_admission::ProbeOutcome::Password);
+        assert_eq!(context(focus).0, allowed);
+        let timeout = input_admission::ProbeOutcome::Failed {
             reason: CaptureReason::InputFocusedElementFailed.code(),
             stage: "GetFocusedElementBuildCache",
             hresult: Some("0x80131505"),
-        });
-        let context = privacy.unavailable_context(Some(focus));
+        };
+        privacy.note_probe_outcome(timeout);
         assert_eq!(
-            context.after,
-            input_admission::probe_outcome_slot(input_admission::ProbeOutcome::Failed {
-                reason: CaptureReason::InputFocusedElementFailed.code(),
-                stage: "",
-                hresult: None,
-            })
-        );
-        assert_eq!(
-            (context.probe_age, context.since_switch, context.breaker),
-            (0, 0, 0)
+            context(focus).0,
+            input_admission::probe_outcome_slot(timeout)
         );
         // Another process's breaker state never describes this focus.
         privacy.note_probe_breaker(focus.control_pid + 1, false);
-        assert_eq!(privacy.unavailable_context(Some(focus)).breaker, 2);
+        assert_eq!(context(focus).3, 2);
         // The same foreground again is not a change.
         let changed = privacy.foreground_changed_ms.load(Ordering::Relaxed);
         privacy.note_native_foreground(focus.foreground);
@@ -4769,8 +4789,17 @@ mod tests {
             privacy.foreground_changed_ms.load(Ordering::Relaxed),
             changed
         );
-        // Publishing never touches admission state.
-        assert_eq!(privacy.generation(), 0);
+        // A keystroke at a foreground the worker has not sampled yet.
+        let elsewhere = NativeKeyboardFocus {
+            foreground: focus.foreground + 1,
+            ..focus
+        };
+        assert_eq!((context(elsewhere).0, context(elsewhere).2), (8, 4));
+        // Publishing alone never grants anything.
+        let generation = privacy.generation();
+        privacy.note_probe_outcome(input_admission::ProbeOutcome::Allowed);
+        privacy.note_probe_breaker(focus.control_pid, false);
+        assert_eq!(privacy.generation(), generation);
         assert_eq!(
             privacy.grant_classified(Some(focus)),
             Err(KeyboardPrivacyDenial::DecisionUnavailable)

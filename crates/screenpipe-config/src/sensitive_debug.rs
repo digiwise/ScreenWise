@@ -16,7 +16,7 @@ const CAPTURE_DECISION_BUDGET_BYTES: u64 = 8 * MIB;
 /// Every other detailed record.
 const DETAIL_BUDGET_BYTES: u64 = 8 * MIB;
 /// Small records reporting how many records each budget dropped.
-const BUDGET_REPORT_BYTES: u64 = 64 * 1024;
+const BUDGET_REPORT_BYTES: u64 = 256 * 1024;
 const BUDGET_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// Bound on one session file: the sum of the budgets.
 #[cfg(test)]
@@ -614,10 +614,12 @@ mod tests {
             reports[0]["details"]["dropped"],
             json!({"summary": 0, "capture_privacy_decision": 1, "detail": 0})
         );
-        // Total disk use stays bounded by the budgets.
-        let total: u64 = sink.written.iter().sum::<u64>() + sink.report_written;
-        assert!(total <= MAX_BYTES + SUMMARY_BUDGET_BYTES + CAPTURE_DECISION_BUDGET_BYTES);
+        // Every budget holds: disk use stays bounded by their sum.
+        for (index, budget) in Budget::ALL.into_iter().enumerate() {
+            assert!(sink.written[index] <= budget.bytes(), "{budget:?}");
+        }
         assert!(sink.report_written <= BUDGET_REPORT_BYTES);
+        assert!(sink.written.iter().sum::<u64>() + sink.report_written <= MAX_BYTES);
         assert_eq!(Budget::Summary.code(), "summary");
     }
 
