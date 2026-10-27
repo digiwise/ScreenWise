@@ -569,6 +569,23 @@ fn focus_clock_ns(at: Instant) -> u64 {
     duration_nanos(at.saturating_duration_since(origin)).saturating_add(1)
 }
 
+/// Milliseconds on the shared monotonic clock, never 0 (diagnostics).
+fn diagnostic_clock_ms() -> u64 {
+    focus_clock_ns(Instant::now()) / 1_000_000 + 1
+}
+
+/// Every failure reason the keyboard privacy probe reports (its fixed
+/// `CaptureReason` codes label the diagnostics).
+pub(crate) const PROBE_FAILURE_REASONS: [CaptureReason; 7] = [
+    CaptureReason::InputNativeFocusUnavailable,
+    CaptureReason::InputFocusedElementFailed,
+    CaptureReason::InputFocusOwnershipFailed,
+    CaptureReason::InputPasswordPropertyFailed,
+    CaptureReason::InputPasswordPropertyUnsupported,
+    CaptureReason::InputFocusVerificationFailed,
+    CaptureReason::InputCheckStale,
+];
+
 fn duration_nanos(value: Duration) -> u64 {
     value.as_nanos().min(u64::MAX as u128) as u64
 }
@@ -1079,6 +1096,16 @@ pub struct KeyboardPrivacy {
     focus_invalidation_sequences: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
     focus_invalidation_generations: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
     focus_invalidation_times: [AtomicU64; FOCUS_INVALIDATION_SLOTS],
+    /// Diagnostics only (context of `decision_unavailable` denials), written
+    /// by the worker and read lock-free by the hook: the last probe outcome
+    /// (`(completed_ms << 8) | input_admission::probe_outcome_slot`, 0 = none
+    /// yet), the native foreground window and when it last changed, and the
+    /// probe breaker state of the last checked control process
+    /// (`(pid << 8) | 1 open / 2 closed`, 0 = unknown).
+    last_probe: AtomicU64,
+    native_foreground: AtomicU64,
+    foreground_changed_ms: AtomicU64,
+    probe_breaker: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1188,6 +1215,45 @@ impl KeyboardPrivacy {
                 .unwrap_or(u64::MAX)
         });
         (recorded, complete_after)
+    }
+
+    /// Worker, diagnostics only: the outcome of the probe that just ended.
+    fn note_probe_outcome(&self, outcome: input_admission::ProbeOutcome) {
+        let slot = input_admission::probe_outcome_slot(outcome) as u64;
+        self.last_probe
+            .store(diagnostic_clock_ms() << 8 | slot, Ordering::Relaxed);
+    }
+
+    /// Worker, diagnostics only: the sampled native foreground window.
+    fn note_native_foreground(&self, foreground: isize) {
+        let foreground = foreground as u64;
+        if self.native_foreground.swap(foreground, Ordering::Relaxed) != foreground {
+            self.foreground_changed_ms
+                .store(diagnostic_clock_ms(), Ordering::Relaxed);
+        }
+    }
+
+    /// Worker, diagnostics only: whether the probe breaker was open for the
+    /// control process just checked.
+    fn note_probe_breaker(&self, control_pid: u32, open: bool) {
+        let state = if open { 1 } else { 2 };
+        self.probe_breaker
+            .store(u64::from(control_pid) << 8 | state, Ordering::Relaxed);
+    }
+
+    /// Hook, lock-free, diagnostics only: why no decision was available for
+    /// a keystroke at `focus` (see `input_admission::classify_unavailable`).
+    pub(crate) fn unavailable_context(
+        &self,
+        focus: Option<NativeKeyboardFocus>,
+    ) -> input_admission::UnavailableContext {
+        input_admission::classify_unavailable(
+            self.last_probe.load(Ordering::Relaxed),
+            self.foreground_changed_ms.load(Ordering::Relaxed),
+            self.probe_breaker.load(Ordering::Relaxed),
+            focus.map(|focus| focus.control_pid),
+            diagnostic_clock_ms(),
+        )
     }
 
     /// Focus-event invalidations so far.
@@ -1854,6 +1920,9 @@ impl UiaContext {
             Err(failure) => failure.foreground_pid,
         };
         let control_pid = sampled.as_ref().ok().map(|focus| focus.control_pid);
+        if let Ok(focus) = &sampled {
+            privacy.note_native_foreground(focus.foreground);
+        }
         let record = |outcome| ProbeRecord {
             pid: attributed_pid,
             control_pid,
@@ -1901,7 +1970,9 @@ impl UiaContext {
         // while a walk to it has already run longer than a probe could wait
         // (it would only queue behind it on the shared UI thread).
         if let Some(skip) = focus.and_then(|focus| {
-            if !crate::uia_breaker::allows_probe(focus.control_pid) {
+            let allowed = crate::uia_breaker::allows_probe(focus.control_pid);
+            privacy.note_probe_breaker(focus.control_pid, !allowed);
+            if !allowed {
                 Some(ProbeSkip::Breaker)
             } else {
                 [focus.pid, focus.control_pid]
@@ -3233,6 +3304,7 @@ pub(crate) fn run_keyboard_privacy_thread(
         }
         report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, false);
         if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+            keyboard_privacy.note_probe_outcome(input_admission::ProbeOutcome::VisualGateClosed);
             probes.record(input_admission::ProbeRecord {
                 pid: 0,
                 control_pid: None,
@@ -3256,12 +3328,10 @@ pub(crate) fn run_keyboard_privacy_thread(
         if let Some(classification) = &mut classification {
             classification.check(&stop);
         }
-        probes.record(uia.refresh_keyboard_privacy(
-            &keyboard_privacy,
-            &config,
-            &cross_process,
-            &relaxations,
-        ));
+        let probe =
+            uia.refresh_keyboard_privacy(&keyboard_privacy, &config, &cross_process, &relaxations);
+        keyboard_privacy.note_probe_outcome(probe.outcome);
+        probes.record(probe);
         unsafe {
             MsgWaitForMultipleObjects(None, false, KEYBOARD_PRIVACY_POLL_MS as u32, QS_ALLINPUT);
         }
@@ -3393,6 +3463,7 @@ fn report_keyboard_admission(
                     "active_ms": keys.active_ms,
                     "discarded_by": keys.totals.discarded_json(),
                     "discarded_after": keys.totals.discarded_after_json(),
+                    "decision_unavailable_context": keys.totals.unavailable_json(),
                     "focus_events": keys.focus_events.events_json(),
                     "weak_reverified": keys.weak_reverified,
                     "weak_focus_senders": input_admission::weak_senders_json(
@@ -3420,6 +3491,7 @@ fn report_keyboard_admission(
                             "persisted_key": after.persisted_key,
                             "discarded_by": gate.discarded_json(),
                             "discarded_after": gate.discarded_after_json(),
+                            "decision_unavailable_context": gate.unavailable_json(),
                             "discard_focus": keys
                                 .discard_focus_by_pid
                                 .get(&pid)
@@ -4650,6 +4722,59 @@ mod tests {
             carried,
             &[]
         ));
+    }
+
+    #[test]
+    fn the_worker_publishes_decision_unavailable_context_lock_free() {
+        let privacy = KeyboardPrivacy::default();
+        let focus = test_keyboard_focus();
+        let before = privacy.unavailable_context(Some(focus));
+        assert_eq!(
+            (
+                before.after,
+                before.probe_age,
+                before.since_switch,
+                before.breaker
+            ),
+            (0, 5, 3, 2),
+            "nothing published yet"
+        );
+        privacy.note_native_foreground(focus.foreground);
+        privacy.note_probe_breaker(focus.control_pid, true);
+        privacy.note_probe_outcome(input_admission::ProbeOutcome::Failed {
+            reason: CaptureReason::InputFocusedElementFailed.code(),
+            stage: "GetFocusedElementBuildCache",
+            hresult: Some("0x80131505"),
+        });
+        let context = privacy.unavailable_context(Some(focus));
+        assert_eq!(
+            context.after,
+            input_admission::probe_outcome_slot(input_admission::ProbeOutcome::Failed {
+                reason: CaptureReason::InputFocusedElementFailed.code(),
+                stage: "",
+                hresult: None,
+            })
+        );
+        assert_eq!(
+            (context.probe_age, context.since_switch, context.breaker),
+            (0, 0, 0)
+        );
+        // Another process's breaker state never describes this focus.
+        privacy.note_probe_breaker(focus.control_pid + 1, false);
+        assert_eq!(privacy.unavailable_context(Some(focus)).breaker, 2);
+        // The same foreground again is not a change.
+        let changed = privacy.foreground_changed_ms.load(Ordering::Relaxed);
+        privacy.note_native_foreground(focus.foreground);
+        assert_eq!(
+            privacy.foreground_changed_ms.load(Ordering::Relaxed),
+            changed
+        );
+        // Publishing never touches admission state.
+        assert_eq!(privacy.generation(), 0);
+        assert_eq!(
+            privacy.grant_classified(Some(focus)),
+            Err(KeyboardPrivacyDenial::DecisionUnavailable)
+        );
     }
 
     #[test]

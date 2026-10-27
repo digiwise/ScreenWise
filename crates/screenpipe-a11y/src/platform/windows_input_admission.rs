@@ -136,6 +136,129 @@ pub(crate) struct KeyCounts {
     pub(crate) discarded_by: [u64; DISCARD_CAUSES],
     /// Of those dropped by a recheck, by the latest invalidation's source.
     pub(crate) discarded_after: [u64; INVALIDATION_SOURCES + 1],
+    /// Keystrokes lost as `decision_unavailable`, by `UnavailableContext`
+    /// dimension (diagnostics only; sensitive sink).
+    pub(crate) unavailable_after: [u64; UNAVAILABLE_AFTER_SLOTS],
+    pub(crate) unavailable_probe_age: [u64; PROBE_AGE_CODES.len()],
+    pub(crate) unavailable_since_switch: [u64; SINCE_SWITCH_CODES.len()],
+    pub(crate) unavailable_breaker: [u64; BREAKER_CODES.len()],
+}
+
+/// The last probe outcome before a `decision_unavailable` denial: fixed
+/// outcomes, then each `PROBE_FAILURE_REASONS` entry, then `failed_other`.
+const UNAVAILABLE_AFTER_FIXED: [&str; 8] = [
+    "none_yet",
+    "allowed",
+    "allowed_relaxed",
+    "password",
+    "skipped_excluded",
+    "skipped_breaker",
+    "skipped_long_walk",
+    "visual_gate_closed",
+];
+const UNAVAILABLE_AFTER_SLOTS: usize =
+    UNAVAILABLE_AFTER_FIXED.len() + super::PROBE_FAILURE_REASONS.len() + 1;
+/// Time since that probe completed.
+const PROBE_AGE_CODES: [&str; 6] = [
+    "lt25ms", "lt75ms", "lt250ms", "lt1000ms", "ge1000ms", "no_probe",
+];
+/// Time since the native foreground window last changed.
+const SINCE_SWITCH_CODES: [&str; 4] = ["lt1s", "lt10s", "ge10s", "unknown"];
+/// The probe breaker for the keystroke's focused control process.
+const BREAKER_CODES: [&str; 3] = ["open", "closed", "unknown"];
+
+/// Why no privacy decision was available for one keystroke (indexes into
+/// the fixed code lists above; diagnostics only, never admission).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnavailableContext {
+    pub(crate) after: usize,
+    pub(crate) probe_age: usize,
+    pub(crate) since_switch: usize,
+    pub(crate) breaker: usize,
+}
+
+/// The slot of a probe outcome in the `decision_unavailable` context, from
+/// the probe's own outcome and failure reason codes.
+pub(crate) fn probe_outcome_slot(outcome: ProbeOutcome) -> usize {
+    match outcome {
+        ProbeOutcome::Allowed => 1,
+        ProbeOutcome::AllowedRelaxed(_) => 2,
+        ProbeOutcome::Password => 3,
+        ProbeOutcome::Skipped(ProbeSkip::Excluded) => 4,
+        ProbeOutcome::Skipped(ProbeSkip::Breaker) => 5,
+        ProbeOutcome::Skipped(ProbeSkip::LongWalk) => 6,
+        ProbeOutcome::VisualGateClosed => 7,
+        ProbeOutcome::Failed { reason, .. } => {
+            UNAVAILABLE_AFTER_FIXED.len()
+                + super::PROBE_FAILURE_REASONS
+                    .iter()
+                    .position(|known| known.code() == reason)
+                    .unwrap_or(super::PROBE_FAILURE_REASONS.len())
+        }
+    }
+}
+
+fn unavailable_after_label(slot: usize) -> &'static str {
+    let fixed = UNAVAILABLE_AFTER_FIXED.len();
+    match slot {
+        slot if slot < fixed => UNAVAILABLE_AFTER_FIXED[slot],
+        slot => super::PROBE_FAILURE_REASONS
+            .get(slot - fixed)
+            .map_or("failed_other", |reason| reason.code()),
+    }
+}
+
+/// Classify a `decision_unavailable` denial from the worker's published
+/// state: `last_probe` is `(completed_ms << 8) | slot` (0: none yet),
+/// `foreground_changed_ms` 0 when unknown, `breaker` `(pid << 8) | 1 open /
+/// 2 closed` (0: unknown), compared with the keystroke's focused control
+/// process. All times in milliseconds of one monotonic clock.
+pub(crate) fn classify_unavailable(
+    last_probe: u64,
+    foreground_changed_ms: u64,
+    breaker: u64,
+    control_pid: Option<u32>,
+    now_ms: u64,
+) -> UnavailableContext {
+    let (after, probe_age) = if last_probe == 0 {
+        (0, PROBE_AGE_CODES.len() - 1)
+    } else {
+        let slot = ((last_probe & 0xFF) as usize).min(UNAVAILABLE_AFTER_SLOTS - 1);
+        let age = now_ms.saturating_sub(last_probe >> 8);
+        let bucket = match age {
+            0..25 => 0,
+            25..75 => 1,
+            75..250 => 2,
+            250..1000 => 3,
+            _ => 4,
+        };
+        (slot, bucket)
+    };
+    let since_switch = if foreground_changed_ms == 0 {
+        SINCE_SWITCH_CODES.len() - 1
+    } else {
+        match now_ms.saturating_sub(foreground_changed_ms) {
+            0..1000 => 0,
+            1000..10_000 => 1,
+            _ => 2,
+        }
+    };
+    let breaker = match (control_pid, breaker & 0xFF) {
+        (Some(pid), state @ (1 | 2)) if u64::from(pid) == breaker >> 8 => {
+            if state == 1 {
+                0
+            } else {
+                1
+            }
+        }
+        _ => 2,
+    };
+    UnavailableContext {
+        after,
+        probe_age,
+        since_switch,
+        breaker,
+    }
 }
 
 impl KeyCounts {
@@ -152,6 +275,54 @@ impl KeyCounts {
         for (total, value) in self.discarded_after.iter_mut().zip(other.discarded_after) {
             *total += value;
         }
+        for (total, value) in self
+            .unavailable_after
+            .iter_mut()
+            .zip(other.unavailable_after)
+        {
+            *total += value;
+        }
+        for (total, value) in self
+            .unavailable_probe_age
+            .iter_mut()
+            .zip(other.unavailable_probe_age)
+        {
+            *total += value;
+        }
+        for (total, value) in self
+            .unavailable_since_switch
+            .iter_mut()
+            .zip(other.unavailable_since_switch)
+        {
+            *total += value;
+        }
+        for (total, value) in self
+            .unavailable_breaker
+            .iter_mut()
+            .zip(other.unavailable_breaker)
+        {
+            *total += value;
+        }
+    }
+
+    fn note_unavailable(&mut self, context: UnavailableContext) {
+        self.unavailable_after[context.after.min(UNAVAILABLE_AFTER_SLOTS - 1)] += 1;
+        self.unavailable_probe_age[context.probe_age.min(PROBE_AGE_CODES.len() - 1)] += 1;
+        self.unavailable_since_switch[context.since_switch.min(SINCE_SWITCH_CODES.len() - 1)] += 1;
+        self.unavailable_breaker[context.breaker.min(BREAKER_CODES.len() - 1)] += 1;
+    }
+
+    /// `decision_unavailable` keystrokes by context (non-zero, fixed codes).
+    pub(crate) fn unavailable_json(&self) -> Value {
+        let after: Vec<&str> = (0..UNAVAILABLE_AFTER_SLOTS)
+            .map(unavailable_after_label)
+            .collect();
+        json!({
+            "after": fixed_json(&after, &self.unavailable_after),
+            "probe_age": fixed_json(&PROBE_AGE_CODES, &self.unavailable_probe_age),
+            "since_foreground_change": fixed_json(&SINCE_SWITCH_CODES, &self.unavailable_since_switch),
+            "breaker": fixed_json(&BREAKER_CODES, &self.unavailable_breaker),
+        })
     }
 
     /// Recordable keystrokes lost at the gate.
@@ -782,6 +953,14 @@ impl KeyAdmissionTally {
         let entry = self.epoch(epoch);
         entry.totals.denied[denial.index()] += 1;
         bounded_entry(&mut entry.by_pid, pid).denied[denial.index()] += 1;
+    }
+
+    /// The context of one keystroke lost as `decision_unavailable` (counted
+    /// with it by `denied`).
+    pub(crate) fn unavailable(&mut self, pid: u32, epoch: u32, context: UnavailableContext) {
+        let entry = self.epoch(epoch);
+        entry.totals.note_unavailable(context);
+        bounded_entry(&mut entry.by_pid, pid).note_unavailable(context);
     }
 
     pub(crate) fn active(&mut self, epoch: u32, gap: Duration) {
@@ -1686,6 +1865,132 @@ mod tests {
         merged.add(epoch);
         assert!(merged.weak_focus_senders.len() <= MAX_TRACKED_PROCESSES + 1);
         assert_eq!(merged.weak_reverified, 2);
+    }
+
+    #[test]
+    fn decision_unavailable_context_uses_fixed_codes_and_bucket_edges() {
+        let label = |outcome| unavailable_after_label(probe_outcome_slot(outcome));
+        assert_eq!(label(ProbeOutcome::Allowed), "allowed");
+        assert_eq!(
+            label(ProbeOutcome::AllowedRelaxed(
+                super::super::ProbeRelaxation::FocusAssumed
+            )),
+            "allowed_relaxed"
+        );
+        assert_eq!(label(ProbeOutcome::Password), "password");
+        assert_eq!(
+            label(ProbeOutcome::Skipped(ProbeSkip::Excluded)),
+            "skipped_excluded"
+        );
+        assert_eq!(
+            label(ProbeOutcome::Skipped(ProbeSkip::Breaker)),
+            "skipped_breaker"
+        );
+        assert_eq!(
+            label(ProbeOutcome::Skipped(ProbeSkip::LongWalk)),
+            "skipped_long_walk"
+        );
+        assert_eq!(label(ProbeOutcome::VisualGateClosed), "visual_gate_closed");
+        let failed = |reason| ProbeOutcome::Failed {
+            reason,
+            stage: "stage",
+            hresult: None,
+        };
+        let mut labels = std::collections::HashSet::new();
+        for reason in super::super::PROBE_FAILURE_REASONS {
+            assert_eq!(label(failed(reason.code())), reason.code());
+            assert!(labels.insert(label(failed(reason.code()))));
+        }
+        assert_eq!(label(failed("something_else")), "failed_other");
+        assert_eq!(unavailable_after_label(0), "none_yet");
+        assert_eq!(
+            unavailable_after_label(UNAVAILABLE_AFTER_SLOTS - 1),
+            "failed_other"
+        );
+
+        let packed = |ms: u64, outcome| ms << 8 | probe_outcome_slot(outcome) as u64;
+        let now = 100_000;
+        let classify =
+            |last, changed, breaker, pid| classify_unavailable(last, changed, breaker, pid, now);
+        // No probe yet; foreground and breaker unknown.
+        assert_eq!(
+            classify(0, 0, 0, None),
+            UnavailableContext {
+                after: 0,
+                probe_age: 5,
+                since_switch: 3,
+                breaker: 2
+            }
+        );
+        // Probe-age edges.
+        for (age, bucket) in [
+            (0, 0),
+            (24, 0),
+            (25, 1),
+            (74, 1),
+            (75, 2),
+            (249, 2),
+            (250, 3),
+            (999, 3),
+            (1000, 4),
+        ] {
+            let context = classify(packed(now - age, ProbeOutcome::Allowed), 0, 0, None);
+            assert_eq!(context.probe_age, bucket, "age {age}");
+            assert_eq!(context.after, 1);
+        }
+        // A probe that completed "after" now (clock race) counts as fresh.
+        assert_eq!(
+            classify(packed(now + 5, ProbeOutcome::Allowed), 0, 0, None).probe_age,
+            0
+        );
+        // Foreground-change edges.
+        for (age, bucket) in [(0, 0), (999, 0), (1000, 1), (9999, 1), (10_000, 2)] {
+            assert_eq!(
+                classify(0, now - age, 0, None).since_switch,
+                bucket,
+                "switch {age}"
+            );
+        }
+        // Breaker: only for the keystroke's own control process.
+        assert_eq!(classify(0, 0, 7 << 8 | 1, Some(7)).breaker, 0);
+        assert_eq!(classify(0, 0, 7 << 8 | 2, Some(7)).breaker, 1);
+        assert_eq!(classify(0, 0, 7 << 8 | 1, Some(8)).breaker, 2);
+        assert_eq!(classify(0, 0, 7 << 8 | 1, None).breaker, 2);
+        assert_eq!(classify(0, 0, 0, Some(0)).breaker, 2);
+
+        // Counted per epoch and per process with the usual bound.
+        let mut tally = KeyAdmissionTally::default();
+        let timeout = classify(
+            packed(now - 30, failed("capture_input_focused_element_failed")),
+            now - 500,
+            9 << 8 | 1,
+            Some(9),
+        );
+        tally.denied(9, 1, KeyboardPrivacyDenial::DecisionUnavailable);
+        tally.unavailable(9, 1, timeout);
+        for pid in 100..140 {
+            tally.unavailable(pid, 1, timeout);
+        }
+        let report = tally.take_due(0, true).unwrap();
+        let epoch = &report.epochs[&1];
+        assert!(epoch.by_pid.len() <= MAX_TRACKED_PROCESSES + 1);
+        let expected = json!({
+            "after": {"capture_input_focused_element_failed": 1},
+            "probe_age": {"lt75ms": 1},
+            "since_foreground_change": {"lt1s": 1},
+            "breaker": {"open": 1},
+        });
+        assert_eq!(epoch.by_pid[&9].unavailable_json(), expected);
+        assert_eq!(
+            epoch.totals.unavailable_json()["after"]["capture_input_focused_element_failed"],
+            41
+        );
+        // Merging sums the histograms.
+        let mut merged = epoch.clone();
+        merged.add(epoch);
+        assert_eq!(merged.totals.unavailable_json()["breaker"]["open"], 82);
+        // The app-log line is unaffected: no new fields in `denied`.
+        assert_eq!(epoch.totals.suppressed(), 1);
     }
 
     #[test]

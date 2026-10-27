@@ -375,8 +375,17 @@ plain-text diagnostics, not encryption, and do not protect against the same user
 administrative takeover, malware running as that user or backups. They are not
 automatically exported or served. Existing sessions are deliberately not deleted
 by the recorder; remove them manually when the diagnosis is finished. Disable
-the option when no longer needed. Each process is capped at 8 MiB; repeated
-identical category/details are deduplicated for 30 seconds. Details larger than
+the option when no longer needed. Each process's file has separate byte
+budgets (2026-10-27), so one high-volume record type cannot starve another:
+32 MiB for the periodic summaries (`input_keystroke_epoch`,
+`input_probe_summary`, sized for a full day of heavy use), 8 MiB for the
+per-frame `capture_privacy_decision` records, 8 MiB for every other record and
+64 KiB for drop reports, about 48 MiB in all. A full budget drops only its own
+records: the writer continues, the app log records the fixed code
+`sensitive_debug_budget_reached` with the budget (`summary`,
+`capture_privacy_decision`, `detail`) once, and the sink writes a
+`sensitive_sink_budget` record with drop counts per budget at most once a
+minute. Repeated identical category/details are deduplicated for 30 seconds. Details larger than
 32 KiB are explicitly omitted (records have a 64 KiB ceiling). A bounded
 128-record queue drops with content-free count warnings instead of blocking
 capture; writer failures/limits also produce a fixed ordinary warning through the engine
@@ -496,6 +505,20 @@ Residual risk: native focus is sampled when the diagnostic callback runs, after
 the event, and could miss a change and change back in between; the sender's
 facts come from its own provider. The mandatory re-verification of the same
 native focus and UIA element limits what such an error can keep.
+
+Context of `decision_unavailable` losses (2026-10-27, diagnostics only): for
+every recordable keystroke lost because no privacy decision was available,
+`input_keystroke_epoch` counts, per epoch and per process (bounded like the
+other per-process counts), the last probe outcome (`none_yet`, `allowed`,
+`allowed_relaxed`, `password`, `skipped_excluded`, `skipped_breaker`,
+`skipped_long_walk`, `visual_gate_closed`, the probe's fixed failure codes, or
+`failed_other`), the time since that probe completed (`lt25ms`, `lt75ms`,
+`lt250ms`, `lt1000ms`, `ge1000ms`, `no_probe`), the time since the native
+foreground window last changed (`lt1s`, `lt10s`, `ge10s`, `unknown`) and whether
+the probe breaker was open for the keystroke's focused control process (`open`,
+`closed`, `unknown`), under `decision_unavailable_context`. The worker publishes
+this state through atomics; the hook only reads them. Nothing about it reaches
+the app log, and it never changes admission, probing or the breaker.
 
 New counts in `input_keystroke_epoch`: `focus_events.treated` (`weak`,
 `strong`), `weak_reverified` (buffers kept by a re-verification that relied on

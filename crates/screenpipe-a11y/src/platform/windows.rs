@@ -1532,7 +1532,14 @@ fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) 
     if recordable {
         match privacy_admission {
             Ok(grant) => s.key_tally.admitted(key_pid, epoch, grant.relaxed),
-            Err(reason) => s.key_tally.denied(key_pid, epoch, reason),
+            Err(reason) => {
+                s.key_tally.denied(key_pid, epoch, reason);
+                if reason == KeyboardPrivacyDenial::DecisionUnavailable {
+                    // Diagnostics only: lock-free reads of the worker's state.
+                    let context = s.keyboard_privacy.unavailable_context(focus);
+                    s.key_tally.unavailable(key_pid, epoch, context);
+                }
+            }
         }
         if let Some(gap) = input_admission::active_gap(s.last_recordable_at, now) {
             s.key_tally.active(epoch, gap);

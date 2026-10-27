@@ -406,6 +406,7 @@ fn log_sensitive_debug_notice(notice: screenpipe_config::sensitive_debug::Sensit
         N::WriteFailedOrLimitReached => tracing::warn!(reason_code = "sensitive_debug_write_stopped", "Private diagnostic write failed or session limit reached; further sensitive records will be omitted"),
         N::WriterStopped => tracing::warn!(reason_code = "sensitive_debug_writer_stopped", "Private diagnostic writer stopped; further sensitive records omitted"),
         N::QueueFull { total_dropped } => tracing::warn!(reason_code = "sensitive_debug_queue_full", total_dropped, "Private diagnostic queue full; diagnostic records were dropped"),
+        N::BudgetReached { budget } => tracing::warn!(reason_code = "sensitive_debug_budget_reached", budget, "Private diagnostic budget for one record class reached; its further records are dropped and counted, other classes continue"),
     }
 }
 

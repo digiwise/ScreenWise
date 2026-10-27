@@ -8,11 +8,66 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-const MAX_BYTES: u64 = 8 * 1024 * 1024;
-/// Part of the session limit kept for small periodic summaries, so detailed
-/// per-decision records cannot crowd out the aggregate counts.
-const SUMMARY_RESERVE_BYTES: u64 = 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+/// Periodic aggregate summaries: sized for a full day of heavy use.
+const SUMMARY_BUDGET_BYTES: u64 = 32 * MIB;
+/// The high-volume per-frame capture decisions.
+const CAPTURE_DECISION_BUDGET_BYTES: u64 = 8 * MIB;
+/// Every other detailed record.
+const DETAIL_BUDGET_BYTES: u64 = 8 * MIB;
+/// Small records reporting how many records each budget dropped.
+const BUDGET_REPORT_BYTES: u64 = 64 * 1024;
+const BUDGET_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+/// Bound on one session file: the sum of the budgets.
+#[cfg(test)]
+const MAX_BYTES: u64 = SUMMARY_BUDGET_BYTES
+    + CAPTURE_DECISION_BUDGET_BYTES
+    + DETAIL_BUDGET_BYTES
+    + BUDGET_REPORT_BYTES;
 const SUMMARY_CATEGORIES: [&str; 2] = ["input_keystroke_epoch", "input_probe_summary"];
+const CAPTURE_DECISION_CATEGORY: &str = "capture_privacy_decision";
+const BUDGET_REPORT_CATEGORY: &str = "sensitive_sink_budget";
+
+/// Each record class has its own byte budget in the session file, so one
+/// high-volume producer cannot starve another. A full budget drops (and
+/// counts) only its own records; the writer keeps going.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Budget {
+    Summary,
+    CaptureDecision,
+    Detail,
+}
+
+impl Budget {
+    const ALL: [Self; 3] = [Self::Summary, Self::CaptureDecision, Self::Detail];
+
+    fn of(category: &str) -> Self {
+        if SUMMARY_CATEGORIES.contains(&category) {
+            Self::Summary
+        } else if category == CAPTURE_DECISION_CATEGORY {
+            Self::CaptureDecision
+        } else {
+            Self::Detail
+        }
+    }
+
+    fn bytes(self) -> u64 {
+        match self {
+            Self::Summary => SUMMARY_BUDGET_BYTES,
+            Self::CaptureDecision => CAPTURE_DECISION_BUDGET_BYTES,
+            Self::Detail => DETAIL_BUDGET_BYTES,
+        }
+    }
+
+    /// Fixed label for notices and drop counts.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::CaptureDecision => "capture_privacy_decision",
+            Self::Detail => "detail",
+        }
+    }
+}
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const REPEAT_INTERVAL: Duration = Duration::from_secs(30);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -27,7 +82,14 @@ pub enum SensitiveDebugNotice {
     WorkerUnavailable,
     WriteFailedOrLimitReached,
     WriterStopped,
-    QueueFull { total_dropped: u64 },
+    QueueFull {
+        total_dropped: u64,
+    },
+    /// One record class reached its byte budget; only its further records
+    /// are dropped (and counted in the sink).
+    BudgetReached {
+        budget: &'static str,
+    },
 }
 type NoticeReporter = fn(SensitiveDebugNotice);
 #[derive(Default)]
@@ -152,18 +214,16 @@ fn start_writer() -> Option<mpsc::SyncSender<(&'static str, Value)>> {
     if std::thread::Builder::new()
         .name("sensitive-decision-log".into())
         .spawn(move || {
-            let mut sink = Sink {
-                file,
-                written: 0,
-                recent: HashMap::new(),
-                detail_limit_reported: false,
-            };
+            let mut sink = Sink::new(file);
             while let Ok((category, details)) = receiver.recv() {
                 match sink.write(category, details) {
-                    Ok(Written::Stored | Written::Repeated | Written::DetailLimitReached) => {}
-                    Ok(Written::FirstDetailLimit) => {
-                        report_notice(SensitiveDebugNotice::WriteFailedOrLimitReached)
-                    }
+                    Ok(Written::BudgetReached {
+                        first: true,
+                        budget,
+                    }) => report_notice(SensitiveDebugNotice::BudgetReached {
+                        budget: budget.code(),
+                    }),
+                    Ok(_) => {}
                     Err(_) => {
                         report_notice(SensitiveDebugNotice::WriteFailedOrLimitReached);
                         break;
@@ -188,20 +248,79 @@ fn bounded_details(details: Value) -> Value {
 }
 struct Sink {
     file: File,
-    written: u64,
+    /// Bytes written per `Budget::ALL` entry, and of budget reports.
+    written: [u64; 3],
+    report_written: u64,
+    /// Records dropped per budget, and as of the last budget report.
+    dropped: [u64; 3],
+    reported: [u64; 3],
+    last_report: Option<Instant>,
     recent: HashMap<&'static str, (Value, Instant)>,
-    detail_limit_reported: bool,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum Written {
     Stored,
     Repeated,
-    /// A detailed record was dropped to keep the summary reserve.
-    DetailLimitReached,
-    FirstDetailLimit,
+    /// Dropped: its class reached its budget (`first` for the first drop).
+    BudgetReached {
+        first: bool,
+        budget: Budget,
+    },
 }
 impl Sink {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            written: [0; 3],
+            report_written: 0,
+            dropped: [0; 3],
+            reported: [0; 3],
+            last_report: None,
+            recent: HashMap::new(),
+        }
+    }
+
     fn write(&mut self, category: &'static str, details: Value) -> io::Result<Written> {
+        let written = self.write_record(category, details)?;
+        self.report_drops()?;
+        Ok(written)
+    }
+
+    /// Every `BUDGET_REPORT_INTERVAL` at most, a small record with the drop
+    /// counts per budget (fixed codes and counts only), within its own budget.
+    fn report_drops(&mut self) -> io::Result<()> {
+        let now = Instant::now();
+        if self.dropped == self.reported
+            || self
+                .last_report
+                .is_some_and(|at| now.duration_since(at) < BUDGET_REPORT_INTERVAL)
+        {
+            return Ok(());
+        }
+        let dropped: serde_json::Map<String, Value> = Budget::ALL
+            .iter()
+            .zip(self.dropped)
+            .map(|(budget, count)| (budget.code().to_string(), json!(count)))
+            .collect();
+        let mut record = serde_json::to_vec(&json!({
+            "sensitive": true,
+            "timestamp_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+            "category": BUDGET_REPORT_CATEGORY,
+            "details": {"dropped": dropped},
+        }))?;
+        record.push(b'\n');
+        if self.report_written + record.len() as u64 > BUDGET_REPORT_BYTES {
+            return Ok(());
+        }
+        self.file.write_all(&record)?;
+        self.file.flush()?;
+        self.report_written += record.len() as u64;
+        self.reported = self.dropped;
+        self.last_report = Some(now);
+        Ok(())
+    }
+
+    fn write_record(&mut self, category: &'static str, details: Value) -> io::Result<Written> {
         let details = bounded_details(details);
         let now = Instant::now();
         if self.recent.get(category).is_some_and(|(previous, at)| {
@@ -218,21 +337,18 @@ impl Sink {
             )?;
         }
         record.push(b'\n');
-        let after = self.written.saturating_add(record.len() as u64);
-        if !SUMMARY_CATEGORIES.contains(&category) && after > MAX_BYTES - SUMMARY_RESERVE_BYTES {
-            let first = !std::mem::replace(&mut self.detail_limit_reported, true);
-            return Ok(if first {
-                Written::FirstDetailLimit
-            } else {
-                Written::DetailLimitReached
+        let budget = Budget::of(category);
+        let index = budget as usize;
+        if self.written[index].saturating_add(record.len() as u64) > budget.bytes() {
+            self.dropped[index] += 1;
+            return Ok(Written::BudgetReached {
+                first: self.dropped[index] == 1,
+                budget,
             });
-        }
-        if after > MAX_BYTES {
-            return Err(io::Error::other("session limit"));
         }
         self.file.write_all(&record)?;
         self.file.flush()?;
-        self.written += record.len() as u64;
+        self.written[index] += record.len() as u64;
         // Fixed producer categories, never titles/IDs as keys.
         self.recent.insert(category, (details, now));
         Ok(Written::Stored)
@@ -413,12 +529,7 @@ mod tests {
     #[test]
     fn sensitive_sink_bounds_deduplicates_and_preserves_error_details() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let mut sink = Sink {
-            file: file.reopen().unwrap(),
-            written: 0,
-            recent: HashMap::new(),
-            detail_limit_reported: false,
-        };
+        let mut sink = Sink::new(file.reopen().unwrap());
         let details = json!({"stage":"password_property","error":"synthetic provider error\n0x80004005","candidate":{"pid":42}});
         sink.write("probe", details.clone()).unwrap();
         let size = sink.written;
@@ -432,37 +543,88 @@ mod tests {
         assert_eq!(row["details"], details);
         assert_eq!(row["sensitive"], true);
         sink.write("probe", json!({"stage":"different"})).unwrap();
-        assert!(sink.written > size);
-        // Detailed records stop at the reserve; summaries continue to the limit.
-        sink.written = MAX_BYTES - SUMMARY_RESERVE_BYTES;
+        assert!(sink.written[Budget::Detail as usize] > size[Budget::Detail as usize]);
+    }
+
+    #[test]
+    fn sensitive_sink_budgets_keep_one_record_class_from_starving_another() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut sink = Sink::new(file.reopen().unwrap());
+        assert_eq!(Budget::of("input_keystroke_epoch"), Budget::Summary);
+        assert_eq!(Budget::of("input_probe_summary"), Budget::Summary);
         assert_eq!(
-            sink.write("probe", json!({"stage":"new"})).unwrap(),
-            Written::FirstDetailLimit
+            Budget::of(CAPTURE_DECISION_CATEGORY),
+            Budget::CaptureDecision
+        );
+        assert_eq!(Budget::of("input_privacy_probe"), Budget::Detail);
+        // The capture decisions' budget is full: only they are dropped.
+        sink.written[Budget::CaptureDecision as usize] = CAPTURE_DECISION_BUDGET_BYTES;
+        assert_eq!(
+            sink.write(CAPTURE_DECISION_CATEGORY, json!({"n":1}))
+                .unwrap(),
+            Written::BudgetReached {
+                first: true,
+                budget: Budget::CaptureDecision
+            }
         );
         assert_eq!(
-            sink.write("probe", json!({"stage":"newer"})).unwrap(),
-            Written::DetailLimitReached
+            sink.write(CAPTURE_DECISION_CATEGORY, json!({"n":2}))
+                .unwrap(),
+            Written::BudgetReached {
+                first: false,
+                budget: Budget::CaptureDecision
+            }
         );
-        assert_eq!(sink.written, MAX_BYTES - SUMMARY_RESERVE_BYTES);
         assert_eq!(
             sink.write("input_keystroke_epoch", json!({"admitted":1}))
                 .unwrap(),
             Written::Stored
         );
-        sink.written = MAX_BYTES;
-        assert!(sink
-            .write("input_probe_summary", json!({"probes":1}))
-            .is_err());
+        assert_eq!(
+            sink.write("input_privacy_probe", json!({"stage":"x"}))
+                .unwrap(),
+            Written::Stored
+        );
+        // Summaries have their own budget too, and a full one never stops
+        // the writer for the others.
+        sink.written[Budget::Summary as usize] = SUMMARY_BUDGET_BYTES;
+        assert!(matches!(
+            sink.write("input_probe_summary", json!({"probes":1}))
+                .unwrap(),
+            Written::BudgetReached {
+                first: true,
+                budget: Budget::Summary
+            }
+        ));
+        assert_eq!(
+            sink.write("input_privacy_probe", json!({"stage":"y"}))
+                .unwrap(),
+            Written::Stored
+        );
+        assert_eq!(sink.dropped, [1, 2, 0]);
+        // The drops were reported once (rate limited), with fixed codes.
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        let reports: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["category"] == BUDGET_REPORT_CATEGORY)
+            .collect();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0]["details"]["dropped"],
+            json!({"summary": 0, "capture_privacy_decision": 1, "detail": 0})
+        );
+        // Total disk use stays bounded by the budgets.
+        let total: u64 = sink.written.iter().sum::<u64>() + sink.report_written;
+        assert!(total <= MAX_BYTES + SUMMARY_BUDGET_BYTES + CAPTURE_DECISION_BUDGET_BYTES);
+        assert!(sink.report_written <= BUDGET_REPORT_BYTES);
+        assert_eq!(Budget::Summary.code(), "summary");
     }
+
     #[test]
     fn sensitive_oversized_records_remain_valid_json() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let mut sink = Sink {
-            file: file.reopen().unwrap(),
-            written: 0,
-            recent: HashMap::new(),
-            detail_limit_reported: false,
-        };
+        let mut sink = Sink::new(file.reopen().unwrap());
         sink.write("probe", json!({"error":"x".repeat(MAX_RECORD_BYTES)}))
             .unwrap();
         let row: Value =
