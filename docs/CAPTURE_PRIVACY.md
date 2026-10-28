@@ -551,7 +551,7 @@ logs, notices or public metrics.
 ### Keystroke drop alerts (temporary diagnostic, 2026-10-28)
 
 Owner-approved, off by default and enabled only by startup switches of the
-desktop executable (nothing is saved): `--keystroke-drop-alerts` turns them
+desktop executable (the switches are not saved): `--keystroke-drop-alerts` turns them
 on, `--keystroke-drop-alert-threshold=<T>` sets the minimum lost burst (default
 3) and `--keystroke-drop-alert-keys=<N>` how many lost keys to show (default 0,
 at most 32). The deployment start script passes them through only when given
@@ -579,6 +579,20 @@ any file. The sensitive diagnostics get one content-free
 `notification_failed` or `notifier_unavailable`, cause, kind, key count,
 basename, focus context, number of keys shown); its timestamp can be matched
 with the `input_keystroke_epoch` record of the same and the next epoch.
+`shown` means the notification was handed to Windows: the notification plugin
+displays it asynchronously and reports success either way, so it is not proof
+that a banner appeared.
+
+Windows shows these notifications only under a registered AppUserModelID, which
+an unpackaged executable lacks (the 2026-10-28 deployed run recorded six
+`shown` alerts, none displayed). With alerts on, startup therefore registers
+the app identifier for the current user
+(`HKCU\Software\Classes\AppUserModelId\<identifier>`, value `DisplayName` =
+`ScreenWise`), unless it is already registered; an existing registration is
+never changed. This key is the one lasting effect of the switches; it is not
+removed afterwards and holds no captured content. If registration fails, the
+app log has a content-free warning and no notifier is set, so alerts are
+recorded as `notifier_unavailable`.
 
 Ordinary input status now identifies native focus sampling, focused UIA element,
 focus ownership, IsPassword read versus unsupported property value, final focus

@@ -80,6 +80,8 @@ mod windows_ca_bundle;
 #[cfg(target_os = "windows")]
 mod windows_overlay;
 #[cfg(target_os = "windows")]
+mod windows_toast_identity;
+#[cfg(target_os = "windows")]
 mod windows_webview_env;
 
 pub use recording::*;
@@ -775,8 +777,31 @@ async fn run_application() {
             }
             let app_handle = app.handle();
             // Keystroke drop alerts (temporary diagnostic): the OS notification
-            // path, registered only when switched on at startup.
-            if screenpipe_a11y::drop_alerts::enabled() {
+            // path, registered only when switched on at startup. Windows shows
+            // the plugin's toasts only under a registered AppUserModelID; without
+            // one no notifier is set, so alerts are recorded as
+            // `notifier_unavailable` rather than silently lost.
+            #[cfg(target_os = "windows")]
+            let toast_identity_ready = !screenpipe_a11y::drop_alerts::enabled()
+                || match windows_toast_identity::ensure_toast_identity(
+                    &app.config().identifier,
+                ) {
+                    Ok(identity) => {
+                        info!(?identity, "keystroke drop alerts: Windows toast identity ready");
+                        true
+                    }
+                    Err(error) => {
+                        warn!(
+                            kind = ?error.kind(),
+                            os_error = ?error.raw_os_error(),
+                            "keystroke drop alerts: Windows toast identity unavailable; notifications off"
+                        );
+                        false
+                    }
+                };
+            #[cfg(not(target_os = "windows"))]
+            let toast_identity_ready = true;
+            if screenpipe_a11y::drop_alerts::enabled() && toast_identity_ready {
                 use tauri_plugin_notification::NotificationExt;
                 let notifier = app_handle.clone();
                 screenpipe_a11y::drop_alerts::set_notifier(move |title, body| {

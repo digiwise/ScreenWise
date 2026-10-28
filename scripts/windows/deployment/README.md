@@ -126,7 +126,10 @@ run only with `-DropAlerts` (optionally `-DropAlertThreshold <T>` and
 `-DropAlertKeys <N>`), given to this launcher or to `Deploy-ScreenWise.ps1`
 (which passes them to the start it performs and records them nowhere); see
 [capture decision metadata](../../../docs/CAPTURE_PRIVACY.md)
-for what the notifications show and their privacy trade-off.
+for what the notifications show and their privacy trade-off. With alerts on, the
+app registers its notification identity under the current user's
+`Software\Classes\AppUserModelId` (once; it is kept), without which Windows
+discards the notifications of this unpackaged build.
 
 The launcher verifies runtime file sizes/timestamps, exact active rules, enabled
 firewall profiles, an unused API port, local audio models and the pinned Pi
