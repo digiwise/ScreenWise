@@ -4,7 +4,13 @@ param(
     [string]$ManifestPath,
     [switch]$PreflightOnly,
     [ValidateSet('PrivacyAndText', 'PrivacyOnly')]
-    [string]$UiaComparisonMode = 'PrivacyAndText'
+    [string]$UiaComparisonMode = 'PrivacyAndText',
+    # Keystroke drop alerts (temporary diagnostic): off unless given explicitly.
+    [switch]$DropAlerts,
+    [ValidateRange(1, 1000)]
+    [int]$DropAlertThreshold = 3,
+    [ValidateRange(0, 32)]
+    [int]$DropAlertKeys = 0
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Deployment.psm1') -Force
@@ -133,6 +139,10 @@ $psi.EnvironmentVariables.Remove('SCREENWISE_PI_VALIDATION_NO_TOOLS')
 $psi.EnvironmentVariables.Remove('SCREENWISE_PI_NO_TOOLS')
 $psi.EnvironmentVariables['SCREENWISE_PI_RUNTIME_DIR'] = $m.pi_runtime_directory
 $psi.EnvironmentVariables['SCREENWISE_PI_RECORDING_TOOLS_ONLY'] = '1'
+# Startup switches for this run only; nothing is persisted.
+if ($DropAlerts) {
+    $psi.Arguments = "--keystroke-drop-alerts --keystroke-drop-alert-threshold=$DropAlertThreshold --keystroke-drop-alert-keys=$DropAlertKeys"
+}
 $process = [Diagnostics.Process]::new()
 $process.StartInfo = $psi
 try {

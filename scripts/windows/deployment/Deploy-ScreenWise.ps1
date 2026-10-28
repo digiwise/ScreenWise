@@ -23,6 +23,11 @@ param(
     # an earlier deployment: each deployment states them explicitly.
     [string]$UiaPasswordStateUnsupportedProcesses = 'none',
     [string]$UiaFocusWithoutKeyboardFocusProcesses = 'none',
+    # Keystroke drop alerts (temporary diagnostic): passed to this start only,
+    # never recorded in the manifest or the login-startup entry.
+    [switch]$DropAlerts,
+    [ValidateRange(1, 1000)][int]$DropAlertThreshold = 3,
+    [ValidateRange(0, 32)][int]$DropAlertKeys = 0,
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -287,7 +292,11 @@ if ($PrepareOnly) {
     Write-Host 'Prepared only; ScreenWise was not started.'
 } else {
     Write-Host 'Checking startup prerequisites and starting ScreenWise...'
-    try { Invoke-DeploymentStartup -StartupScript $launchScript -ManifestPath $manifestPath }
+    $startupArguments = @{}
+    if ($DropAlerts) {
+        $startupArguments = @{ DropAlerts = $true; DropAlertThreshold = $DropAlertThreshold; DropAlertKeys = $DropAlertKeys }
+    }
+    try { Invoke-DeploymentStartup -StartupScript $launchScript -ManifestPath $manifestPath -StartupArguments $startupArguments }
     catch {
         Write-Host ("To retry after fixing the error: & '{0}' -ManifestPath '{1}'" -f $launchScript.Replace("'", "''"), $manifestPath.Replace("'", "''"))
         throw

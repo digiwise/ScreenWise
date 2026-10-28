@@ -414,6 +414,8 @@ fn main() {
             }
         }
     }
+    // Keystroke drop alerts: startup switches only (off unless given).
+    screenpipe_a11y::drop_alerts::configure(screenpipe_a11y::drop_alerts::parse_args(&args));
     run_application();
 }
 
@@ -772,6 +774,21 @@ async fn run_application() {
                 app.deep_link().register_all()?;
             }
             let app_handle = app.handle();
+            // Keystroke drop alerts (temporary diagnostic): the OS notification
+            // path, registered only when switched on at startup.
+            if screenpipe_a11y::drop_alerts::enabled() {
+                use tauri_plugin_notification::NotificationExt;
+                let notifier = app_handle.clone();
+                screenpipe_a11y::drop_alerts::set_notifier(move |title, body| {
+                    notifier
+                        .notification()
+                        .builder()
+                        .title(title)
+                        .body(body)
+                        .show()
+                        .is_ok()
+                });
+            }
 
             // Create macOS app menu with Settings
             #[cfg(target_os = "macos")]

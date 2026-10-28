@@ -141,6 +141,12 @@ impl LostCause {
         matches!(self, Self::RecorderExcluded)
     }
 
+    /// A loss the keystroke drop alerts report: every unintended loss except
+    /// typing that was undone and a privacy pause.
+    pub fn alerts(self) -> bool {
+        !self.intended() && !matches!(self, Self::NetZeroEdit | Self::RecorderPrivacyPause)
+    }
+
     pub fn index(self) -> usize {
         Self::ALL
             .iter()
@@ -376,6 +382,8 @@ pub fn note_persisted(tag: &KeystrokeTag) {
 /// The event carrying `tag` will never be persisted.
 pub fn note_lost(tag: &KeystrokeTag, cause: LostCause) {
     record(tag, Outcome::Lost(cause));
+    // Keystroke drop alerts (off unless switched on; never waits).
+    crate::drop_alerts::note_lost_after_admission(tag.pid, tag.keystrokes(), cause);
 }
 
 /// One reported epoch's dispositions.

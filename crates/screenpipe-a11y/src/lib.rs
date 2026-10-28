@@ -61,6 +61,7 @@
 pub mod activity_feed;
 pub mod budget;
 pub mod config;
+pub mod drop_alerts;
 pub mod events;
 pub mod incognito;
 pub mod input_accounting;

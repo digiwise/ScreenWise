@@ -191,6 +191,22 @@ pub(crate) struct UnavailableContext {
     pub(crate) breaker: usize,
 }
 
+impl UnavailableContext {
+    /// Fixed code of the time since the foreground changed.
+    pub(crate) fn since_switch_code(self) -> &'static str {
+        SINCE_SWITCH_CODES[self.since_switch.min(SINCE_SWITCH_CODES.len() - 1)]
+    }
+
+    /// Whether the probe breaker was open for the keystroke's process.
+    pub(crate) fn breaker_open(self) -> Option<bool> {
+        match self.breaker {
+            0 => Some(true),
+            1 => Some(false),
+            _ => None,
+        }
+    }
+}
+
 /// The slot of a probe outcome in the `decision_unavailable` context, from
 /// the probe's own outcome and failure reason codes.
 pub(crate) fn probe_outcome_slot(outcome: ProbeOutcome) -> usize {
@@ -494,6 +510,16 @@ impl FocusClass {
                 NATIVE_CODES[index % MATCH_STATES]
             ),
         }
+    }
+
+    /// Fixed relation code of the sender (as in the class labels).
+    pub(crate) fn relation_code(self) -> &'static str {
+        SenderRelation::CODES[self.relation.index()]
+    }
+
+    /// Fixed label of the sender's control type.
+    pub(crate) fn control_type_code(self) -> &'static str {
+        control_type_label(control_type_slot(self.control_type))
     }
 
     /// Whether the event was compared with certainly buffered text.

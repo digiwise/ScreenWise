@@ -121,6 +121,13 @@ Then in **ordinary PowerShell**:
 & .\scripts\windows\deployment\Start-ScreenWise.ps1
 ```
 
+Keystroke drop alerts (temporary diagnostic, off by default) are enabled for one
+run only with `-DropAlerts` (optionally `-DropAlertThreshold <T>` and
+`-DropAlertKeys <N>`), given to this launcher or to `Deploy-ScreenWise.ps1`
+(which passes them to the start it performs and records them nowhere); see
+[capture decision metadata](../../../docs/CAPTURE_PRIVACY.md)
+for what the notifications show and their privacy trade-off.
+
 The launcher verifies runtime file sizes/timestamps, exact active rules, enabled
 firewall profiles, an unused API port, local audio models and the pinned Pi
 package before capture. Ollama must be running only on loopback port 11434, with

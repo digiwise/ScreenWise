@@ -492,10 +492,11 @@ function Set-DeploymentUiaComparisonMode {
 }
 
 function Invoke-DeploymentStartup {
-    param([Parameter(Mandatory)][string]$StartupScript, [Parameter(Mandatory)][string]$ManifestPath)
+    param([Parameter(Mandatory)][string]$StartupScript, [Parameter(Mandatory)][string]$ManifestPath,
+        [hashtable]$StartupArguments = @{})
     # The startup launcher owns every preflight and only launches after all pass.
     # Do not change firewall rules or bypass its checks when updating an installation.
-    try { & $StartupScript -ManifestPath $ManifestPath }
+    try { & $StartupScript -ManifestPath $ManifestPath @StartupArguments }
     catch {
         throw "Deployment files are prepared, but startup checks/launch failed. No firewall rules were changed. Resolve the reported prerequisite and rerun Start-ScreenWise.ps1. $($_.Exception.Message)"
     }

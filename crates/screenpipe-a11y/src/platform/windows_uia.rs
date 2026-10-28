@@ -275,6 +275,11 @@ impl NativeKeyboardFocus {
         self.pid
     }
 
+    /// Foreground window handle, for the drop alerts' exclusion recheck.
+    pub(crate) fn foreground_hwnd(self) -> isize {
+        self.foreground
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(foreground: isize, control: isize, pid: u32) -> Self {
         Self {

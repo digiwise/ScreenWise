@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use super::windows_uia::input_admission::{self, DiscardCause, KeyAdmissionTally};
 use super::windows_uia::{
@@ -303,6 +303,17 @@ impl UiRecorder {
                 },
             );
         }));
+
+        // Keystroke drop alerts (temporary diagnostic): only when switched on
+        // at startup; the hand-off opens before the hooks can produce.
+        if crate::drop_alerts::enabled() {
+            let receiver = crate::drop_alerts::open_hand_off();
+            let alert_stop = stop.clone();
+            let alert_config = self.config.clone();
+            threads.push(thread::spawn(move || {
+                run_drop_alert_worker(receiver, alert_stop, alert_config);
+            }));
+        }
 
         // Thread 1: Native Windows hooks for input events
         let tx1 = tx.clone();
@@ -1148,6 +1159,9 @@ fn discard_text_buffer(state: &mut HookState, cause: DiscardCause) {
             None
         }
     };
+    if crate::drop_alerts::enabled() && cause.rechecks() && keys > 0 {
+        alert_discarded_text(state, keys, focus);
+    }
     state
         .key_tally
         .discarded(state.text_pid, epoch, keys, cause, source, focus);
@@ -1454,6 +1468,162 @@ fn invalidate_keyboard_focus(state: &mut HookState) {
         .invalidate_from(windows_uia::InvalidationSource::Navigation);
 }
 
+/// Keystroke drop alerts (temporary diagnostic, off unless switched on): one
+/// recordable key refused at the gate. Never waits; the key label is made with
+/// the same translation as admitted keys (no dead-key or IME state is read).
+fn alert_refused_key(
+    state: &HookState,
+    pid: u32,
+    denial: KeyboardPrivacyDenial,
+    vk: u16,
+    mods: u8,
+    focus: Option<NativeKeyboardFocus>,
+) {
+    let keys_shown = crate::drop_alerts::switches().keys_shown;
+    if let Some(loss) = refused_key_loss(state, pid, denial, vk, mods, focus, keys_shown) {
+        crate::drop_alerts::hand_off(loss);
+    }
+}
+
+/// The drop-alert loss for one refused key; `None` for an intended block
+/// (password field, excluded application).
+fn refused_key_loss(
+    state: &HookState,
+    pid: u32,
+    denial: KeyboardPrivacyDenial,
+    vk: u16,
+    mods: u8,
+    focus: Option<NativeKeyboardFocus>,
+    keys_shown: usize,
+) -> Option<crate::drop_alerts::Loss> {
+    if denial.intended() {
+        return None;
+    }
+    let context = state.keyboard_privacy.unavailable_context(focus);
+    let labels = if keys_shown > 0 {
+        vec![drop_alert_key_label(vk, mods)]
+    } else {
+        Vec::new()
+    };
+    Some(crate::drop_alerts::Loss {
+        at: Instant::now(),
+        pid,
+        keys: 1,
+        cause: denial.code(),
+        kind: crate::drop_alerts::LossKind::Refusal,
+        foreground: focus.map(|focus| focus.foreground_hwnd()),
+        context: crate::drop_alerts::LossContext {
+            since_switch: Some(context.since_switch_code()),
+            breaker_open: context.breaker_open(),
+            ..Default::default()
+        },
+        labels,
+    })
+}
+
+/// A refused key as shown in a drop alert: special keys by name, shortcuts
+/// as one label, otherwise the admitted-key translation.
+fn drop_alert_key_label(vk: u16, mods: u8) -> crate::drop_alerts::KeyLabel {
+    use crate::drop_alerts::KeyLabel;
+    if mods & 0x0E != 0 {
+        return KeyLabel::Named("Shortcut");
+    }
+    match vk {
+        0x1B => KeyLabel::Named("Escape"),
+        0x2E => KeyLabel::Named("Delete"),
+        0x25 => KeyLabel::Named("Left"),
+        0x26 => KeyLabel::Named("Up"),
+        0x27 => KeyLabel::Named("Right"),
+        0x28 => KeyLabel::Named("Down"),
+        0x24 => KeyLabel::Named("Home"),
+        0x23 => KeyLabel::Named("End"),
+        0x21 => KeyLabel::Named("Page Up"),
+        0x22 => KeyLabel::Named("Page Down"),
+        _ => vk_to_char(vk, mods).map_or(KeyLabel::Named("Key"), KeyLabel::from_char),
+    }
+}
+
+/// Keystroke drop alerts: a recheck discard of buffered text, with where
+/// focus moved when the discard's last focus event is already classified.
+fn alert_discarded_text(
+    state: &HookState,
+    keys: u64,
+    attribution: Option<input_admission::DiscardFocus>,
+) {
+    let class = match attribution {
+        Some(input_admission::DiscardFocus::Last(class)) => Some(class),
+        _ => None,
+    };
+    let keys_shown = crate::drop_alerts::switches().keys_shown;
+    crate::drop_alerts::hand_off(crate::drop_alerts::Loss {
+        at: Instant::now(),
+        pid: state.text_pid,
+        keys,
+        cause: LostCause::BufferDiscarded.code(),
+        kind: crate::drop_alerts::LossKind::Discard,
+        foreground: state.text_focus.map(|focus| focus.foreground_hwnd()),
+        context: crate::drop_alerts::LossContext {
+            focus_relation: class.map(|class| class.relation_code()),
+            control_type: class.map(|class| class.control_type_code()),
+            ..Default::default()
+        },
+        labels: state
+            .text_buf
+            .chars()
+            .take(keys_shown)
+            .map(crate::drop_alerts::KeyLabel::from_char)
+            .collect(),
+    });
+}
+
+/// The keystroke drop alert worker: shows alerts for lost bursts; drops
+/// every loss while privacy capture is paused or whose window (or, without
+/// one, application) may not be contacted, keys and all.
+fn run_drop_alert_worker(
+    receiver: Receiver<crate::drop_alerts::Loss>,
+    stop: Arc<AtomicBool>,
+    config: UiCaptureConfig,
+) {
+    let switches = crate::drop_alerts::switches();
+    info!(
+        reason_code = "keystroke_drop_alerts_enabled",
+        threshold = switches.threshold,
+        keys_shown = switches.keys_shown,
+        "keystroke drop alerts are on for this process (temporary diagnostic)"
+    );
+    let mut core = crate::drop_alerts::AlertCore::new(switches);
+    while !stop.load(Ordering::Relaxed) {
+        match receiver.recv_timeout(Duration::from_millis(500)) {
+            Ok(loss) => {
+                if !screenpipe_config::audio_privacy::visual_capture_allowed()
+                    || drop_alert_excluded(&config, &loss)
+                {
+                    continue;
+                }
+                if let Some(alert) = core.observe(loss) {
+                    let exe = windows_uia::process_image_basename(alert.pid);
+                    crate::drop_alerts::deliver(alert, exe);
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => core.expire(Instant::now()),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    crate::drop_alerts::close_hand_off();
+}
+
+/// The same check as UIA contact (window, or application without one);
+/// an unidentified application counts as excluded.
+fn drop_alert_excluded(config: &UiCaptureConfig, loss: &crate::drop_alerts::Loss) -> bool {
+    match loss.foreground {
+        Some(hwnd) => !windows_uia::uia_target_allowed(config, HWND(hwnd as *mut std::ffi::c_void)),
+        None => {
+            let exe = windows_uia::process_image_basename(loss.pid).unwrap_or_default();
+            !config.may_contact(&[exe.as_str()], None)
+        }
+    }
+}
+
 /// Before a keystroke's decision: take any focus events already classified
 /// (bounded, never waiting), so relaxation B's proof is available as soon
 /// as it exists (about 60 ms after the event) rather than on the next timer
@@ -1534,6 +1704,9 @@ fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) 
             Ok(grant) => s.key_tally.admitted(key_pid, epoch, grant.relaxed),
             Err(reason) => {
                 s.key_tally.denied(key_pid, epoch, reason);
+                if crate::drop_alerts::enabled() {
+                    alert_refused_key(s, key_pid, reason, vk_code, mods, focus);
+                }
                 if reason == KeyboardPrivacyDenial::DecisionUnavailable {
                     // Diagnostics only: lock-free reads of the worker's state.
                     let context = s.keyboard_privacy.unavailable_context(focus);
@@ -3784,6 +3957,71 @@ mod tests {
         });
         drain_focus_events(&mut state);
         assert!(state.text_weak_focus.is_empty() && state.text_buf.is_empty());
+    }
+
+    #[test]
+    fn drop_alerts_skip_intended_blocks_name_special_keys_and_recheck_exclusions() {
+        let (tx, _rx) = crossbeam_channel::bounded(64);
+        let (state, _content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        for intended in [
+            KeyboardPrivacyDenial::PasswordField,
+            KeyboardPrivacyDenial::Excluded,
+        ] {
+            assert!(refused_key_loss(&state, 12, intended, 0x41, 0, Some(focus), 1).is_none());
+        }
+        let loss = refused_key_loss(
+            &state,
+            12,
+            KeyboardPrivacyDenial::DecisionUnavailable,
+            0x0D,
+            0,
+            Some(focus),
+            1,
+        )
+        .unwrap();
+        assert_eq!(loss.cause, "decision_unavailable");
+        assert_eq!(
+            loss.labels,
+            vec![crate::drop_alerts::KeyLabel::Named("Enter")]
+        );
+        assert_eq!(loss.foreground, Some(10));
+        assert_eq!(loss.context.since_switch, Some("unsampled"));
+        // No keys asked for: no labels made at all.
+        let quiet = refused_key_loss(
+            &state,
+            12,
+            KeyboardPrivacyDenial::GenerationChanged,
+            0x41,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+        assert!(quiet.labels.is_empty());
+        use crate::drop_alerts::KeyLabel::{Char, Named};
+        assert_eq!(drop_alert_key_label(0x08, 0), Named("Backspace"));
+        assert_eq!(drop_alert_key_label(0x09, 0), Named("Tab"));
+        assert_eq!(drop_alert_key_label(0x20, 0), Named("Space"));
+        assert_eq!(drop_alert_key_label(0x1B, 0), Named("Escape"));
+        assert_eq!(drop_alert_key_label(0x25, 0), Named("Left"));
+        assert_eq!(drop_alert_key_label(0x43, 0x02), Named("Shortcut"));
+        assert_eq!(drop_alert_key_label(0x31, 0x01), Char('!'));
+        // The exclusion recheck: an unidentified application, or one the
+        // configuration ignores, never gets an alert.
+        let config = crate::config::UiCaptureConfig::default();
+        let loss_for = |pid| crate::drop_alerts::Loss {
+            foreground: None,
+            pid,
+            ..quiet.clone()
+        };
+        assert!(drop_alert_excluded(&config, &loss_for(0)));
+        let own = std::process::id();
+        let exe = windows_uia::process_image_basename(own).unwrap();
+        assert!(!drop_alert_excluded(&config, &loss_for(own)));
+        let mut ignoring = config.clone();
+        ignoring.ignored_windows = vec![exe.trim_end_matches(".exe").to_string()];
+        assert!(drop_alert_excluded(&ignoring, &loss_for(own)));
     }
 
     #[test]

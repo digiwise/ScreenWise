@@ -548,6 +548,38 @@ events by the sender's executable basename (at most 32 processes, then
 `overflow`; `unnamed` when no name was resolved). Basenames never reach app
 logs, notices or public metrics.
 
+### Keystroke drop alerts (temporary diagnostic, 2026-10-28)
+
+Owner-approved, off by default and enabled only by startup switches of the
+desktop executable (nothing is saved): `--keystroke-drop-alerts` turns them
+on, `--keystroke-drop-alert-threshold=<T>` sets the minimum lost burst (default
+3) and `--keystroke-drop-alert-keys=<N>` how many lost keys to show (default 0,
+at most 32). The deployment start script passes them through only when given
+`-DropAlerts` (with `-DropAlertThreshold`, `-DropAlertKeys`).
+
+A Windows notification appears when a burst of at least T recordable keystrokes
+is lost, using the keystroke accounting's own classification: an unintended
+gate denial (refusals for one process within 10 s form one burst), a recheck
+discard of buffered text (one burst), or another lost-after-admission cause
+(`LostCause::alerts`). Never for password fields, excluded or protected windows
+(rechecked against the same window/application exclusion as UIA contact before
+an alert), privacy pauses or typing that was undone. At most one notification
+a minute; later ones are only recorded. It shows the local time, the
+executable basename, the number of lost keys, the cause in plain words, the
+time since the last app switch (refusals), where focus moved (discards) and,
+when N > 0, the first N lost keys with special keys by name. Losses after
+admission carry no keys.
+
+Privacy trade-off: with N > 0 the lost keys are shown in the notification text;
+Windows keeps it in its notification history, and screen capture or screen
+sharing may record it. They are held only in memory on their way to the
+notification and never written to the app log, the sensitive diagnostics or
+any file. The sensitive diagnostics get one content-free
+`keystroke_drop_alert` record per alert (outcome `shown`, `rate_limited`,
+`notification_failed` or `notifier_unavailable`, cause, kind, key count,
+basename, focus context, number of keys shown); its timestamp can be matched
+with the `input_keystroke_epoch` record of the same and the next epoch.
+
 Ordinary input status now identifies native focus sampling, focused UIA element,
 focus ownership, IsPassword read versus unsupported property value, final focus
 verification, worker initialization and a closed visual privacy gate. These are
