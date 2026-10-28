@@ -588,11 +588,17 @@ an unpackaged executable lacks (the 2026-10-28 deployed run recorded six
 `shown` alerts, none displayed). With alerts on, startup therefore registers
 the app identifier for the current user
 (`HKCU\Software\Classes\AppUserModelId\<identifier>`, value `DisplayName` =
-`ScreenWise`), unless it is already registered; an existing registration is
-never changed. This key is the one lasting effect of the switches; it is not
-removed afterwards and holds no captured content. If registration fails, the
-app log has a content-free warning and no notifier is set, so alerts are
-recorded as `notifier_unavailable`.
+`ScreenWise`), unless it is already registered; an existing text display name
+is never changed (a non-text `DisplayName` value would be replaced). This key is
+the one lasting effect of the switches; it is not removed afterwards and holds
+no captured content. The plugin uses the identifier as the AppUserModelID only
+when the executable does not run from a `target\debug` or `target\release`
+folder, so the registration matters for the deployed copy, not for an exe run
+straight from the build folder. If registration fails, the app log has a
+content-free warning and no notifier is set, so alerts are recorded as
+`notifier_unavailable`. Per-alert outcome records are written only with the
+sensitive diagnostics option; without it, that startup warning is the only
+record that notifications are off.
 
 Ordinary input status now identifies native focus sampling, focused UIA element,
 focus ownership, IsPassword read versus unsupported property value, final focus
