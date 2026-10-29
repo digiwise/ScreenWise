@@ -53,11 +53,17 @@ by repeated walks. Since then:
   failing optional text phase only switches the window to OCR text. The
   keyboard focus probe (element scope: IsPassword, ProcessId, HasKeyboardFocus)
   has its own backoff, so a large tree never disables keystroke checks; it is
-  skipped (input denied) only while a walk to the same process has run longer
-  than the probe's 50 ms provider timeout. Counters: `breaker_openings`,
+  skipped (input denied) while a walk to the same process has run longer
+  than 50 ms, UIA's shortest provider timeout. Since 2026-10-29 each probe
+  call may wait for the rest of the probe's 250 ms budget (no call starts
+  with less than 50 ms left), instead of 50 ms per call; see
+  [the probe budget](CAPTURE_PRIVACY.md#keyboard-probe-budget-and-pacing-2026-10-29).
+  Counters: `breaker_openings`,
   `breaker_costly_successes` (the subset of those openings caused by a slow
   success), `breaker_shrink_releases`, `breaker_walk_skips`, `breaker_text_skips`,
-  `breaker_probe_skips`, `breaker_open_walk_windows`,
+  `breaker_probe_skips` (breaker and long-walk probe skips), `probe_pacings`
+  and `probe_paced_skips` (slow probe answers that paced the next probe, and
+  probes skipped for it), `breaker_open_walk_windows`,
   `breaker_open_text_windows` and `breaker_open_probe_processes` (no process
   ids or window handles). Because a slow success now opens the gate,
   `breaker_openings` counts more than it did before 2026-10-19 and is not

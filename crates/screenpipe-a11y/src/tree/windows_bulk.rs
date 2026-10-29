@@ -2,7 +2,10 @@
 
 use super::timing::{self, RetryCause, Stage};
 use crate::events::AccessibilityNode;
-use crate::platform::windows_uia::UiaContext;
+// UIA requires a 50 ms minimum timeout: start a new provider call only when
+// at least 50 ms remains, never configured past the phase deadline (the
+// shared rule, also used by the keyboard privacy probe).
+use crate::platform::windows_uia::{provider_timeout_at, UiaContext};
 pub(super) use screenpipe_config::capture_diagnostics::AccessibilityStopReason as Stop;
 use screenpipe_config::capture_diagnostics::RuleReference;
 use std::sync::{
@@ -248,18 +251,6 @@ fn initial_deadline(deadline: Instant) -> Result<(), Stop> {
     } else {
         Ok(())
     }
-}
-/// UIA requires a 50 ms minimum timeout. Start a new provider call only
-/// when at least 50 ms remains, and never configure past the phase deadline.
-fn provider_timeout_at(now: Instant, deadline: Instant) -> Result<u32, Stop> {
-    if now >= deadline {
-        return Err(Stop::Timeout);
-    }
-    let remaining = deadline.duration_since(now);
-    if remaining < std::time::Duration::from_millis(50) {
-        return Err(Stop::Timeout);
-    }
-    Ok(remaining.as_millis().min(u32::MAX as u128) as u32)
 }
 fn configure_provider_timeouts(timeouts: &IUIAutomation2, deadline: Instant) -> Result<(), Stop> {
     let timeout = provider_timeout_at(Instant::now(), deadline).map_err(|reason| {
@@ -1572,38 +1563,6 @@ mod tests {
         assert_eq!(snapshot["schema_version"], 3);
         assert!(snapshot["raw_nodes"].is_u64());
         assert!(snapshot["projected_nodes"].is_u64());
-    }
-
-    #[test]
-    fn provider_timeout_uses_remaining_phase_time_without_overrun() {
-        let now = Instant::now();
-        assert_eq!(
-            provider_timeout_at(now, now + Duration::from_millis(750)),
-            Ok(750)
-        );
-        assert_eq!(
-            provider_timeout_at(now, now + Duration::from_millis(125)),
-            Ok(125)
-        );
-        assert_eq!(
-            provider_timeout_at(now, now + Duration::from_millis(50)),
-            Ok(50)
-        );
-        assert_eq!(
-            provider_timeout_at(
-                now,
-                now + Duration::from_millis(50) - Duration::from_micros(1)
-            ),
-            Err(Stop::Timeout)
-        );
-        assert_eq!(
-            provider_timeout_at(
-                now,
-                now + Duration::from_millis(750) - Duration::from_micros(100)
-            ),
-            Ok(749)
-        );
-        assert_eq!(provider_timeout_at(now, now), Err(Stop::Timeout));
     }
 
     #[test]

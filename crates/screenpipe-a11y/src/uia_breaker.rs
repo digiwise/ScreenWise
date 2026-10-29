@@ -22,14 +22,21 @@
 //!
 //! `Probe` (the cheap keyboard focus probe) is keyed by process: a large tree
 //! never disables keystroke privacy checks, and a probe is instead skipped
-//! while a walk's UIA requests to the same process have run longer than a
-//! probe's own provider timeout (it would only queue behind them on the
-//! shared UI thread). A walk lease reserved before a screenshot does not
+//! while a walk's UIA requests to the same process have run longer than
+//! 50 ms, UIA's shortest provider timeout (it would only queue behind them on
+//! the shared UI thread). A walk lease reserved before a screenshot does not
 //! count until the walk's UIA phase starts.
-//! A probe costs its target one bounded provider request, not a walk, and
-//! every skipped probe withholds the user's typing, so its timeouts back off
-//! for 1 s, 2 s, 4 s ... capped at 30 s (2026-10-23) instead of the walk
-//! schedule; probes whose provider calls all answer count as cheap successes.
+//! A probe costs its target a few element-scope provider requests, not a
+//! walk, and every skipped probe withholds the user's typing, so its costly
+//! outcomes back off for 1 s, 2 s, 4 s ... capped at 30 s (2026-10-23)
+//! instead of the walk schedule. Since 2026-10-29 a probe's provider calls
+//! may wait for the rest of its 250 ms budget: a probe whose calls answer
+//! within that budget is a cheap success, even a slow one; a provider
+//! timeout or provider work beyond the budget is costly (`probe_outcome`).
+//! A slow answer instead paces the next probe of that process
+//! (`PROBE_PACE_AFTER`): it starts no sooner than the answer's own duration
+//! after it, so probing occupies at most about half of the target's UI
+//! thread.
 //! Keys are process ids and window handles only; the tables are bounded.
 
 use std::collections::HashMap;
@@ -42,6 +49,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(600);
 const PROBE_BASE_BACKOFF: Duration = Duration::from_secs(1);
 const PROBE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const RESET_AFTER_SUCCESSES: u32 = 3;
+/// A probe whose provider work took longer than this paces the next probe
+/// of the same process by that work's duration.
+pub(crate) const PROBE_PACE_AFTER: Duration = Duration::from_millis(50);
 const MAX_TRACKED_TARGETS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +151,9 @@ struct Entry {
     walk: Gate,
     text: Gate,
     probe: Gate,
+    /// No probe of this process starts before this (process targets only):
+    /// set after a probe whose provider work exceeded `PROBE_PACE_AFTER`.
+    probe_paced_until: Option<Instant>,
     /// Window area at its last costly outcome (window targets only).
     failure_area: Option<u64>,
     last_seen: Option<Instant>,
@@ -161,12 +174,57 @@ impl Entry {
             Scope::Probe => &mut self.probe,
         }
     }
+    fn paced(&self, now: Instant) -> bool {
+        self.probe_paced_until.is_some_and(|until| now < until)
+    }
     fn all_allow(&self, now: Instant) -> bool {
-        self.walk.allows(now) && self.text.allows(now) && self.probe.allows(now)
+        self.walk.allows(now) && self.text.allows(now) && self.probe.allows(now) && !self.paced(now)
     }
     fn idle(&self, now: Instant) -> bool {
-        self.walk.idle(now) && self.text.idle(now) && self.probe.idle(now)
+        self.walk.idle(now) && self.text.idle(now) && self.probe.idle(now) && !self.paced(now)
     }
+}
+
+/// What one keyboard probe cost the provider of its control process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProbeCost {
+    /// Time spent inside this probe's provider calls.
+    pub(crate) provider_work: Duration,
+    /// A provider call failed with UIA_E_TIMEOUT.
+    pub(crate) timed_out: bool,
+    /// Every provider call the probe needed answered without an error and
+    /// the probe was not stopped by its budget.
+    pub(crate) answered: bool,
+    /// The probe ran out of its budget after calling the provider (too little
+    /// left to start the next call, or the budget expired after an answer).
+    pub(crate) budget_stopped: bool,
+}
+
+/// The breaker outcome of a probe whose provider was called, against its
+/// total `budget`: a timeout, provider work beyond the budget or a probe
+/// stopped by its budget is a costly failure (the 1 s ... 30 s schedule); an
+/// answer within it is a cheap success however slow; a provider error leaves
+/// the gate unchanged. A budget stop is costly because such a provider can
+/// never complete a probe: without it, it would be probed at the pacing rate
+/// indefinitely while admitting nothing.
+pub(crate) fn probe_outcome(cost: ProbeCost, budget: Duration) -> Option<Outcome> {
+    if cost.timed_out || cost.budget_stopped || cost.provider_work > budget {
+        Some(Outcome::Failure)
+    } else if cost.answered {
+        Some(Outcome::Success)
+    } else {
+        None
+    }
+}
+
+/// Whether a probe may call a process's provider now, and if not, why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeGate {
+    Allowed,
+    /// The probe breaker is open after a costly outcome.
+    Breaker,
+    /// The previous probe answered slowly; its pacing gap has not passed.
+    Paced,
 }
 
 #[derive(Debug, Default)]
@@ -220,6 +278,36 @@ impl Breaker {
         }
         if entry.idle(now) {
             self.entries.remove(&target);
+        }
+    }
+
+    /// Whether a probe may call `target` now; the breaker takes precedence.
+    fn probe_gate(&self, target: Target, now: Instant) -> ProbeGate {
+        match self.entries.get(&target) {
+            Some(entry) if !entry.probe.allows(now) => ProbeGate::Breaker,
+            Some(entry) if entry.paced(now) => ProbeGate::Paced,
+            _ => ProbeGate::Allowed,
+        }
+    }
+
+    /// Record one probe of `target` that called its provider: the breaker
+    /// outcome (if any) and its pacing. Provider work over
+    /// `PROBE_PACE_AFTER` holds the next probe for that long after `now`.
+    fn record_probe(&mut self, target: Target, cost: ProbeCost, budget: Duration, now: Instant) {
+        if let Some(outcome) = probe_outcome(cost, budget) {
+            self.record(target, Scope::Probe, outcome, None, now);
+        }
+        if cost.provider_work > PROBE_PACE_AFTER {
+            self.evict(now);
+            let entry = self.entries.entry(target).or_default();
+            entry.last_seen = Some(now);
+            entry.probe_paced_until = Some(now + cost.provider_work);
+            PROBE_PACINGS.fetch_add(1, Ordering::Relaxed);
+        } else if let Some(entry) = self.entries.get_mut(&target) {
+            entry.probe_paced_until = None;
+            if entry.idle(now) {
+                self.entries.remove(&target);
+            }
         }
     }
 
@@ -411,6 +499,9 @@ static SHRINK_RELEASES: AtomicU64 = AtomicU64::new(0);
 static WALK_SKIPS: AtomicU64 = AtomicU64::new(0);
 static TEXT_SKIPS: AtomicU64 = AtomicU64::new(0);
 static PROBE_SKIPS: AtomicU64 = AtomicU64::new(0);
+/// Slow probe answers that paced the next probe, and probes skipped for it.
+static PROBE_PACINGS: AtomicU64 = AtomicU64::new(0);
+static PROBE_PACED_SKIPS: AtomicU64 = AtomicU64::new(0);
 static EXCLUSION_SKIPS: AtomicU64 = AtomicU64::new(0);
 
 fn with_breaker<T>(f: impl FnOnce(&mut Breaker) -> T) -> T {
@@ -443,32 +534,25 @@ pub(crate) fn record_window(
     }
 }
 
-/// Whether keyboard probes may call the provider of process `pid` now.
-pub(crate) fn allows_probe(pid: u32) -> bool {
-    pid == 0
-        || with_breaker(|breaker| {
-            breaker.allows(Target { pid, hwnd: 0 }, Scope::Probe, None, Instant::now())
-        })
+/// Whether keyboard probes may call the provider of process `pid` now: not
+/// while its probe breaker is open or a slow answer's pacing gap runs.
+pub(crate) fn probe_gate(pid: u32) -> ProbeGate {
+    if pid == 0 {
+        return ProbeGate::Allowed;
+    }
+    with_breaker(|breaker| breaker.probe_gate(Target { pid, hwnd: 0 }, Instant::now()))
 }
 
-/// Probes either answer cheaply or fail; they have no slow-success case.
-pub(crate) fn record_probe(pid: u32, costly_failure: bool) {
-    if pid != 0 {
-        let outcome = if costly_failure {
-            Outcome::Failure
-        } else {
-            Outcome::Success
-        };
-        with_breaker(|breaker| {
-            breaker.record(
-                Target { pid, hwnd: 0 },
-                Scope::Probe,
-                outcome,
-                None,
-                Instant::now(),
-            )
-        });
+/// Record a probe that called the provider of process `pid`, against its
+/// total `budget`. Returns whether it was costly (the breaker is now open).
+pub(crate) fn record_probe(pid: u32, cost: ProbeCost, budget: Duration) -> bool {
+    if pid == 0 {
+        return false;
     }
+    with_breaker(|breaker| {
+        breaker.record_probe(Target { pid, hwnd: 0 }, cost, budget, Instant::now())
+    });
+    probe_outcome(cost, budget) == Some(Outcome::Failure)
 }
 
 pub(crate) fn note_walk_skipped() {
@@ -479,6 +563,10 @@ pub(crate) fn note_text_skipped() {
 }
 pub(crate) fn note_probe_skipped() {
     PROBE_SKIPS.fetch_add(1, Ordering::Relaxed);
+}
+/// A probe was not started because its process's pacing gap had not passed.
+pub(crate) fn note_probe_paced() {
+    PROBE_PACED_SKIPS.fetch_add(1, Ordering::Relaxed);
 }
 /// A UIA call was not made because its target is excluded from capture.
 pub(crate) fn note_exclusion_skip() {
@@ -502,6 +590,8 @@ pub(crate) fn metrics_snapshot() -> serde_json::Value {
         "breaker_walk_skips": WALK_SKIPS.load(Ordering::Relaxed),
         "breaker_text_skips": TEXT_SKIPS.load(Ordering::Relaxed),
         "breaker_probe_skips": PROBE_SKIPS.load(Ordering::Relaxed),
+        "probe_pacings": PROBE_PACINGS.load(Ordering::Relaxed),
+        "probe_paced_skips": PROBE_PACED_SKIPS.load(Ordering::Relaxed),
         "uia_exclusion_skips": EXCLUSION_SKIPS.load(Ordering::Relaxed),
         "breaker_open_walk_windows": open_walk,
         "breaker_open_text_windows": open_text,
@@ -740,5 +830,162 @@ mod tests {
             breaker.record(window(pid, 1), Scope::Walk, Outcome::Failure, Some(10), now);
         }
         assert!(breaker.entries.len() <= MAX_TRACKED_TARGETS);
+    }
+
+    const PROBE_BUDGET: Duration = Duration::from_millis(250);
+
+    fn cost(millis: u64, timed_out: bool, answered: bool) -> ProbeCost {
+        ProbeCost {
+            provider_work: Duration::from_millis(millis),
+            timed_out,
+            answered,
+            budget_stopped: false,
+        }
+    }
+
+    #[test]
+    fn probe_answers_within_the_budget_succeed_and_timeouts_or_overruns_are_costly() {
+        let ms = Duration::from_millis;
+        for millis in [1, 50, 200, 250] {
+            assert_eq!(
+                probe_outcome(cost(millis, false, true), PROBE_BUDGET),
+                Some(Outcome::Success),
+                "{millis} ms answer"
+            );
+        }
+        for millis in [1, 120, 250] {
+            assert_eq!(
+                probe_outcome(cost(millis, true, false), PROBE_BUDGET),
+                Some(Outcome::Failure),
+                "timeout after {millis} ms"
+            );
+        }
+        assert_eq!(
+            probe_outcome(cost(251, false, true), PROBE_BUDGET),
+            Some(Outcome::Failure),
+            "an answer beyond the budget is costly"
+        );
+        assert_eq!(
+            probe_outcome(cost(260, false, false), PROBE_BUDGET),
+            Some(Outcome::Failure)
+        );
+        // A provider error within the budget: no change.
+        assert_eq!(probe_outcome(cost(210, false, false), PROBE_BUDGET), None);
+        assert_eq!(probe_outcome(cost(0, false, false), ms(250)), None);
+        // A budget stop (a 210 ms first answer leaves under 50 ms for the
+        // recheck) is costly: that provider can never complete a probe.
+        let stopped = ProbeCost {
+            budget_stopped: true,
+            ..cost(210, false, false)
+        };
+        assert_eq!(probe_outcome(stopped, PROBE_BUDGET), Some(Outcome::Failure));
+    }
+
+    #[test]
+    fn a_slow_answer_paces_the_next_probe_instead_of_opening_the_breaker() {
+        let mut breaker = Breaker::default();
+        let slow = window(50, 0);
+        let other = window(51, 0);
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        breaker.record_probe(slow, cost(200, false, true), PROBE_BUDGET, t0);
+        assert_eq!(breaker.probe_gate(slow, t0), ProbeGate::Paced);
+        assert_eq!(breaker.probe_gate(slow, t0 + ms(199)), ProbeGate::Paced);
+        assert_eq!(breaker.probe_gate(slow, t0 + ms(200)), ProbeGate::Allowed);
+        assert!(
+            breaker.allows(slow, Scope::Probe, None, t0),
+            "a slow answer within the budget never opens the breaker"
+        );
+        assert_eq!(
+            breaker.probe_gate(other, t0),
+            ProbeGate::Allowed,
+            "pacing is per process"
+        );
+        // A fast answer afterwards clears the pacing and forgets the target.
+        breaker.record_probe(slow, cost(20, false, true), PROBE_BUDGET, t0 + ms(200));
+        assert!(breaker.entries.is_empty());
+        // Only answers longer than 50 ms pace.
+        breaker.record_probe(slow, cost(50, false, true), PROBE_BUDGET, t0);
+        assert!(breaker.entries.is_empty());
+        assert_eq!(breaker.probe_gate(slow, t0), ProbeGate::Allowed);
+        breaker.record_probe(slow, cost(51, false, false), PROBE_BUDGET, t0);
+        assert_eq!(
+            breaker.probe_gate(slow, t0 + ms(50)),
+            ProbeGate::Paced,
+            "failed probes pace too"
+        );
+        assert_eq!(breaker.probe_gate(slow, t0 + ms(51)), ProbeGate::Allowed);
+    }
+
+    #[test]
+    fn probe_timeouts_and_overruns_keep_the_breaker_schedule() {
+        let mut breaker = Breaker::default();
+        let process = window(60, 0);
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        breaker.record_probe(process, cost(250, true, false), PROBE_BUDGET, t0);
+        assert_eq!(
+            breaker.probe_gate(process, t0 + ms(999)),
+            ProbeGate::Breaker
+        );
+        assert_eq!(
+            breaker.probe_gate(process, t0 + ms(1_000)),
+            ProbeGate::Allowed
+        );
+        // An answer that overran the budget: the second costly step, 2 s.
+        let t1 = t0 + ms(1_000);
+        breaker.record_probe(process, cost(300, false, true), PROBE_BUDGET, t1);
+        assert_eq!(
+            breaker.probe_gate(process, t1 + ms(1_999)),
+            ProbeGate::Breaker
+        );
+        assert_eq!(
+            breaker.probe_gate(process, t1 + ms(2_000)),
+            ProbeGate::Allowed
+        );
+        // Slow answers within the budget are cheap successes: three of them
+        // reset the streak, so the next timeout starts again at 1 s.
+        let mut at = t1 + ms(2_000);
+        for _ in 0..RESET_AFTER_SUCCESSES {
+            breaker.record_probe(process, cost(200, false, true), PROBE_BUDGET, at);
+            assert_ne!(breaker.probe_gate(process, at), ProbeGate::Breaker);
+            at += ms(200);
+        }
+        breaker.record_probe(process, cost(60, true, false), PROBE_BUDGET, at);
+        assert_eq!(
+            breaker.probe_gate(process, at + ms(999)),
+            ProbeGate::Breaker
+        );
+        assert_eq!(
+            breaker.probe_gate(process, at + ms(1_000)),
+            ProbeGate::Allowed
+        );
+        // A provider error within the budget neither opens nor resets it.
+        let mut breaker = Breaker::default();
+        breaker.record_probe(process, cost(10, false, false), PROBE_BUDGET, t0);
+        assert!(breaker.entries.is_empty());
+    }
+
+    #[test]
+    fn paced_probe_targets_are_bounded_and_expire() {
+        let mut breaker = Breaker::default();
+        let now = Instant::now();
+        for pid in 1..=(MAX_TRACKED_TARGETS as u32 * 2) {
+            breaker.record_probe(window(pid, 0), cost(100, false, true), PROBE_BUDGET, now);
+        }
+        assert!(breaker.entries.len() <= MAX_TRACKED_TARGETS);
+        // Expired pacing entries are the first to go.
+        let later = now + Duration::from_secs(1);
+        breaker.record_probe(
+            window(9_999, 0),
+            cost(100, false, true),
+            PROBE_BUDGET,
+            later,
+        );
+        assert_eq!(breaker.entries.len(), 1);
+        assert!(
+            probe_gate(0) == ProbeGate::Allowed,
+            "pid 0 is never tracked"
+        );
     }
 }

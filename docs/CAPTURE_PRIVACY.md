@@ -513,7 +513,8 @@ every recordable keystroke lost because no privacy decision was available,
 `input_keystroke_epoch` counts, per epoch and per process (bounded like the
 other per-process counts), the last probe outcome (`none_yet`, `allowed`,
 `allowed_relaxed`, `password`, `skipped_excluded`, `skipped_breaker`,
-`skipped_long_walk`, `visual_gate_closed`, the probe's fixed failure codes, or
+`skipped_long_walk`, `skipped_paced`, `visual_gate_closed`, the probe's fixed
+failure codes, or
 `failed_other`; `before_sample` when the keystroke's foreground window is not
 yet the one the worker last sampled, so that outcome described the previous
 window), the time since that probe completed (`lt25ms`, `lt75ms`,
@@ -525,11 +526,12 @@ the probe breaker was open for the keystroke's focused control process (`open`,
 this state through atomics; the hook only reads them. Nothing about it reaches
 the app log, and it never changes admission, probing or the breaker. The last
 outcome is published right after the probe's decision is stored, and the
-breaker state also as soon as a probe timeout opens it. Only a timeout opens
-the breaker and a timeout clears the decision, so keystrokes in that process
+breaker state also as soon as a probe timeout opens it. Only a timeout (or,
+since 2026-10-29, provider work beyond the probe's 250 ms budget) opens the
+breaker and such a probe clears the decision, so keystrokes in that process
 while it is open count as `decision_unavailable` with `breaker: open` until a
-probe succeeds. A long-walk skip keeps the last decision but advances the
-generation, so its keystrokes count as `generation_changed`.
+probe succeeds. A long-walk or paced skip keeps the last decision but advances
+the generation, so its keystrokes count as `generation_changed`.
 
 Reading limits: the comparison is by top-level window, so a focus move inside
 one window (or a reused window handle) keeps the previous outcome. Keystrokes
@@ -547,6 +549,47 @@ a weak event) and, in this sensitive sink only, `weak_focus_senders`: weak
 events by the sender's executable basename (at most 32 processes, then
 `overflow`; `unnamed` when no name was resolved). Basenames never reach app
 logs, notices or public metrics.
+
+### Keyboard probe budget and pacing (2026-10-29)
+
+Before this change, maintainer diagnostics over two local periods attributed
+most keystrokes lost at the privacy gate (`decision_unavailable` after a
+`skipped_breaker` probe) to the probe breaker being open, typically opened by a
+single provider answer slower than the 50 ms per-call timeout. Now:
+
+- Each provider call of the keyboard privacy probe may wait for whatever
+  remains of the probe's 250 ms budget, and no call starts with less than
+  50 ms (UIA's minimum) left; the bulk walk phases use the same rule for their
+  own deadlines. Screen-capture walks, text reads and other UIA callers keep
+  their timeouts.
+- A probe whose calls answer within the budget, however slowly, does not open
+  the breaker and counts towards resetting it. A provider timeout, provider
+  work longer than the budget, or a probe stopped by its budget (for example a
+  first answer after 210 ms leaves too little time to start the recheck) opens
+  it on the unchanged 1 s, 2 s ... 30 s schedule.
+- Pacing protects slow applications: after a probe whose provider calls took
+  longer than 50 ms in total, the next probe of the same process waits at
+  least that long after the answer, so probing occupies at most about half of
+  its UI thread. This bound covers answered calls only: a call that timed out
+  is not cancelled by UIA, and its remaining provider work is unmeasured. The
+  probe also runs every poll whether or not the user is typing. Such a probe is skipped as `skipped_paced`; like the other
+  skips it denies input and advances the generation weakly, so the slow
+  answer's decision does not outlive the next poll (about 25 ms) and buffered
+  text can only be kept by the next probe's re-verification.
+- Unchanged: exclusions and cross-process checks before any UIA contact, the
+  in-probe focus recheck, the 75 ms evidence freshness rule (a slow first
+  answer still fails if verification leaves its evidence older than 75 ms),
+  focus-event invalidation, the long-walk skip threshold (50 ms) and the walk
+  breaker.
+- Diagnostics: `input_probe_summary` adds
+  `duration_ms_buckets_lt10_lt25_lt50_lt75_lt100_lt150_lt200_lt250_ge250`
+  (the five-band field is kept) and `skipped_paced`, per process with the
+  existing bounds.
+
+Limits: a native UIA timeout is not a hard wall-clock bound, so one call can
+still return after the budget; such a probe is costly and its answer is not
+used past the deadline. Whether the longer waits reduce lost keystrokes without
+visibly slowing applications is not yet measured live.
 
 ### Keystroke drop alerts (temporary diagnostic, 2026-10-28)
 

@@ -25,7 +25,7 @@ use tracing::{debug, error, info, trace, warn};
 mod budget;
 #[path = "windows_input_admission.rs"]
 pub(crate) mod input_admission;
-pub(crate) use budget::UiaLimits;
+pub(crate) use budget::{provider_timeout_at, UiaLimits};
 use budget::{ProviderBackoff, TreeProvider, UiaStop, WalkBudget, PROVIDER_TIMEOUT_MS};
 use windows::core::{implement, Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::{HWND, POINT};
@@ -1926,7 +1926,10 @@ impl UiaContext {
     /// an unsupported IsPassword property must not become a false permission.
     /// No context-wide retry backoff: a failed probe already denies content,
     /// and repeating it sooner can only restore a verified permit sooner.
-    /// Provider cost is bounded per process by the probe breaker instead.
+    /// Provider cost is bounded per process by the probe breaker and its
+    /// pacing instead. Each provider call may wait for the rest of the 250 ms
+    /// probe budget (never starting with less than UIA's 50 ms minimum); the
+    /// native wait is not a hard wall-clock bound.
     fn refresh_keyboard_privacy(
         &self,
         privacy: &KeyboardPrivacy,
@@ -1992,14 +1995,20 @@ impl UiaContext {
             }
         });
         // Fail closed without calling the provider while this probe's own
-        // backoff is open for the process that owns the focused window, or
-        // while a walk to it has already run longer than a probe could wait
-        // (it would only queue behind it on the shared UI thread).
+        // backoff is open for the process that owns the focused window, while
+        // a slow previous answer's pacing gap runs, or while a walk to it has
+        // already run longer than UIA's shortest provider wait (the probe
+        // would only queue behind it on the shared UI thread). A focus that
+        // fails without UIA contact (sampling, cross-process) is never paced:
+        // the probe below records that failure at once.
         if let Some(skip) = focus.and_then(|focus| {
-            let allowed = crate::uia_breaker::allows_probe(focus.control_pid);
-            privacy.note_probe_breaker(focus.control_pid, !allowed);
-            if !allowed {
+            let gate = crate::uia_breaker::probe_gate(focus.control_pid);
+            let breaker_open = gate == crate::uia_breaker::ProbeGate::Breaker;
+            privacy.note_probe_breaker(focus.control_pid, breaker_open);
+            if breaker_open {
                 Some(ProbeSkip::Breaker)
+            } else if gate == crate::uia_breaker::ProbeGate::Paced && native.is_ok() {
+                Some(ProbeSkip::Paced)
             } else {
                 [focus.pid, focus.control_pid]
                     .into_iter()
@@ -2012,7 +2021,14 @@ impl UiaContext {
                     .then_some(ProbeSkip::LongWalk)
             }
         }) {
-            crate::uia_breaker::note_probe_skipped();
+            if skip == ProbeSkip::Paced {
+                crate::uia_breaker::note_probe_paced();
+            } else {
+                crate::uia_breaker::note_probe_skipped();
+            }
+            // Every skip withholds typing, a paced one included: the previous
+            // decision is not left to run out its 75 ms. Weak, so buffered
+            // text may still be re-verified by the next probe.
             privacy.invalidate_from(InvalidationSource::ProbeSkip);
             privacy.note_probe_outcome(ProbeOutcome::Skipped(skip));
             return record(ProbeOutcome::Skipped(skip));
@@ -2020,18 +2036,23 @@ impl UiaContext {
         let provider_called = std::cell::Cell::new(false);
         let provider_failed = std::cell::Cell::new(false);
         let provider_timed_out = std::cell::Cell::new(false);
+        let budget_stopped = std::cell::Cell::new(false);
+        // Time spent inside provider calls (the target's UI thread).
+        let provider_work = std::cell::Cell::new(Duration::ZERO);
         let note_timeout = |error: &windows::core::Error| {
             provider_failed.set(true);
             if error.code().0 as u32 == UIA_E_TIMEOUT {
                 provider_timed_out.set(true);
             }
         };
-        let budget = WalkBudget::new(UiaLimits::keyboard_privacy());
+        let limits = UiaLimits::keyboard_privacy().clamped();
+        let budget = WalkBudget::new(limits);
         let prepare = || {
             budget
-                .request_timeout()
+                .remaining_request_timeout()
                 .and_then(|ms| self.set_request_timeout(ms))
                 .map_err(|_| {
+                    budget_stopped.set(true);
                     probe_error(
                         CaptureReason::InputFocusedElementFailed,
                         "provider_budget",
@@ -2046,17 +2067,18 @@ impl UiaContext {
             let focus = native?;
             prepare()?;
             provider_called.set(true);
-            let element = self
-                .automation
-                .GetFocusedElementBuildCache(&self.privacy_cache_request)
-                .map_err(|e| {
-                    note_timeout(&e);
-                    probe_error(
-                        CaptureReason::InputFocusedElementFailed,
-                        "GetFocusedElementBuildCache",
-                        e,
-                    )
-                })?;
+            let element = timed_provider_call(&provider_work, || {
+                self.automation
+                    .GetFocusedElementBuildCache(&self.privacy_cache_request)
+            })
+            .map_err(|e| {
+                note_timeout(&e);
+                probe_error(
+                    CaptureReason::InputFocusedElementFailed,
+                    "GetFocusedElementBuildCache",
+                    e,
+                )
+            })?;
             let evidence_at = Instant::now();
             // Local cached reads (no provider call).
             element_id.set(cached_runtime_id(&element));
@@ -2064,6 +2086,7 @@ impl UiaContext {
                 password_read.set(explicit_cached_password_state(&value).ok());
             }
             budget.check_complete().map_err(|_| {
+                budget_stopped.set(true);
                 probe_error(
                     CaptureReason::InputFocusedElementFailed,
                     "cached_state_budget",
@@ -2163,17 +2186,18 @@ impl UiaContext {
             prepare()?;
             // Cached ids only, so a changed element can be described by fixed
             // numbers (control types, same process) without more calls.
-            let current = self
-                .automation
-                .GetFocusedElementBuildCache(&self.privacy_cache_request)
-                .map_err(|e| {
-                    note_timeout(&e);
-                    probe_error(
-                        CaptureReason::InputFocusVerificationFailed,
-                        "GetFocusedElement recheck",
-                        e,
-                    )
-                })?;
+            let current = timed_provider_call(&provider_work, || {
+                self.automation
+                    .GetFocusedElementBuildCache(&self.privacy_cache_request)
+            })
+            .map_err(|e| {
+                note_timeout(&e);
+                probe_error(
+                    CaptureReason::InputFocusVerificationFailed,
+                    "GetFocusedElement recheck",
+                    e,
+                )
+            })?;
             if NativeKeyboardFocus::current() != Some(focus) {
                 return Err(probe_error(
                     CaptureReason::InputFocusVerificationFailed,
@@ -2182,18 +2206,18 @@ impl UiaContext {
                 ));
             }
             prepare()?;
-            if !self
-                .automation
-                .CompareElements(&element, &current)
-                .map_err(|e| {
-                    note_timeout(&e);
-                    probe_error(
-                        CaptureReason::InputFocusVerificationFailed,
-                        "CompareElements",
-                        e,
-                    )
-                })?
-                .as_bool()
+            if !timed_provider_call(&provider_work, || {
+                self.automation.CompareElements(&element, &current)
+            })
+            .map_err(|e| {
+                note_timeout(&e);
+                probe_error(
+                    CaptureReason::InputFocusVerificationFailed,
+                    "CompareElements",
+                    e,
+                )
+            })?
+            .as_bool()
             {
                 return Err(probe_error(
                     CaptureReason::InputFocusVerificationFailed,
@@ -2202,6 +2226,7 @@ impl UiaContext {
                 ));
             }
             budget.check_complete().map_err(|_| {
+                budget_stopped.set(true);
                 probe_error(
                     CaptureReason::InputFocusVerificationFailed,
                     "completed_probe_budget",
@@ -2220,15 +2245,22 @@ impl UiaContext {
             && result.as_ref().err().is_some_and(|failure| {
                 failure_without_focus_evidence(failure, provider_timed_out.get())
             });
-        // Timeouts open the probe breaker for the provider's process; probes
-        // whose provider calls all answered count towards resetting it.
-        if let Some(focus) = focus {
-            if provider_timed_out.get() {
-                crate::uia_breaker::record_probe(focus.control_pid, true);
+        // Other users of this context keep UIA's shortest wait between probes.
+        let _ = self.set_request_timeout(PROVIDER_TIMEOUT_MS);
+        // A timeout, provider work beyond the budget or a budget stop opens
+        // the probe breaker for the provider's process; probes whose provider calls all
+        // answered within the budget, however slowly, count towards resetting
+        // it. Provider work over 50 ms paces that process's next probe.
+        if let Some(focus) = focus.filter(|_| provider_called.get()) {
+            let cost = crate::uia_breaker::ProbeCost {
+                provider_work: provider_work.get(),
+                timed_out: provider_timed_out.get(),
+                answered: !provider_failed.get() && !budget_stopped.get(),
+                budget_stopped: budget_stopped.get(),
+            };
+            if crate::uia_breaker::record_probe(focus.control_pid, cost, limits.timeout) {
                 // Diagnostics: the breaker is open from now on.
                 privacy.note_probe_breaker(focus.control_pid, true);
-            } else if provider_called.get() && !provider_failed.get() {
-                crate::uia_breaker::record_probe(focus.control_pid, false);
             }
         }
         if let Err(failure) = &result {
@@ -2866,6 +2898,15 @@ fn explicit_cached_password_state(value: &VARIANT) -> windows::core::Result<bool
 fn complete_keyboard_privacy_probe<T>(probe: impl FnOnce() -> T) -> (T, Instant) {
     let result = probe();
     (result, Instant::now())
+}
+
+/// One keyboard-probe provider call, adding its duration to `work` (the time
+/// the target's UI thread spent on this probe, for the breaker and pacing).
+fn timed_provider_call<T>(work: &std::cell::Cell<Duration>, call: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = call();
+    work.set(work.get() + started.elapsed());
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

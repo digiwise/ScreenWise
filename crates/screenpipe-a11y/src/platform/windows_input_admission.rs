@@ -151,12 +151,17 @@ pub(crate) struct KeyCounts {
 const OUTCOME_ALLOWED: &str = "allowed";
 const OUTCOME_PASSWORD: &str = "password";
 const OUTCOME_VISUAL_GATE_CLOSED: &str = "visual_gate_closed";
-/// By `ProbeSkip` order: excluded, breaker, long walk.
-const OUTCOME_SKIPPED: [&str; 3] = ["skipped_excluded", "skipped_breaker", "skipped_long_walk"];
+/// By `ProbeSkip` order: excluded, breaker, long walk, paced.
+const OUTCOME_SKIPPED: [&str; 4] = [
+    "skipped_excluded",
+    "skipped_breaker",
+    "skipped_long_walk",
+    "skipped_paced",
+];
 /// The keystroke's native foreground differs from the worker's last sample:
 /// the last outcome describes the previous foreground.
 const BEFORE_SAMPLE: usize = 8;
-const UNAVAILABLE_AFTER_FIXED: [&str; 9] = [
+const UNAVAILABLE_AFTER_FIXED: [&str; 10] = [
     "none_yet",
     OUTCOME_ALLOWED,
     "allowed_relaxed",
@@ -166,6 +171,7 @@ const UNAVAILABLE_AFTER_FIXED: [&str; 9] = [
     OUTCOME_SKIPPED[2],
     OUTCOME_VISUAL_GATE_CLOSED,
     "before_sample",
+    OUTCOME_SKIPPED[3],
 ];
 const UNAVAILABLE_AFTER_SLOTS: usize =
     UNAVAILABLE_AFTER_FIXED.len() + super::PROBE_FAILURE_REASONS.len() + 1;
@@ -218,6 +224,7 @@ pub(crate) fn probe_outcome_slot(outcome: ProbeOutcome) -> usize {
         ProbeOutcome::Skipped(ProbeSkip::Breaker) => 5,
         ProbeOutcome::Skipped(ProbeSkip::LongWalk) => 6,
         ProbeOutcome::VisualGateClosed => 7,
+        ProbeOutcome::Skipped(ProbeSkip::Paced) => 9,
         ProbeOutcome::Failed { reason, .. } => {
             UNAVAILABLE_AFTER_FIXED.len()
                 + super::PROBE_FAILURE_REASONS
@@ -1166,6 +1173,9 @@ pub(crate) enum ProbeSkip {
     Excluded,
     Breaker,
     LongWalk,
+    /// The previous probe of the process answered slowly; the next waits
+    /// for as long as that answer took (`uia_breaker::PROBE_PACE_AFTER`).
+    Paced,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1234,10 +1244,13 @@ struct ProbeCounts {
     allowed_relaxed: [u64; 2],
     password: u64,
     visual_gate_closed: u64,
-    skipped: [u64; 3],
+    skipped: [u64; 4],
     failures: BTreeMap<(&'static str, &'static str, &'static str), u64>,
-    /// <10, <25, <50, <75, >=75 ms.
+    /// <10, <25, <50, <75, >=75 ms (fixed schema field).
     duration_buckets: [u64; 5],
+    /// <10, <25, <50, <75, <100, <150, <200, <250, >=250 ms: probe calls may
+    /// wait for the whole 250 ms budget (2026-10-29).
+    duration_buckets_250: [u64; 9],
     max_duration_us: u64,
     other_control_process: u64,
 }
@@ -1261,6 +1274,7 @@ impl ProbeCounts {
                     ProbeSkip::Excluded => 0,
                     ProbeSkip::Breaker => 1,
                     ProbeSkip::LongWalk => 2,
+                    ProbeSkip::Paced => 3,
                 }] += 1
             }
             ProbeOutcome::Failed {
@@ -1286,6 +1300,17 @@ impl ProbeCounts {
             50..75 => 3,
             _ => 4,
         }] += 1;
+        self.duration_buckets_250[match ms {
+            0..10 => 0,
+            10..25 => 1,
+            25..50 => 2,
+            50..75 => 3,
+            75..100 => 4,
+            100..150 => 5,
+            150..200 => 6,
+            200..250 => 7,
+            _ => 8,
+        }] += 1;
         self.max_duration_us = self
             .max_duration_us
             .max(record.duration.as_micros().min(u64::MAX as u128) as u64);
@@ -1308,6 +1333,8 @@ impl ProbeCounts {
                 json!({"reason": reason, "stage": stage, "hresult": hresult, "count": count})
             }).collect::<Vec<_>>(),
             "duration_ms_buckets_lt10_lt25_lt50_lt75_ge75": self.duration_buckets,
+            "duration_ms_buckets_lt10_lt25_lt50_lt75_lt100_lt150_lt200_lt250_ge250":
+                self.duration_buckets_250,
             "max_duration_us": self.max_duration_us,
             "other_control_process": self.other_control_process,
         });
@@ -1428,7 +1455,7 @@ impl ProbeTally {
             failed: totals.failures_total(),
             // Only provider-protection skips: password-field, exclusion and
             // pause outcomes would show how long the user spent there.
-            skipped: totals.skipped[1] + totals.skipped[2],
+            skipped: totals.skipped[1] + totals.skipped[2] + totals.skipped[3],
             totals: totals.to_json(),
             by_pid: by_pid
                 .into_iter()
@@ -1963,6 +1990,10 @@ mod tests {
             label(ProbeOutcome::Skipped(ProbeSkip::LongWalk)),
             "skipped_long_walk"
         );
+        assert_eq!(
+            label(ProbeOutcome::Skipped(ProbeSkip::Paced)),
+            "skipped_paced"
+        );
         assert_eq!(label(ProbeOutcome::VisualGateClosed), "visual_gate_closed");
         let failed = |reason| ProbeOutcome::Failed {
             reason,
@@ -2130,6 +2161,7 @@ mod tests {
                 },
             ));
         }
+        tally.record(record(7, ProbeOutcome::Skipped(ProbeSkip::Paced)));
         tally.record(record(9, ProbeOutcome::Password));
         tally.record(record(10, ProbeOutcome::Skipped(ProbeSkip::Excluded)));
         let names = tally.names();
@@ -2141,8 +2173,12 @@ mod tests {
         let report = tally.take_due(Duration::ZERO).unwrap();
         assert_eq!(
             (report.probes, report.allowed, report.failed, report.skipped),
-            (4, 1, 2, 1)
+            (5, 1, 2, 2),
+            "paced skips count with the other provider-protection skips"
         );
+        assert_eq!(report.totals["skipped_paced"], 1);
+        let seven = &report.by_pid.iter().find(|(pid, _)| *pid == 7).unwrap().1;
+        assert_eq!(seven["skipped_paced"], 1, "counted per process");
         assert_eq!(
             report.failures_by_reason,
             "capture_input_focused_element_failed:2"
@@ -2151,5 +2187,30 @@ mod tests {
         assert!(pids.contains(&7) && pids.contains(&0));
         assert!(!pids.contains(&9) && !pids.contains(&10));
         assert!(tally.take_due(Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn probe_durations_fill_the_fixed_and_the_250_ms_bands() {
+        let mut counts = ProbeCounts::default();
+        for millis in [
+            0, 9, 10, 24, 25, 49, 50, 74, 75, 99, 100, 149, 150, 199, 200, 249, 250, 2_000,
+        ] {
+            counts.record(&ProbeRecord {
+                pid: 1,
+                control_pid: Some(1),
+                duration: Duration::from_millis(millis),
+                outcome: ProbeOutcome::Allowed,
+            });
+        }
+        let json = counts.to_json();
+        assert_eq!(
+            json["duration_ms_buckets_lt10_lt25_lt50_lt75_ge75"],
+            json!([2, 2, 2, 2, 10]),
+            "the fixed schema field keeps its five bands"
+        );
+        assert_eq!(
+            json["duration_ms_buckets_lt10_lt25_lt50_lt75_lt100_lt150_lt200_lt250_ge250"],
+            json!([2, 2, 2, 2, 2, 2, 2, 2, 2])
+        );
     }
 }

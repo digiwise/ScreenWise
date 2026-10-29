@@ -5,6 +5,8 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 pub(crate) const PROVIDER_TIMEOUT_MS: u32 = 50;
+/// The shortest native UIA connection/transaction timeout.
+const UIA_MIN_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_NODES: usize = 5_000;
 const MAX_DEPTH: usize = 35;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
@@ -29,7 +31,9 @@ impl UiaLimits {
         }
     }
     /// The focused-state probe has its own total budget for three provider
-    /// requests; native per-request waits do not define evidence freshness.
+    /// requests, each of which may wait for what remains of it
+    /// (`WalkBudget::remaining_request_timeout`); native per-request waits do
+    /// not define evidence freshness.
     pub fn keyboard_privacy() -> Self {
         Self::tree(1)
     }
@@ -45,6 +49,21 @@ impl UiaLimits {
 }
 
 pub(crate) use screenpipe_config::capture_diagnostics::AccessibilityStopReason as UiaStop;
+
+/// The native timeout for a provider call that must return by `deadline`:
+/// the time remaining, never configured past the deadline. UIA requires at
+/// least 50 ms, so no new call starts with less than that remaining. Shared
+/// by the bulk walk phases and the keyboard privacy probe.
+pub(crate) fn provider_timeout_at(now: Instant, deadline: Instant) -> Result<u32, UiaStop> {
+    if now >= deadline {
+        return Err(UiaStop::Timeout);
+    }
+    let remaining = deadline.duration_since(now);
+    if remaining < UIA_MIN_TIMEOUT {
+        return Err(UiaStop::Timeout);
+    }
+    Ok(remaining.as_millis().min(u32::MAX as u128) as u32)
+}
 
 #[derive(Default)]
 pub(crate) struct ProviderBackoff(Cell<Option<Instant>>);
@@ -121,6 +140,19 @@ impl WalkBudget {
         // A valid native wait is not a reservation: fast providers can finish
         // within the remaining budget even when it is less than 50 ms.
         Ok(PROVIDER_TIMEOUT_MS)
+    }
+
+    /// Keyboard privacy probe only: the native wait for the next provider
+    /// call is the time left in the probe budget (`provider_timeout_at`), so
+    /// one slow answer within the budget is not a timeout. Walks keep the
+    /// fixed `request_timeout`.
+    pub fn remaining_request_timeout(&self) -> Result<u32, UiaStop> {
+        self.remaining_request_timeout_at(self.now())
+    }
+
+    fn remaining_request_timeout_at(&self, now: Instant) -> Result<u32, UiaStop> {
+        self.check_complete_at(now)?;
+        provider_timeout_at(now, self.start + self.limits.timeout)
     }
 
     fn admit_node(&self, depth: usize) -> Result<(), UiaStop> {
@@ -424,15 +456,55 @@ mod tests {
     }
 
     #[test]
-    fn focused_privacy_budget_admits_three_minimum_native_waits() {
+    fn provider_timeout_uses_remaining_phase_time_without_overrun() {
+        let now = Instant::now();
+        let at = |millis| now + Duration::from_millis(millis);
+        assert_eq!(provider_timeout_at(now, at(750)), Ok(750));
+        assert_eq!(provider_timeout_at(now, at(125)), Ok(125));
+        assert_eq!(provider_timeout_at(now, at(50)), Ok(50));
+        assert_eq!(
+            provider_timeout_at(now, at(50) - Duration::from_micros(1)),
+            Err(UiaStop::Timeout)
+        );
+        assert_eq!(
+            provider_timeout_at(now, at(750) - Duration::from_micros(100)),
+            Ok(749)
+        );
+        assert_eq!(provider_timeout_at(now, now), Err(UiaStop::Timeout));
+    }
+
+    /// Probe calls may wait for whatever remains of the 250 ms probe budget
+    /// (the shared rule above), and never start with less than UIA's 50 ms
+    /// minimum left. Walks on the same budget type keep 50 ms per call.
+    #[test]
+    fn focused_privacy_probe_waits_for_the_remaining_budget() {
         let mut budget = WalkBudget::new(UiaLimits::keyboard_privacy());
         let now = Instant::now();
-        for elapsed in [1, 51, 101] {
+        for (elapsed, expected) in [(0, Ok(250)), (1, Ok(249)), (120, Ok(130)), (200, Ok(50))] {
             budget.start = now - Duration::from_millis(elapsed);
+            assert_eq!(
+                budget.remaining_request_timeout_at(now),
+                expected,
+                "{elapsed} ms elapsed"
+            );
+            // The same budget's walk-style request keeps the fixed wait.
             assert_eq!(budget.request_timeout_at(now), Ok(PROVIDER_TIMEOUT_MS));
         }
-        budget.start = now - Duration::from_millis(151);
-        assert_eq!(budget.check_complete_at(now), Ok(()));
+        for elapsed in [201, 249, 250, 400] {
+            budget.start = now - Duration::from_millis(elapsed);
+            assert_eq!(
+                budget.remaining_request_timeout_at(now),
+                Err(UiaStop::Timeout),
+                "{elapsed} ms elapsed leaves under 50 ms"
+            );
+        }
+        // A stopped budget never starts another call.
+        budget.start = now;
+        budget.stop = Some(UiaStop::PropertyText);
+        assert_eq!(
+            budget.remaining_request_timeout_at(now),
+            Err(UiaStop::PropertyText)
+        );
     }
 
     #[test]
