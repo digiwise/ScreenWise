@@ -16,10 +16,16 @@
 //! log, the sensitive diagnostics or any file. The sensitive diagnostics get
 //! one content-free record per alert (fixed codes, counts, basename).
 //! Producers never wait: a full hand-off drops the loss and counts it.
+//!
+//! A notification waits until input pauses (no keyboard or mouse input for
+//! `QUIET_BEFORE_SHOW` by Windows' last-input time, at most `MAX_DEFER`): the
+//! toast raises UIA focus events of its own, so one shown mid-typing caused
+//! further losses.
 
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -39,6 +45,13 @@ const BURST_GAP: Duration = Duration::from_secs(10);
 const RATE_LIMIT: Duration = Duration::from_secs(60);
 const HANDOFF_CAPACITY: usize = 256;
 const MAX_OPEN_BURSTS: usize = 16;
+/// A notification is shown once there has been no input for this long ...
+pub(crate) const QUIET_BEFORE_SHOW: Duration = Duration::from_secs(2);
+/// ... or once it has waited this long, whichever comes first.
+const MAX_DEFER: Duration = Duration::from_secs(60);
+/// Notifications waiting for a pause (the rate limit keeps this to one or
+/// two); the oldest is dropped, keys and all, beyond it.
+const MAX_DEFERRED: usize = 4;
 
 /// The startup switches (process lifetime; nothing is persisted).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -457,13 +470,65 @@ pub(crate) fn sink_record(alert: &Alert, exe: Option<&str>, outcome: &'static st
     })
 }
 
+/// An alert waiting for a typing pause, with the local time of the loss.
+pub(crate) struct Deferred {
+    pub(crate) alert: Alert,
+    pub(crate) exe: Option<String>,
+    pub(crate) lost_at: chrono::DateTime<chrono::Local>,
+    pub(crate) queued: Instant,
+}
+
+/// Alerts waiting for a typing pause (pure; bounded).
+#[derive(Default)]
+pub(crate) struct DeferQueue {
+    items: VecDeque<Deferred>,
+}
+
+impl DeferQueue {
+    /// Queue one alert; returns the oldest when the queue was full.
+    pub(crate) fn push(&mut self, item: Deferred) -> Option<Deferred> {
+        let overflow = (self.items.len() >= MAX_DEFERRED)
+            .then(|| self.items.pop_front())
+            .flatten();
+        self.items.push_back(item);
+        overflow
+    }
+
+    /// The alerts to show now: all of them once there has been no input for
+    /// `QUIET_BEFORE_SHOW`, otherwise those that have waited `MAX_DEFER`.
+    pub(crate) fn due(&mut self, now: Instant, last_input: Option<Instant>) -> Vec<Deferred> {
+        let quiet = last_input.map_or(true, |at| {
+            now.saturating_duration_since(at) >= QUIET_BEFORE_SHOW
+        });
+        let (due, waiting) = std::mem::take(&mut self.items)
+            .into_iter()
+            .partition(|item| quiet || now.saturating_duration_since(item.queued) >= MAX_DEFER);
+        self.items = waiting;
+        due.into()
+    }
+
+    /// Drop every waiting alert, keys and all.
+    pub(crate) fn take_all(&mut self) -> Vec<Deferred> {
+        std::mem::take(&mut self.items).into()
+    }
+}
+
 /// Show (or record as rate limited) one alert, then drop its keys.
-pub(crate) fn deliver(alert: Alert, exe: Option<String>) {
+/// `outcome_override` records it unshown (paused, dropped while waiting).
+pub(crate) fn deliver(item: Deferred, now: Instant, outcome_override: Option<&'static str>) {
+    let Deferred {
+        alert,
+        exe,
+        lost_at,
+        queued,
+    } = item;
     let exe_text = exe.as_deref().unwrap_or("unknown app");
-    let outcome = if alert.rate_limited {
+    let outcome = if let Some(outcome) = outcome_override {
+        outcome
+    } else if alert.rate_limited {
         "rate_limited"
     } else {
-        let local_time = chrono::Local::now().format("%H:%M:%S").to_string();
+        let local_time = lost_at.format("%H:%M:%S").to_string();
         let (title, body) = alert_text(&alert, &local_time, exe_text);
         match notify(&title, &body) {
             Some(true) => "shown",
@@ -471,7 +536,8 @@ pub(crate) fn deliver(alert: Alert, exe: Option<String>) {
             None => "notifier_unavailable",
         }
     };
-    let record = sink_record(&alert, exe.as_deref(), outcome);
+    let mut record = sink_record(&alert, exe.as_deref(), outcome);
+    record["deferred_ms"] = json!(now.saturating_duration_since(queued).as_millis() as u64);
     drop(alert);
     screenpipe_config::sensitive_debug::record("keystroke_drop_alert", || record);
 }
@@ -742,6 +808,63 @@ mod tests {
         assert_eq!(record["keys"], 4);
         assert_eq!(record["keys_shown"], 5);
         assert_eq!(record["cause"], "decision_unavailable");
+    }
+
+    fn deferred(queued: Instant, pid: u32) -> Deferred {
+        Deferred {
+            alert: Alert {
+                pid,
+                keys: 3,
+                cause: "buffer_discarded",
+                kind: LossKind::Discard,
+                foreground: None,
+                context: LossContext::default(),
+                labels: vec![KeyLabel::Char('a')],
+                rate_limited: false,
+            },
+            exe: None,
+            lost_at: chrono::Local::now(),
+            queued,
+        }
+    }
+
+    #[test]
+    fn notifications_wait_for_a_typing_pause_or_the_cap() {
+        let mut queue = DeferQueue::default();
+        let t = Instant::now();
+        queue.push(deferred(t, 1));
+        // Still typing: a key 1 s ago.
+        assert!(queue
+            .due(t + Duration::from_secs(3), Some(t + Duration::from_secs(2)))
+            .is_empty());
+        // Typing continues past the cap: shown anyway.
+        let due = queue.due(t + MAX_DEFER, Some(t + MAX_DEFER));
+        assert_eq!(due.len(), 1);
+        // A pause of QUIET_BEFORE_SHOW releases every waiting alert.
+        queue.push(deferred(t, 2));
+        queue.push(deferred(t + Duration::from_secs(1), 3));
+        let key = t + Duration::from_secs(1);
+        assert!(queue
+            .due(
+                key + QUIET_BEFORE_SHOW - Duration::from_millis(1),
+                Some(key)
+            )
+            .is_empty());
+        let due = queue.due(key + QUIET_BEFORE_SHOW, Some(key));
+        assert_eq!(
+            due.iter().map(|d| d.alert.pid).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        // No input seen since alerts were on: shown at once.
+        queue.push(deferred(t, 4));
+        assert_eq!(queue.due(t, None).len(), 1);
+        // Bounded: the oldest is handed back for dropping.
+        for pid in 0..MAX_DEFERRED as u32 {
+            assert!(queue.push(deferred(t, pid)).is_none());
+        }
+        assert_eq!(queue.push(deferred(t, 99)).map(|d| d.alert.pid), Some(0));
+        assert_eq!(queue.take_all().len(), MAX_DEFERRED);
+        assert!(queue.take_all().is_empty());
     }
 
     #[test]

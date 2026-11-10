@@ -36,8 +36,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+    GetKeyState, GetLastInputInfo, LASTINPUTINFO, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU,
+    VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW,
@@ -1592,8 +1592,13 @@ fn run_drop_alert_worker(
         "keystroke drop alerts are on for this process (temporary diagnostic)"
     );
     let mut core = crate::drop_alerts::AlertCore::new(switches);
+    let mut deferred = crate::drop_alerts::DeferQueue::default();
+    // Windows' last-input tick, sampled each pass: when it changes, input
+    // happened since the previous pass (resolution: one pass).
+    let mut last_input_tick = None;
+    let mut last_input_at = None;
     while !stop.load(Ordering::Relaxed) {
-        match receiver.recv_timeout(Duration::from_millis(500)) {
+        match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(loss) => {
                 if !screenpipe_config::audio_privacy::visual_capture_allowed()
                     || drop_alert_excluded(&config, &loss)
@@ -1601,15 +1606,60 @@ fn run_drop_alert_worker(
                     continue;
                 }
                 if let Some(alert) = core.observe(loss) {
-                    let exe = windows_uia::process_image_basename(alert.pid);
-                    crate::drop_alerts::deliver(alert, exe);
+                    let item = crate::drop_alerts::Deferred {
+                        exe: windows_uia::process_image_basename(alert.pid),
+                        alert,
+                        lost_at: chrono::Local::now(),
+                        queued: Instant::now(),
+                    };
+                    if item.alert.rate_limited {
+                        // Nothing is shown, so nothing to wait for.
+                        crate::drop_alerts::deliver(item, Instant::now(), None);
+                    } else if let Some(oldest) = deferred.push(item) {
+                        crate::drop_alerts::deliver(
+                            oldest,
+                            Instant::now(),
+                            Some("deferred_overflow"),
+                        );
+                    }
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => core.expire(Instant::now()),
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
+        let now = Instant::now();
+        let tick = last_input_tick_count();
+        if tick.is_some() && tick != last_input_tick {
+            if last_input_tick.is_some() {
+                last_input_at = Some(now);
+            }
+            last_input_tick = tick;
+        }
+        let due = deferred.due(now, last_input_at);
+        if !due.is_empty() {
+            // A pause that began while waiting suppresses the notification.
+            let paused = !screenpipe_config::audio_privacy::visual_capture_allowed();
+            for item in due {
+                crate::drop_alerts::deliver(item, now, paused.then_some("suppressed_paused"));
+            }
+        }
+    }
+    for item in deferred.take_all() {
+        crate::drop_alerts::deliver(item, Instant::now(), Some("dropped_at_stop"));
     }
     crate::drop_alerts::close_hand_off();
+}
+
+/// Windows' tick count of the last keyboard or mouse input (session-wide;
+/// a time only), or `None` if unavailable.
+fn last_input_tick_count() -> Option<u32> {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe { GetLastInputInfo(&mut info) }
+        .as_bool()
+        .then_some(info.dwTime)
 }
 
 /// The same check as UIA contact (window, or application without one);

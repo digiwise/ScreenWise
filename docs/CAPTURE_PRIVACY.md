@@ -607,7 +607,12 @@ discard of buffered text (one burst), or another lost-after-admission cause
 (`LostCause::alerts`). Never for password fields, excluded or protected windows
 (rechecked against the same window/application exclusion as UIA contact before
 an alert), privacy pauses or typing that was undone. At most one notification
-a minute; later ones are only recorded. It shows the local time, the
+a minute; later ones are only recorded. A notification waits until input
+pauses (no keyboard or mouse input for 2 s by Windows' session-wide last-input
+time, which carries no content; at most 60 s), because a notification shown
+mid-typing raises focus events that lose further keys; a privacy pause that
+begins while it waits suppresses it, and at most four wait (the oldest beyond
+that is dropped unshown). It shows the local time of the loss, the
 executable basename, the number of lost keys, the cause in plain words, the
 time since the last app switch (refusals), where focus moved (discards) and,
 when N > 0, the first N lost keys with special keys by name. Losses after
@@ -619,8 +624,10 @@ sharing may record it. They are held only in memory on their way to the
 notification and never written to the app log, the sensitive diagnostics or
 any file. The sensitive diagnostics get one content-free
 `keystroke_drop_alert` record per alert (outcome `shown`, `rate_limited`,
-`notification_failed` or `notifier_unavailable`, cause, kind, key count,
-basename, focus context, number of keys shown); its timestamp can be matched
+`notification_failed`, `notifier_unavailable`, `suppressed_paused`,
+`deferred_overflow` or `dropped_at_stop`, cause, kind, key count, basename,
+focus context, number of keys shown, `deferred_ms` waited); its timestamp
+(the delivery, up to 60 s after the loss) can be matched
 with the `input_keystroke_epoch` record of the same and the next epoch.
 `shown` means the notification was handed to Windows: the notification plugin
 displays it asynchronously and reports success either way, so it is not proof
