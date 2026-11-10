@@ -669,9 +669,10 @@ struct HookState {
     text_focus: Option<NativeKeyboardFocus>,
     /// Since when an idle flush has been waiting for re-verification.
     text_hold_since: Option<Instant>,
-    /// The latest UIA focus event classified while the current text was
-    /// buffered (content-free discard diagnostics only; never admission).
-    text_focus_event: Option<input_admission::FocusClass>,
+    /// The latest UIA focus event (or matched cluster) classified while the
+    /// current text was buffered (content-free discard diagnostics only;
+    /// never admission).
+    text_focus_event: Option<input_admission::DiscardFocus>,
     /// The most recently emitted or discarded text (diagnostics only).
     previous_text: Option<input_admission::EndedText>,
     /// Highest focus-event sequence classified so far (diagnostics only).
@@ -681,6 +682,18 @@ struct HookState {
     /// Generations produced by focus events proven weak for the current
     /// text (bounded; relaxation B). Cleared with the text's identity.
     text_weak_focus: Vec<u64>,
+    /// Stage 0a shadow (counted, never read by admission): generations
+    /// proven for the current text with `shadow_rules`, with the kind of
+    /// proof (bounded; cleared with the text's identity).
+    text_shadow_focus: Vec<(u64, input_admission::ProofKind)>,
+    /// Matched clusters being proven for the current text (shadow only).
+    open_clusters: Vec<input_admission::ClusterProof>,
+    /// Recheck discards whose missing shadow proofs may still arrive.
+    shadow_discards: Vec<ShadowDiscard>,
+    /// The latest grant an admission site held (shadow only).
+    last_grant: Option<KeyboardGrant>,
+    /// The shadow's proof rules (`ProofRules::SHADOW_0A`; tests narrow it).
+    shadow_rules: input_admission::ProofRules,
     /// Buffers confirmed permissible immediately before navigation changes
     /// focus. PII processing is deferred out of the low-level hook.
     pending_text: Vec<UiEvent>,
@@ -826,6 +839,11 @@ fn run_native_hooks(
             focus_events_classified: 0,
             pending_discards: Vec::new(),
             text_weak_focus: Vec::new(),
+            text_shadow_focus: Vec::new(),
+            open_clusters: Vec::new(),
+            shadow_discards: Vec::new(),
+            last_grant: None,
+            shadow_rules: input_admission::ProofRules::SHADOW_0A,
             pending_text: Vec::new(),
             current_app,
             current_window,
@@ -893,6 +911,7 @@ fn run_native_hooks(
                         }
                         drain_focus_events(s);
                         expire_pending_discards(s, false);
+                        expire_shadow(s, false);
                         if let Some(last_time) = s.last_text_time {
                             if last_time.elapsed().as_millis() as u64 >= s.config.text_timeout_ms {
                                 flush_text_buffer(s);
@@ -952,6 +971,7 @@ fn run_native_hooks(
                 }
                 drain_focus_events(s);
                 expire_pending_discards(s, true);
+                expire_shadow(s, true);
                 if let Some(report) = s.key_tally.take_due(0, true) {
                     let _ = s.keyboard_privacy.offer_admission_report(report);
                 }
@@ -984,6 +1004,7 @@ fn flush_text_buffer_at(state: &mut HookState, focus: Option<NativeKeyboardFocus
     drain_focus_events(state);
     let admission = diagnosed_keyboard_capture_permit(state, focus);
     if let Ok(grant) = admission {
+        state.last_grant = Some(grant);
         rebind_reverified_text(state, grant, focus);
     }
     let permit = admission.as_ref().ok().map(|grant| grant.token);
@@ -1012,6 +1033,7 @@ fn take_permitted_text_buffer(state: &mut HookState, cause: DiscardCause) -> Opt
     let focus = NativeKeyboardFocus::current();
     let permit = match diagnosed_keyboard_capture_permit(state, focus) {
         Ok(grant) => {
+            state.last_grant = Some(grant);
             rebind_reverified_text(state, grant, focus);
             Some(grant.token)
         }
@@ -1061,6 +1083,10 @@ fn rebind_reverified_text(
         state
             .text_weak_focus
             .retain(|generation| *generation > grant.generation);
+        // Shadow only (never read here): pruned the same way.
+        state
+            .text_shadow_focus
+            .retain(|(generation, _)| *generation > grant.generation);
         state.text_privacy_generation = Some(grant.token);
         state.text_generation = Some(grant.generation);
         state.text_hold_since = None;
@@ -1162,6 +1188,9 @@ fn discard_text_buffer(state: &mut HookState, cause: DiscardCause) {
     if crate::drop_alerts::enabled() && cause.rechecks() && keys > 0 {
         alert_discarded_text(state, keys, focus);
     }
+    if cause.rechecks() {
+        shadow_note_discard(state, keys, epoch);
+    }
     state
         .key_tally
         .discarded(state.text_pid, epoch, keys, cause, source, focus);
@@ -1180,6 +1209,7 @@ fn clear_text_identity(state: &mut HookState) {
     state.text_hold_since = None;
     state.text_focus_event = None;
     state.text_weak_focus.clear();
+    state.text_shadow_focus.clear();
 }
 
 /// Focus epoch (generation >> 32) the buffered text was admitted in. Every
@@ -1209,36 +1239,49 @@ fn note_text_ended(state: &mut HookState) {
 
 /// Classify the UIA focus events queued by the focus-event resolver against
 /// the buffered text: record relaxation B's proofs for the current text
-/// (`input_admission::focus_event_weak`, which feeds admission), count the
-/// events per epoch, and keep the latest one that may concern the current
-/// text for discard attribution. Called before every buffered-text decision
-/// (key press, flush, emission, discard) and on the timer tick. Never waits:
-/// a contended queue is read on a later call, and until then those events
-/// stay strong (the classification does not depend on when it runs). Each event is compared
-/// with the text buffered when its own invalidation ran, decided from focus
-/// epochs (`input_admission::text_at_invalidation`): text admitted in an
-/// earlier epoch than that invalidation produced existed before it, text
-/// admitted in its epoch or later did not. An event that could not be
-/// matched with its invalidation, or whose text is otherwise uncertain, is
-/// `ambiguous`, never same or different.
+/// (`input_admission::focus_event_proof` with `ProofRules::ADMISSION_0A`,
+/// which feeds admission), count the events per epoch, and keep the latest
+/// one that may concern the current text for discard attribution. Called
+/// before every buffered-text decision (key press, flush, emission, discard)
+/// and on the timer tick. Never waits: a contended queue is read on a later
+/// call, and until then those events stay strong (the classification does
+/// not depend on when it runs). A single event is compared with the text
+/// buffered when its own invalidation ran, decided from focus epochs
+/// (`input_admission::text_at_invalidation`): text admitted in an earlier
+/// epoch than that invalidation produced existed before it, text admitted in
+/// its epoch or later did not. An event that could not be matched with its
+/// invalidation, or whose text is otherwise uncertain, is `ambiguous`, never
+/// same or different. Matched cluster members never prove anything for
+/// admission (owner decision 2026-11-10); they feed the stage 0a shadow
+/// (`shadow_focus_event`) and attribute discards to the label `cluster`.
 fn drain_focus_events(state: &mut HookState) {
     let Some((events, dropped)) = state.keyboard_privacy.take_focus_events() else {
         return;
     };
     let epoch = input_accounting::epoch_at(state.start, Instant::now());
     state.key_tally.focus_events_dropped(epoch, dropped);
+    if dropped > 0 {
+        shadow_focus_events_dropped(state, epoch);
+    }
     for facts in events {
         let current = has_buffered_text(state).then(|| input_admission::CurrentText {
             epoch: text_epoch(state),
             binding: text_binding(state),
         });
-        let text =
-            input_admission::text_at_invalidation(facts.invalidation, current, state.previous_text);
-        let class = input_admission::classify_focus_event(&facts, text);
+        let text = input_admission::proof_text(&facts, current, state.previous_text);
+        let labelled = input_admission::diagnostic_text(&facts, current, state.previous_text);
+        let class = input_admission::classify_focus_event(&facts, labelled);
         let event_epoch = input_accounting::epoch_at(state.start, facts.at);
         // Relaxation B: remember the proof (its invalidation's generation)
         // for this text; without it the event stays strong.
-        let weak = input_admission::focus_event_weak(text, class)
+        let weak = input_admission::focus_event_proof(
+            &facts,
+            text,
+            &[],
+            input_admission::ProofRules::ADMISSION_0A,
+        )
+        .proven
+            == Some(input_admission::ProofRule::B)
             && match facts.invalidation {
                 Some(generation) if state.text_weak_focus.contains(&generation) => true,
                 Some(generation) if state.text_weak_focus.len() < MAX_WEAK_FOCUS_PROOFS => {
@@ -1255,18 +1298,43 @@ fn drain_focus_events(state: &mut HookState) {
         state
             .key_tally
             .focus_event(event_epoch, class, facts.matching, weak);
+        shadow_focus_event(state, &facts, text, event_epoch);
+        let cluster = match facts.cluster {
+            windows_uia::ClusterOutcome::Matched(cluster) => Some(cluster),
+            _ => None,
+        };
         if matches!(
-            text,
+            labelled,
             input_admission::TextAtEvent::Current(_)
                 | input_admission::TextAtEvent::Ambiguous {
                     current_possible: true
                 }
         ) {
-            state.text_focus_event = Some(class);
+            state.text_focus_event = Some(if cluster.is_some() {
+                input_admission::DiscardFocus::Cluster
+            } else {
+                input_admission::DiscardFocus::Last(class)
+            });
         }
         if let Some(sequence) = facts.sequence {
             state.focus_events_classified = state.focus_events_classified.max(sequence);
-            attribute_pending_discards(state, sequence, class);
+            attribute_pending_discards(
+                state,
+                sequence,
+                sequence,
+                input_admission::DiscardFocus::Last(class),
+            );
+        } else if let Some(cluster) = cluster {
+            // Every invalidation of the run is classified with this member.
+            state.focus_events_classified = state
+                .focus_events_classified
+                .max(cluster.classified_through);
+            attribute_pending_discards(
+                state,
+                cluster.id,
+                cluster.classified_through,
+                input_admission::DiscardFocus::Cluster,
+            );
         }
     }
 }
@@ -1300,11 +1368,7 @@ fn discard_focus(state: &HookState) -> DiscardAttribution {
             _ => return DiscardAttribution::Now(DiscardFocus::Unclassified),
         }
     }
-    DiscardAttribution::Now(
-        state
-            .text_focus_event
-            .map_or(DiscardFocus::NoFocusEvent, DiscardFocus::Last),
-    )
+    DiscardAttribution::Now(state.text_focus_event.unwrap_or(DiscardFocus::NoFocusEvent))
 }
 
 /// Weak focus-event proofs kept for one buffer; a further event stays
@@ -1348,24 +1412,27 @@ fn await_discard_attribution(state: &mut HookState, sequence: u64, epoch: u32, k
     });
 }
 
-/// Attribute waiting discards once the event of `sequence` is classified
-/// as `class`: those waiting for it get that class; those waiting for an
-/// earlier sequence never will (a later one is classified): unclassified.
+/// Attribute waiting discards once the events of sequences `from..=through`
+/// are classified as `focus` (one event: `from == through`; a matched
+/// cluster: its first to last sequence, attributed `cluster`): those
+/// waiting for one of them get `focus`; those waiting for an earlier
+/// sequence never will (a later one is classified): unclassified.
 fn attribute_pending_discards(
     state: &mut HookState,
-    sequence: u64,
-    class: input_admission::FocusClass,
+    from: u64,
+    through: u64,
+    focus: input_admission::DiscardFocus,
 ) {
     let mut index = 0;
     while index < state.pending_discards.len() {
         let pending = state.pending_discards[index];
-        if pending.sequence > sequence {
+        if pending.sequence > through {
             index += 1;
             continue;
         }
         state.pending_discards.swap_remove(index);
-        let focus = if pending.sequence == sequence {
-            input_admission::DiscardFocus::Last(class)
+        let focus = if pending.sequence >= from {
+            focus
         } else {
             input_admission::DiscardFocus::Unclassified
         };
@@ -1398,6 +1465,321 @@ fn expire_pending_discards(state: &mut HookState, all: bool) {
             input_admission::DiscardTiming::Late,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 0a shadow (§12): what wider proof rules (B + A′, single events and
+// matched clusters) would have kept. Counted only: nothing here is read by
+// an admission function (`buffered_text_discard`, `rebind_reverified_text`,
+// `may_await_reverification`, `text_epoch_kept`, `take_text_buffer_with_permit`,
+// `awaitable_denial`), and every decision goes through the same
+// `input_admission` functions admission uses.
+// ---------------------------------------------------------------------------
+
+/// Shadow proofs kept for one buffer (admission keeps
+/// `MAX_WEAK_FOCUS_PROOFS`).
+const MAX_SHADOW_FOCUS_PROOFS: usize = 16;
+/// Matched clusters proven at once; a fifth drops the oldest (counted).
+const MAX_OPEN_CLUSTERS: usize = 4;
+/// Discards waiting for their missing shadow proofs (oldest dropped).
+const MAX_SHADOW_DISCARDS: usize = 4;
+/// How long an open cluster or a waiting discard is kept.
+const SHADOW_AGE: Duration = Duration::from_secs(1);
+
+/// A recheck discard whose steps were not all proven by the shadow yet: if
+/// the missing proofs arrive within `SHADOW_AGE`, it is counted
+/// `key_before_proof` (M1's yield limit).
+#[derive(Clone, Debug)]
+struct ShadowDiscard {
+    pid: u32,
+    epoch: u32,
+    keys: u64,
+    text_generation: u64,
+    discard_generation: u64,
+    binding: input_admission::TextBinding,
+    /// Generations proven for that text so far, with their kinds.
+    proven: Vec<(u64, input_admission::ProofKind)>,
+    /// Its clusters still being proven.
+    clusters: Vec<input_admission::ClusterProof>,
+    since: Instant,
+}
+
+/// Remember one shadow proof (bounded; a further one is not kept).
+fn push_shadow_proof(
+    proofs: &mut Vec<(u64, input_admission::ProofKind)>,
+    generation: u64,
+    kind: input_admission::ProofKind,
+) {
+    if !proofs.iter().any(|(proven, _)| *proven == generation)
+        && proofs.len() < MAX_SHADOW_FOCUS_PROOFS
+    {
+        proofs.push((generation, kind));
+    }
+}
+
+/// One matched cluster member's result for the text identified by
+/// (`generation`, `element`): the kind its generations carry once the
+/// cluster is complete and all proven, and whether an undecided cluster was
+/// dropped to make room.
+fn shadow_cluster_member(
+    clusters: &mut Vec<input_admission::ClusterProof>,
+    cluster: windows_uia::ClusterMatch,
+    result: &input_admission::ProofResult,
+    generation: Option<u64>,
+    element: Option<u64>,
+) -> (Option<input_admission::ProofKind>, bool) {
+    let mut dropped = false;
+    let index = match clusters.iter().position(|open| open.id == cluster.id) {
+        Some(index) => index,
+        None => {
+            if clusters.len() >= MAX_OPEN_CLUSTERS {
+                dropped = !clusters.remove(0).decided();
+            }
+            clusters.push(input_admission::ClusterProof::new(
+                cluster,
+                generation,
+                element,
+                Instant::now(),
+            ));
+            clusters.len() - 1
+        }
+    };
+    let open = &mut clusters[index];
+    let kind = (open.add(result, generation, element) == Some(true)).then(|| open.kind());
+    (kind, dropped)
+}
+
+/// What the shadow proofs in (`earlier`, `later`] needed together.
+fn shadow_kind(
+    proofs: &[(u64, input_admission::ProofKind)],
+    earlier: u64,
+    later: u64,
+) -> input_admission::ProofKind {
+    input_admission::ProofKind::combine(
+        proofs
+            .iter()
+            .filter(|(generation, _)| *generation > earlier && *generation <= later)
+            .map(|(_, kind)| *kind),
+    )
+}
+
+/// Shadow evaluation of one drained focus event: count its cluster outcome,
+/// IsPassword and proof under `shadow_rules`; remember its proof for the
+/// current text (single events at once, cluster members once their cluster
+/// is complete); and evaluate it for every waiting discard against that
+/// discard's own text with the same function.
+fn shadow_focus_event(
+    state: &mut HookState,
+    facts: &windows_uia::FocusEventFacts,
+    text: input_admission::TextAtEvent,
+    epoch: u32,
+) {
+    let rules = state.shadow_rules;
+    let result = input_admission::focus_event_proof(facts, text, &[], rules);
+    state.key_tally.cluster_event(epoch, facts.cluster);
+    state
+        .key_tally
+        .shadow_event(epoch, facts.password, &result, rules);
+    let current = matches!(text, input_admission::TextAtEvent::Current(_));
+    match facts.cluster {
+        windows_uia::ClusterOutcome::Matched(cluster) if rules.m1 => {
+            let (generation, element) = if current {
+                (state.text_generation, state.text_element)
+            } else {
+                (None, None)
+            };
+            let (kind, dropped) = shadow_cluster_member(
+                &mut state.open_clusters,
+                cluster,
+                &result,
+                generation,
+                element,
+            );
+            if dropped {
+                state
+                    .key_tally
+                    .cluster_lost(epoch, input_admission::ClusterLoss::OpenDropped);
+            }
+            if let Some(kind) = kind {
+                for generation in cluster.generations() {
+                    push_shadow_proof(&mut state.text_shadow_focus, *generation, kind);
+                }
+            }
+        }
+        windows_uia::ClusterOutcome::Matched(_) => {}
+        _ => {
+            if let (Some(rule), Some(generation)) = (result.proven, facts.invalidation) {
+                push_shadow_proof(
+                    &mut state.text_shadow_focus,
+                    generation,
+                    input_admission::ProofKind::single(rule),
+                );
+            }
+        }
+    }
+    let mut index = 0;
+    while index < state.shadow_discards.len() {
+        let waiting = &mut state.shadow_discards[index];
+        let result = input_admission::focus_event_proof(
+            facts,
+            input_admission::TextAtEvent::Current(waiting.binding),
+            &[],
+            rules,
+        );
+        match facts.cluster {
+            windows_uia::ClusterOutcome::Matched(cluster) if rules.m1 => {
+                let (kind, _) = shadow_cluster_member(
+                    &mut waiting.clusters,
+                    cluster,
+                    &result,
+                    Some(waiting.text_generation),
+                    waiting.binding.element,
+                );
+                if let Some(kind) = kind {
+                    for generation in cluster.generations() {
+                        push_shadow_proof(&mut waiting.proven, *generation, kind);
+                    }
+                }
+            }
+            windows_uia::ClusterOutcome::Matched(_) => {}
+            _ => {
+                if let (Some(rule), Some(generation)) = (result.proven, facts.invalidation) {
+                    push_shadow_proof(
+                        &mut waiting.proven,
+                        generation,
+                        input_admission::ProofKind::single(rule),
+                    );
+                }
+            }
+        }
+        let generations: Vec<u64> = waiting
+            .proven
+            .iter()
+            .map(|(generation, _)| *generation)
+            .collect();
+        if windows_uia::same_focus_epoch_except(
+            waiting.text_generation,
+            waiting.discard_generation,
+            &generations,
+        ) {
+            let waiting = state.shadow_discards.remove(index);
+            let kind = shadow_kind(
+                &waiting.proven,
+                waiting.text_generation,
+                waiting.discard_generation,
+            );
+            state.key_tally.shadow_discard(
+                waiting.pid,
+                waiting.epoch,
+                waiting.keys,
+                input_admission::ShadowBucket::KeyBeforeProof,
+                kind,
+            );
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// The hand-off lost focus events: a lost member makes every open cluster
+/// unprovable (counted per cluster still undecided).
+fn shadow_focus_events_dropped(state: &mut HookState, epoch: u32) {
+    for open in &mut state.open_clusters {
+        if open.fail() {
+            state
+                .key_tally
+                .cluster_lost(epoch, input_admission::ClusterLoss::QueueDropped);
+        }
+    }
+    for waiting in &mut state.shadow_discards {
+        for open in &mut waiting.clusters {
+            open.fail();
+        }
+    }
+}
+
+/// A recheck discard of the current text (before its identity is cleared):
+/// when admission's own proofs did not cover its steps but the shadow's do,
+/// count its keystrokes by bucket (`would_keep`, `would_hold`,
+/// `other_element`) and the kind of shadow proof needed; when the shadow's
+/// proofs do not cover them yet, wait up to `SHADOW_AGE` for them
+/// (`key_before_proof`).
+fn shadow_note_discard(state: &mut HookState, keys: u64, epoch: u32) {
+    let Some(text_generation) = state.text_generation.filter(|_| keys > 0) else {
+        return;
+    };
+    let generation = state.keyboard_privacy.generation();
+    if windows_uia::same_focus_epoch_except(text_generation, generation, &state.text_weak_focus) {
+        // Admission's proofs cover every step: nothing the shadow adds.
+        return;
+    }
+    let proven: Vec<u64> = state
+        .text_shadow_focus
+        .iter()
+        .map(|(proven, _)| *proven)
+        .collect();
+    if windows_uia::same_focus_epoch_except(text_generation, generation, &proven) {
+        let bucket = match state
+            .last_grant
+            .filter(|grant| grant.generation == generation)
+        {
+            Some(grant)
+                if windows_uia::same_element(grant.element, state.text_element) == Some(true) =>
+            {
+                input_admission::ShadowBucket::WouldKeep
+            }
+            Some(_) => input_admission::ShadowBucket::OtherElement,
+            None => input_admission::ShadowBucket::WouldHold,
+        };
+        let kind = shadow_kind(&state.text_shadow_focus, text_generation, generation);
+        state
+            .key_tally
+            .shadow_discard(state.text_pid, epoch, keys, bucket, kind);
+        return;
+    }
+    if state.shadow_discards.len() >= MAX_SHADOW_DISCARDS {
+        state.shadow_discards.remove(0);
+    }
+    let clusters = state
+        .open_clusters
+        .iter()
+        .filter(|open| !open.decided())
+        .copied()
+        .collect();
+    state.shadow_discards.push(ShadowDiscard {
+        pid: state.text_pid,
+        epoch,
+        keys,
+        text_generation,
+        discard_generation: generation,
+        binding: text_binding(state),
+        proven: state.text_shadow_focus.clone(),
+        clusters,
+        since: Instant::now(),
+    });
+}
+
+/// Expire open clusters (counted when undecided) and waiting discards
+/// after `SHADOW_AGE` (or all, at shutdown).
+fn expire_shadow(state: &mut HookState, all: bool) {
+    let epoch = input_accounting::epoch_at(state.start, Instant::now());
+    let mut index = 0;
+    while index < state.open_clusters.len() {
+        let open = state.open_clusters[index];
+        if !all && open.opened_at.elapsed() < SHADOW_AGE {
+            index += 1;
+            continue;
+        }
+        state.open_clusters.remove(index);
+        if !open.decided() {
+            state
+                .key_tally
+                .cluster_lost(epoch, input_admission::ClusterLoss::Expired);
+        }
+    }
+    state
+        .shadow_discards
+        .retain(|waiting| !all && waiting.since.elapsed() < SHADOW_AGE);
 }
 
 /// Whether buffered text may stay after this key press's admission result.
@@ -1732,6 +2114,7 @@ fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) 
     let privacy_grant = privacy_admission.as_ref().ok().copied();
     let privacy_generation = privacy_grant.map(|grant| grant.token);
     if let Some(grant) = privacy_grant {
+        s.last_grant = Some(grant);
         rebind_reverified_text(s, grant, focus);
     }
     let counts_content =
@@ -3320,6 +3703,12 @@ mod tests {
         assert_eq!(0x08, 8); // Win
     }
 
+    thread_local! {
+        /// The shadow mask `make_test_state` gives new states (T3 narrows it).
+        static TEST_SHADOW_RULES: std::cell::Cell<input_admission::ProofRules> =
+            const { std::cell::Cell::new(input_admission::ProofRules::SHADOW_0A) };
+    }
+
     fn make_test_state(
         tx: crossbeam_channel::Sender<UiEvent>,
         text: &str,
@@ -3351,6 +3740,11 @@ mod tests {
                 focus_events_classified: 0,
                 pending_discards: Vec::new(),
                 text_weak_focus: Vec::new(),
+                text_shadow_focus: Vec::new(),
+                open_clusters: Vec::new(),
+                shadow_discards: Vec::new(),
+                last_grant: None,
+                shadow_rules: TEST_SHADOW_RULES.with(|rules| rules.get()),
                 pending_text: Vec::new(),
                 current_app: Arc::new(parking_lot::Mutex::new(Some("test".into()))),
                 current_window: Arc::new(parking_lot::Mutex::new(Some("test window".into()))),
@@ -3657,6 +4051,8 @@ mod tests {
             element: Some(1),
             native: Some(focus),
             sender: None,
+            password: windows_uia::PasswordValue::Other,
+            cluster: windows_uia::ClusterOutcome::NotApplicable,
         };
         let type_text = |state: &mut HookState| {
             NativeKeyboardFocus::test_grant(
@@ -3851,6 +4247,8 @@ mod tests {
             element: Some(99),
             native: event_native,
             sender: Some(4242),
+            password: windows_uia::PasswordValue::Other,
+            cluster: windows_uia::ClusterOutcome::NotApplicable,
         });
         drain_focus_events(&mut state);
         if extra_strong {
@@ -3940,6 +4338,8 @@ mod tests {
                 element: Some(99),
                 native: Some(focus),
                 sender: None,
+                password: windows_uia::PasswordValue::Other,
+                cluster: windows_uia::ClusterOutcome::NotApplicable,
             });
             NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
             let held = busy.then(|| privacy.test_hold_focus_events());
@@ -4004,6 +4404,8 @@ mod tests {
             element: Some(99),
             native: Some(focus),
             sender: Some(4242),
+            password: windows_uia::PasswordValue::Other,
+            cluster: windows_uia::ClusterOutcome::NotApplicable,
         });
         drain_focus_events(&mut state);
         assert!(state.text_weak_focus.is_empty() && state.text_buf.is_empty());
@@ -4031,6 +4433,13 @@ mod tests {
     ) -> windows_uia::FocusEventFacts {
         let (matching, candidate) =
             windows_uia::match_focus_event(event_ns, invalidations, None, diagnostic_ns, None);
+        let cluster = match matching {
+            windows_uia::FocusMatch::SeveralCandidates
+            | windows_uia::FocusMatch::NearbyCandidate => {
+                windows_uia::match_focus_cluster(event_ns, invalidations, None, diagnostic_ns, None)
+            }
+            _ => windows_uia::ClusterOutcome::NotApplicable,
+        };
         windows_uia::FocusEventFacts {
             at: Instant::now(),
             sequence: candidate.map(|invalidation| invalidation.sequence),
@@ -4041,6 +4450,8 @@ mod tests {
             element: sender.element,
             native: sender.native,
             sender: sender.pid,
+            password: windows_uia::PasswordValue::Other,
+            cluster,
         }
     }
 
@@ -4365,6 +4776,333 @@ mod tests {
             transcript, ADMISSION_TRANSCRIPT_GOLDEN,
             "admission changed; the transcript now reads:\n{transcript}"
         );
+    }
+
+    #[test]
+    fn shadow_mask_never_changes_admission() {
+        // T2's unchanged script and golden transcript under the stage 0a
+        // shadow mask and under B alone: admission is identical (each run
+        // asserts the same golden transcript), and the mask reaches the
+        // script's state.
+        for rules in [
+            input_admission::ProofRules::SHADOW_0A,
+            input_admission::ProofRules::B_ONLY,
+        ] {
+            TEST_SHADOW_RULES.with(|mask| mask.set(rules));
+            let (tx, _rx) = crossbeam_channel::bounded(1);
+            assert_eq!(make_test_state(tx, "").0.shadow_rules, rules);
+            admission_transcript_is_unchanged();
+        }
+        TEST_SHADOW_RULES.with(|mask| mask.set(input_admission::ProofRules::SHADOW_0A));
+    }
+
+    const TEST_MS: u64 = 1_000_000;
+
+    /// A focus event sender A′ accepts for text at `focus` (the text's own
+    /// element 1, sent by its control process 12).
+    fn owner_sender(focus: NativeKeyboardFocus) -> ScriptSender {
+        ScriptSender {
+            relation: windows_uia::SenderRelation::Foreground,
+            control_type: Some(50004),
+            element: Some(1),
+            native: Some(focus),
+            pid: Some(12),
+        }
+    }
+
+    /// One admitted keystroke buffered under a fresh grant for element 1.
+    fn shadow_test_text(state: &mut HookState, focus: NativeKeyboardFocus) {
+        NativeKeyboardFocus::test_grant(&state.keyboard_privacy, focus, Some(1), Instant::now());
+        let grant = state
+            .keyboard_privacy
+            .grant_classified(Some(focus))
+            .unwrap();
+        bound_test_text(state, focus, grant.token);
+        state.text_generation = Some(grant.generation);
+        state.text_element = grant.element;
+        state.text_pid = 12;
+        state.text_tag.push(12, 0, false);
+    }
+
+    /// Two focus invalidations 30 ms apart from `at_ns` (a word pair).
+    fn test_pair(privacy: &KeyboardPrivacy, at_ns: u64) -> [windows_uia::RecordedInvalidation; 2] {
+        [
+            script_invalidation(privacy, at_ns),
+            script_invalidation(privacy, at_ns + 30 * TEST_MS),
+        ]
+    }
+
+    /// The pair's two diagnostic events (each `nearby_candidate`, matched
+    /// together as one cluster), queued for the hook.
+    fn note_test_pair(
+        privacy: &KeyboardPrivacy,
+        pair: &[windows_uia::RecordedInvalidation; 2],
+        sender: ScriptSender,
+    ) {
+        let events = [pair[0].at_ns + TEST_MS, pair[1].at_ns + TEST_MS];
+        for event in events {
+            let facts = script_facts(event, pair, &events, sender);
+            assert!(matches!(
+                facts.cluster,
+                windows_uia::ClusterOutcome::Matched(_)
+            ));
+            privacy.note_focus_event(facts);
+        }
+    }
+
+    fn shadow_json(state: &mut HookState) -> serde_json::Value {
+        let mut keys = input_admission::EpochKeys::default();
+        for epoch in state
+            .key_tally
+            .take_due(0, true)
+            .into_iter()
+            .flat_map(|report| report.epochs.into_values())
+        {
+            keys.add(&epoch);
+        }
+        serde_json::json!({
+            "events": keys.focus_events.events_json(),
+            "discards": keys.discard_focus.discards_json(),
+            "weak_reverified": keys.weak_reverified,
+        })
+    }
+
+    #[test]
+    fn shadow_counts_word_pair_and_key_before_proof() {
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        // Buffer, a same-element pair from the owning process, then a fresh
+        // same-element grant at the next flush: the shadow would keep it
+        // (A′ members of a matched cluster), admission still discards.
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "");
+        let privacy = state.keyboard_privacy.clone();
+        shadow_test_text(&mut state, focus);
+        let pair = test_pair(&privacy, 200_000 * TEST_MS);
+        note_test_pair(&privacy, &pair, owner_sender(focus));
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        drain_test_content(&state, &content_rx);
+        assert!(rx.try_recv().is_err(), "admission discarded it");
+        let report = shadow_json(&mut state);
+        assert_eq!(
+            report["discards"]["shadow"],
+            serde_json::json!({"would_keep": {"a_m1": 1}})
+        );
+        assert_eq!(report["weak_reverified"], 0);
+        assert_eq!(
+            report["events"]["treated"],
+            serde_json::json!({"weak": 0, "strong": 2})
+        );
+        assert_eq!(
+            report["events"]["cluster"]["matched"],
+            serde_json::json!({"2": 2})
+        );
+        assert_eq!(report["events"]["proof"]["a_same_element"]["proven"], 2);
+        assert_eq!(
+            report["events"]["proof"]["b_other_window"]["rejected"],
+            serde_json::json!({"relation": 2})
+        );
+        assert_eq!(
+            report["events"]["password_at_event"],
+            serde_json::json!({"other": 2})
+        );
+        assert_eq!(
+            report["events"]["a_with_od8"],
+            serde_json::json!({"other": 2})
+        );
+        // The key decided before the members are drained: discarded and
+        // not yet proven; once they arrive, `key_before_proof`.
+        shadow_test_text(&mut state, focus);
+        let pair = test_pair(&privacy, 210_000 * TEST_MS);
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        flush_text_buffer_at(&mut state, Some(focus));
+        assert!(state.text_buf.is_empty());
+        assert_eq!(state.shadow_discards.len(), 1);
+        note_test_pair(&privacy, &pair, owner_sender(focus));
+        drain_focus_events(&mut state);
+        assert!(state.shadow_discards.is_empty());
+        assert_eq!(
+            shadow_json(&mut state)["discards"]["shadow"],
+            serde_json::json!({"key_before_proof": {"a_m1": 1}})
+        );
+        // Nothing once the discard waited 1 s.
+        shadow_test_text(&mut state, focus);
+        let pair = test_pair(&privacy, 220_000 * TEST_MS);
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        flush_text_buffer_at(&mut state, Some(focus));
+        state.shadow_discards[0].since = Instant::now() - SHADOW_AGE;
+        expire_shadow(&mut state, false);
+        note_test_pair(&privacy, &pair, owner_sender(focus));
+        drain_focus_events(&mut state);
+        assert!(shadow_json(&mut state)["discards"].get("shadow").is_none());
+        // Without A′ in the mask the same pair proves nothing (its members
+        // are not other-process Windows).
+        state.shadow_rules = input_admission::ProofRules::B_ONLY;
+        shadow_test_text(&mut state, focus);
+        let pair = test_pair(&privacy, 230_000 * TEST_MS);
+        note_test_pair(&privacy, &pair, owner_sender(focus));
+        NativeKeyboardFocus::test_grant(&privacy, focus, Some(1), Instant::now());
+        flush_text_buffer_at(&mut state, Some(focus));
+        let report = shadow_json(&mut state);
+        assert!(report["discards"].get("shadow").is_none());
+        assert!(report["events"]["proof"].get("a_same_element").is_none());
+        drain_test_content(&state, &content_rx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// One member of `cluster` that A′ proves for text at `focus`.
+    fn cluster_member_facts(
+        cluster: windows_uia::ClusterMatch,
+        focus: NativeKeyboardFocus,
+    ) -> windows_uia::FocusEventFacts {
+        let sender = owner_sender(focus);
+        windows_uia::FocusEventFacts {
+            at: Instant::now(),
+            sequence: None,
+            invalidation: None,
+            matching: windows_uia::FocusMatch::NearbyCandidate,
+            relation: sender.relation,
+            control_type: sender.control_type,
+            element: sender.element,
+            native: sender.native,
+            sender: sender.pid,
+            password: windows_uia::PasswordValue::ExplicitFalse,
+            cluster: windows_uia::ClusterOutcome::Matched(cluster),
+        }
+    }
+
+    #[test]
+    fn open_clusters_are_bounded_expire_and_fail_on_drop() {
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (tx, _rx) = crossbeam_channel::bounded(64);
+        let (mut state, _content_rx) = make_test_state(tx, "");
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let privacy = state.keyboard_privacy.clone();
+        shadow_test_text(&mut state, focus);
+        let text_generation = state.text_generation.unwrap();
+        let cluster = |id: u64| windows_uia::ClusterMatch {
+            id,
+            size: 2,
+            generations: [
+                text_generation + id * (1 << 32),
+                text_generation + (id + 1) * (1 << 32),
+                0,
+                0,
+            ],
+            classified_through: id + 1,
+        };
+        // One member each of five clusters: at most four stay open, the
+        // oldest undecided one is dropped and counted.
+        for id in [10, 20, 30, 40, 50] {
+            privacy.note_focus_event(cluster_member_facts(cluster(id), focus));
+        }
+        drain_focus_events(&mut state);
+        assert_eq!(
+            state
+                .open_clusters
+                .iter()
+                .map(|open| open.id)
+                .collect::<Vec<_>>(),
+            vec![20, 30, 40, 50]
+        );
+        // A focus event lost by the hand-off: every open cluster becomes
+        // unprovable, and a late member proves nothing.
+        for index in 0..=MAX_QUEUED_TEST_EVENTS {
+            privacy.note_focus_event(script_facts(
+                (300_000 + index) * TEST_MS,
+                &[],
+                &[],
+                owner_sender(focus),
+            ));
+        }
+        drain_focus_events(&mut state);
+        privacy.note_focus_event(cluster_member_facts(cluster(20), focus));
+        drain_focus_events(&mut state);
+        assert!(state.text_shadow_focus.is_empty());
+        // An undecided cluster expires after 1 s.
+        privacy.note_focus_event(cluster_member_facts(cluster(60), focus));
+        drain_focus_events(&mut state);
+        let open = state
+            .open_clusters
+            .iter_mut()
+            .find(|open| open.id == 60)
+            .unwrap();
+        open.opened_at = Instant::now() - SHADOW_AGE;
+        expire_shadow(&mut state, false);
+        assert!(state.open_clusters.iter().all(|open| open.id != 60));
+        let report = shadow_json(&mut state);
+        let lost = &report["events"]["cluster"];
+        assert_eq!(lost["open_dropped"], 1);
+        assert_eq!(lost["queue_dropped"], 4);
+        assert_eq!(lost["expired"], 1);
+        assert_eq!(report["events"]["password_at_event"]["explicit_false"], 7);
+        // Text proven for one complete cluster: both generations at once.
+        privacy.note_focus_event(cluster_member_facts(cluster(70), focus));
+        drain_focus_events(&mut state);
+        assert!(state.text_shadow_focus.is_empty(), "waits for every member");
+        privacy.note_focus_event(cluster_member_facts(cluster(70), focus));
+        drain_focus_events(&mut state);
+        assert_eq!(
+            state.text_shadow_focus,
+            vec![
+                (cluster(70).generations[0], input_admission::ProofKind::AM1),
+                (cluster(70).generations[1], input_admission::ProofKind::AM1),
+            ]
+        );
+        // Admission never sees them.
+        assert!(state.text_weak_focus.is_empty());
+    }
+
+    /// The hook's focus-event hand-off bound (`MAX_QUEUED_FOCUS_EVENTS`).
+    const MAX_QUEUED_TEST_EVENTS: u64 = 64;
+
+    #[test]
+    fn cluster_discards_use_the_fixed_label() {
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let sender = ScriptSender {
+            pid: None,
+            ..owner_sender(focus)
+        };
+        // A discard waiting for the pair's invalidations is attributed
+        // `cluster` once a member is classified (late).
+        let (tx, _rx) = crossbeam_channel::bounded(64);
+        let (mut state, _content_rx) = make_test_state(tx, "");
+        let privacy = state.keyboard_privacy.clone();
+        shadow_test_text(&mut state, focus);
+        let pair = test_pair(&privacy, 400_000 * TEST_MS);
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        assert_eq!(state.pending_discards.len(), 1);
+        note_test_pair(&privacy, &pair, sender);
+        drain_focus_events(&mut state);
+        assert!(state.pending_discards.is_empty());
+        assert_eq!(state.focus_events_classified, pair[1].sequence);
+        let report = shadow_json(&mut state);
+        let discards = &report["discards"];
+        assert_eq!(discards["classes"], serde_json::json!({"cluster": 1}));
+        assert_eq!(discards["attributed_late"], 1);
+        // A discard right after a drained member: `cluster` at once.
+        shadow_test_text(&mut state, focus);
+        let pair = test_pair(&privacy, 410_000 * TEST_MS);
+        note_test_pair(&privacy, &pair, sender);
+        drain_focus_events(&mut state);
+        assert_eq!(
+            state.text_focus_event,
+            Some(input_admission::DiscardFocus::Cluster)
+        );
+        discard_text_buffer(&mut state, DiscardCause::GenerationChanged);
+        let report = shadow_json(&mut state);
+        let discards = &report["discards"];
+        assert_eq!(discards["classes"], serde_json::json!({"cluster": 1}));
+        assert_eq!(discards["attributed_late"], 0);
     }
 
     #[test]

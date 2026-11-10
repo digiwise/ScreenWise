@@ -58,13 +58,20 @@
 //! `attributed_late` (and `pending_overflow` for a full list, recorded
 //! `unclassified` at once). Element identities are compared
 //! in memory only and never logged. Relaxation B (owner decision
-//! 2026-10-25): `focus_event_weak` decides, once, whether a classified event
-//! is weak for the current text (another process's Window sender with
-//! native focus unchanged); the hook then lets the existing re-verification
-//! path keep that text, and `treated`, `weak_reverified` and
-//! `weak_focus_senders` count it. Native focus may have changed again
-//! between the event and its sample, so `native_*` is an approximation.
+//! 2026-10-25): `focus_event_proof` (with `ProofRules::ADMISSION_0A`)
+//! decides, once, whether a classified event is weak for the current text
+//! (another process's Window sender with native focus unchanged); the hook
+//! then lets the existing re-verification path keep that text, and
+//! `treated`, `weak_reverified` and `weak_focus_senders` count it. Native
+//! focus may have changed again between the event and its sample, so
+//! `native_*` is an approximation. Stage 0a shadow (counted, never used by
+//! admission): the same function with `ProofRules::SHADOW_0A` (B and A′,
+//! single events and matched clusters) feeds `cluster`, `proof`,
+//! `password_at_event`, `a_with_od8` and the discards' `shadow` counts;
+//! discards after a matched cluster are attributed to the fixed label
+//! `cluster`.
 
+use super::{ClusterMatch, ClusterOutcome, ClusterReject, PasswordValue};
 use super::{FocusEventFacts, FocusMatch, NativeKeyboardFocus, SenderRelation, SENDER_RELATIONS};
 use super::{InvalidationSource, INVALIDATION_SOURCES};
 use super::{KeyboardPrivacyDenial, KEYBOARD_PRIVACY_DENIAL_REASONS};
@@ -478,11 +485,14 @@ const NATIVE_CODES: [&str; MATCH_STATES] = [
 ];
 /// Every relation x element x native combination, then `none` (a discard
 /// certainly without a focus event while its text was buffered) and
-/// `unclassified` (a discard whose last focus event was not yet classified).
+/// `unclassified` (a discard whose last focus event was not yet classified),
+/// then `cluster` (a discard after a matched cluster of focus events).
 const EVENT_CLASSES: usize = SENDER_RELATIONS * MATCH_STATES * MATCH_STATES;
 const NO_FOCUS_EVENT: usize = EVENT_CLASSES;
 const UNCLASSIFIED: usize = EVENT_CLASSES + 1;
-const FOCUS_CLASSES: usize = EVENT_CLASSES + 2;
+/// Discards attributed to a matched cluster (`DiscardFocus::Cluster`).
+const CLUSTER_FOCUS: usize = EVENT_CLASSES + 2;
+const FOCUS_CLASSES: usize = EVENT_CLASSES + 3;
 /// UIA's Window control type id.
 pub(crate) const WINDOW_CONTROL_TYPE: i32 = 50032;
 /// UIA control type ids 50000..=50040 by their fixed labels, then
@@ -510,6 +520,7 @@ impl FocusClass {
         match index {
             NO_FOCUS_EVENT => "none".to_string(),
             UNCLASSIFIED => "unclassified".to_string(),
+            CLUSTER_FOCUS => "cluster".to_string(),
             index => format!(
                 "{}|{}|{}",
                 SenderRelation::CODES[index / (MATCH_STATES * MATCH_STATES)],
@@ -551,15 +562,411 @@ pub(crate) fn weak_sender_candidate(relation: SenderRelation, control_type: Opti
     relation == SenderRelation::OtherProcess && control_type == Some(WINDOW_CONTROL_TYPE)
 }
 
-/// The single decision whether a focus event is weak for the current
-/// buffered text: it was matched with its own invalidation, compared with
-/// that text (`TextAtEvent::Current`) and has all three facts of
-/// `FocusClass::weak_facts`. Weak only lets the existing re-verification
-/// path keep the text (`same_focus_epoch_except`); the invalidation itself
-/// stays strong. Used by both admission and the diagnostics' counts.
-pub(crate) fn focus_event_weak(text: TextAtEvent, class: FocusClass) -> bool {
-    matches!(text, TextAtEvent::Current(_)) && class.weak_facts()
+/// Which proof rules a `focus_event_proof` call evaluates. `m1`: members of
+/// a matched cluster (`match_focus_cluster`) may be proven; otherwise they
+/// are rejected `unmatched` by every rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProofRules {
+    pub(crate) b: bool,
+    pub(crate) a: bool,
+    pub(crate) c: bool,
+    pub(crate) m1: bool,
 }
+
+impl ProofRules {
+    /// Relaxation B for single matched events, exactly as before stage 0a.
+    pub(crate) const B_ONLY: Self = Self {
+        b: true,
+        a: false,
+        c: false,
+        m1: false,
+    };
+    /// Stage 0a admission: B only, and never for a cluster member (owner
+    /// decision 2026-11-10: clusters are counted in the shadow only).
+    pub(crate) const ADMISSION_0A: Self = Self::B_ONLY;
+    /// Stage 0a shadow (counted, never used): B and A′, single events and
+    /// matched cluster members.
+    pub(crate) const SHADOW_0A: Self = Self {
+        b: true,
+        a: true,
+        c: false,
+        m1: true,
+    };
+
+    fn enabled(self, rule: ProofRule) -> bool {
+        match rule {
+            ProofRule::B => self.b,
+            ProofRule::A => self.a,
+            ProofRule::C => self.c,
+        }
+    }
+}
+
+/// A focus-event proof rule, in evaluation order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProofRule {
+    /// Relaxation B: another process's Window at the text's native focus.
+    B,
+    /// A′: the text's own element, sent by the process owning the focused
+    /// control, at the text's native focus.
+    A,
+    /// C: the active descendant of the text's field (stage 0b on).
+    C,
+}
+
+impl ProofRule {
+    const ALL: [Self; 3] = [Self::B, Self::A, Self::C];
+    /// Fixed labels of the rules the stage 0a shadow counts (B, A′).
+    const CODES: [&'static str; PROOF_RULES_COUNTED] = ["b_other_window", "a_same_element"];
+}
+const PROOF_RULES_COUNTED: usize = 2;
+
+/// Why a proof rule did not prove a focus event: the first failing fact
+/// (fixed codes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProofReject {
+    Unmatched,
+    Text,
+    Relation,
+    ControlType,
+    ElementOther,
+    ElementUnknown,
+    Pid,
+    PidUnknown,
+    Native,
+    NativeUnknown,
+    NotAlias,
+    /// OD8 (stage 2, if the owner says yes); never produced in stage 0a.
+    #[allow(dead_code)]
+    PasswordUnknown,
+}
+const PROOF_REJECTS: usize = 12;
+
+impl ProofReject {
+    pub(crate) const CODES: [&'static str; PROOF_REJECTS] = [
+        "unmatched",
+        "text",
+        "relation",
+        "control_type",
+        "element_other",
+        "element_unknown",
+        "pid",
+        "pid_unknown",
+        "native",
+        "native_unknown",
+        "not_alias",
+        "password_unknown",
+    ];
+}
+
+/// One focus event's proof: the first rule that proved it, and per rule
+/// (B, A′, C) the reject code when that rule was evaluated and failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProofResult {
+    pub(crate) proven: Option<ProofRule>,
+    pub(crate) rejects: [Option<ProofReject>; 3],
+}
+
+/// Which proofs a step needed (shadow counts only): B alone (admission's
+/// own), A′ singles, a cluster proven with B only, or with A′.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProofKind {
+    B,
+    A,
+    M1,
+    AM1,
+}
+
+impl ProofKind {
+    /// Labels of the shadow-only kinds (`slot`).
+    const CODES: [&'static str; SHADOW_KINDS] = ["a", "m1", "a_m1"];
+
+    /// A single event's kind, from the rule that proved it.
+    pub(crate) fn single(rule: ProofRule) -> Self {
+        match rule {
+            ProofRule::A => Self::A,
+            ProofRule::B | ProofRule::C => Self::B,
+        }
+    }
+
+    /// What a set of steps needed together.
+    pub(crate) fn combine(kinds: impl IntoIterator<Item = Self>) -> Self {
+        let (mut a, mut m1) = (false, false);
+        for kind in kinds {
+            a |= matches!(kind, Self::A | Self::AM1);
+            m1 |= matches!(kind, Self::M1 | Self::AM1);
+        }
+        match (a, m1) {
+            (true, true) => Self::AM1,
+            (true, false) => Self::A,
+            (false, true) => Self::M1,
+            (false, false) => Self::B,
+        }
+    }
+
+    /// The shadow count slot; `None` for B alone (admission keeps those).
+    pub(crate) fn slot(self) -> Option<usize> {
+        match self {
+            Self::B => None,
+            Self::A => Some(0),
+            Self::M1 => Some(1),
+            Self::AM1 => Some(2),
+        }
+    }
+}
+const SHADOW_KINDS: usize = 3;
+
+/// The single decision whether a focus event is proven for the text it is
+/// compared with (`proof_text`), under the rules in `rules`: relaxation B
+/// (`FocusClass::weak_facts` and `TextAtEvent::Current`, exactly as before)
+/// and A′ (§4: same element, sender = the text's control process, native
+/// focus unchanged, current text, matched). Admission calls it with its mask
+/// and counts only B (`ProofRules::ADMISSION_0A`); the shadow calls it with
+/// the wider mask. A proof only lets the existing re-verification keep text
+/// (`same_focus_epoch_except`); every invalidation stays strong. `aliases`
+/// is for rule C (stage 0b on; unused while `rules.c` is off).
+pub(crate) fn focus_event_proof(
+    facts: &FocusEventFacts,
+    text: TextAtEvent,
+    aliases: &[u64],
+    rules: ProofRules,
+) -> ProofResult {
+    let _ = aliases;
+    let class = classify_focus_event(facts, text);
+    let member = matches!(facts.cluster, ClusterOutcome::Matched(_));
+    let excluded = member && !rules.m1;
+    let binding = match text {
+        TextAtEvent::Current(binding) => Some(binding),
+        _ => None,
+    };
+    let native = match class.native {
+        NativeMatch::Same => None,
+        NativeMatch::Differs => Some(ProofReject::Native),
+        _ => Some(ProofReject::NativeUnknown),
+    };
+    let b = if !excluded && binding.is_some() && class.weak_facts() {
+        None
+    } else if excluded {
+        Some(ProofReject::Unmatched)
+    } else if binding.is_none() {
+        Some(ProofReject::Text)
+    } else if class.relation != SenderRelation::OtherProcess {
+        Some(ProofReject::Relation)
+    } else if class.control_type != Some(WINDOW_CONTROL_TYPE) {
+        Some(ProofReject::ControlType)
+    } else {
+        Some(native.unwrap_or(ProofReject::NativeUnknown))
+    };
+    let matched = facts.invalidation.is_some() || (member && rules.m1);
+    let a = if !matched {
+        Some(ProofReject::Unmatched)
+    } else if let Some(binding) = binding {
+        match class.element {
+            ElementMatch::Same => match (facts.sender, binding.focus) {
+                (Some(sender), Some(focus)) if sender == focus.control_pid => native,
+                (Some(_), Some(_)) => Some(ProofReject::Pid),
+                _ => Some(ProofReject::PidUnknown),
+            },
+            ElementMatch::Other => Some(ProofReject::ElementOther),
+            _ => Some(ProofReject::ElementUnknown),
+        }
+    } else {
+        Some(ProofReject::Text)
+    };
+    // Rule C needs the field proof (stage 0b on).
+    let c = Some(ProofReject::NotAlias);
+    let mut result = ProofResult {
+        proven: None,
+        rejects: [None; 3],
+    };
+    for (index, (rule, reject)) in ProofRule::ALL.into_iter().zip([b, a, c]).enumerate() {
+        if !rules.enabled(rule) {
+            continue;
+        }
+        match reject {
+            None => {
+                result.proven.get_or_insert(rule);
+            }
+            Some(reject) => result.rejects[index] = Some(reject),
+        }
+    }
+    result
+}
+
+/// The text a focus event is proven against (§4 M1, S3): for a single event
+/// the text buffered at its own invalidation (`text_at_invalidation`,
+/// exactly as before); for a matched cluster member the current buffer when
+/// its focus epoch is known (`same_focus_epoch_except` then consults only
+/// generations above the text's).
+pub(crate) fn proof_text(
+    facts: &FocusEventFacts,
+    current: Option<CurrentText>,
+    previous: Option<EndedText>,
+) -> TextAtEvent {
+    match facts.cluster {
+        ClusterOutcome::Matched(_) => match current {
+            Some(CurrentText {
+                epoch: Some(_),
+                binding,
+            }) => TextAtEvent::Current(binding),
+            Some(_) => TextAtEvent::Ambiguous {
+                current_possible: true,
+            },
+            None => TextAtEvent::None,
+        },
+        _ => text_at_invalidation(facts.invalidation, current, previous),
+    }
+}
+
+/// The text a focus event's class label is compared with: as `proof_text`
+/// for single events; for a matched cluster member the text buffered at
+/// the cluster's lowest generation (diagnostics only).
+pub(crate) fn diagnostic_text(
+    facts: &FocusEventFacts,
+    current: Option<CurrentText>,
+    previous: Option<EndedText>,
+) -> TextAtEvent {
+    match facts.cluster {
+        ClusterOutcome::Matched(cluster) => text_at_invalidation(
+            cluster.generations().iter().copied().min(),
+            current,
+            previous,
+        ),
+        _ => text_at_invalidation(facts.invalidation, current, previous),
+    }
+}
+
+/// One matched cluster's proof for one text (§4 M1, hook side; shadow only
+/// in stage 0a): proven only when all `size` members were drained against
+/// the same text (generation and element) and each was proven.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClusterProof {
+    pub(crate) id: u64,
+    size: u8,
+    seen: u8,
+    text_generation: Option<u64>,
+    text_element: Option<u64>,
+    all_proven: bool,
+    /// Some member was proven only by A′.
+    any_a: bool,
+    decided: bool,
+    pub(crate) opened_at: Instant,
+}
+
+impl ClusterProof {
+    pub(crate) fn new(
+        cluster: ClusterMatch,
+        text_generation: Option<u64>,
+        text_element: Option<u64>,
+        opened_at: Instant,
+    ) -> Self {
+        Self {
+            id: cluster.id,
+            size: cluster.size,
+            seen: 0,
+            text_generation,
+            text_element,
+            all_proven: true,
+            any_a: false,
+            decided: false,
+            opened_at,
+        }
+    }
+
+    /// One member's result against the text it was drained with:
+    /// `Some(true)` when the last member completes an all-proven cluster,
+    /// `Some(false)` once it becomes unprovable, `None` while waiting (and
+    /// for every member after the decision).
+    pub(crate) fn add(
+        &mut self,
+        result: &ProofResult,
+        text_generation: Option<u64>,
+        text_element: Option<u64>,
+    ) -> Option<bool> {
+        if self.decided {
+            return None;
+        }
+        self.seen = self.seen.saturating_add(1);
+        self.any_a |= result.proven == Some(ProofRule::A);
+        if result.proven.is_none()
+            || text_generation.is_none()
+            || (text_generation, text_element) != (self.text_generation, self.text_element)
+        {
+            self.all_proven = false;
+        }
+        if !self.all_proven {
+            self.decided = true;
+            return Some(false);
+        }
+        if self.seen >= self.size {
+            self.decided = true;
+            return Some(true);
+        }
+        None
+    }
+
+    /// Mark it unprovable (a member may have been lost); whether it was
+    /// still undecided.
+    pub(crate) fn fail(&mut self) -> bool {
+        let open = !self.decided;
+        self.decided = true;
+        self.all_proven = false;
+        open
+    }
+
+    pub(crate) fn decided(&self) -> bool {
+        self.decided
+    }
+
+    /// The kind its proven generations carry.
+    pub(crate) fn kind(&self) -> ProofKind {
+        if self.any_a {
+            ProofKind::AM1
+        } else {
+            ProofKind::M1
+        }
+    }
+}
+
+/// Where a recheck discard falls in the stage 0a shadow (§7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShadowBucket {
+    /// Every step proven with the shadow proofs and the latest grant at
+    /// the current generation named the text's element.
+    WouldKeep,
+    /// Every step proven, no grant at the current generation (an upper
+    /// bound: the text would have waited for re-verification).
+    WouldHold,
+    /// Not proven at the discard; the missing proofs arrived within 1 s.
+    KeyBeforeProof,
+    /// Every step proven, but the grant named another element.
+    OtherElement,
+}
+const SHADOW_BUCKETS: usize = 4;
+
+impl ShadowBucket {
+    const CODES: [&'static str; SHADOW_BUCKETS] = [
+        "would_keep",
+        "would_hold",
+        "key_before_proof",
+        "other_element",
+    ];
+}
+
+/// Hook-side cluster losses (counted per cluster).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterLoss {
+    /// A fifth open cluster dropped the oldest.
+    OpenDropped,
+    /// Undecided after 1 s.
+    Expired,
+    /// Undecided when the hand-off dropped focus events.
+    QueueDropped,
+}
+const CLUSTER_LOSSES: usize = 3;
+const CLUSTER_LOSS_CODES: [&str; CLUSTER_LOSSES] = ["open_dropped", "expired", "queue_dropped"];
+const CLUSTER_SIZE_CODES: [&str; 2] = ["2", "3_4"];
+const A_WITH_OD8_CODES: [&str; 3] = ["pass", "not_supported", "other"];
 
 /// When a recheck discard's focus attribution was recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -582,6 +989,8 @@ pub(crate) enum DiscardFocus {
     NoFocusEvent,
     /// A focus event after the text began is not classified yet.
     Unclassified,
+    /// A matched cluster of focus events (its members are not told apart).
+    Cluster,
 }
 
 fn control_type_slot(control_type: Option<i32>) -> usize {
@@ -726,7 +1135,8 @@ pub(crate) struct FocusEventCounts {
     pub(crate) dropped: u64,
     /// Focus events not matched with their invalidation.
     pub(crate) uncorrelated: u64,
-    /// Focus events treated as weak for the buffered text (`focus_event_weak`).
+    /// Focus events treated as weak for the buffered text (admission's
+    /// `focus_event_proof`).
     pub(crate) weak: u64,
     /// Discards attributed after waiting for their last focus event, and
     /// those recorded unclassified because the waiting list was full.
@@ -739,6 +1149,8 @@ pub(crate) struct FocusEventCounts {
     matches: [u64; MATCH_OUTCOMES],
     offsets: [u64; MATCH_OFFSETS],
     nearest: [u64; MATCH_NEAREST],
+    /// Stage 0a shadow counts (never used by admission).
+    pub(crate) shadow: ShadowCounts,
 }
 
 const MATCH_OUTCOMES: usize = FocusMatch::CODES.len();
@@ -759,6 +1171,7 @@ impl Default for FocusEventCounts {
             matches: [0; MATCH_OUTCOMES],
             offsets: [0; MATCH_OFFSETS],
             nearest: [0; MATCH_NEAREST],
+            shadow: ShadowCounts::default(),
         }
     }
 }
@@ -794,6 +1207,7 @@ impl FocusEventCounts {
             }
             DiscardFocus::NoFocusEvent => self.classes[NO_FOCUS_EVENT] += keys,
             DiscardFocus::Unclassified => self.classes[UNCLASSIFIED] += keys,
+            DiscardFocus::Cluster => self.classes[CLUSTER_FOCUS] += keys,
         }
     }
 
@@ -819,6 +1233,7 @@ impl FocusEventCounts {
         for (total, value) in self.nearest.iter_mut().zip(other.nearest) {
             *total += value;
         }
+        self.shadow.add(&other.shadow);
     }
 
     fn classes_json(&self) -> Value {
@@ -846,7 +1261,7 @@ impl FocusEventCounts {
 
     /// All focus events: counts of events.
     pub(crate) fn events_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "events": self.events,
             "dropped": self.dropped,
             "uncorrelated": self.uncorrelated,
@@ -856,19 +1271,23 @@ impl FocusEventCounts {
             "unmatched_nearest": fixed_json(&FocusMatch::NEAREST_CODES, &self.nearest),
             "classes": self.classes_json(),
             "control_types": self.control_types_json(),
-        })
+        });
+        self.shadow.extend_events_json(&mut value);
+        value
     }
 
     /// Recheck discards by their last focus event: keystroke counts.
     pub(crate) fn discards_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "discards": self.events,
             "keys": self.classes.iter().sum::<u64>(),
             "attributed_late": self.late,
             "pending_overflow": self.overflow,
             "classes": self.classes_json(),
             "control_types": self.control_types_json(),
-        })
+        });
+        self.shadow.extend_discards_json(&mut value);
+        value
     }
 }
 
@@ -882,6 +1301,146 @@ fn fixed_json(codes: &[&str], counts: &[u64]) -> Value {
             .map(|(code, count)| (code.to_string(), json!(count)))
             .collect(),
     )
+}
+
+/// Stage 0a shadow counts (§7; content-free fixed codes, never used by
+/// admission). For all focus events each event weighs 1 (clusters per
+/// member event, hook-side losses per cluster); `discards` weighs each
+/// discard's keystrokes. Reported only when non-zero (additive JSON).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ShadowCounts {
+    /// Matched member events by cluster size (2, 3-4).
+    cluster_matched: [u64; 2],
+    /// Rejected burst events by `ClusterReject`.
+    cluster_rejected: [u64; 7],
+    /// Hook-side cluster losses by `ClusterLoss`.
+    cluster_lost: [u64; CLUSTER_LOSSES],
+    /// Per counted rule (B, A′): events it proved, and its rejects.
+    proof_proven: [u64; PROOF_RULES_COUNTED],
+    proof_rejected: [[u64; PROOF_REJECTS]; PROOF_RULES_COUNTED],
+    /// Every event's sender IsPassword (`PasswordValue`, OD8 measurement).
+    password_at_event: [u64; 3],
+    /// The same, for events A′ proved: pass, not_supported, other.
+    a_with_od8: [u64; 3],
+    /// Recheck discard keystrokes by `ShadowBucket` and shadow-only kind.
+    discards: [[u64; SHADOW_KINDS]; SHADOW_BUCKETS],
+}
+
+impl ShadowCounts {
+    fn record_cluster(&mut self, outcome: ClusterOutcome) {
+        match outcome {
+            ClusterOutcome::NotApplicable => {}
+            ClusterOutcome::Matched(cluster) => {
+                self.cluster_matched[usize::from(cluster.size > 2)] += 1;
+            }
+            ClusterOutcome::Rejected(reject) => self.cluster_rejected[reject.index()] += 1,
+        }
+    }
+
+    fn record_event(&mut self, password: PasswordValue, result: &ProofResult, rules: ProofRules) {
+        self.password_at_event[password.index()] += 1;
+        for (index, rule) in [ProofRule::B, ProofRule::A].into_iter().enumerate() {
+            if !rules.enabled(rule) {
+                continue;
+            }
+            match result.rejects[index] {
+                None => self.proof_proven[index] += 1,
+                Some(reject) => self.proof_rejected[index][reject as usize] += 1,
+            }
+        }
+        if rules.a && result.rejects[1].is_none() {
+            self.a_with_od8[password.index()] += 1;
+        }
+    }
+
+    fn record_discard(&mut self, bucket: ShadowBucket, kind: usize, keys: u64) {
+        self.discards[bucket as usize][kind.min(SHADOW_KINDS - 1)] += keys;
+    }
+
+    fn add(&mut self, other: &Self) {
+        let add = |total: &mut [u64], value: &[u64]| {
+            for (total, value) in total.iter_mut().zip(value) {
+                *total += value;
+            }
+        };
+        add(&mut self.cluster_matched, &other.cluster_matched);
+        add(&mut self.cluster_rejected, &other.cluster_rejected);
+        add(&mut self.cluster_lost, &other.cluster_lost);
+        add(&mut self.proof_proven, &other.proof_proven);
+        for (total, value) in self.proof_rejected.iter_mut().zip(&other.proof_rejected) {
+            add(total, value);
+        }
+        add(&mut self.password_at_event, &other.password_at_event);
+        add(&mut self.a_with_od8, &other.a_with_od8);
+        for (total, value) in self.discards.iter_mut().zip(&other.discards) {
+            add(total, value);
+        }
+    }
+
+    /// Adds `cluster`, `proof`, `password_at_event` and `a_with_od8` to
+    /// `events_json`, each only when non-zero.
+    fn extend_events_json(&self, value: &mut Value) {
+        let any = |counts: &[u64]| counts.iter().any(|count| *count > 0);
+        let Some(object) = value.as_object_mut() else {
+            return;
+        };
+        if any(&self.cluster_matched) || any(&self.cluster_rejected) || any(&self.cluster_lost) {
+            let mut cluster = json!({
+                "matched": fixed_json(&CLUSTER_SIZE_CODES, &self.cluster_matched),
+                "rejected": fixed_json(&ClusterReject::CODES, &self.cluster_rejected),
+            });
+            if let (Some(cluster), Value::Object(lost)) = (
+                cluster.as_object_mut(),
+                fixed_json(&CLUSTER_LOSS_CODES, &self.cluster_lost),
+            ) {
+                cluster.extend(lost);
+            }
+            object.insert("cluster".into(), cluster);
+        }
+        let rules: serde_json::Map<String, Value> = ProofRule::CODES
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.proof_proven[*index] > 0 || any(&self.proof_rejected[*index]))
+            .map(|(index, code)| {
+                (
+                    code.to_string(),
+                    json!({
+                        "proven": self.proof_proven[index],
+                        "rejected": fixed_json(&ProofReject::CODES, &self.proof_rejected[index]),
+                    }),
+                )
+            })
+            .collect();
+        if !rules.is_empty() {
+            object.insert("proof".into(), Value::Object(rules));
+        }
+        if any(&self.password_at_event) {
+            object.insert(
+                "password_at_event".into(),
+                fixed_json(&PasswordValue::CODES, &self.password_at_event),
+            );
+        }
+        if any(&self.a_with_od8) {
+            object.insert(
+                "a_with_od8".into(),
+                fixed_json(&A_WITH_OD8_CODES, &self.a_with_od8),
+            );
+        }
+    }
+
+    /// Adds `shadow` (keystrokes by bucket and kind) to `discards_json`
+    /// when non-zero.
+    fn extend_discards_json(&self, value: &mut Value) {
+        let buckets: serde_json::Map<String, Value> = ShadowBucket::CODES
+            .iter()
+            .zip(&self.discards)
+            .filter(|(_, kinds)| kinds.iter().any(|count| *count > 0))
+            .map(|(code, kinds)| (code.to_string(), fixed_json(&ProofKind::CODES, kinds)))
+            .collect();
+        if let (Some(object), false) = (value.as_object_mut(), buckets.is_empty()) {
+            object.insert("shadow".into(), Value::Object(buckets));
+        }
+    }
 }
 
 /// One epoch's hook-side counts.
@@ -1118,6 +1677,64 @@ impl KeyAdmissionTally {
         self.epoch(epoch)
             .focus_events
             .record_event(class, matching, weak);
+    }
+
+    /// Stage 0a shadow: a focus event's cluster outcome (per member event).
+    pub(crate) fn cluster_event(&mut self, epoch: u32, outcome: ClusterOutcome) {
+        self.epoch(epoch)
+            .focus_events
+            .shadow
+            .record_cluster(outcome);
+    }
+
+    /// Stage 0a shadow: an open cluster lost on the hook side.
+    pub(crate) fn cluster_lost(&mut self, epoch: u32, loss: ClusterLoss) {
+        self.epoch(epoch).focus_events.shadow.cluster_lost[loss as usize] += 1;
+    }
+
+    /// Stage 0a shadow: one focus event's IsPassword and its proof under
+    /// the shadow mask `rules`.
+    pub(crate) fn shadow_event(
+        &mut self,
+        epoch: u32,
+        password: PasswordValue,
+        result: &ProofResult,
+        rules: ProofRules,
+    ) {
+        self.epoch(epoch)
+            .focus_events
+            .shadow
+            .record_event(password, result, rules);
+    }
+
+    /// Stage 0a shadow: a recheck discard's keystrokes that shadow-only
+    /// proofs (`kind`) would have changed, recorded in total and per process
+    /// as `record_discard_focus` keys them. `ProofKind::B` is not recorded
+    /// (admission's own proofs).
+    pub(crate) fn shadow_discard(
+        &mut self,
+        pid: u32,
+        epoch: u32,
+        keys: u64,
+        bucket: ShadowBucket,
+        kind: ProofKind,
+    ) {
+        let Some(slot) = kind.slot().filter(|_| keys > 0) else {
+            return;
+        };
+        let entry = self.epoch(epoch);
+        bounded_entry(&mut entry.by_pid, pid);
+        entry
+            .discard_focus
+            .shadow
+            .record_discard(bucket, slot, keys);
+        let key = by_pid_key(&entry.by_pid, pid);
+        entry
+            .discard_focus_by_pid
+            .entry(key)
+            .or_default()
+            .shadow
+            .record_discard(bucket, slot, keys);
     }
 
     /// A weak focus event's sender process (named later by the worker).
@@ -1547,6 +2164,8 @@ mod tests {
             element,
             native,
             sender: None,
+            password: PasswordValue::Other,
+            cluster: ClusterOutcome::NotApplicable,
         }
     }
 
@@ -1881,7 +2500,9 @@ mod tests {
         };
         let text = TextAtEvent::Current(binding(Some(4), Some(focus)));
         let weak = |facts: FocusEventFacts, text| {
-            focus_event_weak(text, classify_focus_event(&facts, text))
+            focus_event_proof(&facts, text, &[], ProofRules::B_ONLY)
+                .proven
+                .is_some()
         };
         let window = Some(WINDOW_CONTROL_TYPE);
         let other = SenderRelation::OtherProcess;
@@ -1977,7 +2598,9 @@ mod tests {
     /// The one relaxation B decision the golden table records (the only
     /// line a later change of that decision's signature may touch).
     fn relaxation_b_golden_bit(facts: &FocusEventFacts, text: TextAtEvent) -> bool {
-        focus_event_weak(text, classify_focus_event(facts, text))
+        focus_event_proof(facts, text, &[], ProofRules::B_ONLY)
+            .proven
+            .is_some()
     }
 
     #[test]
@@ -2048,6 +2671,381 @@ mod tests {
             table, RELAXATION_B_GOLDEN,
             "relaxation B changed; the table now reads:\n{table}"
         );
+    }
+
+    fn test_cluster() -> ClusterMatch {
+        ClusterMatch {
+            id: 5,
+            size: 2,
+            generations: [5 << 32 | 5, 6 << 32 | 6, 0, 0],
+            classified_through: 6,
+        }
+    }
+
+    #[test]
+    fn a_prime_shadow_rejects_each_fact_with_its_code() {
+        use ProofReject as R;
+        use ProofRule as P;
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let elsewhere = NativeKeyboardFocus::for_test(1, 9, 3);
+        let text = TextAtEvent::Current(binding(Some(4), Some(focus)));
+        // The text's element, sent by its control process (3), native focus
+        // unchanged, matched with its own invalidation.
+        let owner = FocusEventFacts {
+            relation: SenderRelation::Foreground,
+            sender: Some(3),
+            ..focus_facts(Some(4), Some(focus))
+        };
+        let shadow = |facts: FocusEventFacts, text| {
+            focus_event_proof(&facts, text, &[], ProofRules::SHADOW_0A)
+        };
+        let a = |facts, text| shadow(facts, text).rejects[1];
+        let proven = shadow(owner, text);
+        assert_eq!(proven.proven, Some(P::A));
+        assert_eq!(proven.rejects, [Some(R::Relation), None, None]);
+        // Each fact false or unknown: its code.
+        let unmatched = FocusEventFacts {
+            sequence: None,
+            invalidation: None,
+            matching: FocusMatch::SeveralCandidates,
+            ..owner
+        };
+        for (facts, text, code) in [
+            (
+                FocusEventFacts {
+                    element: Some(8),
+                    ..owner
+                },
+                text,
+                R::ElementOther,
+            ),
+            (
+                FocusEventFacts {
+                    element: None,
+                    ..owner
+                },
+                text,
+                R::ElementUnknown,
+            ),
+            (
+                FocusEventFacts {
+                    sender: Some(9),
+                    ..owner
+                },
+                text,
+                R::Pid,
+            ),
+            (
+                FocusEventFacts {
+                    sender: None,
+                    ..owner
+                },
+                text,
+                R::PidUnknown,
+            ),
+            (
+                owner,
+                TextAtEvent::Current(binding(Some(4), None)),
+                R::PidUnknown,
+            ),
+            (
+                FocusEventFacts {
+                    native: Some(elsewhere),
+                    ..owner
+                },
+                text,
+                R::Native,
+            ),
+            (
+                FocusEventFacts {
+                    native: None,
+                    ..owner
+                },
+                text,
+                R::NativeUnknown,
+            ),
+            (
+                owner,
+                TextAtEvent::Ended(binding(Some(4), Some(focus))),
+                R::Text,
+            ),
+            (owner, TextAtEvent::None, R::Text),
+            (unmatched, text, R::Unmatched),
+        ] {
+            assert_eq!(a(facts, text), Some(code), "{code:?}");
+            assert_eq!(shadow(facts, text).proven, None);
+        }
+        // A WebView2 child host: the sender is the control process, its
+        // relation unknown (N6, OD4): proven; the host process is not.
+        let webview = NativeKeyboardFocus {
+            control_pid: 7,
+            ..focus
+        };
+        let webview_text = TextAtEvent::Current(binding(Some(4), Some(webview)));
+        let child = FocusEventFacts {
+            relation: SenderRelation::Unknown,
+            sender: Some(7),
+            native: Some(webview),
+            ..owner
+        };
+        assert_eq!(shadow(child, webview_text).proven, Some(P::A));
+        assert_eq!(
+            a(
+                FocusEventFacts {
+                    sender: Some(3),
+                    ..child
+                },
+                webview_text
+            ),
+            Some(R::Pid)
+        );
+        // B is reported alongside, and proves first when both pass.
+        let window = FocusEventFacts {
+            relation: SenderRelation::OtherProcess,
+            control_type: Some(WINDOW_CONTROL_TYPE),
+            ..owner
+        };
+        assert_eq!(
+            shadow(window, text),
+            ProofResult {
+                proven: Some(P::B),
+                rejects: [None, None, None],
+            }
+        );
+        assert_eq!(
+            shadow(
+                FocusEventFacts {
+                    control_type: Some(50004),
+                    ..window
+                },
+                text
+            )
+            .rejects,
+            [Some(R::ControlType), None, None]
+        );
+        // Admission's mask evaluates B only, and never for a cluster member.
+        let member = FocusEventFacts {
+            cluster: ClusterOutcome::Matched(test_cluster()),
+            ..FocusEventFacts {
+                sequence: None,
+                invalidation: None,
+                matching: FocusMatch::NearbyCandidate,
+                ..window
+            }
+        };
+        let admission =
+            |facts: FocusEventFacts| focus_event_proof(&facts, text, &[], ProofRules::ADMISSION_0A);
+        assert_eq!(admission(owner).rejects, [Some(R::Relation), None, None]);
+        assert_eq!(admission(window).proven, Some(P::B));
+        assert_eq!(
+            admission(member),
+            ProofResult {
+                proven: None,
+                rejects: [Some(R::Unmatched), None, None],
+            }
+        );
+        assert_eq!(shadow(member, text).proven, Some(P::B), "shadow only");
+    }
+
+    #[test]
+    fn cluster_members_use_current_binding_and_lowest_generation_label() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let text = binding(Some(4), Some(focus));
+        let member = FocusEventFacts {
+            sequence: None,
+            invalidation: None,
+            matching: FocusMatch::SeveralCandidates,
+            cluster: ClusterOutcome::Matched(test_cluster()),
+            ..focus_facts(Some(4), Some(focus))
+        };
+        let current = |epoch| {
+            Some(CurrentText {
+                epoch,
+                binding: text,
+            })
+        };
+        let ended = Some(EndedText {
+            epoch: Some(4),
+            ended_generation: 6 << 32,
+            binding: text,
+        });
+        use TextAtEvent as T;
+        // Text before the cluster, between its generations, after it: the
+        // proof always uses the current buffer; the label only text older
+        // than the lowest generation.
+        for (epoch, label) in [(4, T::Current(text)), (5, T::None), (7, T::None)] {
+            assert_eq!(
+                proof_text(&member, current(Some(epoch)), None),
+                T::Current(text)
+            );
+            assert_eq!(diagnostic_text(&member, current(Some(epoch)), None), label);
+        }
+        assert_eq!(
+            proof_text(&member, current(None), None),
+            T::Ambiguous {
+                current_possible: true
+            }
+        );
+        assert_eq!(proof_text(&member, None, ended), T::None);
+        assert_eq!(diagnostic_text(&member, None, ended), T::Ended(text));
+        // Single events: both exactly `text_at_invalidation`.
+        let single = focus_facts(Some(4), Some(focus));
+        for (current, previous) in [
+            (current(Some(4)), None),
+            (current(Some(5)), ended),
+            (None, ended),
+            (current(None), None),
+        ] {
+            let today = text_at_invalidation(single.invalidation, current, previous);
+            assert_eq!(proof_text(&single, current, previous), today);
+            assert_eq!(diagnostic_text(&single, current, previous), today);
+        }
+        // Proofs at or below the text's generation never count: text
+        // admitted after the first member needs only the later one.
+        let [first, second, ..] = test_cluster().generations;
+        assert!(super::super::same_focus_epoch_except(
+            first,
+            second,
+            &[first, second]
+        ));
+        assert!(!super::super::same_focus_epoch_except(
+            first,
+            second,
+            &[first]
+        ));
+        assert!(super::super::same_focus_epoch_except(
+            4 << 32,
+            second,
+            &[first, second]
+        ));
+    }
+
+    #[test]
+    fn cluster_proof_needs_every_member_against_the_same_text() {
+        let by = |rule| ProofResult {
+            proven: rule,
+            rejects: [None; 3],
+        };
+        let (b, a, none) = (by(Some(ProofRule::B)), by(Some(ProofRule::A)), by(None));
+        let now = Instant::now();
+        let open = || ClusterProof::new(test_cluster(), Some(9), Some(4), now);
+        // All proven against the same text: proven once, with its kind.
+        let mut proof = open();
+        assert_eq!(proof.add(&b, Some(9), Some(4)), None);
+        assert_eq!(proof.add(&b, Some(9), Some(4)), Some(true));
+        assert_eq!(proof.kind(), ProofKind::M1);
+        assert_eq!(proof.add(&b, Some(9), Some(4)), None, "decided");
+        let mut proof = open();
+        proof.add(&a, Some(9), Some(4));
+        assert_eq!(proof.add(&b, Some(9), Some(4)), Some(true));
+        assert_eq!(proof.kind(), ProofKind::AM1);
+        // One member unproven, another text, or no text: unprovable at
+        // once, and later members change nothing.
+        for (first, generation, element) in [
+            (&none, Some(9), Some(4)),
+            (&b, Some(8), Some(4)),
+            (&b, Some(9), Some(5)),
+            (&b, None, None),
+        ] {
+            let mut proof = open();
+            assert_eq!(proof.add(first, generation, element), Some(false));
+            assert_eq!(proof.add(&b, Some(9), Some(4)), None);
+            assert!(proof.decided());
+        }
+        // A missing member: still waiting, until a drop fails it.
+        let mut proof = open();
+        assert_eq!(proof.add(&b, Some(9), Some(4)), None);
+        assert!(!proof.decided());
+        assert!(proof.fail());
+        assert!(!proof.fail(), "counted once");
+        assert_eq!(proof.add(&b, Some(9), Some(4)), None);
+        // The kinds a set of steps needed together.
+        use ProofKind as K;
+        assert_eq!(K::combine([K::B, K::B]), K::B);
+        assert_eq!(K::combine([K::B, K::A]), K::A);
+        assert_eq!(K::combine([K::M1, K::B]), K::M1);
+        assert_eq!(K::combine([K::A, K::M1]), K::AM1);
+        assert_eq!(K::combine(std::iter::empty()), K::B);
+        assert_eq!(
+            [K::B, K::A, K::M1, K::AM1].map(K::slot),
+            [None, Some(0), Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn shadow_counts_are_fixed_additive_and_reported_only_when_non_zero() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let class = classify_focus_event(&focus_facts(Some(4), Some(focus)), TextAtEvent::None);
+        let mut tally = KeyAdmissionTally::default();
+        tally.focus_event(1, class, FocusMatch::SeveralCandidates, false);
+        let before = tally.take_due(0, true).unwrap().epochs[&1]
+            .focus_events
+            .events_json();
+        for key in ["cluster", "proof", "password_at_event", "a_with_od8"] {
+            assert!(before.get(key).is_none(), "{key} absent while zero");
+        }
+        tally.cluster_event(1, ClusterOutcome::Matched(test_cluster()));
+        tally.cluster_event(1, ClusterOutcome::Rejected(ClusterReject::Shared));
+        tally.cluster_event(1, ClusterOutcome::NotApplicable);
+        tally.cluster_lost(1, ClusterLoss::Expired);
+        let result = ProofResult {
+            proven: Some(ProofRule::A),
+            rejects: [Some(ProofReject::Relation), None, None],
+        };
+        tally.shadow_event(
+            1,
+            PasswordValue::NotSupported,
+            &result,
+            ProofRules::SHADOW_0A,
+        );
+        tally.shadow_event(1, PasswordValue::Other, &result, ProofRules::B_ONLY);
+        tally.shadow_discard(7, 1, 3, ShadowBucket::WouldKeep, ProofKind::AM1);
+        tally.shadow_discard(7, 1, 2, ShadowBucket::OtherElement, ProofKind::A);
+        tally.shadow_discard(7, 1, 5, ShadowBucket::WouldHold, ProofKind::B);
+        let report = tally.take_due(0, true).unwrap();
+        let epoch = &report.epochs[&1];
+        let events = epoch.focus_events.events_json();
+        assert_eq!(
+            events["cluster"],
+            json!({
+                "matched": {"2": 1},
+                "rejected": {"shared": 1},
+                "expired": 1,
+            })
+        );
+        assert_eq!(
+            events["proof"],
+            json!({
+                "b_other_window": {"proven": 0, "rejected": {"relation": 2}},
+                "a_same_element": {"proven": 1, "rejected": {}},
+            })
+        );
+        assert_eq!(
+            events["password_at_event"],
+            json!({"not_supported": 1, "other": 1})
+        );
+        assert_eq!(events["a_with_od8"], json!({"not_supported": 1}));
+        let shadow = json!({"would_keep": {"a_m1": 3}, "other_element": {"a": 2}});
+        assert_eq!(epoch.discard_focus.discards_json()["shadow"], shadow);
+        assert_eq!(
+            epoch.discard_focus_by_pid[&7].discards_json()["shadow"],
+            shadow
+        );
+        assert_eq!(
+            epoch.discard_focus.discards_json()["keys"],
+            0,
+            "not discards"
+        );
+        let mut merged = epoch.clone();
+        merged.add(epoch);
+        assert_eq!(
+            merged.discard_focus.discards_json()["shadow"]["would_keep"]["a_m1"],
+            6
+        );
+        assert_eq!(FocusClass::label(CLUSTER_FOCUS), "cluster");
+        let mut counts = FocusEventCounts::default();
+        counts.record_discard(DiscardFocus::Cluster, 4, DiscardTiming::Late);
+        assert_eq!(counts.discards_json()["classes"], json!({"cluster": 4}));
     }
 
     #[test]

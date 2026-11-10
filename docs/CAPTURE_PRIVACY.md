@@ -409,12 +409,15 @@ The keyboard privacy worker also registers a second UIA focus subscription
 (2026-10-25) that classifies focus events, whenever keyboard text is captured
 (it supplies relaxation B's proofs, below) or this sink is enabled; the
 invalidating subscription is unchanged. Its cache request makes UI Automation fetch the
-sender's process id, control type and runtime id from the newly focused
+sender's process id, control type, runtime id and (from 2026-11-10, a
+measurement only) its IsPassword property from the newly focused
 application's provider when each focus event is raised, including excluded
 applications and password fields. The diagnostic callback itself only reads
 those cached values and samples native focus; a separate diagnostics thread
 resolves the sender's process relation. The identity numbers stay in memory;
-only a fixed control-type label and fixed classes reach the counts.
+only a fixed control-type label and fixed classes reach the counts. IsPassword
+is reduced to a three-way count (explicitly false, unavailable, other, with
+true folded into other) and is used by no decision.
 
 The per-epoch `input_keystroke_epoch` record then adds bounded, content-free
 `focus_events` and `discard_focus` counters: sender relation to the foreground
@@ -434,7 +437,10 @@ their neighbours. The record counts the match outcome per event (`matched`,
 and the nearest-invalidation distance for unmatched events, to explain a low
 match rate. Anything uncertain is labelled `ambiguous` (or `unclassified` for
 a discard whose last focus event could not be classified), never same or
-different. Matching waits about 60 ms per event, so a discard soon after a
+different. From 2026-11-10, events in a burst that the single-event matcher
+cannot pair are matched as a group in a shadow count only; a discard after
+such a burst is labelled with the fixed class `cluster`. Group matches never
+prove anything for keyboard admission. Matching waits about 60 ms per event, so a discard soon after a
 focus event waits for that event's class (bounded: 16 discards, 2 s; it is
 then counted in the discard's own epoch and process, with `attributed_late`;
 a full list records it `unclassified` and counts `pending_overflow`). The

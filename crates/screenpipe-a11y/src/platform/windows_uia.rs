@@ -523,7 +523,7 @@ fn sender_relation(
 /// Content-free facts about one UIA focus-changed event. They never grant,
 /// deny or invalidate anything themselves, but they are the proof relaxation
 /// B (owner decision 2026-10-25) needs before the hook may treat a focus
-/// event as weak (`input_admission::focus_event_weak`), and they feed the
+/// event as weak (`input_admission::focus_event_proof`), and they feed the
 /// sensitive diagnostics. `element` is an in-memory runtime-id hash for
 /// comparison; it is never logged.
 #[derive(Clone, Copy)]
@@ -546,6 +546,13 @@ pub(crate) struct FocusEventFacts {
     /// The sender's process (in memory, to count weak senders by executable
     /// basename in the sensitive diagnostics only; never logged as a pid).
     pub(crate) sender: Option<u32>,
+    /// The sender's cached IsPassword at the event (stage 0a: measured for
+    /// OD8, never used by any decision).
+    pub(crate) password: PasswordValue,
+    /// For an event whose single match was `several_candidates` or
+    /// `nearby_candidate`: its burst's cluster (`match_focus_cluster`);
+    /// otherwise `NotApplicable`.
+    pub(crate) cluster: ClusterOutcome,
 }
 
 /// Focus events held for the hook thread; older ones are dropped and counted.
@@ -761,6 +768,199 @@ pub(crate) fn match_focus_event(
     )
 }
 
+/// Invalidations in one matched cluster at most (§4 M1).
+pub(crate) const MAX_CLUSTER_SIZE: usize = 4;
+/// Longest time from a cluster's first to its last invalidation.
+pub(crate) const MAX_CLUSTER_SPAN: Duration = Duration::from_millis(250);
+
+/// A burst whose every diagnostic event and invalidation were matched as a
+/// whole (`match_focus_cluster`): which event made which invalidation stays
+/// unknown, so each member carries all of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClusterMatch {
+    /// The run's first invalidation sequence.
+    pub(crate) id: u64,
+    /// Invalidations (and member events) in the run.
+    pub(crate) size: u8,
+    /// Their generations in sequence order (`size` used, then 0).
+    pub(crate) generations: [u64; MAX_CLUSTER_SIZE],
+    /// The run's last invalidation sequence: every focus event up to it is
+    /// classified once a member is.
+    pub(crate) classified_through: u64,
+}
+
+impl ClusterMatch {
+    /// The generations the cluster's invalidations produced.
+    pub(crate) fn generations(&self) -> &[u64] {
+        &self.generations[..usize::from(self.size).min(MAX_CLUSTER_SIZE)]
+    }
+}
+
+/// Why a burst event's cluster was not matched (fixed codes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterReject {
+    /// Member events and invalidations differ in number.
+    CountMismatch,
+    /// A record needed over the run and its guard band was gone or lost.
+    Incomplete,
+    /// More than `MAX_CLUSTER_SPAN` from first to last invalidation.
+    TooLong,
+    /// More than `MAX_CLUSTER_SIZE` invalidations.
+    TooMany,
+    /// A member lies near an invalidation outside the run.
+    Shared,
+    /// A member was singly matched, shared or otherwise not a burst event.
+    Mixed,
+    /// The resolver's wait list was full.
+    WaitOverflow,
+}
+
+impl ClusterReject {
+    pub(crate) const CODES: [&'static str; 7] = [
+        "count_mismatch",
+        "incomplete",
+        "too_long",
+        "too_many",
+        "shared",
+        "mixed",
+        "wait_overflow",
+    ];
+
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// A focus event's cluster outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterOutcome {
+    /// Its single match was final (not a burst event).
+    NotApplicable,
+    Matched(ClusterMatch),
+    Rejected(ClusterReject),
+}
+
+/// The run of recorded invalidations around a burst event: the maximal
+/// sequence (by time) with consecutive gaps below `FOCUS_MATCH_GUARD` that
+/// contains the invalidation nearest to the event. Sorted by time, then
+/// sequence; empty when nothing is recorded.
+fn focus_run(event_ns: u64, invalidations: &[RecordedInvalidation]) -> Vec<RecordedInvalidation> {
+    let guard = duration_nanos(FOCUS_MATCH_GUARD);
+    let mut sorted = invalidations.to_vec();
+    sorted.sort_unstable_by_key(|record| (record.at_ns, record.sequence));
+    let Some(nearest) =
+        (0..sorted.len()).min_by_key(|index| (sorted[*index].at_ns.abs_diff(event_ns), *index))
+    else {
+        return Vec::new();
+    };
+    let mut first = nearest;
+    while first > 0 && sorted[first].at_ns - sorted[first - 1].at_ns < guard {
+        first -= 1;
+    }
+    let mut last = nearest;
+    while last + 1 < sorted.len() && sorted[last + 1].at_ns - sorted[last].at_ns < guard {
+        last += 1;
+    }
+    sorted[first..=last].to_vec()
+}
+
+/// When a burst event (single result `several_candidates` or
+/// `nearby_candidate`) may be matched as a cluster: `FOCUS_MATCH_HOLD`
+/// after both the event and the last invalidation of its run, so no further
+/// invalidation can still join the run. Re-read on every resolver loop.
+pub(crate) fn cluster_due_ns(event_ns: u64, invalidations: &[RecordedInvalidation]) -> u64 {
+    let last = focus_run(event_ns, invalidations)
+        .last()
+        .map_or(0, |record| record.at_ns);
+    event_ns
+        .max(last)
+        .saturating_add(duration_nanos(FOCUS_MATCH_HOLD))
+}
+
+/// Match a burst event's whole run as one cluster (§4 M1; pure). Accepts
+/// only when both records are complete over the run and its guard band,
+/// the run has at most `MAX_CLUSTER_SIZE` invalidations within
+/// `MAX_CLUSTER_SPAN`, the member events (diagnostic events within
+/// `FOCUS_MATCH_WINDOW` of a run invalidation) are as many as its
+/// invalidations, no member lies within the window of an invalidation
+/// outside the run, and each member's own single result
+/// (`match_focus_event`, the one single-event decision) is
+/// `several_candidates` or `nearby_candidate`. Which event made which
+/// invalidation is never decided; the outcome is the same for every member
+/// and every order of the records.
+pub(crate) fn match_focus_cluster(
+    event_ns: u64,
+    invalidations: &[RecordedInvalidation],
+    invalidations_complete_after: Option<u64>,
+    diagnostic_ns: &[u64],
+    diagnostics_complete_after: Option<u64>,
+) -> ClusterOutcome {
+    let window = duration_nanos(FOCUS_MATCH_WINDOW);
+    let guard = duration_nanos(FOCUS_MATCH_GUARD);
+    let run = focus_run(event_ns, invalidations);
+    let (Some(first), Some(last)) = (run.first().copied(), run.last().copied()) else {
+        return ClusterOutcome::Rejected(ClusterReject::CountMismatch);
+    };
+    let incomplete =
+        |after: Option<u64>| after.is_some_and(|after| after >= first.at_ns.saturating_sub(guard));
+    if incomplete(invalidations_complete_after) || incomplete(diagnostics_complete_after) {
+        return ClusterOutcome::Rejected(ClusterReject::Incomplete);
+    }
+    // Gaps below the 50 ms guard mean a run longer than 250 ms always has
+    // more than four invalidations: report the span first.
+    if last.at_ns - first.at_ns > duration_nanos(MAX_CLUSTER_SPAN) {
+        return ClusterOutcome::Rejected(ClusterReject::TooLong);
+    }
+    if run.len() > MAX_CLUSTER_SIZE {
+        return ClusterOutcome::Rejected(ClusterReject::TooMany);
+    }
+    let near = |a: u64, b: u64| a.abs_diff(b) <= window;
+    let members: Vec<u64> = diagnostic_ns
+        .iter()
+        .copied()
+        .filter(|at| run.iter().any(|record| near(record.at_ns, *at)))
+        .collect();
+    if members.len() != run.len() {
+        return ClusterOutcome::Rejected(ClusterReject::CountMismatch);
+    }
+    let in_run =
+        |record: &RecordedInvalidation| run.iter().any(|member| member.sequence == record.sequence);
+    if members.iter().any(|at| {
+        invalidations
+            .iter()
+            .any(|record| !in_run(record) && near(record.at_ns, *at))
+    }) {
+        return ClusterOutcome::Rejected(ClusterReject::Shared);
+    }
+    if members.iter().any(|at| {
+        !matches!(
+            match_focus_event(
+                *at,
+                invalidations,
+                invalidations_complete_after,
+                diagnostic_ns,
+                diagnostics_complete_after,
+            )
+            .0,
+            FocusMatch::SeveralCandidates | FocusMatch::NearbyCandidate
+        )
+    }) {
+        return ClusterOutcome::Rejected(ClusterReject::Mixed);
+    }
+    let mut by_sequence = run;
+    by_sequence.sort_unstable_by_key(|record| record.sequence);
+    let mut generations = [0; MAX_CLUSTER_SIZE];
+    for (slot, record) in generations.iter_mut().zip(&by_sequence) {
+        *slot = record.generation;
+    }
+    ClusterOutcome::Matched(ClusterMatch {
+        id: by_sequence[0].sequence,
+        size: by_sequence.len() as u8,
+        generations,
+        classified_through: by_sequence[by_sequence.len() - 1].sequence,
+    })
+}
+
 /// One focus event as the diagnostic UIA callback saw it, before it is
 /// matched and its sender's process relation resolved off that callback.
 struct RawFocusEvent {
@@ -771,6 +971,7 @@ struct RawFocusEvent {
     control_type: Option<i32>,
     element: Option<u64>,
     native: Option<NativeKeyboardFocus>,
+    password: PasswordValue,
 }
 
 #[derive(Debug)]
@@ -968,6 +1169,36 @@ fn is_reserved_not_supported(value: &VARIANT) -> bool {
             return false;
         };
         !raw.Anonymous.punkVal.is_null() && raw.Anonymous.punkVal == reserved.as_raw()
+    }
+}
+
+/// A focus event sender's cached IsPassword, merged so that a count never
+/// reveals password-field visits: explicit `true` is `Other`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PasswordValue {
+    ExplicitFalse,
+    /// UIA's reserved "not supported" value (`is_reserved_not_supported`).
+    NotSupported,
+    /// Explicit `true`, empty, malformed, or not read.
+    Other,
+}
+
+impl PasswordValue {
+    pub(crate) const CODES: [&'static str; 3] = ["explicit_false", "not_supported", "other"];
+
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Classify a cached IsPassword value (`PasswordValue`). Measurement only:
+/// the probe's own password decision does not call it.
+fn password_value(value: &VARIANT) -> PasswordValue {
+    match explicit_cached_password_state(value) {
+        Ok(false) => PasswordValue::ExplicitFalse,
+        Ok(true) => PasswordValue::Other,
+        Err(_) if is_reserved_not_supported(value) => PasswordValue::NotSupported,
+        Err(_) => PasswordValue::Other,
     }
 }
 
@@ -2695,8 +2926,9 @@ impl UiaContext {
     }
 
     /// Subscribe the focus classification handler, with a cache
-    /// request for the sender's process id, control type and runtime id
-    /// (fixed numbers; no names, values or descendants).
+    /// request for the sender's process id, control type, runtime id and
+    /// IsPassword (fixed numbers and a Boolean; no names, values or
+    /// descendants). IsPassword is measured only (stage 0a, OD8).
     fn subscribe_focus_classification(
         &self,
         handler: &IUIAutomationFocusChangedEventHandler,
@@ -2706,6 +2938,7 @@ impl UiaContext {
             cache.AddProperty(UIA_ProcessIdPropertyId)?;
             cache.AddProperty(UIA_ControlTypePropertyId)?;
             cache.AddProperty(UIA_RuntimeIdPropertyId)?;
+            cache.AddProperty(UIA_IsPasswordPropertyId)?;
             cache.SetTreeScope(TreeScope_Element)?;
             // A cache request filters to the control view by default; the
             // invalidating subscription has no such filter, so use the raw
@@ -2980,9 +3213,10 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusChangedHandler_Impl {
 /// anything itself: `FocusChangedHandler`'s own subscription, which carries
 /// no cache request, keeps doing every (strong) invalidation unchanged, and
 /// without this handler's facts every focus event simply stays strong.
-/// Its cache request makes UIA fetch the sender's process id, control type
-/// and runtime id from the provider when the event is raised; this callback
-/// then only reads those cached values, the clock and native focus, and
+/// Its cache request makes UIA fetch the sender's process id, control type,
+/// runtime id and IsPassword (measured only) from the provider when the event
+/// is raised; this callback then only reads those cached values, the clock
+/// and native focus, and
 /// hands the event to `run_focus_event_resolver` without waiting. A
 /// missing value is classified as unknown.
 #[implement(IUIAutomationFocusChangedEventHandler)]
@@ -3018,6 +3252,14 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusClassificationHandler_I
             control_type: int(UIA_ControlTypePropertyId),
             element: sender.and_then(cached_runtime_id),
             native: native.ok(),
+            // A local cached read only (measured, never used).
+            password: sender
+                .and_then(|element| unsafe {
+                    element
+                        .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
+                        .ok()
+                })
+                .map_or(PasswordValue::Other, |value| password_value(&value)),
         };
         if self.raw.try_send(event).is_err() {
             self.raw_dropped.fetch_add(1, Ordering::Relaxed);
@@ -3031,15 +3273,24 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusClassificationHandler_I
 /// checks (bounded by count and age).
 const MAX_RECENT_FOCUS_EVENTS: usize = 128;
 const RECENT_FOCUS_EVENT_AGE: Duration = Duration::from_secs(1);
+/// Raw focus events held for matching; the oldest is dropped and counted.
+const MAX_PENDING_FOCUS_EVENTS: usize = 128;
+/// Burst events waiting for their cluster; overflow is emitted at once as
+/// `ClusterReject::WaitOverflow`.
+const MAX_CLUSTER_WAIT: usize = 16;
 
 /// Focus-event resolver thread (never the hook, the UIA callback or the
 /// probe worker): hold each focus event until `FOCUS_MATCH_HOLD` has passed, match
 /// it by time with the recorded focus-event invalidations
 /// (`match_focus_event`), resolve its sender relation with the one WebView2
 /// relation keyboard admission uses (its own memo), and queue the facts for
-/// the hook. Process lookups and waits here cannot delay invalidations or
-/// probes. `name_senders`: also resolve candidate senders' basenames for the
-/// sensitive diagnostics (only when that sink is on).
+/// the hook. An event whose single result is `several_candidates` or
+/// `nearby_candidate` waits until `cluster_due_ns` and is then emitted with
+/// its burst's cluster (`match_focus_cluster`); every other event is emitted
+/// exactly as before, with `ClusterOutcome::NotApplicable`. Process lookups
+/// and waits here cannot delay invalidations or probes. `name_senders`: also
+/// resolve candidate senders' basenames for the sensitive diagnostics (only
+/// when that sink is on).
 fn run_focus_event_resolver(
     raw: crossbeam_channel::Receiver<RawFocusEvent>,
     privacy: Arc<KeyboardPrivacy>,
@@ -3049,6 +3300,8 @@ fn run_focus_event_resolver(
 ) {
     let mut memo = WebView2ChildMemo::default();
     let mut pending: std::collections::VecDeque<RawFocusEvent> = Default::default();
+    // Burst events with their single result, waiting for their cluster.
+    let mut cluster_wait: Vec<(RawFocusEvent, FocusMatch)> = Vec::new();
     let mut recent: std::collections::VecDeque<u64> = Default::default();
     // Every diagnostic event later than this is in `recent`.
     let mut recent_complete_after: Option<u64> = None;
@@ -3056,7 +3309,37 @@ fn run_focus_event_resolver(
     let hold = duration_nanos(FOCUS_MATCH_HOLD);
     let max_age = duration_nanos(RECENT_FOCUS_EVENT_AGE);
     let mut disconnected = false;
-    while !stop.load(Ordering::Relaxed) && !(disconnected && pending.is_empty()) {
+    let mut emit = |event: RawFocusEvent,
+                    matching: FocusMatch,
+                    matched: Option<RecordedInvalidation>,
+                    cluster: ClusterOutcome| {
+        let relation = sender_relation(event.sender_pid, event.foreground_pid, |host, child| {
+            memo.check(host, child, || webview2_child_of(child, host))
+        });
+        // Name only senders that could make a weak event, and only for
+        // the sensitive sink; the hook decides with the buffered text.
+        if let Some(pid) = event.sender_pid.filter(|_| {
+            name_senders && input_admission::weak_sender_candidate(relation, event.control_type)
+        }) {
+            privacy.note_focus_sender_name(pid);
+        }
+        privacy.note_focus_event(FocusEventFacts {
+            at: event.at,
+            sequence: matched.map(|record| record.sequence),
+            invalidation: matched.map(|record| record.generation),
+            matching,
+            relation,
+            control_type: event.control_type,
+            element: event.element,
+            native: event.native,
+            sender: event.sender_pid,
+            password: event.password,
+            cluster,
+        });
+    };
+    while !stop.load(Ordering::Relaxed)
+        && !(disconnected && pending.is_empty() && cluster_wait.is_empty())
+    {
         if !disconnected {
             // Take everything delivered so far, so every diagnostic event
             // near a due one is known before it is matched.
@@ -3065,6 +3348,13 @@ fn run_focus_event_resolver(
                 match received {
                     Ok(event) => {
                         recent.push_back(event.at_ns);
+                        if pending.len() >= MAX_PENDING_FOCUS_EVENTS {
+                            // Lost before matching: counted like a lost
+                            // hand-off, so completeness checks see it.
+                            pending.pop_front();
+                            raw_dropped.fetch_add(1, Ordering::Relaxed);
+                            privacy.note_focus_event_dropped();
+                        }
                         pending.push_back(event);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
@@ -3115,28 +3405,43 @@ fn run_focus_event_resolver(
                 &recent,
                 recent_complete_after,
             );
-            let relation =
-                sender_relation(event.sender_pid, event.foreground_pid, |host, child| {
-                    memo.check(host, child, || webview2_child_of(child, host))
-                });
-            // Name only senders that could make a weak event, and only for
-            // the sensitive sink; the hook decides with the buffered text.
-            if let Some(pid) = event.sender_pid.filter(|_| {
-                name_senders && input_admission::weak_sender_candidate(relation, event.control_type)
-            }) {
-                privacy.note_focus_sender_name(pid);
-            }
-            privacy.note_focus_event(FocusEventFacts {
-                at: event.at,
-                sequence: matched.map(|record| record.sequence),
-                invalidation: matched.map(|record| record.generation),
+            if !matches!(
                 matching,
-                relation,
-                control_type: event.control_type,
-                element: event.element,
-                native: event.native,
-                sender: event.sender_pid,
-            });
+                FocusMatch::SeveralCandidates | FocusMatch::NearbyCandidate
+            ) {
+                emit(event, matching, matched, ClusterOutcome::NotApplicable);
+            } else if cluster_wait.len() >= MAX_CLUSTER_WAIT {
+                emit(
+                    event,
+                    matching,
+                    None,
+                    ClusterOutcome::Rejected(ClusterReject::WaitOverflow),
+                );
+            } else {
+                cluster_wait.push((event, matching));
+            }
+        }
+        if !cluster_wait.is_empty() {
+            let (invalidations, invalidations_complete_after) =
+                privacy.recorded_focus_invalidations();
+            let recent: Vec<u64> = recent.iter().copied().collect();
+            let mut index = 0;
+            while index < cluster_wait.len() {
+                let at_ns = cluster_wait[index].0.at_ns;
+                if !disconnected && now_ns < cluster_due_ns(at_ns, &invalidations) {
+                    index += 1;
+                    continue;
+                }
+                let (event, matching) = cluster_wait.remove(index);
+                let cluster = match_focus_cluster(
+                    at_ns,
+                    &invalidations,
+                    invalidations_complete_after,
+                    &recent,
+                    recent_complete_after,
+                );
+                emit(event, matching, None, cluster);
+            }
         }
     }
 }
@@ -4652,6 +4957,7 @@ mod tests {
             control_type: Some(50004),
             element: Some(3),
             native: None,
+            password: PasswordValue::Other,
         };
         let run = |events: Vec<RawFocusEvent>, dropped: u64| {
             let (tx, rx) = crossbeam_channel::bounded(8);
@@ -4712,6 +5018,246 @@ mod tests {
         );
     }
 
+    /// `match_focus_cluster` for an event at `event_ms` with invalidations
+    /// (sequence, ms) and diagnostic events (ms), both records complete.
+    fn cluster_at(
+        event_ms: u64,
+        invalidations: &[(u64, u64)],
+        events_ms: &[u64],
+    ) -> ClusterOutcome {
+        let invalidations: Vec<RecordedInvalidation> = invalidations
+            .iter()
+            .map(|(sequence, at_ms)| record(*sequence, *at_ms))
+            .collect();
+        let events: Vec<u64> = events_ms.iter().map(|at| at * MS).collect();
+        match_focus_cluster(event_ms * MS, &invalidations, None, &events, None)
+    }
+
+    #[test]
+    fn cluster_matching_accepts_only_complete_unshared_runs() {
+        use ClusterReject::*;
+        let matched = |ids: &[u64]| {
+            let mut generations = [0; MAX_CLUSTER_SIZE];
+            for (slot, id) in generations.iter_mut().zip(ids) {
+                *slot = id << 32;
+            }
+            ClusterOutcome::Matched(ClusterMatch {
+                id: ids[0],
+                size: ids.len() as u8,
+                generations,
+                classified_through: ids[ids.len() - 1],
+            })
+        };
+        // k = 2 (a pair 30 ms apart: each event `nearby_candidate`), 3 and
+        // 4 (10 ms apart: `several_candidates`).
+        let pair = [(1, 1000), (2, 1030)];
+        assert_eq!(cluster_at(1001, &pair, &[1001, 1031]), matched(&[1, 2]));
+        assert_eq!(cluster_at(1031, &pair, &[1001, 1031]), matched(&[1, 2]));
+        let triple = [(3, 1000), (4, 1010), (5, 1020)];
+        let triple_events = [1001, 1011, 1021];
+        for event in triple_events {
+            assert_eq!(
+                cluster_at(event, &triple, &triple_events),
+                matched(&[3, 4, 5])
+            );
+        }
+        let four = [(6, 1000), (7, 1010), (8, 1020), (9, 1030)];
+        assert_eq!(
+            cluster_at(1031, &four, &[1001, 1011, 1021, 1031]),
+            matched(&[6, 7, 8, 9])
+        );
+        // Any order of the records: the same outcome.
+        let reversed: Vec<(u64, u64)> = triple.iter().rev().copied().collect();
+        assert_eq!(
+            cluster_at(1011, &reversed, &[1021, 1001, 1011]),
+            matched(&[3, 4, 5])
+        );
+        // k invalidations, k - 1 events.
+        assert_eq!(
+            cluster_at(1001, &triple, &[1001, 1011]),
+            ClusterOutcome::Rejected(CountMismatch)
+        );
+        // Five invalidations; a run longer than 250 ms.
+        let five = [(1, 1000), (2, 1010), (3, 1020), (4, 1030), (5, 1040)];
+        assert_eq!(
+            cluster_at(1001, &five, &[1001, 1011, 1021, 1031, 1041]),
+            ClusterOutcome::Rejected(TooMany)
+        );
+        let long: Vec<(u64, u64)> = [1000, 1045, 1090, 1135, 1180, 1225, 1260]
+            .into_iter()
+            .zip(1..)
+            .map(|(at, sequence)| (sequence, at))
+            .collect();
+        assert_eq!(
+            cluster_at(1001, &long, &[1001]),
+            ClusterOutcome::Rejected(TooLong)
+        );
+        // A ring overwrite or a lost diagnostic event over the run and its
+        // guard band.
+        let invalidations: Vec<RecordedInvalidation> = pair
+            .iter()
+            .map(|(sequence, at)| record(*sequence, *at))
+            .collect();
+        let events = [1001 * MS, 1031 * MS];
+        for (invalidations_after, diagnostics_after) in
+            [(Some(990 * MS), None), (None, Some(960 * MS))]
+        {
+            assert_eq!(
+                match_focus_cluster(
+                    1001 * MS,
+                    &invalidations,
+                    invalidations_after,
+                    &events,
+                    diagnostics_after
+                ),
+                ClusterOutcome::Rejected(Incomplete)
+            );
+        }
+        assert_eq!(
+            match_focus_cluster(1001 * MS, &invalidations, Some(900 * MS), &events, None),
+            matched(&[1, 2]),
+            "complete since before the guard band"
+        );
+        // A member also near a neighbouring invalidation outside the run.
+        assert_eq!(
+            cluster_at(1001, &[(1, 1000), (2, 1030), (3, 1080)], &[1001, 1055]),
+            ClusterOutcome::Rejected(Shared)
+        );
+        // One member singly matched.
+        assert_eq!(
+            cluster_at(1050, &[(1, 1000), (2, 1045)], &[990, 1050]),
+            ClusterOutcome::Rejected(Mixed)
+        );
+        // When it may be matched: the hold after the run's last
+        // invalidation (or the event, if later).
+        let records: Vec<RecordedInvalidation> = pair
+            .iter()
+            .map(|(sequence, at)| record(*sequence, *at))
+            .collect();
+        assert_eq!(cluster_due_ns(1001 * MS, &records), 1090 * MS);
+        assert_eq!(cluster_due_ns(1040 * MS, &records), 1100 * MS);
+    }
+
+    #[test]
+    fn resolver_defers_only_several_and_nearby_events() {
+        // Times below are in the past of the shared clock.
+        let start = focus_clock_ns(Instant::now());
+        if start < 700 * MS {
+            std::thread::sleep(Duration::from_nanos(700 * MS - start));
+        }
+        let now = focus_clock_ns(Instant::now());
+        let raw = |at_ns| RawFocusEvent {
+            at: Instant::now(),
+            at_ns,
+            sender_pid: Some(7),
+            foreground_pid: Some(7),
+            control_type: Some(50004),
+            element: Some(3),
+            native: None,
+            password: PasswordValue::ExplicitFalse,
+        };
+        let run = |privacy: &Arc<KeyboardPrivacy>, events: Vec<RawFocusEvent>| {
+            let (tx, rx) = crossbeam_channel::bounded(256);
+            for event in events {
+                tx.send(event).unwrap();
+            }
+            drop(tx);
+            let raw_dropped = Arc::new(AtomicU64::new(0));
+            run_focus_event_resolver(
+                rx,
+                privacy.clone(),
+                raw_dropped.clone(),
+                Arc::new(AtomicBool::new(false)),
+                false,
+            );
+            let (events, dropped) = privacy.take_focus_events().unwrap();
+            (events, dropped, raw_dropped.load(Ordering::Relaxed))
+        };
+        // A single matched event, then a pair 30 ms apart: the single is
+        // emitted as before (`NotApplicable`), both pair members with the
+        // same cluster and no sequence of their own.
+        let privacy = Arc::new(KeyboardPrivacy::default());
+        let (single, generation) = privacy.test_focus_event_invalidation_at(now - 500 * MS);
+        let (first, first_generation) = privacy.test_focus_event_invalidation_at(now - 300 * MS);
+        let (second, second_generation) = privacy.test_focus_event_invalidation_at(now - 270 * MS);
+        let (events, dropped, _) = run(
+            &privacy,
+            vec![
+                raw(now - 499 * MS),
+                raw(now - 299 * MS),
+                raw(now - 269 * MS),
+            ],
+        );
+        assert_eq!(dropped, 0);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].matching, FocusMatch::Matched { offset: 1 });
+        assert_eq!(events[0].sequence, Some(single));
+        assert_eq!(events[0].invalidation, Some(generation));
+        assert_eq!(events[0].cluster, ClusterOutcome::NotApplicable);
+        assert_eq!(events[0].password, PasswordValue::ExplicitFalse);
+        let pair = ClusterOutcome::Matched(ClusterMatch {
+            id: first,
+            size: 2,
+            generations: [first_generation, second_generation, 0, 0],
+            classified_through: second,
+        });
+        for member in [&events[1], &events[2]] {
+            assert_eq!(member.matching, FocusMatch::NearbyCandidate);
+            assert_eq!((member.sequence, member.invalidation), (None, None));
+            assert_eq!(member.cluster, pair);
+        }
+        // `pending` is bounded: the oldest raw event is dropped and counted
+        // (then the hook's own queue bound drops more).
+        let privacy = Arc::new(KeyboardPrivacy::default());
+        let many = MAX_PENDING_FOCUS_EVENTS + 2;
+        let (events, dropped, raw_dropped) = run(
+            &privacy,
+            (0..many as u64)
+                .map(|index| raw(now - 600 * MS + index))
+                .collect(),
+        );
+        assert_eq!(raw_dropped, 2);
+        assert_eq!(events.len(), MAX_QUEUED_FOCUS_EVENTS);
+        assert_eq!(dropped, (many - MAX_QUEUED_FOCUS_EVENTS) as u64);
+        // The cluster wait list is bounded: overflow is emitted at once as
+        // `wait_overflow`; the others get their (here unmatched) cluster.
+        let privacy = Arc::new(KeyboardPrivacy::default());
+        privacy.test_focus_event_invalidation_at(now - 200 * MS);
+        privacy.test_focus_event_invalidation_at(now - 190 * MS);
+        let (events, _, _) = run(
+            &privacy,
+            (0..MAX_CLUSTER_WAIT as u64 + 1)
+                .map(|index| raw(now - 195 * MS + index))
+                .collect(),
+        );
+        assert_eq!(events.len(), MAX_CLUSTER_WAIT + 1);
+        assert_eq!(
+            events[0].cluster,
+            ClusterOutcome::Rejected(ClusterReject::WaitOverflow)
+        );
+        assert!(events
+            .iter()
+            .skip(1)
+            .all(|event| event.cluster == ClusterOutcome::Rejected(ClusterReject::CountMismatch)));
+    }
+
+    #[test]
+    fn password_value_merges_true_with_other() {
+        use windows::Win32::UI::Accessibility::UiaGetReservedNotSupportedValue;
+        assert_eq!(
+            password_value(&VARIANT::from(false)),
+            PasswordValue::ExplicitFalse
+        );
+        for other in [VARIANT::from(true), VARIANT::default(), VARIANT::from(0i32)] {
+            assert_eq!(password_value(&other), PasswordValue::Other);
+        }
+        let reserved = unsafe { UiaGetReservedNotSupportedValue() }.unwrap();
+        assert_eq!(
+            password_value(&VARIANT::from(reserved)),
+            PasswordValue::NotSupported
+        );
+    }
+
     #[test]
     fn focus_classification_runs_without_the_sensitive_sink_and_names_senders_only_with_it() {
         let mut config = UiCaptureConfig::default();
@@ -4735,6 +5281,7 @@ mod tests {
                 control_type: Some(input_admission::WINDOW_CONTROL_TYPE),
                 element: Some(3),
                 native: None,
+                password: PasswordValue::Other,
             })
             .unwrap();
             drop(tx);
@@ -4870,6 +5417,8 @@ mod tests {
             control_type: None,
             element: None,
             native: None,
+            password: PasswordValue::Other,
+            cluster: ClusterOutcome::NotApplicable,
         };
         for index in 0..(MAX_QUEUED_FOCUS_EVENTS as u64 + 6) {
             privacy.note_focus_event(facts(index));
