@@ -4009,6 +4009,364 @@ mod tests {
         assert!(state.text_weak_focus.is_empty() && state.text_buf.is_empty());
     }
 
+    /// The sender facts of one scripted focus event.
+    #[derive(Clone, Copy)]
+    struct ScriptSender {
+        relation: windows_uia::SenderRelation,
+        control_type: Option<i32>,
+        element: Option<u64>,
+        native: Option<NativeKeyboardFocus>,
+        pid: Option<u32>,
+    }
+
+    /// The one place `admission_transcript_is_unchanged` builds focus-event
+    /// facts: matched (or not) by the real resolver matching from the
+    /// recorded invalidation and diagnostic event times, as the resolver
+    /// would. A later change of the facts' fields changes only this helper.
+    fn script_facts(
+        event_ns: u64,
+        invalidations: &[windows_uia::RecordedInvalidation],
+        diagnostic_ns: &[u64],
+        sender: ScriptSender,
+    ) -> windows_uia::FocusEventFacts {
+        let (matching, candidate) =
+            windows_uia::match_focus_event(event_ns, invalidations, None, diagnostic_ns, None);
+        windows_uia::FocusEventFacts {
+            at: Instant::now(),
+            sequence: candidate.map(|invalidation| invalidation.sequence),
+            invalidation: candidate.map(|invalidation| invalidation.generation),
+            matching,
+            relation: sender.relation,
+            control_type: sender.control_type,
+            element: sender.element,
+            native: sender.native,
+            sender: sender.pid,
+        }
+    }
+
+    /// The invalidating focus handler at `at_ns`, as a record for matching.
+    fn script_invalidation(
+        privacy: &KeyboardPrivacy,
+        at_ns: u64,
+    ) -> windows_uia::RecordedInvalidation {
+        let (sequence, generation) = privacy.test_focus_event_invalidation_at(at_ns);
+        windows_uia::RecordedInvalidation {
+            sequence,
+            generation,
+            at_ns,
+        }
+    }
+
+    /// One text key press at `focus` with the admission steps of
+    /// `process_key_down` (the live native sample is replaced by `focus`;
+    /// counting and alerts are left out). Returns the admission code.
+    fn script_key(state: &mut HookState, focus: NativeKeyboardFocus) -> String {
+        begin_key_decision(state);
+        let admission = diagnosed_keyboard_capture_permit(state, Some(focus));
+        let grant = admission.as_ref().ok().copied();
+        if let Some(grant) = grant {
+            rebind_reverified_text(state, grant, Some(focus));
+        }
+        if let Some(cause) = buffered_text_discard(state, admission, Some(focus), false) {
+            discard_text_buffer(state, cause);
+        }
+        if let Some(grant) = grant {
+            state.text_buf.push('x');
+            state.text_tag.push(12, 0, false);
+            state.last_text_time = Some(Instant::now());
+            state.text_privacy_generation = Some(grant.token);
+            state.text_generation = Some(grant.generation);
+            state.text_element_bound = grant.element_bound;
+            state.text_element = grant.element;
+            state.text_focus = Some(focus);
+            state.text_hold_since = None;
+            state.text_pid = 12;
+        }
+        match admission {
+            Ok(_) => "ok".to_string(),
+            Err(denial) => denial.code().to_string(),
+        }
+    }
+
+    /// One transcript line: what admission did in this step (counts since
+    /// the previous step; emitted texts in total).
+    fn script_record(
+        state: &mut HookState,
+        content_rx: &Receiver<InputContentWork>,
+        rx: &Receiver<UiEvent>,
+        emitted: &mut usize,
+        base: u64,
+        step: &str,
+        admission: &str,
+    ) -> String {
+        drain_test_content(state, content_rx);
+        *emitted += rx
+            .try_iter()
+            .filter(|event| matches!(event.data, EventData::Text { .. }))
+            .count();
+        let mut keys = input_admission::EpochKeys::default();
+        for epoch in state
+            .key_tally
+            .take_due(0, true)
+            .into_iter()
+            .flat_map(|report| report.epochs.into_values())
+        {
+            keys.add(&epoch);
+        }
+        let generation = state.text_generation.map_or("-".to_string(), |generation| {
+            let step = generation.wrapping_sub(base);
+            format!("e{}+{}", step >> 32, step & 0xffff_ffff)
+        });
+        format!(
+            "{step} adm={admission} discarded={} weak_focus={} text_gen={generation} \
+             emitted={emitted} weak_reverified={} treated={}/{}",
+            keys.totals.discarded_json(),
+            state.text_weak_focus.len(),
+            keys.weak_reverified,
+            keys.focus_events.weak,
+            keys.focus_events.events - keys.focus_events.weak,
+        )
+    }
+
+    /// Admission transcript of `admission_transcript_is_unchanged`, recorded
+    /// at 088f658f3. Stage 0a must leave it byte for byte unchanged.
+    const ADMISSION_TRANSCRIPT_GOLDEN: &str = concat!(
+        "b_proven.type adm=ok discarded={} weak_focus=0 text_gen=e0+0 emitted=0 weak_reverified=0 treated=0/0\n",
+        "b_proven.key adm=ok discarded={} weak_focus=0 text_gen=e1+1 emitted=0 weak_reverified=1 treated=1/0\n",
+        "b_proven.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=1 weak_reverified=0 treated=0/0\n",
+        "b_unmatched.type adm=ok discarded={} weak_focus=0 text_gen=e1+1 emitted=1 weak_reverified=0 treated=0/0\n",
+        "b_unmatched.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e2+2 emitted=1 weak_reverified=0 treated=0/1\n",
+        "b_unmatched.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=2 weak_reverified=0 treated=0/0\n",
+        "nearby_pair.type adm=ok discarded={} weak_focus=0 text_gen=e2+2 emitted=2 weak_reverified=0 treated=0/0\n",
+        "nearby_pair.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e4+4 emitted=2 weak_reverified=0 treated=0/2\n",
+        "nearby_pair.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=3 weak_reverified=0 treated=0/0\n",
+        "several_triple.type adm=ok discarded={} weak_focus=0 text_gen=e4+4 emitted=3 weak_reverified=0 treated=0/0\n",
+        "several_triple.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e7+7 emitted=3 weak_reverified=0 treated=0/3\n",
+        "several_triple.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=4 weak_reverified=0 treated=0/0\n",
+        "foreground_single.type adm=ok discarded={} weak_focus=0 text_gen=e7+7 emitted=4 weak_reverified=0 treated=0/0\n",
+        "foreground_single.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e8+8 emitted=4 weak_reverified=0 treated=0/1\n",
+        "foreground_single.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=5 weak_reverified=0 treated=0/0\n",
+        "contended_queue.type adm=ok discarded={} weak_focus=0 text_gen=e8+8 emitted=5 weak_reverified=0 treated=0/0\n",
+        "contended_queue.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e9+9 emitted=5 weak_reverified=0 treated=0/0\n",
+        "contended_queue.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=6 weak_reverified=0 treated=0/1\n",
+        "handoff_drop.type adm=ok discarded={} weak_focus=0 text_gen=e9+9 emitted=6 weak_reverified=0 treated=0/0\n",
+        "handoff_drop.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e10+10 emitted=6 weak_reverified=0 treated=0/64\n",
+        "handoff_drop.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=7 weak_reverified=0 treated=0/0\n",
+        "other_element_grant.type adm=ok discarded={} weak_focus=0 text_gen=e10+10 emitted=7 weak_reverified=0 treated=0/0\n",
+        "other_element_grant.drain adm=- discarded={} weak_focus=1 text_gen=e10+10 emitted=7 weak_reverified=0 treated=1/0\n",
+        "other_element_grant.key adm=ok discarded={\"generation_changed\":1} weak_focus=0 text_gen=e11+11 emitted=7 weak_reverified=0 treated=0/0\n",
+        "other_element_grant.flush adm=- discarded={} weak_focus=0 text_gen=- emitted=8 weak_reverified=0 treated=0/0\n",
+        "hold_expiry.type adm=ok discarded={} weak_focus=0 text_gen=e11+11 emitted=8 weak_reverified=0 treated=0/0\n",
+        "hold_expiry.flush_held adm=- discarded={} weak_focus=0 text_gen=e11+11 emitted=8 weak_reverified=0 treated=0/0\n",
+        "hold_expiry.flush_expired adm=- discarded={\"hold_expired\":1} weak_focus=0 text_gen=- emitted=8 weak_reverified=0 treated=0/0\n",
+        "navigation.type adm=ok discarded={} weak_focus=0 text_gen=e11+12 emitted=8 weak_reverified=0 treated=0/0\n",
+        "navigation.navigate adm=- discarded={\"navigation_unverified\":1} weak_focus=0 text_gen=- emitted=8 weak_reverified=0 treated=0/0\n",
+    );
+
+    #[test]
+    fn admission_transcript_is_unchanged() {
+        // Discards settle keystrokes in the shared ledger other tests read.
+        let _guard = input_accounting::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use windows_uia::SenderRelation::{Foreground, OtherProcess};
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (mut state, content_rx) = make_test_state(tx, "");
+        state.config.skip_password_fields = true;
+        let focus = NativeKeyboardFocus::for_test(10, 11, 12);
+        let privacy = state.keyboard_privacy.clone();
+        let base = privacy.generation();
+        // Another process's Window at the text's native focus (relaxation
+        // B's three facts), and the text's own element in the foreground.
+        let window = ScriptSender {
+            relation: OtherProcess,
+            control_type: Some(input_admission::WINDOW_CONTROL_TYPE),
+            element: Some(99),
+            native: Some(focus),
+            pid: Some(4242),
+        };
+        let same_element = ScriptSender {
+            relation: Foreground,
+            control_type: Some(50004),
+            element: Some(1),
+            native: Some(focus),
+            pid: None,
+        };
+        let grant = |element| {
+            NativeKeyboardFocus::test_grant(&privacy, focus, Some(element), Instant::now())
+        };
+        const MS: u64 = 1_000_000;
+        // Each case at its own time, far from every other case's records.
+        let at = |case: u64| (case + 1) * 10_000 * MS;
+        let mut emitted = 0;
+        let mut transcript = String::new();
+        macro_rules! record {
+            ($step:expr, $admission:expr) => {{
+                let line = script_record(
+                    &mut state,
+                    &content_rx,
+                    &rx,
+                    &mut emitted,
+                    base,
+                    $step,
+                    $admission,
+                );
+                transcript.push_str(&line);
+                transcript.push('\n');
+            }};
+        }
+        macro_rules! type_key {
+            ($case:literal, $element:expr) => {{
+                grant($element);
+                let admission = script_key(&mut state, focus);
+                record!(concat!($case, ".type"), &admission);
+            }};
+        }
+        macro_rules! decide_key {
+            ($case:literal, $element:expr) => {{
+                grant($element);
+                let admission = script_key(&mut state, focus);
+                record!(concat!($case, ".key"), &admission);
+            }};
+        }
+        macro_rules! flush {
+            ($case:literal, $element:expr) => {{
+                grant($element);
+                flush_text_buffer_at(&mut state, Some(focus));
+                record!(concat!($case, ".flush"), "-");
+            }};
+        }
+
+        // B proven by a matched single event, then the same element
+        // re-verified: kept and emitted.
+        type_key!("b_proven", 1);
+        let t = at(1);
+        let invalidation = script_invalidation(&privacy, t);
+        privacy.note_focus_event(script_facts(t + MS, &[invalidation], &[t + MS], window));
+        decide_key!("b_proven", 1);
+        flush!("b_proven", 1);
+
+        // The same event unmatched (no invalidation within the window): strong.
+        type_key!("b_unmatched", 1);
+        let t = at(2);
+        let invalidation = script_invalidation(&privacy, t);
+        privacy.note_focus_event(script_facts(
+            t + 40 * MS,
+            &[invalidation],
+            &[t + 40 * MS],
+            window,
+        ));
+        decide_key!("b_unmatched", 1);
+        flush!("b_unmatched", 1);
+
+        // A same-element pair 30 ms apart: each event `nearby_candidate`.
+        type_key!("nearby_pair", 1);
+        let t = at(3);
+        let pair = [
+            script_invalidation(&privacy, t),
+            script_invalidation(&privacy, t + 30 * MS),
+        ];
+        let events = [t + MS, t + 31 * MS];
+        for event in events {
+            privacy.note_focus_event(script_facts(event, &pair, &events, same_element));
+        }
+        decide_key!("nearby_pair", 1);
+        flush!("nearby_pair", 1);
+
+        // A triple 10 ms apart, a Window then two same-element events: each
+        // `several_candidates`.
+        type_key!("several_triple", 1);
+        let t = at(4);
+        let triple = [
+            script_invalidation(&privacy, t),
+            script_invalidation(&privacy, t + 10 * MS),
+            script_invalidation(&privacy, t + 20 * MS),
+        ];
+        let events = [t + MS, t + 11 * MS, t + 21 * MS];
+        for (event, sender) in events.into_iter().zip([window, same_element, same_element]) {
+            privacy.note_focus_event(script_facts(event, &triple, &events, sender));
+        }
+        decide_key!("several_triple", 1);
+        flush!("several_triple", 1);
+
+        // A matched single same-element event in the foreground: strong.
+        type_key!("foreground_single", 1);
+        let t = at(5);
+        let invalidation = script_invalidation(&privacy, t);
+        privacy.note_focus_event(script_facts(
+            t + MS,
+            &[invalidation],
+            &[t + MS],
+            same_element,
+        ));
+        decide_key!("foreground_single", 1);
+        flush!("foreground_single", 1);
+
+        // B's proof queued but the queue busy at the key decision: strong;
+        // the event is classified later against ended text.
+        type_key!("contended_queue", 1);
+        let t = at(6);
+        let invalidation = script_invalidation(&privacy, t);
+        privacy.note_focus_event(script_facts(t + MS, &[invalidation], &[t + MS], window));
+        {
+            grant(1);
+            let held = privacy.test_hold_focus_events();
+            let admission = script_key(&mut state, focus);
+            drop(held);
+            record!("contended_queue.key", &admission);
+        }
+        flush!("contended_queue", 1);
+
+        // B's proof dropped by the bounded hand-off behind 64 unmatched
+        // events: strong.
+        type_key!("handoff_drop", 1);
+        let t = at(7);
+        let invalidation = script_invalidation(&privacy, t);
+        privacy.note_focus_event(script_facts(t + MS, &[invalidation], &[t + MS], window));
+        for index in 0..64 {
+            privacy.note_focus_event(script_facts(
+                t + (1_000 + index) * MS,
+                &[],
+                &[],
+                same_element,
+            ));
+        }
+        decide_key!("handoff_drop", 1);
+        flush!("handoff_drop", 1);
+
+        // B proven, but the fresh grant names another element: discarded.
+        type_key!("other_element_grant", 1);
+        let t = at(8);
+        let invalidation = script_invalidation(&privacy, t);
+        privacy.note_focus_event(script_facts(t + MS, &[invalidation], &[t + MS], window));
+        drain_focus_events(&mut state);
+        record!("other_element_grant.drain", "-");
+        decide_key!("other_element_grant", 2);
+        flush!("other_element_grant", 2);
+
+        // A probe timeout (weak): the idle flush holds, then the hold
+        // expires and discards.
+        type_key!("hold_expiry", 1);
+        NativeKeyboardFocus::test_failure(&privacy, focus, true);
+        flush_text_buffer_at(&mut state, Some(focus));
+        record!("hold_expiry.flush_held", "-");
+        state.text_hold_since = Some(Instant::now() - TEXT_REVERIFY_HOLD);
+        flush_text_buffer_at(&mut state, Some(focus));
+        record!("hold_expiry.flush_expired", "-");
+
+        // Navigation: the live native focus is never the scripted one, so
+        // the buffer is not confirmed and is discarded.
+        type_key!("navigation", 1);
+        invalidate_keyboard_focus(&mut state);
+        record!("navigation.navigate", "-");
+
+        assert!(state.pending_text.is_empty());
+        assert_eq!(
+            transcript, ADMISSION_TRANSCRIPT_GOLDEN,
+            "admission changed; the transcript now reads:\n{transcript}"
+        );
+    }
+
     #[test]
     fn drop_alerts_skip_intended_blocks_name_special_keys_and_recheck_exclusions() {
         let (tx, _rx) = crossbeam_channel::bounded(64);

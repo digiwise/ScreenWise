@@ -1927,6 +1927,129 @@ mod tests {
         }
     }
 
+    /// Relaxation B's result for every case of
+    /// `relaxation_b_golden_table_is_unchanged`, recorded at 088f658f3. One
+    /// line per relation (foreground, webview2_child, other_process,
+    /// unknown) x control type (Window, Document, none) x event native focus
+    /// (same, differs, none); per line one group per event element (same,
+    /// other, none); per group one bit per text (current with focus, current
+    /// without focus, ended, none, ambiguous current possible, ambiguous
+    /// not) x matched (yes, no).
+    const RELAXATION_B_GOLDEN: &str = concat!(
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "110000000000 110000000000 110000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+        "000000000000 000000000000 000000000000\n",
+    );
+
+    /// The one relaxation B decision the golden table records (the only
+    /// line a later change of that decision's signature may touch).
+    fn relaxation_b_golden_bit(facts: &FocusEventFacts, text: TextAtEvent) -> bool {
+        focus_event_weak(text, classify_focus_event(facts, text))
+    }
+
+    #[test]
+    fn relaxation_b_golden_table_is_unchanged() {
+        let focus = NativeKeyboardFocus::for_test(1, 2, 3);
+        let elsewhere = NativeKeyboardFocus::for_test(1, 9, 3);
+        let relations = [
+            SenderRelation::Foreground,
+            SenderRelation::WebView2Child,
+            SenderRelation::OtherProcess,
+            SenderRelation::Unknown,
+        ];
+        let control_types = [Some(WINDOW_CONTROL_TYPE), Some(50030), None];
+        let natives = [Some(focus), Some(elsewhere), None];
+        let elements = [Some(4), Some(8), None];
+        let texts = [
+            TextAtEvent::Current(binding(Some(4), Some(focus))),
+            TextAtEvent::Current(binding(Some(4), None)),
+            TextAtEvent::Ended(binding(Some(4), Some(focus))),
+            TextAtEvent::None,
+            TextAtEvent::Ambiguous {
+                current_possible: true,
+            },
+            TextAtEvent::Ambiguous {
+                current_possible: false,
+            },
+        ];
+        let mut table = String::new();
+        for relation in relations {
+            for control_type in control_types {
+                for native in natives {
+                    let groups: Vec<String> = elements
+                        .iter()
+                        .map(|element| {
+                            texts
+                                .iter()
+                                .flat_map(|text| [(text, true), (text, false)])
+                                .map(|(text, matched)| {
+                                    let facts = FocusEventFacts {
+                                        sequence: matched.then_some(1),
+                                        invalidation: matched.then_some(5 << 32),
+                                        matching: if matched {
+                                            FocusMatch::Matched { offset: 0 }
+                                        } else {
+                                            FocusMatch::SeveralCandidates
+                                        },
+                                        relation,
+                                        control_type,
+                                        element: *element,
+                                        native,
+                                        ..focus_facts(None, None)
+                                    };
+                                    if relaxation_b_golden_bit(&facts, *text) {
+                                        '1'
+                                    } else {
+                                        '0'
+                                    }
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    table.push_str(&groups.join(" "));
+                    table.push('\n');
+                }
+            }
+        }
+        assert_eq!(
+            table, RELAXATION_B_GOLDEN,
+            "relaxation B changed; the table now reads:\n{table}"
+        );
+    }
+
     #[test]
     fn weak_focus_senders_are_reported_by_bounded_basename_only() {
         let mut tally = KeyAdmissionTally::default();
