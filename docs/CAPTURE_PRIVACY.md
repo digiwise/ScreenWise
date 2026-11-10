@@ -606,13 +606,16 @@ gate denial (refusals for one process within 10 s form one burst), a recheck
 discard of buffered text (one burst), or another lost-after-admission cause
 (`LostCause::alerts`). Never for password fields, excluded or protected windows
 (rechecked against the same window/application exclusion as UIA contact before
-an alert), privacy pauses or typing that was undone. At most one notification
-a minute; later ones are only recorded. A notification waits until input
-pauses (no keyboard or mouse input for 2 s by Windows' session-wide last-input
-time, which carries no content; at most 60 s), because a notification shown
-mid-typing raises focus events that lose further keys; a privacy pause that
-begins while it waits suppresses it, and at most four wait (the oldest beyond
-that is dropped unshown). It shows the local time of the loss, the
+an alert), privacy pauses or typing that was undone. At most one alert a
+minute, counted from when its burst reached the threshold; later ones are only
+recorded. A notification waits until input pauses (no keyboard or mouse input
+for 2 s by Windows' session-wide last-input time, which carries no content; at
+most 60 s), because a notification shown mid-typing raises focus events that
+lose further keys. After 60 s of uninterrupted input, two notifications can
+therefore appear less than a minute apart. A privacy pause that begins while
+it waits suppresses it, and at most four wait (the oldest beyond that is
+dropped unshown); if Windows' last-input time is unavailable, it shows at
+once. It shows the local time the burst reached the threshold, the
 executable basename, the number of lost keys, the cause in plain words, the
 time since the last app switch (refusals), where focus moved (discards) and,
 when N > 0, the first N lost keys with special keys by name. Losses after
