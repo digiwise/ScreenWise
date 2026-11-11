@@ -591,6 +591,13 @@ single provider answer slower than the 50 ms per-call timeout. Now:
   `duration_ms_buckets_lt10_lt25_lt50_lt75_lt100_lt150_lt200_lt250_ge250`
   (the five-band field is kept) and `skipped_paced`, per process with the
   existing bounds.
+- Diagnostics (2026-11-11): a `focus_ownership` failure's `hresult` field
+  holds a fixed label naming which half of the check failed:
+  `native_process_no_keyboard_focus` (the element belongs to the native focus
+  window's process but lacks keyboard focus) or
+  `element_<foreground|webview2|other_process|unknown>_native_<foreground|webview2>`
+  (the element's process, relative to the foreground application, differs
+  from the native focus window's). Labels only; the decision is unchanged.
 
 Limits: a native UIA timeout is not a hard wall-clock bound, so one call can
 still return after the budget; such a probe is costly and its answer is not

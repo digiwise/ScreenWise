@@ -520,6 +520,41 @@ fn sender_relation(
     }
 }
 
+/// Fixed diagnostic label for a `focus_ownership` probe failure (aggregate
+/// diagnostics only; the decision is unchanged). `element` is the focused
+/// element's process relative to the foreground (`sender_relation`), `None`
+/// when it is the native focus window's process; `native_in_foreground` says
+/// whether the native focus window belongs to the foreground process rather
+/// than its accepted WebView2 child.
+fn focus_ownership_detail(
+    element: Option<SenderRelation>,
+    native_in_foreground: bool,
+) -> &'static str {
+    const OTHER_PROCESS: [[&str; 2]; SENDER_RELATIONS] = [
+        [
+            "element_foreground_native_webview2",
+            "element_foreground_native_foreground",
+        ],
+        [
+            "element_webview2_native_webview2",
+            "element_webview2_native_foreground",
+        ],
+        [
+            "element_other_process_native_webview2",
+            "element_other_process_native_foreground",
+        ],
+        [
+            "element_unknown_native_webview2",
+            "element_unknown_native_foreground",
+        ],
+    ];
+    match element {
+        // Same process: the failure was HasKeyboardFocus=false.
+        None => "native_process_no_keyboard_focus",
+        Some(relation) => OTHER_PROCESS[relation.index()][usize::from(native_in_foreground)],
+    }
+}
+
 /// Content-free facts about one UIA focus-changed event. They never grant,
 /// deny or invalidate anything themselves, but they are the proof relaxation
 /// B (owner decision 2026-10-25) needs before the hook may treat a focus
@@ -2368,14 +2403,25 @@ impl UiaContext {
                     .focus_without_keyboard_focus
                     .matches(control_executable().as_deref());
             if (!owns_focus && !focus_relaxed) || element_pid != focus.control_pid {
-                return Err(probe_error(
-                    CaptureReason::InputFocusOwnershipFailed,
-                    "focus_ownership",
-                    format!(
-                        "has_keyboard_focus={owns_focus}; element_pid={element_pid}; native_pid={}; control_pid={}",
-                        focus.pid, focus.control_pid
-                    ),
-                ));
+                let element = (element_pid != focus.control_pid).then(|| {
+                    sender_relation(Some(element_pid), Some(focus.pid), |host, child| {
+                        webview2_child_of(child, host)
+                    })
+                });
+                return Err(PrivacyProbeFailure {
+                    detail: Some(focus_ownership_detail(
+                        element,
+                        focus.control_pid == focus.pid,
+                    )),
+                    ..probe_error(
+                        CaptureReason::InputFocusOwnershipFailed,
+                        "focus_ownership",
+                        format!(
+                            "has_keyboard_focus={owns_focus}; element_pid={element_pid}; native_pid={}; control_pid={}",
+                            focus.pid, focus.control_pid
+                        ),
+                    )
+                });
             }
             let value = element
                 .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, true)
@@ -4646,6 +4692,26 @@ mod tests {
             pid: 12,
             control_pid: 12,
         }
+    }
+
+    #[test]
+    fn focus_ownership_failures_carry_a_fixed_relation_label() {
+        assert_eq!(
+            focus_ownership_detail(None, true),
+            "native_process_no_keyboard_focus"
+        );
+        assert_eq!(
+            focus_ownership_detail(Some(SenderRelation::WebView2Child), true),
+            "element_webview2_native_foreground"
+        );
+        assert_eq!(
+            focus_ownership_detail(Some(SenderRelation::Foreground), false),
+            "element_foreground_native_webview2"
+        );
+        assert_eq!(
+            focus_ownership_detail(Some(SenderRelation::Unknown), true),
+            "element_unknown_native_foreground"
+        );
     }
 
     #[test]
