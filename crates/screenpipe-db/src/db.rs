@@ -65,6 +65,187 @@ pub const MEETING_END_REASON_AUTO_END: &str = "auto_end";
 /// App shutdown closed an active meeting row. Eligible for auto-merge on next launch.
 pub const MEETING_END_REASON_SHUTDOWN: &str = "shutdown";
 
+/// Time filter for a search query whose start and end are bound as `?2` and
+/// `?3`. A given bound is a plain comparison; a missing one becomes `?N IS NULL`
+/// so every parameter stays referenced (sqlx binds unreferenced `?N` gaps
+/// positionally). Never write `(?2 IS NULL OR col >= ?2)`: SQLite cannot use the
+/// timestamp index for that form and reads every frame (2026-11-12: over 30 s
+/// on a 45 GB store with a cold page cache, so the search route timed out).
+fn search_time_range_sql(column: &str, has_start: bool, has_end: bool) -> String {
+    let bound = |given: bool, op: &str, param: &str| {
+        if given {
+            format!("AND {column} {op} {param}")
+        } else {
+            format!("AND {param} IS NULL")
+        }
+    };
+    format!(
+        "{} {}",
+        bound(has_start, ">=", "?2"),
+        bound(has_end, "<=", "?3")
+    )
+}
+
+/// SQL for `search_ocr`. `GROUP BY +frames.id`: with the joins, a plain
+/// `GROUP BY frames.id` makes SQLite walk all frames in id order instead of
+/// using the timestamp index.
+fn ocr_search_sql(has_fts: bool, has_start: bool, has_end: bool) -> String {
+    format!(
+        r#"
+        SELECT
+            frames.id as frame_id,
+            COALESCE(frames.full_text, ocr_text.text, frames.accessibility_text, '') as ocr_text,
+            ocr_text.text_json,
+            frames.timestamp,
+            frames.name as frame_name,
+            COALESCE(frames.snapshot_path, video_chunks.file_path) as file_path,
+            frames.offset_index,
+            frames.app_name,
+            COALESCE(ocr_text.ocr_engine, '') as ocr_engine,
+            frames.window_name,
+            COALESCE(video_chunks.device_name, frames.device_name) as device_name,
+            GROUP_CONCAT(tags.name, ',') as tags,
+            frames.browser_url,
+            frames.focused,
+            frames.text_source,
+            frames.capture_privacy
+        FROM frames
+        LEFT JOIN video_chunks ON frames.video_chunk_id = video_chunks.id
+        LEFT JOIN ocr_text ON frames.id = ocr_text.frame_id
+        LEFT JOIN vision_tags ON frames.id = vision_tags.vision_id
+        LEFT JOIN tags ON vision_tags.tag_id = tags.id
+        {fts_join}
+        WHERE 1=1
+            {fts_condition}
+            {time_range}
+            AND (?4 IS NULL OR LENGTH(COALESCE(frames.full_text, ocr_text.text, '')) >= ?4)
+            AND (?5 IS NULL OR LENGTH(COALESCE(frames.full_text, ocr_text.text, '')) <= ?5)
+            AND (?6 IS NULL OR COALESCE(video_chunks.device_name, frames.device_name) LIKE '%' || ?6 || '%')
+            AND (?7 IS NULL OR frames.machine_id = ?7)
+            AND (?8 IS NULL OR frames.focused = ?8)
+            AND (?9 IS NULL OR frames.name LIKE '%' || ?9 || '%')
+            AND (json_array_length(?12) = 0 OR frames.id IN (
+                SELECT vt.vision_id
+                FROM vision_tags vt
+                JOIN tags t ON vt.tag_id = t.id
+                WHERE t.name IN (SELECT value FROM json_each(?12))
+                GROUP BY vt.vision_id
+                HAVING COUNT(DISTINCT t.name) = json_array_length(?12)
+            ))
+            AND (?13 IS NULL OR CASE WHEN json_valid(frames.capture_privacy) THEN
+                json_type(frames.capture_privacy, '$.is_active_monitor') IN ('true', 'false')
+                AND json_extract(frames.capture_privacy, '$.is_active_monitor') = ?13
+                AND json_type(frames.capture_privacy, '$.foreground_monitor_changed') = 'false'
+                ELSE 0 END)
+        GROUP BY +frames.id
+        ORDER BY frames.timestamp DESC
+        LIMIT ?10 OFFSET ?11
+        "#,
+        fts_join = if has_fts {
+            "JOIN frames_fts ON frames.id = frames_fts.rowid"
+        } else {
+            ""
+        },
+        fts_condition = if has_fts {
+            "AND frames_fts MATCH ?1"
+        } else {
+            ""
+        },
+        time_range = search_time_range_sql("frames.timestamp", has_start, has_end),
+    )
+}
+
+/// SQL counting the frames `search_ocr` (or, with `accessibility_only`,
+/// `search_accessibility`) can return, for the search route's `total`.
+fn frame_count_sql(
+    has_fts: bool,
+    accessibility_only: bool,
+    has_start: bool,
+    has_end: bool,
+) -> String {
+    format!(
+        r#"SELECT COUNT(DISTINCT frames.id)
+           FROM frames
+           {fts_join}
+           WHERE 1=1
+               {fts_condition}
+               {time_range}
+               AND (?4 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) >= ?4)
+               AND (?5 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) <= ?5)
+               AND (?6 IS NULL OR frames.name LIKE '%' || ?6 || '%')
+               AND (?7 IS NULL OR frames.focused = ?7)
+               AND (json_array_length(?8) = 0 OR frames.id IN (
+                   SELECT vt.vision_id
+                   FROM vision_tags vt
+                   JOIN tags t ON vt.tag_id = t.id
+                   WHERE t.name IN (SELECT value FROM json_each(?8))
+                   GROUP BY vt.vision_id
+                   HAVING COUNT(DISTINCT t.name) = json_array_length(?8)
+               ))
+    AND (?9 IS NULL OR CASE WHEN json_valid(frames.capture_privacy) THEN
+        json_type(frames.capture_privacy, '$.is_active_monitor') IN ('true', 'false')
+        AND json_extract(frames.capture_privacy, '$.is_active_monitor') = ?9
+        AND json_type(frames.capture_privacy, '$.foreground_monitor_changed') = 'false'
+        ELSE 0 END)
+               {a11y_filter}"#,
+        fts_join = if has_fts {
+            "JOIN frames_fts ON frames.id = frames_fts.rowid"
+        } else {
+            ""
+        },
+        fts_condition = if has_fts {
+            "AND frames_fts MATCH ?1"
+        } else {
+            ""
+        },
+        time_range = search_time_range_sql("frames.timestamp", has_start, has_end),
+        a11y_filter = if accessibility_only {
+            "AND frames.accessibility_text IS NOT NULL AND frames.accessibility_text != ''"
+        } else {
+            ""
+        }
+    )
+}
+
+/// SQL for `search_accessibility`.
+fn accessibility_search_sql(has_fts: bool, has_start: bool, has_end: bool) -> String {
+    format!(
+        r#"
+            SELECT
+                f.id,
+                COALESCE(f.full_text, f.accessibility_text, '') AS text_output,
+                f.timestamp,
+                COALESCE(f.app_name, '') as app_name,
+                COALESCE(f.window_name, '') as window_name,
+                NULL as initial_traversal_at,
+                COALESCE(vc.file_path, '') as file_path,
+                COALESCE(f.offset_index, 0) as offset_index,
+                f.name as frame_name,
+                f.browser_url
+            FROM frames f
+            LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
+            {fts_join}
+            WHERE 1=1
+                {fts_condition}
+                {time_range}
+                AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''
+            ORDER BY f.timestamp DESC
+            LIMIT ?4 OFFSET ?5
+            "#,
+        fts_join = if has_fts {
+            "JOIN frames_fts ON f.id = frames_fts.rowid"
+        } else {
+            ""
+        },
+        fts_condition = if has_fts {
+            "AND frames_fts MATCH ?1"
+        } else {
+            ""
+        },
+        time_range = search_time_range_sql("f.timestamp", has_start, has_end),
+    )
+}
+
 fn normalize_timestamp_for_range_query(timestamp: &str) -> String {
     DateTime::parse_from_rfc3339(timestamp)
         .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
@@ -4210,69 +4391,7 @@ impl DatabaseManager {
         let fts_query = frame_fts_parts.join(" ");
         let has_fts = !fts_query.trim().is_empty();
 
-        let sql = format!(
-            r#"
-        SELECT
-            frames.id as frame_id,
-            COALESCE(frames.full_text, ocr_text.text, frames.accessibility_text, '') as ocr_text,
-            ocr_text.text_json,
-            frames.timestamp,
-            frames.name as frame_name,
-            COALESCE(frames.snapshot_path, video_chunks.file_path) as file_path,
-            frames.offset_index,
-            frames.app_name,
-            COALESCE(ocr_text.ocr_engine, '') as ocr_engine,
-            frames.window_name,
-            COALESCE(video_chunks.device_name, frames.device_name) as device_name,
-            GROUP_CONCAT(tags.name, ',') as tags,
-            frames.browser_url,
-            frames.focused,
-            frames.text_source,
-            frames.capture_privacy
-        FROM frames
-        LEFT JOIN video_chunks ON frames.video_chunk_id = video_chunks.id
-        LEFT JOIN ocr_text ON frames.id = ocr_text.frame_id
-        LEFT JOIN vision_tags ON frames.id = vision_tags.vision_id
-        LEFT JOIN tags ON vision_tags.tag_id = tags.id
-        {fts_join}
-        WHERE 1=1
-            {fts_condition}
-            AND (?2 IS NULL OR frames.timestamp >= ?2)
-            AND (?3 IS NULL OR frames.timestamp <= ?3)
-            AND (?4 IS NULL OR LENGTH(COALESCE(frames.full_text, ocr_text.text, '')) >= ?4)
-            AND (?5 IS NULL OR LENGTH(COALESCE(frames.full_text, ocr_text.text, '')) <= ?5)
-            AND (?6 IS NULL OR COALESCE(video_chunks.device_name, frames.device_name) LIKE '%' || ?6 || '%')
-            AND (?7 IS NULL OR frames.machine_id = ?7)
-            AND (?8 IS NULL OR frames.focused = ?8)
-            AND (?9 IS NULL OR frames.name LIKE '%' || ?9 || '%')
-            AND (json_array_length(?12) = 0 OR frames.id IN (
-                SELECT vt.vision_id
-                FROM vision_tags vt
-                JOIN tags t ON vt.tag_id = t.id
-                WHERE t.name IN (SELECT value FROM json_each(?12))
-                GROUP BY vt.vision_id
-                HAVING COUNT(DISTINCT t.name) = json_array_length(?12)
-            ))
-            AND (?13 IS NULL OR CASE WHEN json_valid(frames.capture_privacy) THEN
-                json_type(frames.capture_privacy, '$.is_active_monitor') IN ('true', 'false')
-                AND json_extract(frames.capture_privacy, '$.is_active_monitor') = ?13
-                AND json_type(frames.capture_privacy, '$.foreground_monitor_changed') = 'false'
-                ELSE 0 END)
-        GROUP BY frames.id
-        ORDER BY frames.timestamp DESC
-        LIMIT ?10 OFFSET ?11
-        "#,
-            fts_join = if has_fts {
-                "JOIN frames_fts ON frames.id = frames_fts.rowid"
-            } else {
-                ""
-            },
-            fts_condition = if has_fts {
-                "AND frames_fts MATCH ?1"
-            } else {
-                ""
-            },
-        );
+        let sql = ocr_search_sql(has_fts, start_time.is_some(), end_time.is_some());
 
         // Serialize the tag filter to a JSON array so the SQL can use
         // `json_each` / `json_array_length`. Empty array short-circuits the
@@ -5382,47 +5501,11 @@ impl DatabaseManager {
         let has_fts = !fts_query.trim().is_empty();
 
         let sql = match content_type {
-            ContentType::OCR | ContentType::Accessibility => format!(
-                r#"SELECT COUNT(DISTINCT frames.id)
-                   FROM frames
-                   {fts_join}
-                   WHERE 1=1
-                       {fts_condition}
-                       AND (?2 IS NULL OR frames.timestamp >= ?2)
-                       AND (?3 IS NULL OR frames.timestamp <= ?3)
-                       AND (?4 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) >= ?4)
-                       AND (?5 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) <= ?5)
-                       AND (?6 IS NULL OR frames.name LIKE '%' || ?6 || '%')
-                       AND (?7 IS NULL OR frames.focused = ?7)
-                       AND (json_array_length(?8) = 0 OR frames.id IN (
-                           SELECT vt.vision_id
-                           FROM vision_tags vt
-                           JOIN tags t ON vt.tag_id = t.id
-                           WHERE t.name IN (SELECT value FROM json_each(?8))
-                           GROUP BY vt.vision_id
-                           HAVING COUNT(DISTINCT t.name) = json_array_length(?8)
-                       ))
-            AND (?9 IS NULL OR CASE WHEN json_valid(frames.capture_privacy) THEN
-                json_type(frames.capture_privacy, '$.is_active_monitor') IN ('true', 'false')
-                AND json_extract(frames.capture_privacy, '$.is_active_monitor') = ?9
-                AND json_type(frames.capture_privacy, '$.foreground_monitor_changed') = 'false'
-                ELSE 0 END)
-                       {a11y_filter}"#,
-                fts_join = if has_fts {
-                    "JOIN frames_fts ON frames.id = frames_fts.rowid"
-                } else {
-                    ""
-                },
-                fts_condition = if has_fts {
-                    "AND frames_fts MATCH ?1"
-                } else {
-                    ""
-                },
-                a11y_filter = if content_type == ContentType::Accessibility {
-                    "AND frames.accessibility_text IS NOT NULL AND frames.accessibility_text != ''"
-                } else {
-                    ""
-                }
+            ContentType::OCR | ContentType::Accessibility => frame_count_sql(
+                has_fts,
+                content_type == ContentType::Accessibility,
+                start_time.is_some(),
+                end_time.is_some(),
             ),
             ContentType::Audio => format!(
                 r#"SELECT COUNT(DISTINCT audio_transcriptions.id)
@@ -6204,41 +6287,7 @@ impl DatabaseManager {
         let combined_query = fts_parts.join(" ");
         let has_fts = !combined_query.trim().is_empty();
 
-        let sql = format!(
-            r#"
-            SELECT
-                f.id,
-                COALESCE(f.full_text, f.accessibility_text, '') AS text_output,
-                f.timestamp,
-                COALESCE(f.app_name, '') as app_name,
-                COALESCE(f.window_name, '') as window_name,
-                NULL as initial_traversal_at,
-                COALESCE(vc.file_path, '') as file_path,
-                COALESCE(f.offset_index, 0) as offset_index,
-                f.name as frame_name,
-                f.browser_url
-            FROM frames f
-            LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
-            {fts_join}
-            WHERE 1=1
-                {fts_condition}
-                AND (?2 IS NULL OR f.timestamp >= ?2)
-                AND (?3 IS NULL OR f.timestamp <= ?3)
-                AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''
-            ORDER BY f.timestamp DESC
-            LIMIT ?4 OFFSET ?5
-            "#,
-            fts_join = if has_fts {
-                "JOIN frames_fts ON f.id = frames_fts.rowid"
-            } else {
-                ""
-            },
-            fts_condition = if has_fts {
-                "AND frames_fts MATCH ?1"
-            } else {
-                ""
-            },
-        );
+        let sql = accessibility_search_sql(has_fts, start_time.is_some(), end_time.is_some());
 
         sqlx::query_as(&sql)
             .bind(if has_fts {
@@ -6308,8 +6357,7 @@ impl DatabaseManager {
             WHERE e.source = 'accessibility'
               AND e.on_screen = ?1
               {fts_match}
-              AND (?2 IS NULL OR f.timestamp >= ?2)
-              AND (?3 IS NULL OR f.timestamp <= ?3)
+              {time_range}
               AND (?4 IS NULL OR f.app_name = ?4)
               AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
             GROUP BY f.id
@@ -6326,6 +6374,8 @@ impl DatabaseManager {
             } else {
                 ""
             },
+            time_range =
+                search_time_range_sql("f.timestamp", start_time.is_some(), end_time.is_some()),
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
@@ -6364,8 +6414,7 @@ impl DatabaseManager {
             WHERE e.source = 'accessibility'
               AND e.on_screen = ?1
               {fts_match}
-              AND (?2 IS NULL OR f.timestamp >= ?2)
-              AND (?3 IS NULL OR f.timestamp <= ?3)
+              {time_range}
               AND (?4 IS NULL OR f.app_name = ?4)
               AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
             "#,
@@ -6379,6 +6428,8 @@ impl DatabaseManager {
             } else {
                 ""
             },
+            time_range =
+                search_time_range_sql("f.timestamp", start_time.is_some(), end_time.is_some()),
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
@@ -11833,6 +11884,57 @@ mod tests {
         DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap()
+    }
+
+    /// A time-bounded search must reach frames through the timestamp index,
+    /// never by reading every frame (see `search_time_range_sql`).
+    #[tokio::test]
+    async fn time_bounded_frame_searches_use_the_timestamp_index() {
+        let db = test_database().await;
+        for has_fts in [false, true] {
+            for (has_start, has_end) in [(true, true), (true, false), (false, true)] {
+                for (name, sql) in [
+                    ("ocr", ocr_search_sql(has_fts, has_start, has_end)),
+                    (
+                        "accessibility",
+                        accessibility_search_sql(has_fts, has_start, has_end),
+                    ),
+                    ("count", frame_count_sql(has_fts, false, has_start, has_end)),
+                    (
+                        "a11y count",
+                        frame_count_sql(has_fts, true, has_start, has_end),
+                    ),
+                ] {
+                    let plan: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+                        .fetch_all(&db.pool)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(|row| row.get::<String, _>(3))
+                        .collect();
+                    let case = format!("{name} fts={has_fts} start={has_start} end={has_end}");
+                    assert!(
+                        !plan.iter().any(|step| {
+                            ["SCAN frames", "SCAN f"].iter().any(|scan| {
+                                step == scan || step.starts_with(&format!("{scan} USING"))
+                            })
+                        }),
+                        "{case} reads every frame: {plan:?}"
+                    );
+                    if !has_fts {
+                        assert!(
+                            plan.iter()
+                                .any(|step| step.contains("idx_frames_timestamp")),
+                            "{case} does not use the timestamp index: {plan:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            search_time_range_sql("f.timestamp", false, false),
+            "AND ?2 IS NULL AND ?3 IS NULL"
+        );
     }
 
     // ─── Dedicated read endpoints: DatabaseManager method tests ───
