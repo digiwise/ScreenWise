@@ -536,8 +536,10 @@ breaker state also as soon as a probe timeout opens it. Only a timeout (or,
 since 2026-10-29, provider work beyond the probe's 250 ms budget) opens the
 breaker and such a probe clears the decision, so keystrokes in that process
 while it is open count as `decision_unavailable` with `breaker: open` until a
-probe succeeds. A long-walk or paced skip keeps the last decision but advances
-the generation, so its keystrokes count as `generation_changed`.
+probe succeeds. A long-walk skip keeps the last decision but advances the
+generation, so its keystrokes count as `generation_changed`. A paced skip
+(since 2026-11-11) keeps the decision and the generation, so its keystrokes are
+admitted or, once the decision is older than the age limit, `decision_stale`.
 
 Reading limits: the comparison is by top-level window, so a focus move inside
 one window (or a reused window handle) keeps the previous outcome. Keystrokes
@@ -547,7 +549,10 @@ probe completed still show the previous window's outcome, with
 worker's first sample, the worker does not sample the foreground, so keystrokes
 in a newly focused window show as `before_sample` rather than
 `visual_gate_closed` or `none_yet`; read `before_sample` beside the epoch's
-`visual_gate_closed` probe count.
+`visual_gate_closed` probe count. The `probe_age` band `lt75ms` matched the
+former 75 ms decision lifetime; since 2026-11-11 the lifetime is 125 ms, so a
+`decision_unavailable` 75-125 ms after the last probe falls in `lt250ms`
+(fixed schema labels are kept).
 
 New counts in `input_keystroke_epoch`: `focus_events.treated` (`weak`,
 `strong`), `weak_reverified` (buffers kept by a re-verification that relied on
@@ -578,14 +583,27 @@ single provider answer slower than the 50 ms per-call timeout. Now:
   least that long after the answer, so probing occupies at most about half of
   its UI thread. This bound covers answered calls only: a call that timed out
   is not cancelled by UIA, and its remaining provider work is unmeasured. The
-  probe also runs every poll whether or not the user is typing. Such a probe is skipped as `skipped_paced`; like the other
-  skips it denies input and advances the generation weakly, so the slow
-  answer's decision does not outlive the next poll (about 25 ms) and buffered
-  text can only be kept by the next probe's re-verification.
+  probe also runs every poll whether or not the user is typing. Such a probe is skipped as `skipped_paced`.
+  Owner decision (2026-11-11): unlike the breaker and long-walk skips, a paced
+  skip no longer advances the generation; the slow answer's decision runs out
+  its normal age and stays subject to focus events, native focus and every
+  other per-key check. (Before, it denied input from the next poll, about
+  25 ms.)
+- Owner decision (2026-11-11): the evidence freshness limit is 125 ms (was
+  75 ms). A decision admits keystrokes for at most 125 ms after its evidence
+  was read, and a probe whose verification leaves its evidence older than that
+  fails. A move to another native window (HWND) or process is still caught per
+  key by the native focus check. What the 50 ms extension covers: a move
+  between controls sharing one HWND (normal in browsers, Electron, WPF,
+  UWP/WinUI and Office) whose UIA focus event is late or missing, and an
+  element whose IsPassword flips in place (for example a "show password"
+  toggle), which raises no focus event and is caught only by the next
+  completed probe. After a paced skip the exposure is the decision's remaining
+  age instead of the next poll (about 25 ms), and pacing follows exactly the
+  slow answers whose UI thread is also more likely to deliver focus events
+  late.
 - Unchanged: exclusions and cross-process checks before any UIA contact, the
-  in-probe focus recheck, the 75 ms evidence freshness rule (a slow first
-  answer still fails if verification leaves its evidence older than 75 ms),
-  focus-event invalidation, the long-walk skip threshold (50 ms) and the walk
+  in-probe focus recheck, focus-event invalidation, the long-walk skip threshold (50 ms) and the walk
   breaker.
 - Diagnostics: `input_probe_summary` adds
   `duration_ms_buckets_lt10_lt25_lt50_lt75_lt100_lt150_lt200_lt250_ge250`

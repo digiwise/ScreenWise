@@ -51,10 +51,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const LOCKED_SCREEN_UIA_BACKOFF: Duration = Duration::from_millis(1000);
-// Keep routine refresh well inside the 75 ms permit lifetime even when a
-// provider call and ordinary Windows scheduler jitter add measurable delay.
+// Keep routine refresh well inside the permit lifetime even when a provider
+// call and ordinary Windows scheduler jitter add measurable delay.
 const KEYBOARD_PRIVACY_POLL_MS: u64 = 25;
-const KEYBOARD_PRIVACY_MAX_AGE: Duration = Duration::from_millis(75);
+// Owner decision 2026-11-11: 125 ms (was 75 ms), so an answer taking 50-75 ms
+// is not already expired when the next key arrives.
+const KEYBOARD_PRIVACY_MAX_AGE: Duration = Duration::from_millis(125);
 const KEYBOARD_PRIVACY_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
 const KEYBOARD_PRIVACY_UNKNOWN: u8 = 0;
 const KEYBOARD_PRIVACY_ALLOWED: u8 = 1;
@@ -1408,6 +1410,23 @@ impl KeyboardPrivacy {
             .fetch_add(STRONG_INVALIDATION, Ordering::SeqCst);
     }
 
+    /// The invalidation a skipped probe applies. An excluded application is
+    /// strong (its caller also sets the block); a breaker or long-walk skip
+    /// is weak, so buffered text may still be re-verified by the next probe.
+    /// A paced skip follows an answer that arrived (owner decision
+    /// 2026-11-11): that decision runs out its normal
+    /// `KEYBOARD_PRIVACY_MAX_AGE`, subject to every other invalidation and
+    /// per-key check.
+    fn invalidate_for_skip(&self, skip: input_admission::ProbeSkip) {
+        match skip {
+            input_admission::ProbeSkip::Excluded => self.invalidate(),
+            input_admission::ProbeSkip::Breaker | input_admission::ProbeSkip::LongWalk => {
+                self.invalidate_from(InvalidationSource::ProbeSkip)
+            }
+            input_admission::ProbeSkip::Paced => {}
+        }
+    }
+
     /// As `invalidate`, counting its source for diagnostics; a weak source
     /// keeps the focus epoch.
     pub(crate) fn invalidate_from(&self, source: InvalidationSource) {
@@ -2242,7 +2261,7 @@ impl UiaContext {
         }) {
             crate::uia_breaker::note_exclusion_skip();
             privacy.set_block(focus.map(|focus| (focus, KeyboardPrivacyDenial::Excluded)));
-            privacy.invalidate();
+            privacy.invalidate_for_skip(ProbeSkip::Excluded);
             privacy.note_probe_outcome(ProbeOutcome::Skipped(ProbeSkip::Excluded));
             return record(ProbeOutcome::Skipped(ProbeSkip::Excluded));
         }
@@ -2292,10 +2311,7 @@ impl UiaContext {
             } else {
                 crate::uia_breaker::note_probe_skipped();
             }
-            // Every skip withholds typing, a paced one included: the previous
-            // decision is not left to run out its 75 ms. Weak, so buffered
-            // text may still be re-verified by the next probe.
-            privacy.invalidate_from(InvalidationSource::ProbeSkip);
+            privacy.invalidate_for_skip(skip);
             privacy.note_probe_outcome(ProbeOutcome::Skipped(skip));
             return record(ProbeOutcome::Skipped(skip));
         }
@@ -5810,7 +5826,7 @@ mod tests {
         assert!(diagnostics.max_probe_duration_us >= diagnostics.last_probe_duration_us);
         assert!(diagnostics.last_probe_gap_us >= 1_000);
         assert!(diagnostics.max_probe_gap_us >= diagnostics.last_probe_gap_us);
-        assert!(diagnostics.last_stale_age_us > 75_000);
+        assert!(diagnostics.last_stale_age_us > duration_micros(KEYBOARD_PRIVACY_MAX_AGE));
         assert!(diagnostics.max_stale_age_us >= diagnostics.last_stale_age_us);
         assert_eq!(diagnostics.suppressions, 1);
         assert_eq!(
@@ -5922,6 +5938,69 @@ mod tests {
         let next = privacy.generation.load(Ordering::SeqCst);
         privacy.update(next, focus, Some(false), Instant::now());
         assert_ne!(privacy.permit(focus), Some(original));
+    }
+
+    #[test]
+    fn keyboard_decisions_last_125_ms_after_their_evidence() {
+        // Owner decision 2026-11-11 (was 75 ms).
+        assert_eq!(KEYBOARD_PRIVACY_MAX_AGE, Duration::from_millis(125));
+        let focus = Some(test_keyboard_focus());
+        let privacy = KeyboardPrivacy::default();
+        privacy.update(
+            0,
+            focus,
+            Some(false),
+            Instant::now() - Duration::from_millis(100),
+        );
+        assert!(
+            privacy.permit_diagnosed(focus).is_ok(),
+            "100 ms old: admitted"
+        );
+        let privacy = KeyboardPrivacy::default();
+        privacy.update(
+            0,
+            focus,
+            Some(false),
+            Instant::now() - Duration::from_millis(126),
+        );
+        assert_eq!(
+            privacy.permit_diagnosed(focus),
+            Err(KeyboardPrivacyDenial::DecisionStale)
+        );
+    }
+
+    #[test]
+    fn probe_skips_invalidate_by_kind_and_a_paced_skip_keeps_the_decision() {
+        use input_admission::ProbeSkip;
+        let focus = Some(test_keyboard_focus());
+        let granted = || {
+            let privacy = KeyboardPrivacy::default();
+            privacy.update(0, focus, Some(false), Instant::now());
+            let generation = privacy.generation();
+            assert_eq!(privacy.permit(focus), Some(generation));
+            (privacy, generation)
+        };
+
+        let (privacy, generation) = granted();
+        privacy.invalidate_for_skip(ProbeSkip::Paced);
+        assert_eq!(privacy.generation(), generation);
+        assert_eq!(
+            privacy.permit(focus),
+            Some(generation),
+            "paced: decision kept"
+        );
+
+        for weak in [ProbeSkip::Breaker, ProbeSkip::LongWalk] {
+            let (privacy, generation) = granted();
+            privacy.invalidate_for_skip(weak);
+            assert_eq!(privacy.generation(), generation + 1, "{weak:?}: weak step");
+            assert_eq!(privacy.permit(focus), None);
+        }
+
+        let (privacy, generation) = granted();
+        privacy.invalidate_for_skip(ProbeSkip::Excluded);
+        assert_eq!(privacy.generation(), generation + STRONG_INVALIDATION);
+        assert_eq!(privacy.permit(focus), None);
     }
 
     #[test]

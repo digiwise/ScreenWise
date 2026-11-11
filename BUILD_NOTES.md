@@ -127,7 +127,7 @@ The [investigation and repair note](docs/UIA_CAPTURE_REGRESSION_20261013.md)
 records matching owner-deployed hashes, the supplied failure counts and a
 freshly authorized numeric/fixed-stage diagnostic projection. The repair gives
 keyboard privacy probes their own work budget while retaining 75 ms permission
-freshness; traversal uses the actual deadline for request/reply/completion checks.
+freshness (125 ms since 2026-11-11); traversal uses the actual deadline for request/reply/completion checks.
 Failed accessibility metadata gains a freshly verified sampled executable
 basename without claiming exclusion-rule or blocker attribution. Per-frame
 walker/cache construction and discarded backoff state remain separately deferred.

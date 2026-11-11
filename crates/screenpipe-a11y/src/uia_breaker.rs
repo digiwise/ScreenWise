@@ -27,7 +27,9 @@
 //! the shared UI thread). A walk lease reserved before a screenshot does not
 //! count until the walk's UIA phase starts.
 //! A probe costs its target a few element-scope provider requests, not a
-//! walk, and every skipped probe withholds the user's typing, so its costly
+//! walk, and a breaker or long-walk skip withholds the user's typing (a paced
+//! skip keeps the last answer until its age limit since 2026-11-11; see
+//! `KeyboardPrivacy::invalidate_for_skip`), so its costly
 //! outcomes back off for 1 s, 2 s, 4 s ... capped at 30 s (2026-10-23)
 //! instead of the walk schedule. Since 2026-10-29 a probe's provider calls
 //! may wait for the rest of its 250 ms budget: a probe whose calls answer

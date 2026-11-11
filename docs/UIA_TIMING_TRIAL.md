@@ -106,7 +106,7 @@ off after two walks while a blip does not.
   element first pass the shared native gate; `uia_exclusion_skips` counts the
   calls not made.
 
-The keyboard probe still polls every 25 ms to keep its 75 ms permit fresh,
+The keyboard probe still polls every 25 ms to keep its 75 ms (125 ms since 2026-11-11) permit fresh,
 which is a continuous small load on the focused application; reducing it
 (probing only around input) is a separate owner decision because the first
 keystroke after idle would otherwise be suppressed.
