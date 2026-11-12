@@ -927,7 +927,10 @@ impl<'a> ElementFilter<'a> {
         }
         q.push(" WHERE e.source = 'accessibility'");
         if !self.query.is_empty() {
-            q.push(" AND e.id IN (SELECT rowid FROM elements_fts WHERE text MATCH ")
+            // `+` keeps SQLite from looking elements up by the matches' ids
+            // (every match in the whole history, per frame) when statistics
+            // claim many elements per frame; it checks each row instead.
+            q.push(" AND +e.id IN (SELECT rowid FROM elements_fts WHERE text MATCH ")
                 .push_bind(crate::text_normalizer::sanitize_fts5_query(self.query))
                 .push(")");
         }
@@ -8494,7 +8497,9 @@ LIMIT ? OFFSET ?
             q.build_query_as().fetch_all(&self.pool).await?
         };
         // Frames with OCR text, newest first. A frame that shares another
-        // frame's elements (`elements_ref_frame_id`) has none of its own.
+        // frame's elements (`elements_ref_frame_id`) is left out: it has its
+        // own `ocr_text`, but its elements are read from that frame, as the
+        // stored OCR rows were.
         let mut q = sqlx::QueryBuilder::<Sqlite>::new(
             "SELECT f.id FROM frames f WHERE f.elements_ref_frame_id IS NULL \
              AND EXISTS (SELECT 1 FROM ocr_text ot WHERE ot.frame_id = f.id)",
@@ -8570,8 +8575,10 @@ LIMIT ? OFFSET ?
     }
 
     /// The `ocr_text` rows `(text, text_json)` of `frame_ids`, by frame, in
-    /// storage order. Rows whose text lacks any of `required_tokens` (ASCII,
-    /// lower case) are skipped: none of their elements could match.
+    /// storage order. Rows where neither column holds one of
+    /// `required_tokens` (ASCII, lower case) are skipped: none of their
+    /// elements could match. Both are checked because they can differ:
+    /// capture strips editor-gutter digit runs from `text` only.
     async fn ocr_text_rows(
         &self,
         frame_ids: &[i64],
@@ -8586,9 +8593,11 @@ LIMIT ? OFFSET ?
         }
         q.push(")");
         for token in required_tokens {
-            q.push(" AND instr(lower(text), ")
+            q.push(" AND (instr(lower(text), ")
                 .push_bind(token.clone())
-                .push(") > 0");
+                .push(") > 0 OR instr(lower(text_json), ")
+                .push_bind(token.clone())
+                .push(") > 0)");
         }
         q.push(" ORDER BY frame_id, rowid");
         let rows: Vec<(i64, Option<String>, Option<String>)> =

@@ -655,7 +655,7 @@ mod query_plan_tests {
                 "elements_endpoint_text",
                 "SELECT e.id FROM frames f CROSS JOIN elements e ON e.frame_id = f.id \
                  WHERE e.source = 'accessibility' \
-                   AND e.id IN (SELECT rowid FROM elements_fts WHERE text MATCH '\"word\"') \
+                   AND +e.id IN (SELECT rowid FROM elements_fts WHERE text MATCH '\"word\"') \
                    AND f.timestamp >= '2020-01-01' AND f.timestamp <= '2030-01-01' \
                  ORDER BY e.frame_id DESC, e.sort_order ASC LIMIT 20"
                     .to_string(),
@@ -682,6 +682,13 @@ mod query_plan_tests {
                     .iter()
                     .any(|l| l == "SCAN e" || l.starts_with("SCAN e ")),
                 "{name}: walks the elements table.\nPlan:\n{}",
+                plan.join("\n")
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|l| l.starts_with("SEARCH e ") && l.contains("rowid=?")),
+                "{name}: looks elements up by id inside the frame loop.\nPlan:\n{}",
                 plan.join("\n")
             );
         }

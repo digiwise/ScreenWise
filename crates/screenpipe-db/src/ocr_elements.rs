@@ -185,10 +185,11 @@ pub(crate) fn text_matches(text: &str, query: &str) -> bool {
         .all(|p| words.windows(p.len()).any(|w| w == p.as_slice()))
 }
 
-/// The tokens of a query, for a cheap SQL pre-check against `ocr_text.text`.
-/// Sound because the engines build that text from the same words as
-/// `text_json`, and capture-time PII removal rewrites both with the same
-/// placeholders. ASCII only: SQLite's `lower()` folds no other letters.
+/// The tokens of a query, for a cheap SQL pre-check against an `ocr_text`
+/// row's `text` and `text_json`: an element whose text matches contains every
+/// token, and an element's text appears in the column it is built from
+/// (JSON escapes never touch letters or digits). ASCII only: SQLite's
+/// `lower()` folds no other letters.
 pub(crate) fn prefilter_tokens(query: &str) -> Vec<String> {
     let mut out: Vec<String> = query
         .split_whitespace()

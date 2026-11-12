@@ -345,6 +345,22 @@ async fn text_search_with_a_time_range_keeps_only_frames_in_range() {
 }
 
 #[tokio::test]
+async fn words_missing_from_the_flat_text_are_still_found() {
+    let db = setup().await;
+    let id = frame(&db, Utc::now(), &[], &["gutter", "42"], None).await;
+    // Capture strips editor-gutter digit runs from `text` but not `text_json`.
+    sqlx::query("UPDATE ocr_text SET text = 'gutter' WHERE frame_id = ?1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let (hits, total) = search(&db, "42", None, None, None, 100, 0).await;
+    assert_eq!(total, 1);
+    assert_eq!(labels(&hits), [label("ocr", "42")]);
+}
+
+#[tokio::test]
 async fn redacted_frame_falls_back_to_redacted_text_lines() {
     let db = setup().await;
     let id = frame(&db, Utc::now(), &[], &["synthetic", "words"], None).await;
