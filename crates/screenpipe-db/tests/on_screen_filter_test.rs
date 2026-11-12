@@ -280,5 +280,10 @@ mod tests {
             1,
             "GROUP BY f.id must collapse multiple matching elements to one frame row"
         );
+        let total = db
+            .count_accessibility_visible("alpha-marker", true, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "the count must match the collapsed rows");
     }
 }

@@ -602,4 +602,75 @@ mod query_plan_tests {
         assert_uses_index(&plan, "audio_dedup");
         assert_no_table_scan(&plan, "audio_dedup");
     }
+
+    // ──────────────────────────────────────────────────────────
+    // Elements queries with a time range
+    // ──────────────────────────────────────────────────────────
+
+    /// Time-ranged elements queries must start from the frame timestamp
+    /// index. The dropped source/role indexes made SQLite walk every element
+    /// of one source instead.
+    #[tokio::test]
+    async fn test_elements_time_range_queries_start_from_frames() {
+        let db = setup_test_db().await;
+        seed_data(&db, 100).await;
+
+        let dropped: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN \
+             ('idx_elements_frame_id', 'idx_elements_frame_source_role', \
+              'idx_elements_source', 'idx_elements_source_role_text')",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert!(dropped.is_empty(), "indexes still present: {dropped:?}");
+
+        let visible = "SELECT f.id FROM elements e \
+             JOIN frames f ON f.id = e.frame_id \
+             WHERE e.source = 'accessibility' AND e.on_screen = 1 \
+               AND f.timestamp >= '2020-01-01' AND f.timestamp <= '2030-01-01' \
+             GROUP BY +f.id";
+        let queries = [
+            // activity_summary accessibility texts
+            (
+                "activity_summary",
+                "SELECT e.text, f.app_name FROM elements e \
+                 JOIN frames f ON f.id = e.frame_id \
+                 WHERE f.timestamp BETWEEN '2020-01-01' AND '2030-01-01' \
+                   AND e.text IS NOT NULL AND e.source = 'accessibility' \
+                   AND LENGTH(e.text) BETWEEN 30 AND 300"
+                    .to_string(),
+            ),
+            // /elements with source, role and time filters
+            (
+                "elements_endpoint",
+                "SELECT e.id FROM elements e JOIN frames f ON f.id = e.frame_id \
+                 WHERE e.source = 'accessibility' AND e.role = 'AXStaticText' \
+                   AND f.timestamp >= '2020-01-01' AND f.timestamp <= '2030-01-01' \
+                 ORDER BY e.frame_id DESC, e.sort_order ASC LIMIT 20"
+                    .to_string(),
+            ),
+            (
+                "search_accessibility_visible",
+                format!("{visible} ORDER BY f.timestamp DESC LIMIT 20"),
+            ),
+            (
+                "count_accessibility_visible",
+                format!("SELECT COUNT(*) FROM ({visible})"),
+            ),
+        ];
+        for (name, sql) in queries {
+            let plan = explain(&db, &sql).await;
+            assert!(
+                plan.iter().any(|l| l.contains("idx_frames_timestamp")),
+                "{name}: does not start from the frame timestamp index.\nPlan:\n{}",
+                plan.join("\n")
+            );
+            assert!(
+                !plan.iter().any(|l| l.starts_with("SCAN e")),
+                "{name}: walks the elements table.\nPlan:\n{}",
+                plan.join("\n")
+            );
+        }
+    }
 }

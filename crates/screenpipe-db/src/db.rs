@@ -6411,7 +6411,7 @@ impl DatabaseManager {
               {time_range}
               AND (?4 IS NULL OR f.app_name = ?4)
               AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
-            GROUP BY f.id
+            GROUP BY +f.id
             ORDER BY f.timestamp DESC
             LIMIT ?6 OFFSET ?7
             "#,
@@ -6461,9 +6461,13 @@ impl DatabaseManager {
         end_time: Option<DateTime<Utc>>,
     ) -> Result<usize, sqlx::Error> {
         let has_query = !query.trim().is_empty();
+        // Counts the search's groups. `GROUP BY +f.id` (as in the search) lets
+        // a time range start from the timestamp index; `COUNT(DISTINCT f.id)`
+        // walked every on-screen element instead.
         let sql = format!(
             r#"
-            SELECT COUNT(DISTINCT f.id) FROM elements e
+            SELECT COUNT(*) FROM (
+            SELECT f.id FROM elements e
             {fts_join}
             JOIN frames f ON f.id = e.frame_id
             WHERE e.source = 'accessibility'
@@ -6472,6 +6476,8 @@ impl DatabaseManager {
               {time_range}
               AND (?4 IS NULL OR f.app_name = ?4)
               AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
+            GROUP BY +f.id
+            )
             "#,
             fts_join = if has_query {
                 "JOIN elements_fts ef ON ef.rowid = e.id"
