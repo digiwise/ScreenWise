@@ -306,6 +306,45 @@ async fn text_and_role_filters_apply_to_ocr_words() {
 }
 
 #[tokio::test]
+async fn text_search_with_a_time_range_keeps_only_frames_in_range() {
+    let db = setup().await;
+    let now = Utc::now();
+    frame(&db, now - Duration::hours(3), &["invoice old"], &[], None).await;
+    frame(&db, now - Duration::minutes(5), &["invoice new"], &[], None).await;
+    settle().await;
+
+    let ranged = |start, end| {
+        db.search_elements(
+            "invoice",
+            None,
+            Some(&ElementSource::Accessibility),
+            None,
+            start,
+            end,
+            None,
+            None,
+            100,
+            0,
+        )
+    };
+    let (recent, total) = ranged(Some(now - Duration::hours(1)), None).await.unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(labels(&recent), [label("accessibility", "invoice new")]);
+    let (older, _) = ranged(None, Some(now - Duration::hours(1))).await.unwrap();
+    assert_eq!(labels(&older), [label("accessibility", "invoice old")]);
+    let (both, _) = ranged(Some(now - Duration::hours(4)), Some(now))
+        .await
+        .unwrap();
+    assert_eq!(
+        labels(&both),
+        [
+            label("accessibility", "invoice new"),
+            label("accessibility", "invoice old")
+        ]
+    );
+}
+
+#[tokio::test]
 async fn redacted_frame_falls_back_to_redacted_text_lines() {
     let db = setup().await;
     let id = frame(&db, Utc::now(), &[], &["synthetic", "words"], None).await;

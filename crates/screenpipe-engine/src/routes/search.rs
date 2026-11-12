@@ -320,7 +320,7 @@ fn search_busy() -> (StatusCode, JsonResponse<serde_json::Value>) {
 
 /// Map a search failure: an interrupted (over-budget) statement is a timeout,
 /// an exhausted API read pool is overload, anything else is a server error.
-fn search_failure(error: &sqlx::Error) -> (StatusCode, JsonResponse<serde_json::Value>) {
+pub(crate) fn search_failure(error: &sqlx::Error) -> (StatusCode, JsonResponse<serde_json::Value>) {
     const SQLITE_INTERRUPT: &str = "9";
     if matches!(error, sqlx::Error::PoolTimedOut) {
         warn!("search refused: API read pool exhausted");

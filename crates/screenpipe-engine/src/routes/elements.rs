@@ -167,13 +167,7 @@ pub(crate) async fn search_elements(
             query.offset,
         )
         .await
-        .map_err(|e| {
-            error!("elements search failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                JsonResponse(json!({"error": e.to_string()})),
-            )
-        })?;
+        .map_err(|e| super::search::search_failure(&e))?;
 
     Ok(JsonResponse(ElementsListResponse {
         data: elements.into_iter().map(ElementResponse::from).collect(),

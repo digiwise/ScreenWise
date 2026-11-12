@@ -650,6 +650,16 @@ mod query_plan_tests {
                  ORDER BY e.frame_id DESC, e.sort_order ASC LIMIT 20"
                     .to_string(),
             ),
+            // /elements with text and time filters (`ElementFilter::stored_query`)
+            (
+                "elements_endpoint_text",
+                "SELECT e.id FROM frames f CROSS JOIN elements e ON e.frame_id = f.id \
+                 WHERE e.source = 'accessibility' \
+                   AND e.id IN (SELECT rowid FROM elements_fts WHERE text MATCH '\"word\"') \
+                   AND f.timestamp >= '2020-01-01' AND f.timestamp <= '2030-01-01' \
+                 ORDER BY e.frame_id DESC, e.sort_order ASC LIMIT 20"
+                    .to_string(),
+            ),
             (
                 "search_accessibility_visible",
                 format!("{visible} ORDER BY f.timestamp DESC LIMIT 20"),
@@ -667,7 +677,10 @@ mod query_plan_tests {
                 plan.join("\n")
             );
             assert!(
-                !plan.iter().any(|l| l.starts_with("SCAN e")),
+                // `SCAN e` alone or with an index; not `SCAN elements_fts`.
+                !plan
+                    .iter()
+                    .any(|l| l == "SCAN e" || l.starts_with("SCAN e ")),
                 "{name}: walks the elements table.\nPlan:\n{}",
                 plan.join("\n")
             );

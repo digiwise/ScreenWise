@@ -915,14 +915,21 @@ impl<'a> ElementFilter<'a> {
     /// Only accessibility rows are read: OCR elements are built from OCR text.
     fn stored_query(&self, select: &str) -> sqlx::QueryBuilder<'a, Sqlite> {
         let mut q = sqlx::QueryBuilder::new(select);
-        q.push(" FROM elements e JOIN frames f ON f.id = e.frame_id");
-        if !self.query.is_empty() {
-            q.push(" JOIN elements_fts fts ON fts.rowid = e.id");
+        // With text and a time range, read the range's elements through the
+        // frame timestamp and element frame indexes and check each against
+        // the text's matches. Otherwise SQLite starts from every match in
+        // the whole history and looks each one up before applying the range,
+        // which is slow on a cold cache for common words.
+        if !self.query.is_empty() && (self.start_time.is_some() || self.end_time.is_some()) {
+            q.push(" FROM frames f CROSS JOIN elements e ON e.frame_id = f.id");
+        } else {
+            q.push(" FROM elements e JOIN frames f ON f.id = e.frame_id");
         }
         q.push(" WHERE e.source = 'accessibility'");
         if !self.query.is_empty() {
-            q.push(" AND fts.text MATCH ")
-                .push_bind(crate::text_normalizer::sanitize_fts5_query(self.query));
+            q.push(" AND e.id IN (SELECT rowid FROM elements_fts WHERE text MATCH ")
+                .push_bind(crate::text_normalizer::sanitize_fts5_query(self.query))
+                .push(")");
         }
         self.push_frame_filters(&mut q, "e.frame_id");
         if let Some(role) = self.role {
