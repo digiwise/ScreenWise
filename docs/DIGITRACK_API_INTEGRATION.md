@@ -52,8 +52,12 @@ an instruction to load every element and full frame context for every period.
   and starved recording): API reads use a dedicated small read pool, separate
   from recording's. At most two `/search` requests run at once; others get
   503 at once with `Retry-After` (seconds), as does an exhausted API pool.
-  Any API statement running over 25 s is interrupted and the search answers
-  408, so a timed-out request no longer keeps a connection busy. Send one
+  An API connection's statements are interrupted 25 s after it is taken from
+  the pool, and a search's statements are also interrupted when its 30 s
+  request timeout fires, so a timed-out request does not keep a connection
+  busy. Until 2026-11-12 the 25 s clock restarted whenever a statement
+  stalled on disk reads for over 0.1 s: slow searches then ran on for over
+  30 minutes after their 408 and every later search got 503. Send one
   request at a time, keep OCR ranges short (about 30 minutes on busy days),
   honour `Retry-After` and stop or back off on the first 408/5xx rather than
   retrying in a loop. Cached identical searches return without the limit.
@@ -63,9 +67,10 @@ an instruction to load every element and full frame context for every period.
   after). Before this, every such search read all frames and could answer 408
   on a large store whose pages were not yet in memory (for example after a
   restart). Measured through the API on one ~45 GB store (`release-local`):
-  10 minutes of OCR 0.05-0.15 s, one day about 3 s. An OCR search without
-  `start_time` still groups every frame and can still answer 408: always send
-  a range.
+  10 minutes of OCR 0.05-0.15 s, one day about 3-5 s. An OCR search without
+  `start_time` still groups every frame and can still answer 408, as can a
+  text search without a range for a word in more than a few hundred frames:
+  always send a range.
 
 ## Routes to use
 

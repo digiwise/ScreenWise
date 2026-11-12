@@ -18,7 +18,6 @@ use sqlx::Row;
 use sqlx::Sqlite;
 use sqlx::TypeInfo;
 use sqlx::ValueRef;
-#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -812,64 +811,87 @@ pub struct DatabaseManager {
     read_only_sql_pool: SqlitePool,
 }
 
-/// Longest an API-pool statement may run before SQLite interrupts it. Below the
-/// API's 30 s request timeout, so a timed-out search also frees its connection
-/// instead of running on after the response (dropping a future does not stop
-/// a running SQLite statement).
+/// Longest an API-pool connection may run statements, from the moment it is
+/// taken from the pool, before SQLite interrupts them. Below the API's 30 s
+/// request timeout, so a timed-out search also frees its connection instead of
+/// running on after the response (dropping a future does not stop a running
+/// SQLite statement).
 pub const API_STATEMENT_BUDGET: Duration = Duration::from_secs(25);
-/// Callback gap that marks a new statement for [`StatementClock`].
-const STATEMENT_IDLE_GAP: Duration = Duration::from_millis(100);
 /// SQLite VM instructions between progress callbacks.
 const PROGRESS_HANDLER_OPS: i32 = 4000;
 
-/// Pool options whose connections interrupt any statement running longer
-/// than `budget` (see [`StatementClock`]).
-pub(crate) fn statement_budget_pool_options(budget: Duration) -> SqlitePoolOptions {
-    SqlitePoolOptions::new().after_connect(move |conn, _meta| {
-        Box::pin(async move {
-            let mut handle = conn.lock_handle().await?;
-            let mut clock = StatementClock::new(budget);
-            handle.set_progress_handler(PROGRESS_HANDLER_OPS, move || {
-                clock.tick(std::time::Instant::now())
-            });
-            Ok(())
-        })
-    })
+tokio::task_local! {
+    /// Set by [`cancel_api_reads_on_drop`] for the API work running in this task.
+    static API_READS_CANCELLED: Arc<AtomicBool>;
 }
 
-/// Per-connection clock driven by SQLite's progress handler, which only runs
-/// while a statement executes. A pause longer than [`STATEMENT_IDLE_GAP`]
-/// between callbacks starts a new measurement, so the clock can restart
-/// early (lenient) but never measures idle time. Statements that follow each
-/// other on one connection with no such pause share one budget.
-#[derive(Debug)]
-pub(crate) struct StatementClock {
+/// Runs `work`; if it is dropped before it finishes (e.g. by a request
+/// timeout), budgeted-pool statements it started are interrupted at their next
+/// progress callback, so their connections return to the pool at once.
+pub async fn cancel_api_reads_on_drop<F: std::future::Future>(work: F) -> F::Output {
+    struct CancelUnlessFinished {
+        cancelled: Arc<AtomicBool>,
+        finished: bool,
+    }
+    impl Drop for CancelUnlessFinished {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.cancelled.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    let mut guard = CancelUnlessFinished {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        finished: false,
+    };
+    let output = API_READS_CANCELLED
+        .scope(Arc::clone(&guard.cancelled), work)
+        .await;
+    guard.finished = true;
+    output
+}
+
+/// Arms `conn` for one use from the pool: its statements are interrupted once
+/// `budget` has passed since now, or once the acquiring task's
+/// [`cancel_api_reads_on_drop`] work is dropped. The deadline is fixed when the
+/// connection is taken, not measured between progress callbacks: a statement
+/// stalled on disk reads must not restart its own clock (2026-11-12: such
+/// searches ran on for over 30 minutes and held every API connection).
+async fn arm_statement_budget(
+    conn: &mut sqlx::SqliteConnection,
     budget: Duration,
-    started: Option<std::time::Instant>,
-    last_tick: Option<std::time::Instant>,
+) -> Result<(), SqlxError> {
+    let deadline = std::time::Instant::now() + budget;
+    let cancelled = API_READS_CANCELLED.try_with(Arc::clone).ok();
+    conn.lock_handle()
+        .await?
+        .set_progress_handler(PROGRESS_HANDLER_OPS, move || {
+            statement_may_continue(deadline, cancelled.as_deref(), std::time::Instant::now())
+        });
+    Ok(())
 }
 
-impl StatementClock {
-    pub(crate) fn new(budget: Duration) -> Self {
-        Self {
-            budget,
-            started: None,
-            last_tick: None,
-        }
-    }
+/// `true` to let SQLite continue, `false` to interrupt the statement.
+fn statement_may_continue(
+    deadline: std::time::Instant,
+    cancelled: Option<&AtomicBool>,
+    now: std::time::Instant,
+) -> bool {
+    now <= deadline && !cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
 
-    /// `true` to let SQLite continue, `false` to interrupt the statement.
-    pub(crate) fn tick(&mut self, now: std::time::Instant) -> bool {
-        let new_run = self
-            .last_tick
-            .is_none_or(|last| now.saturating_duration_since(last) > STATEMENT_IDLE_GAP);
-        if new_run {
-            self.started = Some(now);
-        }
-        self.last_tick = Some(now);
-        self.started
-            .is_none_or(|started| now.saturating_duration_since(started) <= self.budget)
-    }
+/// Pool options whose connections interrupt their statements `budget` after
+/// each acquisition, or when the acquiring API work is cancelled (see
+/// [`arm_statement_budget`]).
+pub(crate) fn statement_budget_pool_options(budget: Duration) -> SqlitePoolOptions {
+    SqlitePoolOptions::new()
+        .after_connect(move |conn, _meta| Box::pin(arm_statement_budget(conn, budget)))
+        .before_acquire(move |conn, _meta| {
+            Box::pin(async move {
+                arm_statement_budget(conn, budget).await?;
+                Ok(true)
+            })
+        })
 }
 
 /// One level-0 OCR element row, buffered for bulk insertion.
@@ -12725,20 +12747,21 @@ mod tests {
     }
 
     #[test]
-    fn statement_clock_interrupts_only_a_continuously_running_statement() {
+    fn statement_budget_counts_from_acquisition_and_honours_cancellation() {
         let start = std::time::Instant::now();
-        let mut clock = StatementClock::new(Duration::from_millis(500));
-        // Continuous callbacks: allowed up to the budget, then interrupted.
-        let mut now = start;
-        while now - start <= Duration::from_millis(500) {
-            assert!(clock.tick(now));
-            now += Duration::from_millis(10);
-        }
-        assert!(!clock.tick(now));
-        // A pause (idle connection or new statement) restarts the measurement.
-        let later = now + STATEMENT_IDLE_GAP + Duration::from_millis(1);
-        assert!(clock.tick(later));
-        assert!(clock.tick(later + Duration::from_millis(400)));
+        let deadline = start + Duration::from_millis(500);
+        // No pause between callbacks restarts the budget: only the deadline counts.
+        assert!(statement_may_continue(deadline, None, start));
+        assert!(statement_may_continue(deadline, None, deadline));
+        assert!(!statement_may_continue(
+            deadline,
+            None,
+            deadline + Duration::from_millis(1)
+        ));
+        let cancelled = AtomicBool::new(false);
+        assert!(statement_may_continue(deadline, Some(&cancelled), start));
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(!statement_may_continue(deadline, Some(&cancelled), start));
     }
 
     #[tokio::test]
@@ -12762,6 +12785,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(one, 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_cancellable_api_work_interrupts_its_statement() {
+        let options: SqliteConnectOptions = "sqlite::memory:".parse().unwrap();
+        let pool = statement_budget_pool_options(Duration::from_secs(600))
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        // Warm the pool so the next use goes through `before_acquire`.
+        let _: i64 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let runaway = cancel_api_reads_on_drop(
+            sqlx::query_scalar::<_, i64>(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+            )
+            .fetch_one(&pool),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), runaway)
+                .await
+                .is_err(),
+            "the endless statement is still running when the timeout fires"
+        );
+        // The only connection comes back well before the 600 s budget.
+        let one: i64 = tokio::time::timeout(
+            Duration::from_secs(10),
+            sqlx::query_scalar("SELECT 1").fetch_one(&pool),
+        )
+        .await
+        .expect("the dropped work's statement must be interrupted")
+        .unwrap();
+        assert_eq!(one, 1);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // Finished work leaves the connection usable.
+        let two: i64 = cancel_api_reads_on_drop(sqlx::query_scalar("SELECT 2").fetch_one(&pool))
+            .await
+            .unwrap();
+        assert_eq!(two, 2);
+        let three: i64 = sqlx::query_scalar("SELECT 3")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(three, 3);
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use axum::{
 use oasgen::{oasgen, OaSchema};
 
 use chrono::{DateTime, Utc};
-use screenpipe_db::{ContentType, DatabaseManager, Order, SearchResult};
+use screenpipe_db::{cancel_api_reads_on_drop, ContentType, DatabaseManager, Order, SearchResult};
 
 use futures::future::{try_join, try_join_all};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -429,9 +429,11 @@ pub(crate) async fn search(
     let content_type = query.content_type.clone();
     let tags = query.tags.as_deref().unwrap_or(&[]);
 
+    // On timeout the dropped work interrupts its SQLite statements, so their
+    // API connections are free for the next search.
     let (results, total) = timeout(
         Duration::from_secs(30),
-        try_join(
+        cancel_api_reads_on_drop(try_join(
             state.db.search_with_tags_and_active_monitor(
                 query_str,
                 content_type.clone(),
@@ -472,7 +474,7 @@ pub(crate) async fn search(
                 tags,
                 query.active_monitor,
             ),
-        ),
+        )),
     )
     .await
     .map_err(|_| {
