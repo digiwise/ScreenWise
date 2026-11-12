@@ -160,13 +160,12 @@ pub(crate) enum WriteOp {
     ClearSnapshotPaths {
         frame_ids: Vec<i64>,
     },
-    /// Deferred element insertion: inserts OCR and/or accessibility elements
-    /// for a frame in a separate transaction from the frame insert itself.
-    /// This avoids holding the write lock during the 30-80+ individual
+    /// Deferred element insertion: inserts accessibility elements for a frame
+    /// in a separate transaction from the frame insert itself. This avoids
+    /// holding the write lock during the 30-80+ individual
     /// INSERT...RETURNING id queries that element insertion requires.
     InsertDeferredElements {
         frame_id: i64,
-        ocr_text_json: Option<String>,
         accessibility_tree_json: Option<String>,
     },
     /// Batch insert frames with OCR text. Replaces the direct
@@ -1124,15 +1123,8 @@ async fn execute_single_write(
 
         WriteOp::InsertDeferredElements {
             frame_id,
-            ocr_text_json,
             accessibility_tree_json,
         } => {
-            if let Some(ref text_json) = ocr_text_json {
-                if !text_json.is_empty() {
-                    crate::db::DatabaseManager::insert_ocr_elements(conn, *frame_id, text_json)
-                        .await;
-                }
-            }
             if let Some(ref tree_json) = accessibility_tree_json {
                 if !tree_json.is_empty() {
                     crate::db::DatabaseManager::insert_accessibility_elements(
@@ -1250,16 +1242,6 @@ async fn execute_single_write(
                 .bind(window.focused)
                 .execute(&mut **conn)
                 .await?;
-
-                // Dual-write: insert OCR elements into unified elements table
-                if !window.text_json.is_empty() {
-                    crate::db::DatabaseManager::insert_ocr_elements(
-                        conn,
-                        frame_id,
-                        &window.text_json,
-                    )
-                    .await;
-                }
 
                 results.push((frame_id, idx));
             }

@@ -894,54 +894,107 @@ pub(crate) fn statement_budget_pool_options(budget: Duration) -> SqlitePoolOptio
         })
 }
 
-/// One level-0 OCR element row, buffered for bulk insertion.
-struct Level0Row<'a> {
-    text: &'a str,
-    left: Option<f64>,
-    top: Option<f64>,
-    width: Option<f64>,
-    height: Option<f64>,
-    confidence: Option<f64>,
-    sort_order: i32,
+/// The filters of an elements search, as applied to stored (accessibility)
+/// element rows `e` joined to their frames `f`.
+struct ElementFilter<'a> {
+    query: &'a str,
+    frame_id: Option<i64>,
+    role: Option<&'a str>,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    app_name: Option<&'a str>,
+    on_screen: Option<bool>,
 }
 
-/// Bulk-insert a batch of level-0 OCR elements (no hierarchy, parent_id = NULL).
-/// One INSERT statement with `chunk.len()` VALUES rows replaces N round-trips
-/// through `RETURNING id`. Used by the level-0 fast path in
-/// `DatabaseManager::insert_ocr_elements`.
-async fn flush_level0_bulk(
-    tx: &mut sqlx::pool::PoolConnection<Sqlite>,
-    frame_id: i64,
-    chunk: &[Level0Row<'_>],
-) -> Result<(), sqlx::Error> {
-    if chunk.is_empty() {
-        return Ok(());
-    }
-    let mut sql = String::with_capacity(200 + chunk.len() * 40);
-    sql.push_str(
-        "INSERT INTO elements (frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order) VALUES ",
-    );
-    for i in 0..chunk.len() {
-        if i > 0 {
-            sql.push(',');
+const STORED_ELEMENT_COLUMNS: &str = "SELECT e.id, e.frame_id, e.source, e.role, e.text, \
+     e.parent_id, e.depth, e.left_bound, e.top_bound, e.width_bound, e.height_bound, \
+     e.confidence, e.sort_order, e.on_screen";
+
+impl<'a> ElementFilter<'a> {
+    /// `select` over the stored accessibility elements that pass the filters.
+    /// Only accessibility rows are read: OCR elements are built from OCR text.
+    fn stored_query(&self, select: &str) -> sqlx::QueryBuilder<'a, Sqlite> {
+        let mut q = sqlx::QueryBuilder::new(select);
+        q.push(" FROM elements e JOIN frames f ON f.id = e.frame_id");
+        if !self.query.is_empty() {
+            q.push(" JOIN elements_fts fts ON fts.rowid = e.id");
         }
-        sql.push_str("(?,'ocr','block',?,NULL,0,?,?,?,?,?,?)");
+        q.push(" WHERE e.source = 'accessibility'");
+        if !self.query.is_empty() {
+            q.push(" AND fts.text MATCH ")
+                .push_bind(crate::text_normalizer::sanitize_fts5_query(self.query));
+        }
+        self.push_frame_filters(&mut q, "e.frame_id");
+        if let Some(role) = self.role {
+            q.push(" AND e.role = ").push_bind(role);
+        }
+        if let Some(on_screen) = self.on_screen {
+            // `=` does not match legacy NULL rows, by design (issue #2436).
+            // Bound as an integer so the partial on-screen index applies.
+            q.push(" AND e.on_screen = ")
+                .push_bind(i64::from(on_screen));
+        }
+        q
     }
-    let mut q = sqlx::query(&sql);
-    for row in chunk {
-        q = q
-            .bind(frame_id)
-            .bind(row.text)
-            .bind(row.left)
-            .bind(row.top)
-            .bind(row.width)
-            .bind(row.height)
-            .bind(row.confidence)
-            .bind(row.sort_order);
+
+    /// The frame, time and app filters, on frames `f`; `frame_column` is the
+    /// column the frame id filter applies to.
+    fn push_frame_filters(&self, q: &mut sqlx::QueryBuilder<'a, Sqlite>, frame_column: &str) {
+        if let Some(id) = self.frame_id {
+            q.push(format!(" AND {frame_column} = ")).push_bind(id);
+        }
+        if let Some(start) = self.start_time {
+            q.push(" AND f.timestamp >= ").push_bind(start);
+        }
+        if let Some(end) = self.end_time {
+            q.push(" AND f.timestamp <= ").push_bind(end);
+        }
+        if let Some(app) = self.app_name {
+            q.push(" AND f.app_name = ").push_bind(app);
+        }
     }
-    q.execute(&mut **tx).await?;
-    Ok(())
+
+    /// Whether an OCR element passes the role and text filters.
+    fn keeps_ocr(&self, element: &Element) -> bool {
+        self.role.is_none_or(|role| element.role == role)
+            && (self.query.is_empty()
+                || element
+                    .text
+                    .as_deref()
+                    .is_some_and(|t| crate::ocr_elements::text_matches(t, self.query)))
+    }
 }
+
+/// Part of a page of elements search results.
+enum ElementPagePart {
+    /// Stored elements of one frame, in `sort_order`, after skipping some.
+    Stored {
+        frame_id: i64,
+        skip: usize,
+        take: usize,
+    },
+    Ocr(Vec<Element>),
+}
+
+/// Advances `position` past `count` results; returns the part of them on the
+/// page `window` as `(skip, take)`.
+fn on_page(
+    window: &std::ops::Range<i64>,
+    position: &mut i64,
+    count: usize,
+) -> Option<(usize, usize)> {
+    let start = *position;
+    *position += count as i64;
+    let from = window.start.max(start);
+    let to = window.end.min(*position);
+    (from < to).then(|| ((from - start) as usize, (to - from) as usize))
+}
+
+/// Frames whose OCR text is read per query in an elements search.
+const OCR_FRAME_CHUNK: usize = 400;
+
+/// `maintenance_progress` task of the stored OCR element cleanup.
+const STORED_OCR_CLEANUP_TASK: &str = "delete_stored_ocr_elements";
 
 impl DatabaseManager {
     /// A handle for the local HTTP API: identical, except that its reads use
@@ -3092,201 +3145,8 @@ impl DatabaseManager {
     }
 
     // ========================================================================
-    // Elements helpers — dual-write OCR + accessibility as structured rows
+    // Elements helpers — accessibility rows (OCR elements are built when read)
     // ========================================================================
-
-    /// Insert OCR elements from `text_json` (serialized `Vec<OcrTextBlock>`) into the
-    /// `elements` table. Builds a page→block→paragraph→line→word hierarchy using
-    /// `RETURNING id` to chain parent IDs within the same transaction.
-    ///
-    /// Level-0 blocks (Apple Native OCR — the default macOS path) have no hierarchy,
-    /// so they are accumulated and bulk-inserted in chunks via multi-row VALUES.
-    /// Hierarchical levels (Tesseract: 1-5) still go through per-row `RETURNING id`
-    /// because each row's id may become the parent of a later row.
-    ///
-    /// Errors are logged and swallowed so that the primary OCR insert path is never
-    /// blocked by a failure in the new elements table.
-    pub(crate) async fn insert_ocr_elements(
-        tx: &mut sqlx::pool::PoolConnection<Sqlite>,
-        frame_id: i64,
-        text_json: &str,
-    ) {
-        let blocks: Vec<OcrTextBlock> = match serde_json::from_str(text_json) {
-            Ok(b) => b,
-            Err(e) => {
-                debug!("elements: skipping OCR parse for frame {}: {}", frame_id, e);
-                return;
-            }
-        };
-        if blocks.is_empty() {
-            return;
-        }
-
-        // 12 params per row × 80 rows = 960 params, well below SQLite's
-        // default SQLITE_LIMIT_VARIABLE_NUMBER (999 on older builds, 32766 on
-        // newer). Larger flushes save round-trips on the hot path.
-        const BULK_CHUNK: usize = 80;
-
-        // Buffer of ready-to-insert level-0 rows. Flushed when full or when
-        // we encounter a hierarchical block that needs RETURNING.
-        let mut buf: Vec<Level0Row<'_>> = Vec::with_capacity(BULK_CHUNK);
-
-        // Track hierarchy: (page, block, par, line) → element_id
-        let mut page_ids: BTreeMap<i64, i64> = BTreeMap::new();
-        let mut block_ids: BTreeMap<(i64, i64), i64> = BTreeMap::new();
-        let mut par_ids: BTreeMap<(i64, i64, i64), i64> = BTreeMap::new();
-        let mut line_ids: BTreeMap<(i64, i64, i64, i64), i64> = BTreeMap::new();
-        let mut sort_order: i32 = 0;
-
-        for block in &blocks {
-            let level: i64 = block.level.parse().unwrap_or(0);
-            let page_num: i64 = block.page_num.parse().unwrap_or(0);
-            let block_num: i64 = block.block_num.parse().unwrap_or(0);
-            let par_num: i64 = block.par_num.parse().unwrap_or(0);
-            let line_num: i64 = block.line_num.parse().unwrap_or(0);
-
-            let left: Option<f64> = block.left.parse().ok();
-            let top: Option<f64> = block.top.parse().ok();
-            let width: Option<f64> = block.width.parse().ok();
-            let height: Option<f64> = block.height.parse().ok();
-            let conf: Option<f64> = block.conf.parse().ok();
-
-            // Fast path for level 0 (Apple Native, vast majority of Mac frames).
-            if level == 0 {
-                let text_val = block.text.as_str();
-                if text_val.trim().is_empty() {
-                    continue;
-                }
-                buf.push(Level0Row {
-                    text: text_val,
-                    left,
-                    top,
-                    width,
-                    height,
-                    confidence: conf,
-                    sort_order,
-                });
-                sort_order += 1;
-                if buf.len() >= BULK_CHUNK {
-                    if let Err(e) = flush_level0_bulk(tx, frame_id, &buf).await {
-                        debug!(
-                            "elements: OCR bulk insert failed for frame {}: {}",
-                            frame_id, e
-                        );
-                        return;
-                    }
-                    buf.clear();
-                }
-                continue;
-            }
-
-            // Hierarchical levels (Tesseract). Flush any pending level-0 rows
-            // first so sort_order interleaves correctly.
-            if !buf.is_empty() {
-                if let Err(e) = flush_level0_bulk(tx, frame_id, &buf).await {
-                    debug!(
-                        "elements: OCR bulk insert failed for frame {}: {}",
-                        frame_id, e
-                    );
-                    return;
-                }
-                buf.clear();
-            }
-
-            let (role, text, parent_id, depth, confidence) = match level {
-                1 => {
-                    if page_ids.contains_key(&page_num) {
-                        continue;
-                    }
-                    ("page", None::<&str>, None::<i64>, 0i32, None::<f64>)
-                }
-                2 => {
-                    if block_ids.contains_key(&(page_num, block_num)) {
-                        continue;
-                    }
-                    let pid = page_ids.get(&page_num).copied();
-                    ("block", None, pid, 1, None)
-                }
-                3 => {
-                    if par_ids.contains_key(&(page_num, block_num, par_num)) {
-                        continue;
-                    }
-                    let pid = block_ids.get(&(page_num, block_num)).copied();
-                    ("paragraph", None, pid, 2, None)
-                }
-                4 => {
-                    if line_ids.contains_key(&(page_num, block_num, par_num, line_num)) {
-                        continue;
-                    }
-                    let pid = par_ids.get(&(page_num, block_num, par_num)).copied();
-                    ("line", None, pid, 3, None)
-                }
-                5 => {
-                    let text_val = block.text.as_str();
-                    if text_val.trim().is_empty() {
-                        continue;
-                    }
-                    let pid = line_ids
-                        .get(&(page_num, block_num, par_num, line_num))
-                        .copied();
-                    ("word", Some(text_val), pid, 4, conf)
-                }
-                _ => continue,
-            };
-
-            let result = sqlx::query_scalar::<_, i64>(
-                "INSERT INTO elements (frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order) VALUES (?1, 'ocr', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING id",
-            )
-            .bind(frame_id)
-            .bind(role)
-            .bind(text)
-            .bind(parent_id)
-            .bind(depth)
-            .bind(left)
-            .bind(top)
-            .bind(width)
-            .bind(height)
-            .bind(confidence)
-            .bind(sort_order)
-            .fetch_one(&mut **tx)
-            .await;
-
-            match result {
-                Ok(id) => {
-                    match level {
-                        1 => {
-                            page_ids.insert(page_num, id);
-                        }
-                        2 => {
-                            block_ids.insert((page_num, block_num), id);
-                        }
-                        3 => {
-                            par_ids.insert((page_num, block_num, par_num), id);
-                        }
-                        4 => {
-                            line_ids.insert((page_num, block_num, par_num, line_num), id);
-                        }
-                        _ => {}
-                    }
-                    sort_order += 1;
-                }
-                Err(e) => {
-                    debug!("elements: OCR insert failed for frame {}: {}", frame_id, e);
-                    return;
-                }
-            }
-        }
-
-        // Flush any remaining buffered level-0 rows.
-        if !buf.is_empty() {
-            if let Err(e) = flush_level0_bulk(tx, frame_id, &buf).await {
-                debug!(
-                    "elements: OCR bulk insert failed for frame {}: {}",
-                    frame_id, e
-                );
-            }
-        }
-    }
 
     /// Insert accessibility tree nodes from `tree_json` (serialized
     /// `Vec<AccessibilityTreeNode>`) into the `elements` table.
@@ -3609,12 +3469,8 @@ impl DatabaseManager {
                 .or_else(|| ocr_text_str.filter(|t| !t.is_empty()).map(String::from)),
         };
 
-        // Capture element data before moving into the frame write op
-        let ocr_json_for_elements = if elements_ref_frame_id.is_none() {
-            ocr_data.map(|(_, j, _)| j.to_string())
-        } else {
-            None
-        };
+        // Capture element data before moving into the frame write op. OCR
+        // elements are not stored: they are built from `ocr_text` when read.
         let a11y_json_for_elements = if elements_ref_frame_id.is_none() {
             accessibility_tree_json.map(String::from)
         } else {
@@ -3657,12 +3513,9 @@ impl DatabaseManager {
         // Submit element inserts as a separate write op so they don't hold
         // the write lock during the frame transaction. Elements are supplementary
         // data — the frame is usable for search immediately after the first commit.
-        let has_elements = ocr_json_for_elements
+        let has_elements = a11y_json_for_elements
             .as_ref()
-            .is_some_and(|j| !j.is_empty())
-            || a11y_json_for_elements
-                .as_ref()
-                .is_some_and(|j| !j.is_empty());
+            .is_some_and(|j| !j.is_empty());
         if has_elements {
             // Fire-and-forget: spawn so we don't block the capture loop waiting
             // for element insertion. Errors are logged inside insert_*_elements.
@@ -3671,7 +3524,6 @@ impl DatabaseManager {
                 let _ = queue
                     .submit(WriteOp::InsertDeferredElements {
                         frame_id,
-                        ocr_text_json: ocr_json_for_elements,
                         accessibility_tree_json: a11y_json_for_elements,
                     })
                     .await;
@@ -3944,11 +3796,6 @@ impl DatabaseManager {
                     .bind(text_length)
                     .execute(&mut **tx.conn())
                     .await?;
-
-                    // Dual-write: insert OCR elements into unified elements table
-                    if !window.text_json.is_empty() {
-                        Self::insert_ocr_elements(tx.conn(), frame_id, &window.text_json).await;
-                    }
                 }
 
                 frame_results.push((frame_id, idx));
@@ -8577,8 +8424,13 @@ LIMIT ? OFFSET ?
     // Elements search
     // ========================================================================
 
-    /// Search the unified `elements` table with optional FTS, time, and app filters.
-    /// Returns a flat `Vec<Element>` — clients reconstruct the tree from `parent_id`/`depth`.
+    /// Search screen elements with optional FTS, frame, time, app, role and
+    /// on-screen filters. Accessibility elements are stored rows; OCR
+    /// elements are built from each frame's OCR text (`crate::ocr_elements`).
+    /// Results run newest frame first, and within a frame its accessibility
+    /// elements, then its OCR elements, each in `sort_order`. Returns a flat
+    /// `Vec<Element>` and the total; clients rebuild trees from
+    /// `parent_id`/`depth`.
     #[allow(clippy::too_many_arguments)]
     pub async fn search_elements(
         &self,
@@ -8592,132 +8444,158 @@ LIMIT ? OFFSET ?
         // Optional on-screen filter (issue #2436). Some(true) keeps only
         // elements visually present in the captured screenshot;
         // Some(false) keeps only off-screen elements (rare — useful for
-        // debugging or "what was scrolled off?" queries); None preserves
-        // current behavior and matches all rows including legacy NULL.
+        // debugging or "what was scrolled off?" queries); None matches all
+        // rows including legacy NULL. OCR elements carry no flag, so either
+        // value leaves them out (and `source=ocr` with it returns nothing).
         on_screen: Option<bool>,
         limit: u32,
         offset: u32,
     ) -> Result<(Vec<Element>, i64), sqlx::Error> {
-        let mut conditions = Vec::new();
-        let use_fts = !query.is_empty();
-
-        if use_fts {
-            conditions.push("fts.text MATCH ?".to_string());
-        }
-        if frame_id.is_some() {
-            conditions.push("e.frame_id = ?".to_string());
-        }
-        if source.is_some() {
-            conditions.push("e.source = ?".to_string());
-        }
-        if role.is_some() {
-            conditions.push("e.role = ?".to_string());
-        }
-        if start_time.is_some() {
-            conditions.push("f.timestamp >= ?".to_string());
-        }
-        if end_time.is_some() {
-            conditions.push("f.timestamp <= ?".to_string());
-        }
-        if app_name.is_some() {
-            conditions.push("f.app_name = ?".to_string());
-        }
-        if on_screen.is_some() {
-            // `e.on_screen = ?` is intentional — does NOT match NULL rows.
-            // Legacy elements have NULL because the a11y walker didn't
-            // report it before; pre-fix they cannot be classified.
-            conditions.push("e.on_screen = ?".to_string());
-        }
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
+        let filter = ElementFilter {
+            query,
+            frame_id,
+            role,
+            start_time,
+            end_time,
+            app_name,
+            on_screen,
         };
+        let reads_ocr = crate::ocr_elements::search_reads_ocr(source, role, on_screen);
+        if source == Some(&ElementSource::Ocr) && !reads_ocr {
+            return Ok((Vec::new(), 0));
+        }
+        if !reads_ocr {
+            let mut data = filter.stored_query(STORED_ELEMENT_COLUMNS);
+            data.push(" ORDER BY e.frame_id DESC, e.sort_order ASC LIMIT ")
+                .push_bind(i64::from(limit))
+                .push(" OFFSET ")
+                .push_bind(i64::from(offset));
+            let mut count = filter.stored_query("SELECT COUNT(*)");
+            let (rows, total) = tokio::try_join!(
+                data.build_query_as::<ElementRow>().fetch_all(&self.pool),
+                count.build_query_scalar::<i64>().fetch_one(&self.pool),
+            )?;
+            return Ok((rows.into_iter().map(Element::from).collect(), total));
+        }
 
-        let join_fts = if use_fts {
-            "JOIN elements_fts fts ON fts.rowid = e.id"
+        // Matching stored elements per frame, newest frame first.
+        let stored_counts: Vec<(i64, i64)> = if source == Some(&ElementSource::Ocr) {
+            Vec::new()
         } else {
-            ""
+            let mut q = filter.stored_query("SELECT e.frame_id, COUNT(*)");
+            q.push(" GROUP BY e.frame_id ORDER BY e.frame_id DESC");
+            q.build_query_as().fetch_all(&self.pool).await?
         };
-
-        let sql = format!(
-            r#"SELECT e.id, e.frame_id, e.source, e.role, e.text, e.parent_id,
-                      e.depth, e.left_bound, e.top_bound, e.width_bound, e.height_bound,
-                      e.confidence, e.sort_order, e.on_screen
-               FROM elements e
-               JOIN frames f ON f.id = e.frame_id
-               {}
-               {}
-               ORDER BY e.frame_id DESC, e.sort_order ASC
-               LIMIT ? OFFSET ?"#,
-            join_fts, where_clause
+        // Frames with OCR text, newest first. A frame that shares another
+        // frame's elements (`elements_ref_frame_id`) has none of its own.
+        let mut q = sqlx::QueryBuilder::<Sqlite>::new(
+            "SELECT f.id FROM frames f WHERE f.elements_ref_frame_id IS NULL \
+             AND EXISTS (SELECT 1 FROM ocr_text ot WHERE ot.frame_id = f.id)",
         );
+        filter.push_frame_filters(&mut q, "f.id");
+        q.push(" ORDER BY f.id DESC");
+        let ocr_frames: Vec<i64> = q.build_query_scalar().fetch_all(&self.pool).await?;
 
-        let count_sql = format!(
-            r#"SELECT COUNT(*) FROM elements e
-               JOIN frames f ON f.id = e.frame_id
-               {}
-               {}"#,
-            join_fts, where_clause
-        );
-
-        // Build the data query
-        let mut data_query = sqlx::query_as::<_, ElementRow>(&sql);
-        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-
-        // Bind parameters in the same order as conditions
-        if use_fts {
-            let fts_query = crate::text_normalizer::sanitize_fts5_query(query);
-            data_query = data_query.bind(fts_query.clone());
-            count_query = count_query.bind(fts_query);
+        // Every match is counted for the total; only the page's are kept.
+        let window = i64::from(offset)..i64::from(offset) + i64::from(limit);
+        let mut position = 0i64;
+        let mut page = Vec::new();
+        let mut stored = stored_counts.into_iter().peekable();
+        let required = crate::ocr_elements::prefilter_tokens(query);
+        for chunk in ocr_frames.chunks(OCR_FRAME_CHUNK) {
+            let mut texts = self.ocr_text_rows(chunk, &required).await?;
+            for &id in chunk {
+                while let Some((stored_id, n)) = stored.next_if(|(s, _)| *s >= id) {
+                    if let Some((skip, take)) = on_page(&window, &mut position, n as usize) {
+                        page.push(ElementPagePart::Stored {
+                            frame_id: stored_id,
+                            skip,
+                            take,
+                        });
+                    }
+                }
+                let Some(rows) = texts.remove(&id) else {
+                    continue;
+                };
+                let elements: Vec<Element> = crate::ocr_elements::ocr_elements(id, &rows)
+                    .into_iter()
+                    .filter(|e| filter.keeps_ocr(e))
+                    .collect();
+                if let Some((skip, take)) = on_page(&window, &mut position, elements.len()) {
+                    page.push(ElementPagePart::Ocr(
+                        elements.into_iter().skip(skip).take(take).collect(),
+                    ));
+                }
+            }
         }
-        if let Some(fid) = frame_id {
-            data_query = data_query.bind(fid);
-            count_query = count_query.bind(fid);
-        }
-        if let Some(src) = source {
-            data_query = data_query.bind(src.to_string());
-            count_query = count_query.bind(src.to_string());
-        }
-        if let Some(r) = role {
-            data_query = data_query.bind(r.to_string());
-            count_query = count_query.bind(r.to_string());
-        }
-        if let Some(st) = start_time {
-            data_query = data_query.bind(st);
-            count_query = count_query.bind(st);
-        }
-        if let Some(et) = end_time {
-            data_query = data_query.bind(et);
-            count_query = count_query.bind(et);
-        }
-        if let Some(app) = app_name {
-            data_query = data_query.bind(app.to_string());
-            count_query = count_query.bind(app.to_string());
-        }
-        if let Some(os) = on_screen {
-            // SQLite stores BOOLEAN as INTEGER. Bind as i64 explicitly so
-            // the comparison hits the partial index from
-            // 20260502000000_add_elements_on_screen.sql.
-            let v: i64 = if os { 1 } else { 0 };
-            data_query = data_query.bind(v);
-            count_query = count_query.bind(v);
+        for (stored_id, n) in stored {
+            if let Some((skip, take)) = on_page(&window, &mut position, n as usize) {
+                page.push(ElementPagePart::Stored {
+                    frame_id: stored_id,
+                    skip,
+                    take,
+                });
+            }
         }
 
-        data_query = data_query.bind(limit as i64).bind(offset as i64);
-
-        let (rows, total) = tokio::try_join!(
-            data_query.fetch_all(&self.pool),
-            count_query.fetch_one(&self.pool),
-        )?;
-
-        let elements: Vec<Element> = rows.into_iter().map(Element::from).collect();
-        Ok((elements, total))
+        let mut elements = Vec::new();
+        for part in page {
+            match part {
+                ElementPagePart::Ocr(ocr) => elements.extend(ocr),
+                ElementPagePart::Stored {
+                    frame_id,
+                    skip,
+                    take,
+                } => {
+                    let mut q = filter.stored_query(STORED_ELEMENT_COLUMNS);
+                    q.push(" AND e.frame_id = ")
+                        .push_bind(frame_id)
+                        .push(" ORDER BY e.sort_order ASC LIMIT ")
+                        .push_bind(take as i64)
+                        .push(" OFFSET ")
+                        .push_bind(skip as i64);
+                    let rows: Vec<ElementRow> = q.build_query_as().fetch_all(&self.pool).await?;
+                    elements.extend(rows.into_iter().map(Element::from));
+                }
+            }
+        }
+        Ok((elements, position))
     }
 
-    /// Get all elements for a single frame, ordered by sort_order.
-    /// Returns the full tree; clients reconstruct hierarchy from `parent_id`/`depth`.
+    /// The `ocr_text` rows `(text, text_json)` of `frame_ids`, by frame, in
+    /// storage order. Rows whose text lacks any of `required_tokens` (ASCII,
+    /// lower case) are skipped: none of their elements could match.
+    async fn ocr_text_rows(
+        &self,
+        frame_ids: &[i64],
+        required_tokens: &[String],
+    ) -> Result<BTreeMap<i64, Vec<(Option<String>, Option<String>)>>, sqlx::Error> {
+        let mut q = sqlx::QueryBuilder::<Sqlite>::new(
+            "SELECT frame_id, text, text_json FROM ocr_text WHERE frame_id IN (",
+        );
+        let mut ids = q.separated(", ");
+        for id in frame_ids {
+            ids.push_bind(*id);
+        }
+        q.push(")");
+        for token in required_tokens {
+            q.push(" AND instr(lower(text), ")
+                .push_bind(token.clone())
+                .push(") > 0");
+        }
+        q.push(" ORDER BY frame_id, rowid");
+        let rows: Vec<(i64, Option<String>, Option<String>)> =
+            q.build_query_as().fetch_all(&self.pool).await?;
+        let mut by_frame: BTreeMap<i64, Vec<_>> = BTreeMap::new();
+        for (id, text, json) in rows {
+            by_frame.entry(id).or_default().push((text, json));
+        }
+        Ok(by_frame)
+    }
+
+    /// All elements of one frame: its accessibility elements, then its OCR
+    /// elements, each in `sort_order`; clients rebuild the tree from
+    /// `parent_id`/`depth`.
     ///
     /// If the frame has `elements_ref_frame_id` set (element dedup), this follows
     /// the reference and returns elements from the anchor frame instead.
@@ -8735,19 +8613,23 @@ LIMIT ? OFFSET ?
         .await?
         .unwrap_or(frame_id);
 
-        let sql = if source.is_some() {
-            "SELECT id, frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order, on_screen FROM elements WHERE frame_id = ?1 AND source = ?2 ORDER BY sort_order"
-        } else {
-            "SELECT id, frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order, on_screen FROM elements WHERE frame_id = ?1 ORDER BY sort_order"
-        };
-
-        let mut query = sqlx::query_as::<_, ElementRow>(sql).bind(effective_frame_id);
-        if let Some(src) = source {
-            query = query.bind(src.to_string());
+        let mut elements = Vec::new();
+        if source != Some(&ElementSource::Ocr) {
+            let rows: Vec<ElementRow> = sqlx::query_as(
+                "SELECT id, frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order, on_screen FROM elements WHERE frame_id = ?1 AND source = 'accessibility' ORDER BY sort_order",
+            )
+            .bind(effective_frame_id)
+            .fetch_all(&self.pool)
+            .await?;
+            elements.extend(rows.into_iter().map(Element::from));
         }
-
-        let rows = query.fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(Element::from).collect())
+        if source != Some(&ElementSource::Accessibility) {
+            let mut texts = self.ocr_text_rows(&[effective_frame_id], &[]).await?;
+            if let Some(rows) = texts.remove(&effective_frame_id) {
+                elements.extend(crate::ocr_elements::ocr_elements(effective_frame_id, &rows));
+            }
+        }
+        Ok(elements)
     }
 
     /// Lightweight search for grouped results — skips text/text_json columns entirely.
@@ -9549,6 +9431,160 @@ LIMIT ? OFFSET ?
             .await?;
 
         Ok(rows.into_iter().map(UiEventRecord::from).collect())
+    }
+
+    /// Spawn a background task that deletes the OCR element rows earlier
+    /// versions stored; OCR elements are now built from `ocr_text` when read
+    /// (`crate::ocr_elements`), so those rows are unused copies. It walks the
+    /// table in id order, one small batch per write transaction with a pause
+    /// between, so capture writes are not held up. Its position is kept in
+    /// `maintenance_progress`: an interrupted run resumes there, and a
+    /// finished one is not repeated.
+    pub fn start_stored_ocr_element_cleanup(self: &Arc<Self>) {
+        const BATCH: i64 = 2000;
+        // Ids looked at per lookup, so no single read is long (no index
+        // finds OCR rows, and a long read holds back WAL checkpoints).
+        const WINDOW: i64 = 100_000;
+        const PAUSE: Duration = Duration::from_millis(250);
+        const PROGRESS_EVERY: u64 = 1_000_000;
+        let db = Arc::clone(self);
+        tokio::spawn(async move {
+            // Let boot settle first, like the startup integrity check.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let (mut after, end) = loop {
+                match db.stored_ocr_cleanup_range().await {
+                    Ok(Some(range)) => break range,
+                    Ok(None) => return,
+                    Err(e) => {
+                        warn!("stored OCR element cleanup: start failed, retrying: {}", e);
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                }
+            };
+            let (mut deleted, mut reported) = (0u64, 0u64);
+            while after < end {
+                // Looked up on the read pool, so the scan never holds the write lock.
+                let ids: Vec<i64> = match sqlx::query_scalar(
+                    "SELECT id FROM elements WHERE id > ?1 AND id <= ?2 AND source = 'ocr' \
+                     ORDER BY id LIMIT ?3",
+                )
+                .bind(after)
+                .bind(after.saturating_add(WINDOW))
+                .bind(BATCH)
+                .fetch_all(&db.pool)
+                .await
+                {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        warn!("stored OCR element cleanup: lookup failed, retrying: {}", e);
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        continue;
+                    }
+                };
+                let (Some(&first), Some(&last)) = (ids.first(), ids.last()) else {
+                    after = after.saturating_add(WINDOW);
+                    tokio::time::sleep(PAUSE).await;
+                    continue;
+                };
+                match db.delete_stored_ocr_elements(first, last).await {
+                    Ok(n) => {
+                        deleted += n;
+                        after = last;
+                    }
+                    Err(e) => {
+                        warn!("stored OCR element cleanup: delete failed, retrying: {}", e);
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                }
+                if deleted - reported >= PROGRESS_EVERY {
+                    reported = deleted;
+                    info!(
+                        "stored OCR element cleanup: {} rows deleted so far",
+                        deleted
+                    );
+                }
+                tokio::time::sleep(PAUSE).await;
+            }
+            loop {
+                match db.finish_stored_ocr_cleanup().await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        warn!("stored OCR element cleanup: finish failed, retrying: {}", e);
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                }
+            }
+            info!(
+                "stored OCR element cleanup: finished, {} rows deleted this run",
+                deleted
+            );
+        });
+    }
+
+    /// Where the stored OCR element cleanup resumes and the last element id it
+    /// must reach (new rows are never OCR); `None` once it has finished.
+    async fn stored_ocr_cleanup_range(&self) -> Result<Option<(i64, i64)>, sqlx::Error> {
+        let progress: Option<(i64, Option<String>)> =
+            sqlx::query_as("SELECT last_id, finished_at FROM maintenance_progress WHERE task = ?1")
+                .bind(STORED_OCR_CLEANUP_TASK)
+                .fetch_optional(&self.pool)
+                .await?;
+        if progress.as_ref().is_some_and(|(_, done)| done.is_some()) {
+            return Ok(None);
+        }
+        let end: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM elements")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(Some((
+            progress.map_or(0, |(last, _)| last),
+            end.unwrap_or(0),
+        )))
+    }
+
+    async fn finish_stored_ocr_cleanup(&self) -> Result<(), sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+        sqlx::query(
+            "INSERT INTO maintenance_progress (task, finished_at) VALUES (?1, datetime('now')) \
+             ON CONFLICT(task) DO UPDATE SET finished_at = excluded.finished_at",
+        )
+        .bind(STORED_OCR_CLEANUP_TASK)
+        .execute(&mut **tx.conn())
+        .await?;
+        tx.commit().await
+    }
+
+    /// Deletes the stored OCR element rows with ids in `first..=last` and
+    /// records `last` as the cleanup's position, in one transaction.
+    async fn delete_stored_ocr_elements(&self, first: i64, last: i64) -> Result<u64, sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+        // Children later in the table would otherwise fail the parent_id
+        // foreign key; they are deleted by a later batch.
+        sqlx::query(
+            "UPDATE elements SET parent_id = NULL \
+             WHERE parent_id BETWEEN ?1 AND ?2 AND source = 'ocr'",
+        )
+        .bind(first)
+        .bind(last)
+        .execute(&mut **tx.conn())
+        .await?;
+        let deleted =
+            sqlx::query("DELETE FROM elements WHERE id BETWEEN ?1 AND ?2 AND source = 'ocr'")
+                .bind(first)
+                .bind(last)
+                .execute(&mut **tx.conn())
+                .await?
+                .rows_affected();
+        sqlx::query(
+            "INSERT INTO maintenance_progress (task, last_id) VALUES (?1, ?2) \
+             ON CONFLICT(task) DO UPDATE SET last_id = excluded.last_id",
+        )
+        .bind(STORED_OCR_CLEANUP_TASK)
+        .bind(last)
+        .execute(&mut **tx.conn())
+        .await?;
+        tx.commit().await?;
+        Ok(deleted)
     }
 
     /// Spawn a background task that runs `PRAGMA wal_checkpoint(TRUNCATE)` every 5 minutes.
@@ -13691,6 +13727,79 @@ mod tests {
         assert_eq!(groups[0].representative.frame_id, 2); // highest confidence
         assert_eq!(groups[1].group_size, 2); // Gmail group
         assert_eq!(groups[2].group_size, 1); // Maps group 2 (separate visit)
+    }
+
+    #[tokio::test]
+    async fn stored_ocr_element_cleanup_keeps_accessibility_and_splits_parent_links() {
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let frame: i64 = sqlx::query_scalar(
+            "INSERT INTO frames (video_chunk_id, timestamp, full_text) \
+             VALUES (NULL, '2026-01-01T00:00:00Z', 'synthetic') RETURNING id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        async fn element(
+            db: &DatabaseManager,
+            frame: i64,
+            source: &str,
+            parent: Option<i64>,
+        ) -> i64 {
+            sqlx::query_scalar(
+                "INSERT INTO elements (frame_id, source, role, text, parent_id) \
+                 VALUES (?1, ?2, 'line', 'synthetic', ?3) RETURNING id",
+            )
+            .bind(frame)
+            .bind(source)
+            .bind(parent)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+        }
+        element(&db, frame, "accessibility", None).await;
+        let parent = element(&db, frame, "ocr", None).await;
+        let child = element(&db, frame, "ocr", Some(parent)).await;
+        element(&db, frame, "accessibility", None).await;
+
+        // The parent's batch ends before its child: the link must not block it.
+        assert_eq!(
+            db.delete_stored_ocr_elements(parent, parent).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            db.delete_stored_ocr_elements(child, child).await.unwrap(),
+            1
+        );
+        let left: Vec<(String,)> = sqlx::query_as("SELECT source FROM elements ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            left,
+            [
+                ("accessibility".to_string(),),
+                ("accessibility".to_string(),)
+            ]
+        );
+        let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM elements_fts")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(indexed, 2, "the search index loses the deleted rows too");
+
+        let max_id: i64 = sqlx::query_scalar("SELECT MAX(id) FROM elements")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.stored_ocr_cleanup_range().await.unwrap(),
+            Some((child, max_id)),
+            "a restart resumes after the last deleted batch"
+        );
+        db.finish_stored_ocr_cleanup().await.unwrap();
+        assert_eq!(db.stored_ocr_cleanup_range().await.unwrap(), None);
     }
 }
 

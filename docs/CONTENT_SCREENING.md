@@ -359,8 +359,8 @@ Applies the current rules (credential-file titles, protected apps,
 `contentScreeningKeywords` and, with `pauseOnDrmContent`, DRM domains) to every
 stored frame (app for the window rules; title, URL, document path,
 accessibility text, tree JSON and accessibility element texts as the frame
-window's texts; OCR text with its stored word positions, OCR word JSON, full
-text and OCR element texts as image texts) and input event (title, URL, text,
+window's texts; OCR text with its stored word positions, OCR word JSON and full
+text as image texts; OCR elements are built from those when read, not stored) and input event (title, URL, text,
 element name/value/description, screened as a frame of its own window).
 `includedWindows` is not re-applied. Screening always runs here, even if
 `contentScreeningEnabled` is off. Capture time and the re-screen make no

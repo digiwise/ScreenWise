@@ -221,7 +221,6 @@ fn frame_decision(row: &RescreenFrameRow, rules: &RescreenRules) -> FrameDecisio
         image_texts.push(text);
         image_texts.extend(json.as_deref());
     }
-    image_texts.extend(row.ocr_element_texts.iter().map(String::as_str));
     let stored = StoredFrame {
         app_name: row.app_name.as_deref(),
         window_name: row.window_name.as_deref(),

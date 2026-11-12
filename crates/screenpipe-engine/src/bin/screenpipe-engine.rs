@@ -1324,6 +1324,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Periodic WAL checkpoint to prevent unbounded WAL growth
     db.start_wal_maintenance();
+    // Remove OCR element rows older versions stored (now built when read).
+    db.start_stored_ocr_element_cleanup();
 
     let server_future = server.start();
     pin_mut!(server_future);

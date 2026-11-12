@@ -134,6 +134,24 @@ pub(crate) async fn search_elements(
         .as_deref()
         .and_then(|s| s.parse::<ElementSource>().ok());
 
+    // OCR elements are built from every OCR frame in range, so an unranged
+    // search would read the whole OCR store in one request.
+    if query.start_time.is_none()
+        && query.frame_id.is_none()
+        && screenpipe_db::ocr_elements::search_reads_ocr(
+            source.as_ref(),
+            query.role.as_deref(),
+            query.on_screen,
+        )
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({
+                "error": "start_time or frame_id is required unless source=accessibility or on_screen is set"
+            })),
+        ));
+    }
+
     let (elements, total) = state
         .db
         .search_elements(

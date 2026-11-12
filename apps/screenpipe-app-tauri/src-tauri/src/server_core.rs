@@ -259,6 +259,7 @@ impl ServerCore {
         resource_monitor.start_monitoring(Duration::from_secs(30));
         let privacy_notice_recorder = screenpipe_engine::privacy_notices::start(db.clone());
         start_sleep_monitor();
+        db.start_stored_ocr_element_cleanup();
 
         // --- HTTP server ---
         let mut server = SCServer::new(

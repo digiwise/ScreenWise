@@ -30,9 +30,9 @@ pub struct RescreenFrameRow {
     /// `(ocr_text.text, ocr_text.text_json)` rows of the frame.
     pub ocr: Vec<(String, Option<String>)>,
     /// `elements.text` and `elements.properties` of the frame's element
-    /// anchor (the frame itself or its `elements_ref_frame_id`), by source.
+    /// anchor (the frame itself or its `elements_ref_frame_id`). Only
+    /// accessibility elements are stored; OCR elements are built from `ocr`.
     pub accessibility_element_texts: Vec<String>,
-    pub ocr_element_texts: Vec<String>,
 }
 
 /// One stored input event's identity and text columns.
@@ -150,7 +150,6 @@ impl DatabaseManager {
                 accessibility_tree_json: row.get("accessibility_tree_json"),
                 ocr: Vec::new(),
                 accessibility_element_texts: Vec::new(),
-                ocr_element_texts: Vec::new(),
             });
         }
         if frames.is_empty() {
@@ -175,22 +174,17 @@ impl DatabaseManager {
         unique.sort_unstable();
         unique.dedup();
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT frame_id, source, text, properties FROM elements WHERE frame_id IN (",
+            "SELECT frame_id, text, properties FROM elements \
+             WHERE source = 'accessibility' AND frame_id IN (",
         );
         in_list(&mut query, &unique);
         for row in query.build().fetch_all(&self.pool).await? {
             let anchor: i64 = row.get("frame_id");
-            let source: String = row.get("source");
             let text: Option<String> = row.get("text");
             let properties: Option<String> = row.get("properties");
             for (i, frame_anchor) in anchors.iter().enumerate() {
                 if *frame_anchor == anchor {
-                    let target = if source == "ocr" {
-                        &mut frames[i].ocr_element_texts
-                    } else {
-                        &mut frames[i].accessibility_element_texts
-                    };
-                    target.extend(
+                    frames[i].accessibility_element_texts.extend(
                         text.iter()
                             .chain(properties.iter())
                             .filter(|s| !s.is_empty())
@@ -454,7 +448,7 @@ mod tests {
 
     async fn element(db: &DatabaseManager, frame_id: i64, text: &str) {
         sqlx::query(
-            "INSERT INTO elements (frame_id, source, role, text) VALUES (?1, 'ocr', 'line', ?2)",
+            "INSERT INTO elements (frame_id, source, role, text) VALUES (?1, 'accessibility', 'AXStaticText', ?2)",
         )
         .bind(frame_id)
         .bind(text)
@@ -571,8 +565,7 @@ mod tests {
         let rows = db.rescreen_frames(0, i64::MAX, 10).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].id, referencing);
-        assert_eq!(rows[1].ocr_element_texts, ["alpha element"]);
-        assert!(rows[1].accessibility_element_texts.is_empty());
+        assert_eq!(rows[1].accessibility_element_texts, ["alpha element"]);
         assert_eq!(
             rows[1].ocr,
             [("beta synthetic".to_string(), Some("[]".to_string()))]
@@ -693,7 +686,7 @@ mod tests {
         );
         assert!(rows
             .iter()
-            .all(|r| r.ocr_element_texts == ["shared element"]));
+            .all(|r| r.accessibility_element_texts == ["shared element"]));
         assert_eq!(
             count(
                 &db,

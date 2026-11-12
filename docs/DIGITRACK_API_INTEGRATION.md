@@ -71,13 +71,25 @@ an instruction to load every element and full frame context for every period.
   `start_time` still groups every frame and can still answer 408, as can a
   text search without a range for a word in more than a few hundred frames:
   always send a range.
+- Routes in use (checked 2026-11-12): DigiTrack's CLI reads only
+  `/search` (`content_type=ocr`, `input` and `audio`), `/meetings` and
+  `/capture-events`; its review scripts add `/frames/{id}/metadata` and
+  `/frames/{id}`. Neither calls the elements routes below.
+- OCR elements (2026-11-12): OCR elements are built from each frame's
+  stored OCR words when read, no longer stored as rows. Their `id` is
+  negative, derived from the frame and the word's position, and stable
+  between reads; accessibility elements keep positive row ids. A frame whose
+  OCR text was redacted returns its redacted text as one element per line,
+  without bounds. An elements text search matches OCR words by whole tokens,
+  like the index it replaces, and reads every frame in the range: send a
+  range.
 
 ## Routes to use
 
 | Purpose | GET route | Important fields/shape |
 |---|---|---|
 | Screen text and frame references | `/search?content_type=ocr` | `{data:[{type:"OCR",content:{...}}],pagination:{limit,offset,total}}`; `frame_id`, `timestamp`, `text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused`, `device_name`, `capture_privacy`; optional `active_monitor=true` for known active-monitor frames, including redactions |
-| Individual retained accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence`; add visibility/source filters when needed |
+| Individual retained accessibility/OCR elements | `/elements` | `{data:[...],pagination:{...}}`; `id`, `frame_id`, `source`, `text`, `role`, `bounds`, `on_screen`, `confidence`; add visibility/source filters when needed; newest frame first, a frame's accessibility elements before its OCR elements |
 | Audio transcripts | `/search?content_type=audio` | `type:"Audio"`; optional `transcription_id` (the only segment identity — see the audio caution below), `chunk_id`, `offset_index` (not a segment index), `timestamp`, `transcription`/`text`, `device_name`, `device_type`, optional segment times, speaker/source/provider/model metadata and `meeting_id` |
 | Optional retained input events | `/search?content_type=input` | `type:"Input"`; `id`, `timestamp`, `event_type`, optional app/window/context, `text_content` and `frame_id` |
 | Frame timestamp for a reference | `/frames/{frame_id}/metadata` | `{frame_id,timestamp}`; returns 404 when the frame is absent |
