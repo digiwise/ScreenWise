@@ -57,9 +57,10 @@ an instruction to load every element and full frame context for every period.
   request at a time, keep OCR ranges short (about 30 minutes on busy days),
   honour `Retry-After` and stop or back off on the first 408/5xx rather than
   retrying in a loop. Cached identical searches return without the limit.
-- Search speed (2026-11-12): OCR and accessibility searches and their totals
-  find frames through the timestamp index when `start_time`/`end_time` are
-  sent. Before this, every such search read all frames and could answer 408
+- Search speed (2026-11-12): OCR, accessibility, audio and input searches and
+  their totals find rows through the timestamp index when
+  `start_time`/`end_time` are sent (input 10 minutes: 0.94 s before, 0.1 s
+  after). Before this, every such search read all frames and could answer 408
   on a large store whose pages were not yet in memory (for example after a
   restart). Measured through the API on one ~45 GB store (`release-local`):
   10 minutes of OCR 0.05-0.15 s, one day about 3 s. An OCR search without

@@ -65,13 +65,19 @@ pub const MEETING_END_REASON_AUTO_END: &str = "auto_end";
 /// App shutdown closed an active meeting row. Eligible for auto-merge on next launch.
 pub const MEETING_END_REASON_SHUTDOWN: &str = "shutdown";
 
-/// Time filter for a search query whose start and end are bound as `?2` and
-/// `?3`. A given bound is a plain comparison; a missing one becomes `?N IS NULL`
-/// so every parameter stays referenced (sqlx binds unreferenced `?N` gaps
+/// Time filter for a search query whose start and end are bound as `params`
+/// (e.g. `["?2", "?3"]`, or `["?", "?"]` with each bound once). A given bound is
+/// a plain comparison; a missing one becomes `<param> IS NULL`, so every
+/// parameter stays referenced exactly once (sqlx binds unreferenced `?N` gaps
 /// positionally). Never write `(?2 IS NULL OR col >= ?2)`: SQLite cannot use the
-/// timestamp index for that form and reads every frame (2026-11-12: over 30 s
-/// on a 45 GB store with a cold page cache, so the search route timed out).
-fn search_time_range_sql(column: &str, has_start: bool, has_end: bool) -> String {
+/// timestamp index for that form and reads every row (2026-11-12: over 30 s on
+/// a 45 GB store with a cold page cache, so the search route timed out).
+fn search_time_range_sql(
+    column: &str,
+    has_start: bool,
+    has_end: bool,
+    params: [&str; 2],
+) -> String {
     let bound = |given: bool, op: &str, param: &str| {
         if given {
             format!("AND {column} {op} {param}")
@@ -81,8 +87,8 @@ fn search_time_range_sql(column: &str, has_start: bool, has_end: bool) -> String
     };
     format!(
         "{} {}",
-        bound(has_start, ">=", "?2"),
-        bound(has_end, "<=", "?3")
+        bound(has_start, ">=", params[0]),
+        bound(has_end, "<=", params[1])
     )
 }
 
@@ -151,7 +157,7 @@ fn ocr_search_sql(has_fts: bool, has_start: bool, has_end: bool) -> String {
         } else {
             ""
         },
-        time_range = search_time_range_sql("frames.timestamp", has_start, has_end),
+        time_range = search_time_range_sql("frames.timestamp", has_start, has_end, ["?2", "?3"]),
     )
 }
 
@@ -198,7 +204,7 @@ fn frame_count_sql(
         } else {
             ""
         },
-        time_range = search_time_range_sql("frames.timestamp", has_start, has_end),
+        time_range = search_time_range_sql("frames.timestamp", has_start, has_end, ["?2", "?3"]),
         a11y_filter = if accessibility_only {
             "AND frames.accessibility_text IS NOT NULL AND frames.accessibility_text != ''"
         } else {
@@ -242,7 +248,82 @@ fn accessibility_search_sql(has_fts: bool, has_start: bool, has_end: bool) -> St
         } else {
             ""
         },
-        time_range = search_time_range_sql("f.timestamp", has_start, has_end),
+        time_range = search_time_range_sql("f.timestamp", has_start, has_end, ["?2", "?3"]),
+    )
+}
+
+/// SQL counting the transcriptions `search_audio` can return, for the search
+/// route's `total`.
+fn audio_count_sql(
+    has_query: bool,
+    has_speaker_name: bool,
+    has_tags: bool,
+    has_start: bool,
+    has_end: bool,
+) -> String {
+    format!(
+        r#"SELECT COUNT(DISTINCT audio_transcriptions.id)
+           FROM {table}
+           JOIN audio_chunks ON audio_chunks.id = audio_transcriptions.audio_chunk_id
+           {speaker_join}
+           WHERE {match_condition}
+               AND (speakers.id IS NULL OR speakers.hallucination = 0)
+               {time_range}
+               AND (?4 IS NULL OR COALESCE(audio_transcriptions.text_length, LENGTH(audio_transcriptions.transcription)) >= ?4)
+               AND (?5 IS NULL OR COALESCE(audio_transcriptions.text_length, LENGTH(audio_transcriptions.transcription)) <= ?5)
+               AND (json_array_length(?6) = 0 OR audio_transcriptions.speaker_id IN (SELECT value FROM json_each(?6)))
+               {speaker_name_condition}
+               {tag_filter}
+        "#,
+        table = if !has_query {
+            "audio_transcriptions"
+        } else {
+            "audio_transcriptions_fts JOIN audio_transcriptions ON audio_transcriptions.id = audio_transcriptions_fts.rowid"
+        },
+        speaker_join = "LEFT JOIN speakers ON audio_transcriptions.speaker_id = speakers.id",
+        speaker_name_condition = if has_speaker_name {
+            "AND (speakers.name LIKE '%' || ?7 || '%' COLLATE NOCASE
+                OR EXISTS (
+                    SELECT 1 FROM diarization_segments ds_name
+                    WHERE ds_name.audio_chunk_id = audio_transcriptions.audio_chunk_id
+                      AND audio_transcriptions.start_time IS NOT NULL
+                      AND audio_transcriptions.end_time IS NOT NULL
+                      AND ABS(ds_name.start_time - audio_transcriptions.start_time) < 0.05
+                      AND ABS(ds_name.end_time - audio_transcriptions.end_time) < 0.05
+                      AND ds_name.provider_speaker_label LIKE '%' || ?7 || '%' COLLATE NOCASE
+                ))"
+        } else {
+            ""
+        },
+        // Tag filter binds after the conditional speaker-name param,
+        // so its placeholder is ?8 when a name filter is present, ?7
+        // otherwise. Empty tag slice = no clause (and no bind).
+        tag_filter = if !has_tags {
+            String::new()
+        } else {
+            let n = if has_speaker_name { 8 } else { 7 };
+            format!(
+                "AND audio_transcriptions.audio_chunk_id IN (
+                    SELECT a_inner.audio_chunk_id
+                    FROM audio_tags a_inner
+                    JOIN tags t_inner ON a_inner.tag_id = t_inner.id
+                    WHERE t_inner.name IN (SELECT value FROM json_each(?{n}))
+                    GROUP BY a_inner.audio_chunk_id
+                    HAVING COUNT(DISTINCT t_inner.name) = json_array_length(?{n})
+                )"
+            )
+        },
+        match_condition = if !has_query {
+            "1=1"
+        } else {
+            "audio_transcriptions_fts MATCH ?1"
+        },
+        time_range = search_time_range_sql(
+            "audio_transcriptions.timestamp",
+            has_start,
+            has_end,
+            ["?2", "?3"]
+        ),
     )
 }
 
@@ -5507,65 +5588,12 @@ impl DatabaseManager {
                 start_time.is_some(),
                 end_time.is_some(),
             ),
-            ContentType::Audio => format!(
-                r#"SELECT COUNT(DISTINCT audio_transcriptions.id)
-                   FROM {table}
-                   JOIN audio_chunks ON audio_chunks.id = audio_transcriptions.audio_chunk_id
-                   {speaker_join}
-                   WHERE {match_condition}
-                       AND (speakers.id IS NULL OR speakers.hallucination = 0)
-                       AND (?2 IS NULL OR audio_transcriptions.timestamp >= ?2)
-                       AND (?3 IS NULL OR audio_transcriptions.timestamp <= ?3)
-                       AND (?4 IS NULL OR COALESCE(audio_transcriptions.text_length, LENGTH(audio_transcriptions.transcription)) >= ?4)
-                       AND (?5 IS NULL OR COALESCE(audio_transcriptions.text_length, LENGTH(audio_transcriptions.transcription)) <= ?5)
-                       AND (json_array_length(?6) = 0 OR audio_transcriptions.speaker_id IN (SELECT value FROM json_each(?6)))
-                       {speaker_name_condition}
-                       {tag_filter}
-                "#,
-                table = if query.is_empty() {
-                    "audio_transcriptions"
-                } else {
-                    "audio_transcriptions_fts JOIN audio_transcriptions ON audio_transcriptions.id = audio_transcriptions_fts.rowid"
-                },
-                speaker_join =
-                    "LEFT JOIN speakers ON audio_transcriptions.speaker_id = speakers.id",
-                speaker_name_condition = if speaker_name.is_some() {
-                    "AND (speakers.name LIKE '%' || ?7 || '%' COLLATE NOCASE
-                        OR EXISTS (
-                            SELECT 1 FROM diarization_segments ds_name
-                            WHERE ds_name.audio_chunk_id = audio_transcriptions.audio_chunk_id
-                              AND audio_transcriptions.start_time IS NOT NULL
-                              AND audio_transcriptions.end_time IS NOT NULL
-                              AND ABS(ds_name.start_time - audio_transcriptions.start_time) < 0.05
-                              AND ABS(ds_name.end_time - audio_transcriptions.end_time) < 0.05
-                              AND ds_name.provider_speaker_label LIKE '%' || ?7 || '%' COLLATE NOCASE
-                        ))"
-                } else {
-                    ""
-                },
-                // Tag filter binds after the conditional speaker-name param,
-                // so its placeholder is ?8 when a name filter is present, ?7
-                // otherwise. Empty tag slice = no clause (and no bind).
-                tag_filter = if tags.is_empty() {
-                    String::new()
-                } else {
-                    let n = if speaker_name.is_some() { 8 } else { 7 };
-                    format!(
-                        "AND audio_transcriptions.audio_chunk_id IN (
-                            SELECT a_inner.audio_chunk_id
-                            FROM audio_tags a_inner
-                            JOIN tags t_inner ON a_inner.tag_id = t_inner.id
-                            WHERE t_inner.name IN (SELECT value FROM json_each(?{n}))
-                            GROUP BY a_inner.audio_chunk_id
-                            HAVING COUNT(DISTINCT t_inner.name) = json_array_length(?{n})
-                        )"
-                    )
-                },
-                match_condition = if query.is_empty() {
-                    "1=1"
-                } else {
-                    "audio_transcriptions_fts MATCH ?1"
-                }
+            ContentType::Audio => audio_count_sql(
+                !query.is_empty(),
+                speaker_name.is_some(),
+                !tags.is_empty(),
+                start_time.is_some(),
+                end_time.is_some(),
             ),
             ContentType::Memory => {
                 let start_str = start_time.map(|t| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
@@ -5617,18 +5645,19 @@ impl DatabaseManager {
                 };
 
                 let input_sql = format!(
-                    "SELECT COUNT(*) FROM ui_events WHERE {} AND (? IS NULL OR timestamp >= ?) AND (? IS NULL OR timestamp <= ?)",
-                    where_part
+                    "SELECT COUNT(*) FROM ui_events WHERE {where_part} {}",
+                    search_time_range_sql(
+                        "timestamp",
+                        start_time.is_some(),
+                        end_time.is_some(),
+                        ["?", "?"]
+                    )
                 );
                 let mut qb = sqlx::query_scalar::<_, i64>(&input_sql);
                 for val in &bind_values {
                     qb = qb.bind(val);
                 }
-                qb = qb
-                    .bind(start_time)
-                    .bind(start_time)
-                    .bind(end_time)
-                    .bind(end_time);
+                qb = qb.bind(start_time).bind(end_time);
                 let count: i64 = qb.fetch_one(&self.pool).await?;
                 return Ok(count as usize);
             }
@@ -6374,8 +6403,12 @@ impl DatabaseManager {
             } else {
                 ""
             },
-            time_range =
-                search_time_range_sql("f.timestamp", start_time.is_some(), end_time.is_some()),
+            time_range = search_time_range_sql(
+                "f.timestamp",
+                start_time.is_some(),
+                end_time.is_some(),
+                ["?2", "?3"]
+            ),
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
@@ -6428,8 +6461,12 @@ impl DatabaseManager {
             } else {
                 ""
             },
-            time_range =
-                search_time_range_sql("f.timestamp", start_time.is_some(), end_time.is_some()),
+            time_range = search_time_range_sql(
+                "f.timestamp",
+                start_time.is_some(),
+                end_time.is_some(),
+                ["?2", "?3"]
+            ),
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
@@ -6505,13 +6542,17 @@ impl DatabaseManager {
                 element_description, element_automation_id, element_bounds,
                 frame_id
             FROM ui_events
-            WHERE {}
-                AND (? IS NULL OR timestamp >= ?)
-                AND (? IS NULL OR timestamp <= ?)
+            WHERE {where_clause}
+                {time_range}
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
             "#,
-            where_clause
+            time_range = search_time_range_sql(
+                "timestamp",
+                start_time.is_some(),
+                end_time.is_some(),
+                ["?", "?"]
+            ),
         );
 
         let mut query_builder = sqlx::query_as::<_, UiEventRow>(&sql);
@@ -6520,8 +6561,6 @@ impl DatabaseManager {
         }
         let rows: Vec<UiEventRow> = query_builder
             .bind(start_time)
-            .bind(start_time)
-            .bind(end_time)
             .bind(end_time)
             .bind(limit)
             .bind(offset)
@@ -6537,20 +6576,27 @@ impl DatabaseManager {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
     ) -> Result<Vec<(String, String, i64)>, sqlx::Error> {
-        let sql = r#"
+        let sql = format!(
+            r#"
             SELECT
                 COALESCE(app_name, 'unknown') as app,
                 event_type,
                 COUNT(*) as count
             FROM ui_events
-            WHERE (?1 IS NULL OR timestamp >= ?1)
-                AND (?2 IS NULL OR timestamp <= ?2)
+            WHERE 1=1 {}
             GROUP BY app_name, event_type
             ORDER BY count DESC
             LIMIT 100
-        "#;
+        "#,
+            search_time_range_sql(
+                "timestamp",
+                start_time.is_some(),
+                end_time.is_some(),
+                ["?1", "?2"]
+            )
+        );
 
-        let rows: Vec<(String, String, i64)> = sqlx::query_as(sql)
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(&sql)
             .bind(start_time)
             .bind(end_time)
             .fetch_all(&self.pool)
@@ -11931,10 +11977,104 @@ mod tests {
                 }
             }
         }
+        for (has_start, has_end) in [(true, true), (true, false), (false, true)] {
+            let audio = audio_count_sql(false, false, false, has_start, has_end);
+            let ui = format!(
+                "SELECT COUNT(*) FROM ui_events WHERE 1=1 {}",
+                search_time_range_sql("timestamp", has_start, has_end, ["?", "?"])
+            );
+            for (table, index, sql) in [
+                (
+                    "audio_transcriptions",
+                    "idx_audio_transcriptions_timestamp",
+                    audio,
+                ),
+                ("ui_events", "idx_ui_events_timestamp", ui),
+            ] {
+                let plan: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .fetch_all(&db.pool)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.get::<String, _>(3))
+                    .collect();
+                assert!(
+                    plan.iter()
+                        .any(|step| step.starts_with(&format!("SEARCH {table} "))
+                            && step.contains(index)),
+                    "{table} start={has_start} end={has_end} does not search by time: {plan:?}"
+                );
+            }
+        }
         assert_eq!(
-            search_time_range_sql("f.timestamp", false, false),
+            search_time_range_sql("f.timestamp", false, false, ["?2", "?3"]),
             "AND ?2 IS NULL AND ?3 IS NULL"
         );
+    }
+
+    /// Input searches bind each time bound once, after the text filters, and
+    /// keep every row in range whichever bounds and filters are given.
+    #[tokio::test]
+    async fn input_searches_bind_optional_time_bounds_in_order() {
+        let db = test_database().await;
+        for (timestamp, app) in [
+            ("2026-03-01T09:00:00.000+00:00", "code"),
+            ("2026-03-01T10:00:00.000+00:00", "code"),
+            ("2026-03-01T11:00:00.000+00:00", "term"),
+        ] {
+            sqlx::query(
+                "INSERT INTO ui_events (timestamp, event_type, app_name) VALUES (?1, 'click', ?2)",
+            )
+            .bind(timestamp)
+            .bind(app)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let (start, end) = (at("2026-03-01T09:30:00Z"), at("2026-03-01T11:30:00Z"));
+        for (start, end, app, expected) in [
+            (None, None, None, 3),
+            (Some(start), None, None, 2),
+            (None, Some(at("2026-03-01T10:30:00Z")), None, 2),
+            (Some(start), Some(end), None, 2),
+            (Some(start), Some(end), Some("code"), 1),
+            (None, None, Some("code"), 2),
+        ] {
+            let case = format!("start={start:?} end={end:?} app={app:?}");
+            let found = db
+                .search_ui_events(None, None, app, None, start, end, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(found.len(), expected, "search {case}");
+            let total = db
+                .count_search_results_with_tags_and_active_monitor(
+                    "",
+                    ContentType::Input,
+                    start,
+                    end,
+                    app,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(total, expected, "count {case}");
+            if app.is_none() {
+                let stats = db.get_ui_event_stats(start, end).await.unwrap();
+                let stats_total: i64 = stats.iter().map(|(_, _, n)| n).sum();
+                assert_eq!(stats_total, expected as i64, "stats {case}");
+            }
+        }
     }
 
     // ─── Dedicated read endpoints: DatabaseManager method tests ───

@@ -308,7 +308,8 @@ mod query_plan_tests {
         let db = setup_test_db().await;
         seed_data(&db, 200).await;
 
-        // Pattern used in search today: IS NULL OR
+        // IS NULL OR pattern (search used it until 2026-11-12; see
+        // `search_time_range_sql` in db.rs)
         let plan_with_is_null = explain(
             &db,
             r#"SELECT frames.id, frames.timestamp
