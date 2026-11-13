@@ -820,15 +820,30 @@ pub const API_STATEMENT_BUDGET: Duration = Duration::from_secs(25);
 /// SQLite VM instructions between progress callbacks.
 const PROGRESS_HANDLER_OPS: i32 = 4000;
 
-tokio::task_local! {
-    /// Set by [`cancel_api_reads_on_drop`] for the API work running in this task.
-    static API_READS_CANCELLED: Arc<AtomicBool>;
+/// The API work running in a task (see [`cancel_api_reads_on_drop`]).
+#[derive(Clone)]
+struct ApiWork {
+    cancelled: Arc<AtomicBool>,
+    /// [`API_STATEMENT_BUDGET`] after the work started.
+    deadline: std::time::Instant,
 }
 
-/// Runs `work`; if it is dropped before it finishes (e.g. by a request
-/// timeout), budgeted-pool statements it started are interrupted at their next
-/// progress callback, so their connections return to the pool at once.
+tokio::task_local! {
+    /// Set by [`cancel_api_reads_on_drop`] for the API work running in this task.
+    static API_WORK: ApiWork;
+}
+
+/// Runs `work`; budgeted-pool statements it starts are interrupted at their
+/// next progress callback once [`API_STATEMENT_BUDGET`] has passed since
+/// `work` began, however many statements it runs, or once `work` is dropped
+/// before it finishes (e.g. by a request timeout), so their connections
+/// return to the pool at once.
 pub async fn cancel_api_reads_on_drop<F: std::future::Future>(work: F) -> F::Output {
+    api_work_within(API_STATEMENT_BUDGET, work).await
+}
+
+/// [`cancel_api_reads_on_drop`] with a given budget.
+async fn api_work_within<F: std::future::Future>(budget: Duration, work: F) -> F::Output {
     struct CancelUnlessFinished {
         cancelled: Arc<AtomicBool>,
         finished: bool,
@@ -844,25 +859,32 @@ pub async fn cancel_api_reads_on_drop<F: std::future::Future>(work: F) -> F::Out
         cancelled: Arc::new(AtomicBool::new(false)),
         finished: false,
     };
-    let output = API_READS_CANCELLED
-        .scope(Arc::clone(&guard.cancelled), work)
-        .await;
+    let api_work = ApiWork {
+        cancelled: Arc::clone(&guard.cancelled),
+        deadline: std::time::Instant::now() + budget,
+    };
+    let output = API_WORK.scope(api_work, work).await;
     guard.finished = true;
     output
 }
 
 /// Arms `conn` for one use from the pool: its statements are interrupted once
-/// `budget` has passed since now, or once the acquiring task's
-/// [`cancel_api_reads_on_drop`] work is dropped. The deadline is fixed when the
-/// connection is taken, not measured between progress callbacks: a statement
-/// stalled on disk reads must not restart its own clock (2026-11-12: such
-/// searches ran on for over 30 minutes and held every API connection).
+/// `budget` has passed since now, or the acquiring task's
+/// [`cancel_api_reads_on_drop`] work passes its deadline or is dropped. The
+/// deadline is fixed when the connection is taken, not measured between
+/// progress callbacks: a statement stalled on disk reads must not restart its
+/// own clock (2026-11-12: such searches ran on for over 30 minutes and held
+/// every API connection).
 async fn arm_statement_budget(
     conn: &mut sqlx::SqliteConnection,
     budget: Duration,
 ) -> Result<(), SqlxError> {
-    let deadline = std::time::Instant::now() + budget;
-    let cancelled = API_READS_CANCELLED.try_with(Arc::clone).ok();
+    let work = API_WORK.try_with(ApiWork::clone).ok();
+    let mut deadline = std::time::Instant::now() + budget;
+    if let Some(work) = &work {
+        deadline = deadline.min(work.deadline);
+    }
+    let cancelled = work.map(|work| work.cancelled);
     conn.lock_handle()
         .await?
         .set_progress_handler(PROGRESS_HANDLER_OPS, move || {
@@ -12891,6 +12913,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(three, 3);
+    }
+
+    #[tokio::test]
+    async fn api_work_budget_covers_all_its_statements_together() {
+        let options: SqliteConnectOptions = "sqlite::memory:".parse().unwrap();
+        let pool = statement_budget_pool_options(Duration::from_secs(600))
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let _: i64 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Short statements: none is over the work's budget alone.
+        let short = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+                     LIMIT 100000) SELECT count(*) FROM c";
+        let started = std::time::Instant::now();
+        let outcome = api_work_within(Duration::from_millis(500), async {
+            loop {
+                sqlx::query_scalar::<_, i64>(short).fetch_one(&pool).await?;
+                if started.elapsed() > Duration::from_secs(10) {
+                    return Ok::<_, sqlx::Error>(());
+                }
+            }
+        })
+        .await;
+        let code = outcome
+            .expect_err("the series must be interrupted")
+            .as_database_error()
+            .and_then(|e| e.code())
+            .map(|c| c.into_owned());
+        assert_eq!(code.as_deref(), Some("9"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Work started afterwards has its own budget.
+        let one: i64 = api_work_within(
+            Duration::from_secs(5),
+            sqlx::query_scalar(short).fetch_one(&pool),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one, 100000);
     }
 
     #[tokio::test]

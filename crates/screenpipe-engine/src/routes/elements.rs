@@ -10,7 +10,7 @@ use axum::{
 use oasgen::{oasgen, OaSchema};
 
 use chrono::{DateTime, Utc};
-use screenpipe_db::{Element, ElementSource};
+use screenpipe_db::{cancel_api_reads_on_drop, Element, ElementSource};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -152,22 +152,22 @@ pub(crate) async fn search_elements(
         ));
     }
 
-    let (elements, total) = state
-        .db
-        .search_elements(
-            q,
-            query.frame_id,
-            source.as_ref(),
-            query.role.as_deref(),
-            query.start_time,
-            query.end_time,
-            query.app_name.as_deref(),
-            query.on_screen,
-            query.limit,
-            query.offset,
-        )
-        .await
-        .map_err(|e| super::search::search_failure(&e))?;
+    // A search runs a query per batch of OCR frames; the API statement budget
+    // bounds them together, from the start of the request.
+    let (elements, total) = cancel_api_reads_on_drop(state.db.search_elements(
+        q,
+        query.frame_id,
+        source.as_ref(),
+        query.role.as_deref(),
+        query.start_time,
+        query.end_time,
+        query.app_name.as_deref(),
+        query.on_screen,
+        query.limit,
+        query.offset,
+    ))
+    .await
+    .map_err(|e| super::search::search_failure(&e))?;
 
     Ok(JsonResponse(ElementsListResponse {
         data: elements.into_iter().map(ElementResponse::from).collect(),
