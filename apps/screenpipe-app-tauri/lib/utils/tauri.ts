@@ -2070,6 +2070,13 @@ disableKeyboardCapture?: boolean;
  */
 disablePointerCapture?: boolean;
 /**
+ * Record entered text: on typing pauses and boundaries, the focused
+ * field's text at the caret, read through UI Automation, before and after
+ * each edit (`text_edit` rows; see `docs/ENTERED_TEXT_CAPTURE.md`).
+ * Independent of `disableKeyboardCapture`. Default false.
+ */
+enteredTextCapture?: boolean;
+/**
  * Continue recording audio when the screen is locked.
  * Default: false (audio pauses when screen is locked to save resources).
  */

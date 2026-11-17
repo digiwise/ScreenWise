@@ -280,6 +280,11 @@ pub fn search_result_to_content_item(
             window_title: input.window_title.clone(),
             browser_url: input.browser_url.clone(),
             text_content: input.text_content.clone().map(truncate),
+            text_before: input.text_before.clone().map(truncate),
+            edit_detail: input
+                .edit_detail
+                .as_deref()
+                .and_then(|detail| serde_json::from_str(detail).ok()),
             x: input.x,
             y: input.y,
             key_code: input.key_code,

@@ -133,8 +133,17 @@ pub struct InputContent {
     pub app_name: Option<String>,
     pub window_title: Option<String>,
     pub browser_url: Option<String>,
-    /// Text content for text/clipboard events
+    /// Text content for text/clipboard events; the text after the edit for
+    /// `text_edit` events
     pub text_content: Option<String>,
+    /// `text_edit` only: the changed text before the edit (absent when the
+    /// edit began before a baseline read)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_before: Option<String>,
+    /// `text_edit` only: fixed-code details (`ended`, `source`, `baseline`,
+    /// `truncated`, `keys_after_read`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_detail: Option<serde_json::Value>,
     /// Position for mouse events
     pub x: Option<i32>,
     pub y: Option<i32>,

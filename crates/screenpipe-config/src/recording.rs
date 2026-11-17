@@ -382,6 +382,13 @@ pub struct RecordingSettings {
     #[serde(rename = "disablePointerCapture", default)]
     pub disable_pointer_capture: bool,
 
+    /// Record entered text: on typing pauses and boundaries, the focused
+    /// field's text at the caret, read through UI Automation, before and after
+    /// each edit (`text_edit` rows; see `docs/ENTERED_TEXT_CAPTURE.md`).
+    /// Independent of `disableKeyboardCapture`. Default false.
+    #[serde(rename = "enteredTextCapture", default)]
+    pub entered_text_capture: bool,
+
     /// Continue recording audio when the screen is locked.
     /// Default: false (audio pauses when screen is locked to save resources).
     #[serde(rename = "recordWhileLocked", default)]
@@ -584,6 +591,7 @@ impl Default for RecordingSettings {
             pause_on_drm_content: false,
             disable_clipboard_capture: true,
             disable_keyboard_capture: true,
+            entered_text_capture: false,
             disable_pointer_capture: false,
             record_while_locked: false,
             languages: vec![],

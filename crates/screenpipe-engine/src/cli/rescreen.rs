@@ -26,12 +26,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use crate::input_screening::RuleInputs;
+use crate::input_screening::{InputEventTexts, InputScreening};
 use screenpipe_db::rescreen::{RescreenFrameRow, RescreenUiEventRow, UiEventTextUpdate};
 use screenpipe_db::DatabaseManager;
-use screenpipe_redact::rescreen::{
-    decide_frame, decide_ui_event, FrameDecision, RescreenRules, StoredFrame, StoredUiEvent,
-    UiEventDecision,
-};
+use screenpipe_redact::rescreen::{decide_frame, FrameDecision, RescreenRules, StoredFrame};
 
 /// Plan/progress file format version.
 const STATE_VERSION: u32 = 1;
@@ -39,41 +38,9 @@ const STATE_VERSION: u32 = 1;
 /// Largest accepted `--batch-size` (one write transaction per batch).
 pub const MAX_BATCH_SIZE: u32 = screenpipe_db::rescreen::MAX_RESCREEN_WRITE_IDS as u32;
 
-/// The owner's current rules as plain lists (also hashed into the plan).
-#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
-pub struct RuleInputs {
-    pub ignored_windows: Vec<String>,
-    pub ignored_urls: Vec<String>,
-    pub keywords: Vec<String>,
-    pub protected_domains: bool,
-    pub credential_file_patterns: Vec<String>,
-}
-
 impl RuleInputs {
-    pub fn from_settings(settings: &screenpipe_config::RecordingSettings) -> Self {
-        Self {
-            ignored_windows: settings.ignored_windows.clone(),
-            ignored_urls: settings.ignored_urls.clone(),
-            keywords: settings.content_screening_keywords.clone(),
-            protected_domains: settings.pause_on_drm_content,
-            credential_file_patterns: settings.credential_file_patterns.clone(),
-        }
-    }
-
-    /// Install the owner credential-file patterns and build the rules.
-    pub fn rules(&self) -> RescreenRules {
-        screenpipe_capture_policy::credential_files::set_owner_patterns(
-            &self.credential_file_patterns,
-        );
-        RescreenRules::new(
-            &self.ignored_windows,
-            &self.ignored_urls,
-            &self.keywords,
-            self.protected_domains,
-        )
-    }
-
-    /// Hex SHA-256 of the canonical rules (no rule value is stored).
+    /// Hex SHA-256 of the canonical rules (no rule value is stored), hashed
+    /// into the plan.
     pub fn hash(&self) -> String {
         let canonical = serde_json::to_vec(self).unwrap_or_default();
         hex(&Sha256::digest(canonical))
@@ -238,21 +205,17 @@ fn frame_decision(row: &RescreenFrameRow, rules: &RescreenRules) -> FrameDecisio
     decide_frame(&stored, rules)
 }
 
-fn ui_event_decision(row: &RescreenUiEventRow, rules: &RescreenRules) -> UiEventDecision {
-    let stored = StoredUiEvent {
-        app_name: row.app_name.as_deref(),
+fn ui_event_decision(row: &RescreenUiEventRow, rules: &RescreenRules) -> InputScreening {
+    InputEventTexts {
+        text_content: row.text_content.as_deref(),
         window_title: row.window_title.as_deref(),
         browser_url: row.browser_url.as_deref(),
-        fields: [
-            row.text_content.as_deref(),
-            row.window_title.as_deref(),
-            row.browser_url.as_deref(),
-            row.element_name.as_deref(),
-            row.element_value.as_deref(),
-            row.element_description.as_deref(),
-        ],
-    };
-    decide_ui_event(&stored, rules)
+        element_name: row.element_name.as_deref(),
+        element_value: row.element_value.as_deref(),
+        element_description: row.element_description.as_deref(),
+        text_before: row.text_before.as_deref(),
+    }
+    .screen(row.app_name.as_deref(), rules)
 }
 
 /// Read-only pass: counts only, nothing written to the database.
@@ -291,9 +254,9 @@ pub async fn dry_run(
         for row in &rows {
             counts.ui_events_scanned += 1;
             match ui_event_decision(row, rules) {
-                UiEventDecision::Keep => {}
-                UiEventDecision::Delete(reason) => counts.add("ui_events", "delete", reason.code()),
-                UiEventDecision::Redact(_) => counts.add("ui_events", "redact", "content_secret"),
+                InputScreening::Keep => {}
+                InputScreening::Delete(reason) => counts.add("ui_events", "delete", reason.code()),
+                InputScreening::Redact(_) => counts.add("ui_events", "redact", "content_secret"),
             }
         }
         cursor = last;
@@ -381,15 +344,22 @@ pub async fn apply(
         for row in &rows {
             batch.ui_events_scanned += 1;
             match ui_event_decision(row, rules) {
-                UiEventDecision::Keep => {}
-                UiEventDecision::Delete(reason) => {
+                InputScreening::Keep => {}
+                InputScreening::Delete(reason) => {
                     batch.add("ui_events", "delete", reason.code());
                     delete.push(row.id);
                 }
-                UiEventDecision::Redact(fields) => {
+                InputScreening::Redact(texts) => {
                     batch.add("ui_events", "redact", "content_secret");
-                    let [text_content, window_title, browser_url, element_name, element_value, element_description] =
-                        *fields;
+                    let InputEventTexts {
+                        text_content,
+                        window_title,
+                        browser_url,
+                        element_name,
+                        element_value,
+                        element_description,
+                        text_before,
+                    } = texts;
                     redact.push((
                         row.id,
                         UiEventTextUpdate {
@@ -399,6 +369,7 @@ pub async fn apply(
                             element_name,
                             element_value,
                             element_description,
+                            text_before,
                         },
                     ));
                 }

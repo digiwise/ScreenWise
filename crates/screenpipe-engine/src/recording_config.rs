@@ -91,6 +91,11 @@ pub struct RecordingConfig {
     pub accessibility_walk_disabled: bool,
     /// Executables whose untitled windows are verified (`untitledSafeApps`).
     pub untitled_safe_apps: Vec<String>,
+    /// `enteredTextCapture`: record entered text (`text_edit` rows).
+    pub entered_text_capture: bool,
+    /// The content screening rules applied to input events before storage;
+    /// `None` when content screening is off.
+    pub input_screening: Option<crate::input_screening::RuleInputs>,
     /// Owner credential-file title globs (`credentialFilePatterns`), added to
     /// the built-in credential-file title rule. Installed process-wide by
     /// [`Self::from_settings`].
@@ -197,6 +202,15 @@ pub struct RecordingConfig {
     pub encrypt_secrets: bool,
 }
 
+/// Deployment switch for entered-text capture (`Deploy-ScreenWise.ps1
+/// -EnteredTextCapture`): `1` turns it on in addition to the
+/// `enteredTextCapture` setting; it can never turn the setting off.
+pub const ENTERED_TEXT_CAPTURE_VAR: &str = "SCREENWISE_ENTERED_TEXT_CAPTURE";
+
+fn entered_text_capture_deployed() -> bool {
+    std::env::var(ENTERED_TEXT_CAPTURE_VAR).is_ok_and(|value| value == "1")
+}
+
 impl RecordingConfig {
     /// Build a `RecordingConfig` from the shared `RecordingSettings` type.
     ///
@@ -270,6 +284,10 @@ impl RecordingConfig {
             accessibility_walk_disabled: settings.accessibility_walk_disabled,
             untitled_safe_apps: settings.untitled_safe_apps.clone(),
             credential_file_patterns: settings.credential_file_patterns.clone(),
+            entered_text_capture: settings.entered_text_capture || entered_text_capture_deployed(),
+            input_screening: settings
+                .content_screening_enabled
+                .then(|| crate::input_screening::RuleInputs::from_settings(settings)),
             disable_clipboard_capture: settings.disable_clipboard_capture,
             disable_keyboard_capture: settings.disable_keyboard_capture,
             disable_pointer_capture: settings.disable_pointer_capture,
@@ -354,6 +372,11 @@ impl RecordingConfig {
             record_pointer_events: !self.disable_pointer_capture,
             record_clipboard_events: !self.disable_clipboard_capture,
             apply_pii_removal: self.use_pii_removal,
+            capture_entered_text: self.entered_text_capture,
+            input_screening: self
+                .input_screening
+                .as_ref()
+                .map(|inputs| Arc::new(inputs.rules())),
             // Event-driven capture relies on same-app title changes reaching
             // the trigger mapper. The lower-level a11y default keeps this off
             // for libraries, but recording sessions need it on.

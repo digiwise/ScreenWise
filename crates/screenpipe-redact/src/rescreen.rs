@@ -317,13 +317,14 @@ pub struct StoredUiEvent<'a> {
 
 /// The `ui_events` text columns screened and rewritten by
 /// [`decide_ui_event`], in the order of [`StoredUiEvent::fields`].
-pub const UI_EVENT_TEXT_FIELDS: [&str; 6] = [
+pub const UI_EVENT_TEXT_FIELDS: [&str; 7] = [
     "text_content",
     "window_title",
     "browser_url",
     "element_name",
     "element_value",
     "element_description",
+    "text_before",
 ];
 
 /// What to do with a stored input event.
@@ -644,8 +645,25 @@ mod tests {
             app_name: Some("notepad.exe"),
             window_title: Some(title),
             browser_url: None,
-            fields: [text, Some(title), None, None, None, None],
+            fields: [text, Some(title), None, None, None, None, None],
         }
+    }
+
+    #[test]
+    fn the_text_before_an_edit_is_screened_like_the_text_after_it() {
+        let rules = rules();
+        let token = token();
+        let before = format!("api token {token}");
+        let mut edit = event("notes.txt - Notepad", Some("api token removed"));
+        edit.fields[6] = Some(before.as_str());
+        let UiEventDecision::Redact(fields) = decide_ui_event(&edit, &rules) else {
+            panic!("expected a redaction");
+        };
+        assert_eq!(
+            fields[6].as_deref(),
+            Some(format!("api token {SECRET_LABEL}").as_str())
+        );
+        assert!(fields[..6].iter().all(Option::is_none));
     }
 
     #[test]

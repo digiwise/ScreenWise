@@ -23,6 +23,12 @@ param(
     # an earlier deployment: each deployment states them explicitly.
     [string]$UiaPasswordStateUnsupportedProcesses = 'none',
     [string]$UiaFocusWithoutKeyboardFocusProcesses = 'none',
+    # Relaxed processes whose decisions may also authorise entered-text reads
+    # (default none; same list format and rules as the relaxations above).
+    [string]$EnteredTextRelaxedProcesses = 'none',
+    # Entered-text capture (default off): recorded in the manifest and passed to
+    # the GUI at each start. Not carried over from an earlier deployment.
+    [switch]$EnteredTextCapture,
     # Keystroke drop alerts (temporary diagnostic): passed to this start only,
     # never recorded in the manifest or the login-startup entry.
     [switch]$DropAlerts,
@@ -37,6 +43,7 @@ if ($AllowColdCache -and !$Build) { throw '-AllowColdCache requires -Build.' }
 Import-Module (Join-Path $PSScriptRoot 'Deployment.psm1') -Force
 $UiaPasswordStateUnsupportedProcesses = ConvertTo-DeploymentProcessList $UiaPasswordStateUnsupportedProcesses
 $UiaFocusWithoutKeyboardFocusProcesses = ConvertTo-DeploymentProcessList $UiaFocusWithoutKeyboardFocusProcesses
+$EnteredTextRelaxedProcesses = ConvertTo-DeploymentProcessList $EnteredTextRelaxedProcesses
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $private = Join-Path $repo '.local'
 if (!$DeploymentDirectory) { $DeploymentDirectory = Join-Path $private 'deployment' }
@@ -68,6 +75,8 @@ if ($PlanOnly) {
         sensitive_debug_logging = $SensitiveDebugLogging; webview_manifest = $RuntimeManifestPath; pi_included = $true;
         uia_password_state_unsupported_processes = $UiaPasswordStateUnsupportedProcesses;
         uia_focus_without_keyboard_focus_processes = $UiaFocusWithoutKeyboardFocusProcesses;
+        entered_text_relaxed_processes = $EnteredTextRelaxedProcesses;
+        entered_text_capture = [bool]$EnteredTextCapture;
         pi_runtime = $PiRuntimePath; pi_tool_mode = 'recording-api-only'; provision_pi = [bool]$ProvisionPi } | ConvertTo-Json
     return
 }
@@ -263,6 +272,8 @@ $manifest = [ordered]@{
     schema='screenwise.local-deployment.v2'; profile=$BuildProfile; sensitive_debug_logging=$SensitiveDebugLogging; deployed_utc=[DateTime]::UtcNow.ToString('o');
     uia_password_state_unsupported_processes=$UiaPasswordStateUnsupportedProcesses;
     uia_focus_without_keyboard_focus_processes=$UiaFocusWithoutKeyboardFocusProcesses;
+    entered_text_relaxed_processes=$EnteredTextRelaxedProcesses;
+    entered_text_capture=[bool]$EnteredTextCapture;
     binary_directory=$binary; data_directory=$DataDirectory; port=$Port; firewall_group=$group;
     gui_executable=(Join-Path $binary 'screenpipe-app.exe'); cli_executable=(Join-Path $binary 'screenpipe.exe');
     graceful_quit_protocol='ScreenWise.GracefulQuit.v1'; gui_sha256=$guiHash;

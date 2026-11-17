@@ -221,6 +221,8 @@ pub(crate) struct UiEventWrite {
     pub element_automation_id: Option<String>,
     pub element_bounds: Option<String>,
     pub frame_id: Option<i64>,
+    pub text_before: Option<String>,
+    pub edit_detail: Option<String>,
 }
 
 /// Result returned to callers. Each variant matches the return type
@@ -1295,7 +1297,7 @@ async fn insert_ui_event_row(
     event: &UiEventWrite,
 ) -> Result<i64, sqlx::Error> {
     let result = sqlx::query(
-        "INSERT INTO ui_events (timestamp, session_id, relative_ms, event_type, x, y, delta_x, delta_y, button, click_count, key_code, modifiers, text_content, text_length, app_name, app_pid, window_title, browser_url, element_role, element_name, element_value, element_description, element_automation_id, element_bounds, frame_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+        "INSERT INTO ui_events (timestamp, session_id, relative_ms, event_type, x, y, delta_x, delta_y, button, click_count, key_code, modifiers, text_content, text_length, app_name, app_pid, window_title, browser_url, element_role, element_name, element_value, element_description, element_automation_id, element_bounds, frame_id, text_before, edit_detail) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
     )
     .bind(event.timestamp.as_str())
     .bind(event.session_id.as_deref())
@@ -1322,6 +1324,8 @@ async fn insert_ui_event_row(
     .bind(event.element_automation_id.as_deref())
     .bind(event.element_bounds.as_deref())
     .bind(event.frame_id)
+    .bind(event.text_before.as_deref())
+    .bind(event.edit_detail.as_deref())
     .execute(&mut **conn)
     .await?;
 

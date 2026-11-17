@@ -17,6 +17,9 @@
 //! search side falls back to the paragraph bbox path automatically — same
 //! behaviour as before this commit, no regression.
 //!
+//! Budgeted `TextPattern` reads of a verified element already exist for
+//! entered-text capture (`platform/windows_text.rs`); reuse them here.
+//!
 //! ## When the refactor lands, the implementation is:
 //!
 //! 1. From the live `IUIAutomationElement`, fetch the `TextPattern`:

@@ -126,6 +126,20 @@ pub enum EventData {
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
     },
+
+    /// Entered text: the focused field's text at the caret before and after
+    /// one edit, as displayed (see `docs/ENTERED_TEXT_CAPTURE.md`).
+    #[serde(rename = "text_edit")]
+    TextEdit {
+        /// The changed paragraphs before the edit; `None` when the edit began
+        /// before a baseline read.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        /// The changed paragraphs after the edit.
+        after: String,
+        /// Fixed-code JSON details (`entered_text::EditDetail`).
+        detail: String,
+    },
 }
 
 /// Element context from accessibility API
@@ -600,6 +614,7 @@ impl UiEvent {
             EventData::AppSwitch { .. } => "app_switch",
             EventData::WindowFocus { .. } => "window_focus",
             EventData::Clipboard { .. } => "clipboard",
+            EventData::TextEdit { .. } => "text_edit",
         }
     }
 
@@ -610,6 +625,7 @@ impl UiEvent {
             EventData::Clipboard {
                 content: Some(c), ..
             } => Some(c),
+            EventData::TextEdit { after, .. } => Some(after),
             _ => None,
         }
     }
@@ -646,6 +662,7 @@ pub enum EventType {
     AppSwitch,
     WindowFocus,
     Clipboard,
+    TextEdit,
 }
 
 impl EventType {
@@ -659,6 +676,7 @@ impl EventType {
             EventType::AppSwitch => "app_switch",
             EventType::WindowFocus => "window_focus",
             EventType::Clipboard => "clipboard",
+            EventType::TextEdit => "text_edit",
         }
     }
 
@@ -673,6 +691,7 @@ impl EventType {
             "app_switch" | "app" | "a" => Some(EventType::AppSwitch),
             "window_focus" | "window" | "w" => Some(EventType::WindowFocus),
             "clipboard" | "paste" | "p" => Some(EventType::Clipboard),
+            "text_edit" => Some(EventType::TextEdit),
             _ => None,
         }
     }
@@ -684,233 +703,164 @@ impl EventType {
 
 #[cfg(feature = "db")]
 impl UiEvent {
-    /// Convert to database insert format
-    pub fn to_db_insert(
-        &self,
-        session_id: Option<String>,
-        apply_pii_removal: bool,
-    ) -> screenpipe_db::InsertUiEvent {
+    /// The database row exactly as captured, before any redaction: the
+    /// recorder screens it and then applies [`remove_pii_from_insert`].
+    pub fn to_db_insert(&self, session_id: Option<String>) -> screenpipe_db::InsertUiEvent {
         use screenpipe_db::{InsertUiEvent, UiEventType};
 
-        let redacted_fields = std::cell::Cell::new(0usize);
-        let sanitize = |value: Option<String>| {
-            value.map(|value| {
-                if apply_pii_removal {
-                    let sanitized = screenpipe_core::pii_removal::remove_pii(&value);
-                    if sanitized != value {
-                        redacted_fields.set(redacted_fields.get().saturating_add(1));
-                    }
-                    sanitized
-                } else {
-                    value
-                }
-            })
+        let mut insert = InsertUiEvent {
+            timestamp: self.timestamp,
+            session_id,
+            relative_ms: self.relative_ms as i64,
+            event_type: UiEventType::Click,
+            x: None,
+            y: None,
+            delta_x: None,
+            delta_y: None,
+            button: None,
+            click_count: None,
+            key_code: None,
+            modifiers: None,
+            text_content: None,
+            app_name: self.app_name.clone(),
+            app_pid: None,
+            window_title: self.window_title.clone(),
+            browser_url: self.browser_url.clone(),
+            element_role: None,
+            element_name: None,
+            element_value: None,
+            element_description: None,
+            element_automation_id: None,
+            element_bounds: None,
+            frame_id: self.frame_id,
+            text_before: None,
+            edit_detail: None,
         };
-
-        let (
-            event_type,
-            x,
-            y,
-            delta_x,
-            delta_y,
-            button,
-            click_count,
-            key_code,
-            modifiers,
-            text_content,
-            app_pid,
-        ) = match &self.data {
+        match &self.data {
             EventData::Click {
                 x,
                 y,
                 button,
                 click_count,
                 modifiers,
-            } => (
-                UiEventType::Click,
-                Some(*x),
-                Some(*y),
-                None,
-                None,
-                Some(*button),
-                Some(*click_count),
-                None,
-                Some(*modifiers),
-                None,
-                None,
-            ),
-            EventData::Move { x, y } => (
-                UiEventType::Move,
-                Some(*x),
-                Some(*y),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
+            } => {
+                insert.event_type = UiEventType::Click;
+                insert.x = Some(*x);
+                insert.y = Some(*y);
+                insert.button = Some(*button);
+                insert.click_count = Some(*click_count);
+                insert.modifiers = Some(*modifiers);
+            }
+            EventData::Move { x, y } => {
+                insert.event_type = UiEventType::Move;
+                insert.x = Some(*x);
+                insert.y = Some(*y);
+            }
             EventData::Scroll {
                 x,
                 y,
                 delta_x,
                 delta_y,
-            } => (
-                UiEventType::Scroll,
-                Some(*x),
-                Some(*y),
-                Some(*delta_x),
-                Some(*delta_y),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
+            } => {
+                insert.event_type = UiEventType::Scroll;
+                insert.x = Some(*x);
+                insert.y = Some(*y);
+                insert.delta_x = Some(*delta_x);
+                insert.delta_y = Some(*delta_y);
+            }
             EventData::Key {
                 key_code,
                 modifiers,
-            } => (
-                UiEventType::Key,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(*key_code),
-                Some(*modifiers),
-                None,
-                None,
-            ),
-            EventData::Text { content, .. } => (
-                UiEventType::Text,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                sanitize(Some(content.clone())),
-                None,
-            ),
-            EventData::AppSwitch { name, pid } => (
-                UiEventType::AppSwitch,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(name.clone()), // Store app name in text_content
-                Some(*pid),
-            ),
-            EventData::WindowFocus { app, title } => (
-                UiEventType::WindowFocus,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                sanitize(title.clone().or_else(|| Some(app.clone()))), // Use title, fallback to app name
-                None,
-            ),
-            EventData::Clipboard { operation, content } => (
-                UiEventType::Clipboard,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(*operation as u8),
-                sanitize(content.clone()),
-                None,
-            ),
-        };
-
-        let (
-            element_role,
-            element_name,
-            element_value,
-            element_description,
-            element_automation_id,
-            element_bounds,
-        ) = if let Some(ref elem) = self.element {
-            (
-                Some(elem.role.clone()),
-                sanitize(elem.name.clone()),
-                sanitize(elem.value.clone()),
-                sanitize(elem.description.clone()),
-                elem.automation_id.clone(),
-                elem.bounds.as_ref().map(|b| {
-                    serde_json::json!({
-                        "x": b.x,
-                        "y": b.y,
-                        "width": b.width,
-                        "height": b.height
-                    })
-                    .to_string()
-                }),
-            )
-        } else {
-            (None, None, None, None, None, None)
-        };
-
-        // Extract app_name and window_title from EventData for certain event types
-        let (final_app_name, final_window_title) = match &self.data {
-            EventData::AppSwitch { name, .. } => {
-                (Some(name.clone()), sanitize(self.window_title.clone()))
+            } => {
+                insert.event_type = UiEventType::Key;
+                insert.key_code = Some(*key_code);
+                insert.modifiers = Some(*modifiers);
             }
-            EventData::WindowFocus { app, title } => (Some(app.clone()), sanitize(title.clone())),
-            _ => (self.app_name.clone(), sanitize(self.window_title.clone())),
-        };
-
-        let insert = InsertUiEvent {
-            timestamp: self.timestamp,
-            session_id,
-            relative_ms: self.relative_ms as i64,
-            event_type,
-            x,
-            y,
-            delta_x,
-            delta_y,
-            button,
-            click_count,
-            key_code,
-            modifiers,
-            text_content,
-            app_name: final_app_name,
-            app_pid,
-            window_title: final_window_title,
-            browser_url: sanitize(self.browser_url.clone()),
-            element_role,
-            element_name,
-            element_value,
-            element_description,
-            element_automation_id,
-            element_bounds,
-            frame_id: self.frame_id,
-        };
-        if redacted_fields.get() > 0 {
-            tracing::debug!(
-                event_type = self.event_type(),
-                redacted_fields = redacted_fields.get(),
-                "Basic PII redaction applied before UI-event persistence"
-            );
+            EventData::Text { content, .. } => {
+                insert.event_type = UiEventType::Text;
+                insert.text_content = Some(content.clone());
+            }
+            EventData::AppSwitch { name, pid } => {
+                insert.event_type = UiEventType::AppSwitch;
+                // The app name is stored in text_content as well.
+                insert.text_content = Some(name.clone());
+                insert.app_name = Some(name.clone());
+                insert.app_pid = Some(*pid);
+            }
+            EventData::WindowFocus { app, title } => {
+                insert.event_type = UiEventType::WindowFocus;
+                // Title, falling back to the app name.
+                insert.text_content = title.clone().or_else(|| Some(app.clone()));
+                insert.app_name = Some(app.clone());
+                insert.window_title = title.clone();
+            }
+            EventData::Clipboard { operation, content } => {
+                insert.event_type = UiEventType::Clipboard;
+                insert.modifiers = Some(*operation as u8);
+                insert.text_content = content.clone();
+            }
+            EventData::TextEdit {
+                before,
+                after,
+                detail,
+            } => {
+                insert.event_type = UiEventType::TextEdit;
+                insert.text_content = Some(after.clone());
+                insert.text_before = before.clone();
+                insert.edit_detail = Some(detail.clone());
+            }
+        }
+        if let Some(elem) = &self.element {
+            insert.element_role = Some(elem.role.clone());
+            insert.element_name = elem.name.clone();
+            insert.element_value = elem.value.clone();
+            insert.element_description = elem.description.clone();
+            insert.element_automation_id = elem.automation_id.clone();
+            insert.element_bounds = elem.bounds.as_ref().map(|b| {
+                serde_json::json!({
+                    "x": b.x,
+                    "y": b.y,
+                    "width": b.width,
+                    "height": b.height
+                })
+                .to_string()
+            });
         }
         insert
+    }
+}
+
+/// Basic PII removal on every text-bearing field of an input event row, as
+/// the last step before database admission. App names, automation ids and
+/// fixed-code details are not captured text and are left as they are.
+#[cfg(feature = "db")]
+pub fn remove_pii_from_insert(insert: &mut screenpipe_db::InsertUiEvent) {
+    let mut redacted_fields = 0usize;
+    let mut sanitize = |value: &mut Option<String>| {
+        if let Some(text) = value {
+            let sanitized = screenpipe_core::pii_removal::remove_pii(text);
+            if sanitized != *text {
+                redacted_fields += 1;
+                *text = sanitized;
+            }
+        }
+    };
+    // An app switch stores the app name in text_content.
+    if insert.event_type != screenpipe_db::UiEventType::AppSwitch {
+        sanitize(&mut insert.text_content);
+    }
+    sanitize(&mut insert.text_before);
+    sanitize(&mut insert.window_title);
+    sanitize(&mut insert.browser_url);
+    sanitize(&mut insert.element_name);
+    sanitize(&mut insert.element_value);
+    sanitize(&mut insert.element_description);
+    if redacted_fields > 0 {
+        tracing::debug!(
+            event_type = %insert.event_type,
+            redacted_fields,
+            "Basic PII redaction applied before UI-event persistence"
+        );
     }
 }
 
@@ -978,7 +928,8 @@ mod tests {
             bounds: None,
         });
 
-        let insert = event.to_db_insert(None, true);
+        let mut insert = event.to_db_insert(None);
+        remove_pii_from_insert(&mut insert);
         let captured = [
             insert.text_content.as_deref(),
             insert.window_title.as_deref(),
@@ -1000,11 +951,11 @@ mod tests {
 
     #[cfg(feature = "db")]
     #[test]
-    fn database_admission_preserves_text_when_pii_removal_is_disabled() {
+    fn database_conversion_keeps_text_as_captured() {
         let secret = "person@example.com";
         let event = UiEvent::text(Utc::now(), 100, secret.to_string());
 
-        let insert = event.to_db_insert(None, false);
+        let insert = event.to_db_insert(None);
 
         assert_eq!(insert.text_content.as_deref(), Some(secret));
     }

@@ -124,6 +124,8 @@ if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_lo
 }
 # Owner-authorised keyboard privacy relaxations (manifest values only).
 Set-DeploymentKeyboardRelaxations -StartInfo $psi -Manifest $m
+# Entered-text capture only when the manifest turns it on; never inherited.
+Set-DeploymentEnteredTextCapture -StartInfo $psi -Manifest $m
 # Only a manifest that names a validated extra local directory (e.g. on another
 # disk) gets one; explicitly remove an inherited value for every other manifest.
 $psi.EnvironmentVariables.Remove('SCREENWISE_BACKUP_DIR')

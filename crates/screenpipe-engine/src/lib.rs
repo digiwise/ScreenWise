@@ -19,6 +19,7 @@ pub mod frame_linker_actor;
 pub mod hd_recorder;
 pub mod high_fps_controller;
 pub mod hot_frame_cache;
+pub mod input_screening;
 pub mod logging;
 pub mod meeting_detector;
 pub mod meeting_export;

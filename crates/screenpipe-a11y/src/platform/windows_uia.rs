@@ -25,6 +25,8 @@ use tracing::{debug, error, info, trace, warn};
 mod budget;
 #[path = "windows_input_admission.rs"]
 pub(crate) mod input_admission;
+#[path = "windows_text.rs"]
+mod text;
 pub(crate) use budget::{provider_timeout_at, UiaLimits};
 use budget::{ProviderBackoff, TreeProvider, UiaStop, WalkBudget, PROVIDER_TIMEOUT_MS};
 use windows::core::{implement, Interface, BSTR, VARIANT};
@@ -38,11 +40,12 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationFocusChangedEventHandler, IUIAutomationFocusChangedEventHandler_Impl,
     IUIAutomationTreeWalker, TreeScope_Element, UIA_AcceleratorKeyPropertyId,
     UIA_AccessKeyPropertyId, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
-    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId,
-    UIA_HelpTextPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
-    UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
-    UIA_ProcessIdPropertyId, UIA_RuntimeIdPropertyId, UIA_ValueValuePropertyId, UIA_E_TIMEOUT,
-    UIA_PROPERTY_ID,
+    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_EditControlTypeId,
+    UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId, UIA_IsEnabledPropertyId,
+    UIA_IsKeyboardFocusablePropertyId, UIA_IsPasswordPropertyId,
+    UIA_IsTextPatternAvailablePropertyId, UIA_IsValuePatternAvailablePropertyId,
+    UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId, UIA_ProcessIdPropertyId,
+    UIA_RuntimeIdPropertyId, UIA_ValueValuePropertyId, UIA_E_TIMEOUT, UIA_PROPERTY_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -1169,6 +1172,10 @@ pub(crate) struct ProbeRelaxations {
     /// A focused element without HasKeyboardFocus is accepted; its
     /// IsPassword must then be explicit.
     pub(crate) focus_without_keyboard_focus: ProcessList,
+    /// Processes whose relaxed decisions may also authorise entered-text
+    /// reads (owner decision 2026-11-16); every other relaxed decision reads
+    /// nothing.
+    pub(crate) entered_text_reads: ProcessList,
 }
 
 impl ProbeRelaxations {
@@ -1176,12 +1183,14 @@ impl ProbeRelaxations {
         "SCREENWISE_UIA_PASSWORD_STATE_UNSUPPORTED_PROCESSES";
     pub(crate) const FOCUS_VAR: &'static str =
         "SCREENWISE_UIA_FOCUS_WITHOUT_KEYBOARD_FOCUS_PROCESSES";
+    pub(crate) const ENTERED_TEXT_VAR: &'static str = "SCREENWISE_ENTERED_TEXT_RELAXED_PROCESSES";
 
     pub(crate) fn from_env() -> Self {
         let read = |name| ProcessList::parse(&std::env::var(name).unwrap_or_default());
         Self {
             password_state_unsupported: read(Self::PASSWORD_STATE_VAR),
             focus_without_keyboard_focus: read(Self::FOCUS_VAR),
+            entered_text_reads: read(Self::ENTERED_TEXT_VAR),
         }
     }
 }
@@ -2177,6 +2186,126 @@ fn pause_uia_for_visual_privacy(
     true
 }
 
+/// A focused element the keyboard privacy probe has just allowed (explicit
+/// non-password state, verified ownership and native focus), kept for an
+/// entered-text read under that same decision.
+struct VerifiedFocus {
+    generation: u64,
+    focus: NativeKeyboardFocus,
+    /// The probe's live (full-mode) reference to the element.
+    element: IUIAutomationElement,
+    element_id: Option<u64>,
+    relaxation: Option<ProbeRelaxation>,
+}
+
+/// Whether UIA may contact the applications behind a native keyboard focus:
+/// the foreground application and, when another process owns the focused
+/// window (WebView2), that process. Excluded or unidentifiable ones are never
+/// contacted.
+fn focus_may_be_contacted(config: &UiCaptureConfig, focus: NativeKeyboardFocus) -> bool {
+    uia_target_allowed(config, HWND(focus.foreground as *mut std::ffi::c_void))
+        && (focus.control_pid == focus.pid
+            || uia_target_allowed(config, HWND(focus.control as *mut std::ffi::c_void)))
+}
+
+/// Whether a tree walk's requests to either process behind `focus` have run
+/// longer than UIA's shortest provider wait: a request now would only queue
+/// behind them on the target's UI thread.
+fn focus_walk_running(focus: NativeKeyboardFocus) -> bool {
+    [focus.pid, focus.control_pid].into_iter().any(|pid| {
+        crate::uia_breaker::long_walk_in_flight(
+            pid,
+            Duration::from_millis(u64::from(PROVIDER_TIMEOUT_MS)),
+        )
+    })
+}
+
+/// A cached Boolean property that is explicitly true (a local read).
+fn cached_flag(element: &IUIAutomationElement, property: UIA_PROPERTY_ID) -> bool {
+    unsafe { element.GetCachedPropertyValueEx(property, true) }
+        .ok()
+        .and_then(|value| bool::try_from(&value).ok())
+        .unwrap_or(false)
+}
+
+/// Provider requests made under a caller's budget, cost accounting and
+/// error type: the keyboard privacy probe's, or an entered-text read's.
+trait ProviderRequests {
+    type Error;
+    fn request<T>(
+        &self,
+        stage: &'static str,
+        call: impl FnOnce() -> windows::core::Result<T>,
+    ) -> Result<T, Self::Error>;
+    /// The focus or element changed (no provider error).
+    fn changed(&self, stage: &'static str, detail: String) -> Self::Error;
+}
+
+/// The probe's requests: its budget, provider-work timing and timeout notes.
+struct ProbeRequests<'a> {
+    prepare: &'a dyn Fn() -> Result<(), PrivacyProbeFailure>,
+    provider_work: &'a std::cell::Cell<Duration>,
+    note_timeout: &'a dyn Fn(&windows::core::Error),
+}
+
+impl ProviderRequests for ProbeRequests<'_> {
+    type Error = PrivacyProbeFailure;
+    fn request<T>(
+        &self,
+        stage: &'static str,
+        call: impl FnOnce() -> windows::core::Result<T>,
+    ) -> Result<T, PrivacyProbeFailure> {
+        (self.prepare)()?;
+        timed_provider_call(self.provider_work, call).map_err(|e| {
+            (self.note_timeout)(&e);
+            probe_error(CaptureReason::InputFocusVerificationFailed, stage, e)
+        })
+    }
+    fn changed(&self, stage: &'static str, detail: String) -> PrivacyProbeFailure {
+        probe_error(CaptureReason::InputFocusVerificationFailed, stage, detail)
+    }
+}
+
+impl ProviderRequests for text::ProviderCalls<'_> {
+    type Error = crate::entered_text::ReadFailure;
+    fn request<T>(
+        &self,
+        _stage: &'static str,
+        call: impl FnOnce() -> windows::core::Result<T>,
+    ) -> Result<T, Self::Error> {
+        self.call(call)
+    }
+    fn changed(&self, _stage: &'static str, _detail: String) -> Self::Error {
+        crate::entered_text::ReadFailure::Changed
+    }
+}
+
+/// The identity entered-text reads bind to: the verified element and the
+/// native focus (windows and processes) it was verified under.
+fn entered_text_target(focus: NativeKeyboardFocus, element_id: u64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (
+        element_id,
+        focus.foreground,
+        focus.control,
+        focus.pid,
+        focus.control_pid,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Dispatch this thread's pending window messages.
+fn pump_messages() {
+    let mut msg = MSG::default();
+    unsafe {
+        while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 /// Click position request for ElementFromPoint
 pub struct ClickElementRequest {
     pub x: i32,
@@ -2190,7 +2319,8 @@ pub(crate) struct UiaContext {
     timeouts: IUIAutomation2,
     backoff: ProviderBackoff,
     cache_request: IUIAutomationCacheRequest,
-    /// Focus ownership/password state only; never requests text or descendants.
+    /// Focus ownership/password state, plus (with entered text on) which text
+    /// patterns the element supports; never requests text or descendants.
     privacy_cache_request: IUIAutomationCacheRequest,
     /// Per-element cache request for bounded TreeWalker navigation.
     /// Uses Full mode so walked elements retain live COM references for navigation.
@@ -2221,7 +2351,7 @@ impl UiaContext {
         config: &UiCaptureConfig,
         cross_process: &CrossProcessFocusCheck,
         relaxations: &ProbeRelaxations,
-    ) -> input_admission::ProbeRecord {
+    ) -> (input_admission::ProbeRecord, Option<VerifiedFocus>) {
         use input_admission::{ProbeOutcome, ProbeRecord, ProbeSkip};
         let started_at = Instant::now();
         let generation = privacy.generation.load(Ordering::SeqCst);
@@ -2254,16 +2384,12 @@ impl UiaContext {
         // Never contact an excluded (or unidentifiable) application through
         // UIA: neither the foreground application nor, when another process
         // owns the focused window (WebView2), that process. Deny keystrokes.
-        if focus.is_some_and(|focus| {
-            !uia_target_allowed(config, HWND(focus.foreground as *mut std::ffi::c_void))
-                || (focus.control_pid != focus.pid
-                    && !uia_target_allowed(config, HWND(focus.control as *mut std::ffi::c_void)))
-        }) {
+        if focus.is_some_and(|focus| !focus_may_be_contacted(config, focus)) {
             crate::uia_breaker::note_exclusion_skip();
             privacy.set_block(focus.map(|focus| (focus, KeyboardPrivacyDenial::Excluded)));
             privacy.invalidate_for_skip(ProbeSkip::Excluded);
             privacy.note_probe_outcome(ProbeOutcome::Skipped(ProbeSkip::Excluded));
-            return record(ProbeOutcome::Skipped(ProbeSkip::Excluded));
+            return (record(ProbeOutcome::Skipped(ProbeSkip::Excluded)), None);
         }
         // A focus window owned by another process is only probed for the
         // foreground application's own WebView2 child; otherwise deny
@@ -2295,15 +2421,7 @@ impl UiaContext {
             } else if gate == crate::uia_breaker::ProbeGate::Paced && native.is_ok() {
                 Some(ProbeSkip::Paced)
             } else {
-                [focus.pid, focus.control_pid]
-                    .into_iter()
-                    .any(|pid| {
-                        crate::uia_breaker::long_walk_in_flight(
-                            pid,
-                            Duration::from_millis(u64::from(PROVIDER_TIMEOUT_MS)),
-                        )
-                    })
-                    .then_some(ProbeSkip::LongWalk)
+                focus_walk_running(focus).then_some(ProbeSkip::LongWalk)
             }
         }) {
             if skip == ProbeSkip::Paced {
@@ -2313,7 +2431,7 @@ impl UiaContext {
             }
             privacy.invalidate_for_skip(skip);
             privacy.note_probe_outcome(ProbeOutcome::Skipped(skip));
-            return record(ProbeOutcome::Skipped(skip));
+            return (record(ProbeOutcome::Skipped(skip)), None);
         }
         let provider_called = std::cell::Cell::new(false);
         let provider_failed = std::cell::Cell::new(false);
@@ -2476,48 +2594,15 @@ impl UiaContext {
                     ))
                 }
             };
-            prepare()?;
-            // Cached ids only, so a changed element can be described by fixed
-            // numbers (control types, same process) without more calls.
-            let current = timed_provider_call(&provider_work, || {
-                self.automation
-                    .GetFocusedElementBuildCache(&self.privacy_cache_request)
-            })
-            .map_err(|e| {
-                note_timeout(&e);
-                probe_error(
-                    CaptureReason::InputFocusVerificationFailed,
-                    "GetFocusedElement recheck",
-                    e,
-                )
-            })?;
-            if NativeKeyboardFocus::current() != Some(focus) {
-                return Err(probe_error(
-                    CaptureReason::InputFocusVerificationFailed,
-                    "native_focus_recheck",
-                    "foreground/control changed",
-                ));
-            }
-            prepare()?;
-            if !timed_provider_call(&provider_work, || {
-                self.automation.CompareElements(&element, &current)
-            })
-            .map_err(|e| {
-                note_timeout(&e);
-                probe_error(
-                    CaptureReason::InputFocusVerificationFailed,
-                    "CompareElements",
-                    e,
-                )
-            })?
-            .as_bool()
-            {
-                return Err(probe_error(
-                    CaptureReason::InputFocusVerificationFailed,
-                    "CompareElements",
-                    changed_element_detail(&element, &current),
-                ));
-            }
+            let current = self.recheck_focus(
+                &element,
+                focus,
+                &ProbeRequests {
+                    prepare: &prepare,
+                    provider_work: &provider_work,
+                    note_timeout: &note_timeout,
+                },
+            )?;
             budget.check_complete().map_err(|_| {
                 budget_stopped.set(true);
                 probe_error(
@@ -2526,8 +2611,14 @@ impl UiaContext {
                     "UIA privacy deadline expired",
                 )
             })?;
-            Ok((is_password, evidence_at))
+            Ok((is_password, evidence_at, current))
         });
+        let (result, verified_element) = match result {
+            Ok((is_password, evidence_at, current)) => {
+                (Ok((is_password, evidence_at)), Some(current))
+            }
+            Err(failure) => (Err(failure), None),
+        };
         let result = result.and_then(|(is_password, evidence_at)| {
             validated_password_evidence(is_password, evidence_at, checked_at)
         });
@@ -2606,11 +2697,147 @@ impl UiaContext {
         if failed && password_read.get() == Some(true) {
             privacy.set_block(focus.map(|focus| (focus, KeyboardPrivacyDenial::PasswordField)));
         }
-        record(outcome)
+        // An allowed (non-password) decision leaves its verified element for
+        // an entered-text read under the same decision.
+        let verified = match (is_password, focus, verified_element) {
+            (Some(false), Some(focus), Some(element)) => Some(VerifiedFocus {
+                generation,
+                focus,
+                element_id: element_id.get(),
+                relaxation: relaxation.get(),
+                element,
+            }),
+            _ => None,
+        };
+        (record(outcome), verified)
+    }
+
+    /// Confirm that `element` is still the focused element under the native
+    /// focus `focus`: a fresh fetch of the focused element (cached ids only,
+    /// so a changed element is described by fixed numbers), the native focus
+    /// sampled again, and the provider's own comparison. Returns the fresh
+    /// live element. The probe runs it after its decision; an entered-text
+    /// read runs it again after reading.
+    fn recheck_focus<R: ProviderRequests>(
+        &self,
+        element: &IUIAutomationElement,
+        focus: NativeKeyboardFocus,
+        requests: &R,
+    ) -> Result<IUIAutomationElement, R::Error> {
+        let current = requests.request("GetFocusedElement recheck", || unsafe {
+            self.automation
+                .GetFocusedElementBuildCache(&self.privacy_cache_request)
+        })?;
+        if NativeKeyboardFocus::current() != Some(focus) {
+            return Err(requests.changed(
+                "native_focus_recheck",
+                "foreground/control changed".to_string(),
+            ));
+        }
+        let same = requests.request("CompareElements", || unsafe {
+            self.automation.CompareElements(element, &current)
+        })?;
+        if !same.as_bool() {
+            return Err(
+                requests.changed("CompareElements", changed_element_detail(element, &current))
+            );
+        }
+        Ok(current)
+    }
+
+    /// Read the text at the caret of the element the probe just verified,
+    /// under that decision (see `docs/ENTERED_TEXT_CAPTURE.md`). The read is
+    /// accepted only if the keyboard privacy generation and native focus are
+    /// unchanged from the probe until after it, the focus recheck finds the
+    /// same element, it finished within its budget, and the foreground and
+    /// focus windows still may be contacted, and visual capture is still
+    /// allowed (lock, schedule, DRM). Anything else discards the text.
+    fn read_entered_text(
+        &self,
+        verified: &VerifiedFocus,
+        privacy: &KeyboardPrivacy,
+        config: &UiCaptureConfig,
+        relaxations: &ProbeRelaxations,
+    ) -> crate::entered_text::ReadOutcome {
+        use crate::entered_text::{CaretText, ReadFailure, ReadOutcome};
+        let focus = verified.focus;
+        let unchanged = || {
+            screenpipe_config::audio_privacy::visual_capture_allowed()
+                && privacy.generation.load(Ordering::SeqCst) == verified.generation
+                && NativeKeyboardFocus::current() == Some(focus)
+        };
+        if !unchanged() {
+            return ReadOutcome::Failed(ReadFailure::Changed);
+        }
+        if verified.relaxation.is_some()
+            && !relaxations
+                .entered_text_reads
+                .matches(process_image_basename(focus.control_pid).as_deref())
+        {
+            return ReadOutcome::Failed(ReadFailure::Relaxed);
+        }
+        let Some(element_id) = verified.element_id else {
+            return ReadOutcome::Failed(ReadFailure::Denied);
+        };
+        if focus_walk_running(focus) || !crate::uia_breaker::read_allowed(focus.control_pid) {
+            return ReadOutcome::NotNow;
+        }
+
+        let set_timeout = |ms| self.set_request_timeout(ms);
+        let calls = text::ProviderCalls::new(&set_timeout);
+        // Cached with the probe's element (entered-text properties only).
+        let element = &verified.element;
+        let text_pattern = cached_flag(element, UIA_IsTextPatternAvailablePropertyId);
+        // Value is read only from an Edit control under an unrelaxed decision.
+        let value_allowed = cached_flag(element, UIA_IsValuePatternAvailablePropertyId)
+            && verified.relaxation.is_none()
+            && cached_i32(element, UIA_ControlTypePropertyId) == Some(UIA_EditControlTypeId.0);
+        let read = unsafe { text::read_field_text(element, text_pattern, value_allowed, &calls) }
+            .and_then(|text| {
+                self.recheck_focus(&verified.element, focus, &calls)?;
+                Ok(text)
+            });
+        // Other users of this context keep UIA's shortest wait.
+        let _ = self.set_request_timeout(PROVIDER_TIMEOUT_MS);
+        if let Some(cost) = calls.cost() {
+            crate::uia_breaker::record_read(focus.control_pid, cost, text::READ_BUDGET);
+        }
+        let text = match read {
+            Ok(text) => text,
+            Err(failure) => return ReadOutcome::Failed(failure),
+        };
+        if !calls.within_budget() {
+            return ReadOutcome::Failed(ReadFailure::Timeout);
+        }
+        // Let pending focus notifications count before the final check.
+        pump_messages();
+        if !unchanged() {
+            return ReadOutcome::Failed(ReadFailure::Changed);
+        }
+        if !focus_may_be_contacted(config, focus) {
+            crate::uia_breaker::note_exclusion_skip();
+            return ReadOutcome::Failed(ReadFailure::Denied);
+        }
+        let foreground = HWND(focus.foreground as *mut std::ffi::c_void);
+        let (_, window_title, pid) = get_window_info(foreground);
+        ReadOutcome::Text(CaretText::new(
+            entered_text_target(focus, element_id),
+            &text.text,
+            text.truncated,
+            text.source,
+            super::windows::get_effective_app_name(foreground, pid),
+            window_title,
+        ))
     }
 
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
     pub(crate) fn new() -> windows::core::Result<Self> {
+        Self::with_entered_text(false)
+    }
+
+    /// As [`Self::new`]; `entered_text` adds the text-pattern availability
+    /// the keyboard privacy worker's entered-text reads need to its probe.
+    pub(crate) fn with_entered_text(entered_text: bool) -> windows::core::Result<Self> {
         unsafe {
             // Do not fall back to the old class with its long default waits.
             let timeouts: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_ALL)?;
@@ -2673,8 +2900,15 @@ impl UiaContext {
             privacy_cache_request.AddProperty(UIA_ProcessIdPropertyId)?;
             privacy_cache_request.AddProperty(UIA_HasKeyboardFocusPropertyId)?;
             privacy_cache_request.AddProperty(UIA_RuntimeIdPropertyId)?;
-            // A fixed number, only for describing a changed element.
+            // A fixed number, for describing a changed element (and limiting
+            // entered-text Value reads to Edit controls).
             privacy_cache_request.AddProperty(UIA_ControlTypePropertyId)?;
+            // Booleans only, when entered text is captured: whether a read
+            // has a text source.
+            if entered_text {
+                privacy_cache_request.AddProperty(UIA_IsTextPatternAvailablePropertyId)?;
+                privacy_cache_request.AddProperty(UIA_IsValuePatternAvailablePropertyId)?;
+            }
             privacy_cache_request.SetTreeScope(TreeScope_Element)?;
             privacy_cache_request.SetAutomationElementMode(AutomationElementMode_Full)?;
 
@@ -3514,7 +3748,136 @@ fn run_focus_event_resolver(
 
 fn keyboard_privacy_capture_enabled(config: &UiCaptureConfig) -> bool {
     config.skip_password_fields
-        && (config.capture_text || config.capture_keystrokes || config.capture_clipboard_content)
+        && (config.capture_text
+            || config.capture_keystrokes
+            || config.capture_clipboard_content
+            || config.capture_entered_text)
+}
+
+/// Entered-text capture's inputs on the keyboard privacy worker.
+pub(crate) struct EnteredTextCapture {
+    pub(crate) signals: Arc<crate::entered_text::EditSignals>,
+    pub(crate) events: Sender<crate::events::UiEvent>,
+    pub(crate) start: Instant,
+}
+
+/// Content-free totals of entered-text reads and edits, logged periodically.
+#[derive(Default)]
+struct EnteredTextTally {
+    reads: std::collections::BTreeMap<&'static str, u64>,
+    edits: std::collections::BTreeMap<&'static str, u64>,
+    reported_at: Option<Instant>,
+}
+
+impl EnteredTextTally {
+    const INTERVAL: Duration = Duration::from_secs(60);
+
+    fn report(&mut self, force: bool) {
+        let now = Instant::now();
+        let due = self
+            .reported_at
+            .is_none_or(|at| now.duration_since(at) >= Self::INTERVAL);
+        if !(force || due) || (self.reads.is_empty() && self.edits.is_empty()) {
+            return;
+        }
+        self.reported_at = Some(now);
+        info!(
+            reason_code = "entered_text_summary",
+            reads = %fixed_counts(std::mem::take(&mut self.reads)),
+            edits = %fixed_counts(std::mem::take(&mut self.edits)),
+            "entered-text reads and emitted edits (counts only)"
+        );
+    }
+}
+
+/// Entered-text capture: the edit tracker, driven after each probe.
+struct EnteredText {
+    capture: EnteredTextCapture,
+    tracker: crate::entered_text::EditTracker,
+    tally: EnteredTextTally,
+}
+
+impl EnteredText {
+    /// Poll the tracker and make the read it asks for, if any, under the
+    /// decision `verified` from the probe that just ran (`probe`).
+    fn step(
+        &mut self,
+        uia: &UiaContext,
+        privacy: &KeyboardPrivacy,
+        config: &UiCaptureConfig,
+        relaxations: &ProbeRelaxations,
+        probe: input_admission::ProbeOutcome,
+        verified: Option<&VerifiedFocus>,
+    ) {
+        use crate::entered_text::{ReadFailure, ReadOutcome};
+        use input_admission::{ProbeOutcome, ProbeSkip};
+        let (finished, due) = self
+            .tracker
+            .poll(self.capture.signals.counts(), Instant::now());
+        self.emit(finished);
+        let Some(kind) = due else {
+            self.tally.report(false);
+            return;
+        };
+        let outcome = match (verified, probe) {
+            (Some(verified), _) => uia.read_entered_text(verified, privacy, config, relaxations),
+            // Intended blocks: never read.
+            (None, ProbeOutcome::Password | ProbeOutcome::Skipped(ProbeSkip::Excluded)) => {
+                ReadOutcome::Failed(ReadFailure::Denied)
+            }
+            // No decision this time (paced, breaker, a failed probe): later.
+            (None, _) => ReadOutcome::NotNow,
+        };
+        let code = match &outcome {
+            ReadOutcome::Text(text) => text.source.code(),
+            ReadOutcome::Failed(failure) => failure.code(),
+            ReadOutcome::NotNow => "not_now",
+        };
+        *self.tally.reads.entry(code).or_default() += 1;
+        let finished = self.tracker.read_done(kind, outcome, Instant::now());
+        self.emit(finished);
+        self.tally.report(false);
+    }
+
+    /// Visual capture is paused: nothing read so far is stored.
+    fn discard(&mut self) {
+        self.tracker.discard();
+    }
+
+    fn stop(&mut self) {
+        let finished = self.tracker.stop();
+        self.emit(finished);
+        self.tally.report(true);
+    }
+
+    fn emit(&mut self, edits: Vec<crate::entered_text::FinishedEdit>) {
+        use crate::events::{EventData, UiEvent};
+        for edit in edits {
+            *self
+                .tally
+                .edits
+                .entry(edit.detail.ended.code())
+                .or_default() += 1;
+            let detail = edit.detail_json();
+            let event = UiEvent {
+                id: None,
+                timestamp: Utc::now(),
+                relative_ms: self.capture.start.elapsed().as_millis() as u64,
+                data: EventData::TextEdit {
+                    before: edit.before,
+                    after: edit.after,
+                    detail,
+                },
+                app_name: Some(edit.app_name),
+                window_title: edit.window_title,
+                browser_url: None,
+                element: None,
+                frame_id: None,
+                accounting: None,
+            };
+            super::windows::try_send_ui_event(&self.capture.events, event);
+        }
+    }
 }
 
 /// Whether the focus classification pipeline runs: whenever keyboard text
@@ -3581,6 +3944,7 @@ pub(crate) fn run_keyboard_privacy_thread(
     keyboard_privacy: Arc<KeyboardPrivacy>,
     stop: Arc<AtomicBool>,
     config: UiCaptureConfig,
+    entered_text: Option<EnteredTextCapture>,
 ) {
     if !keyboard_privacy_capture_enabled(&config) {
         return;
@@ -3616,7 +3980,7 @@ pub(crate) fn run_keyboard_privacy_thread(
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            match UiaContext::new() {
+            match UiaContext::with_entered_text(entered_text.is_some()) {
                 Ok(context) => break 'outer context,
                 Err(error) => {
                     let delay_secs = 1u64 << attempt.min(2);
@@ -3716,32 +4080,36 @@ pub(crate) fn run_keyboard_privacy_thread(
         }
     }
 
-    let mut msg = MSG::default();
     let cross_process = CrossProcessFocusCheck::new();
     let relaxations = ProbeRelaxations::from_env();
     info!(
         reason_code = "keyboard_privacy_relaxations",
         password_state_unsupported_processes = relaxations.password_state_unsupported.len(),
         focus_without_keyboard_focus_processes = relaxations.focus_without_keyboard_focus.len(),
+        entered_text_relaxed_processes = relaxations.entered_text_reads.len(),
         "owner-authorised keyboard privacy relaxations configured (process counts only)"
     );
+    let mut entered_text = entered_text.map(|capture| EnteredText {
+        capture,
+        tracker: Default::default(),
+        tally: Default::default(),
+    });
     screenpipe_config::sensitive_debug::record("input_privacy_relaxations", || {
         serde_json::json!({
             "password_state_unsupported": format!("{:?}", relaxations.password_state_unsupported),
             "focus_without_keyboard_focus": format!("{:?}", relaxations.focus_without_keyboard_focus),
+            "entered_text_reads": format!("{:?}", relaxations.entered_text_reads),
         })
     });
     let mut probes = input_admission::ProbeTally::default();
     let mut pending_keys = std::collections::BTreeMap::new();
     while !stop.load(Ordering::Relaxed) {
-        unsafe {
-            while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
+        pump_messages();
         report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, false);
         if !screenpipe_config::audio_privacy::visual_capture_allowed() {
+            if let Some(entered_text) = &mut entered_text {
+                entered_text.discard();
+            }
             keyboard_privacy.stage_probe_outcome(input_admission::ProbeOutcome::VisualGateClosed);
             probes.record(input_admission::ProbeRecord {
                 pid: 0,
@@ -3766,15 +4134,31 @@ pub(crate) fn run_keyboard_privacy_thread(
         if let Some(classification) = &mut classification {
             classification.check(&stop);
         }
-        let probe =
+        let (probe, verified) =
             uia.refresh_keyboard_privacy(&keyboard_privacy, &config, &cross_process, &relaxations);
+        let outcome = probe.outcome;
         probes.record(probe);
+        if let Some(entered_text) = &mut entered_text {
+            entered_text.step(
+                &uia,
+                &keyboard_privacy,
+                &config,
+                &relaxations,
+                outcome,
+                verified.as_ref(),
+            );
+        }
+        // Release the probe's element reference before waiting.
+        drop(verified);
         unsafe {
             MsgWaitForMultipleObjects(None, false, KEYBOARD_PRIVACY_POLL_MS as u32, QS_ALLINPUT);
         }
     }
 
     report_keyboard_admission(&keyboard_privacy, &mut probes, &mut pending_keys, true);
+    if let Some(entered_text) = &mut entered_text {
+        entered_text.stop();
+    }
     keyboard_privacy.invalidate();
     let resolver = classification.and_then(|classification| {
         let _ = uia.unsubscribe_focus_changes(&classification.handler);

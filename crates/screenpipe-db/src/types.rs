@@ -586,6 +586,9 @@ pub enum UiEventType {
     AppSwitch,
     WindowFocus,
     Clipboard,
+    /// Entered text: the focused field's text at the caret before and after
+    /// an edit (see `docs/ENTERED_TEXT_CAPTURE.md`).
+    TextEdit,
     /// Content-free system diagnosis, never a captured user-input event.
     PrivacyNotice,
 }
@@ -601,6 +604,7 @@ impl Display for UiEventType {
             UiEventType::AppSwitch => write!(f, "app_switch"),
             UiEventType::WindowFocus => write!(f, "window_focus"),
             UiEventType::Clipboard => write!(f, "clipboard"),
+            UiEventType::TextEdit => write!(f, "text_edit"),
             UiEventType::PrivacyNotice => write!(f, "privacy_notice"),
         }
     }
@@ -619,6 +623,7 @@ impl std::str::FromStr for UiEventType {
             "app_switch" => Ok(UiEventType::AppSwitch),
             "window_focus" => Ok(UiEventType::WindowFocus),
             "clipboard" => Ok(UiEventType::Clipboard),
+            "text_edit" => Ok(UiEventType::TextEdit),
             "privacy_notice" => Ok(UiEventType::PrivacyNotice),
             _ => Err(format!("Unknown UI event type: {}", s)),
         }
@@ -657,6 +662,13 @@ pub struct UiEventRecord {
     // Text
     pub text_content: Option<String>,
     pub text_length: Option<i32>,
+    /// `text_edit` only: the text at the caret before the edit
+    /// (`text_content` holds the text after it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_before: Option<String>,
+    /// `text_edit` only: fixed-code JSON details of the edit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_detail: Option<String>,
     // App context
     pub app_name: Option<String>,
     pub app_pid: Option<i32>,
@@ -697,6 +709,8 @@ pub struct UiEventRow {
     pub element_automation_id: Option<String>,
     pub element_bounds: Option<String>,
     pub frame_id: Option<i64>,
+    pub text_before: Option<String>,
+    pub edit_detail: Option<String>,
 }
 
 impl From<UiEventRow> for UiEventRecord {
@@ -733,6 +747,8 @@ impl From<UiEventRow> for UiEventRecord {
             modifiers: row.modifiers.map(|v| v as u8),
             text_content: row.text_content,
             text_length: row.text_length,
+            text_before: row.text_before,
+            edit_detail: row.edit_detail,
             app_name: row.app_name,
             app_pid: row.app_pid,
             window_title: row.window_title,
@@ -770,6 +786,10 @@ pub struct InsertUiEvent {
     pub element_automation_id: Option<String>,
     pub element_bounds: Option<String>,
     pub frame_id: Option<i64>,
+    /// `text_edit` only (see [`UiEventRecord::text_before`]).
+    pub text_before: Option<String>,
+    /// `text_edit` only (see [`UiEventRecord::edit_detail`]).
+    pub edit_detail: Option<String>,
 }
 
 // ============================================================================

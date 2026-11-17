@@ -45,15 +45,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION,
     HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
     WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
 };
 
 static UI_EVENT_QUEUE_FULL_DROPS: AtomicU64 = AtomicU64::new(0);
 static UI_EVENT_QUEUE_DISCONNECTED_DROPS: AtomicU64 = AtomicU64::new(0);
 static INPUT_CONTENT_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
 
-fn try_send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
+pub(crate) fn try_send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
     match tx.try_send(event) {
         Ok(()) => {}
         Err(TrySendError::Full(event)) => {
@@ -273,6 +273,11 @@ impl UiRecorder {
         let focused_element = Arc::new(Mutex::new(None::<ElementContext>));
         let keyboard_privacy = Arc::new(KeyboardPrivacy::default());
         let keyboard_privacy_diagnostics = keyboard_privacy.clone();
+        // Entered-text signals: counted by the hooks, read by the privacy worker.
+        let entered_text_signals = self
+            .config
+            .capture_entered_text
+            .then(|| Arc::new(crate::entered_text::EditSignals::default()));
 
         // Most recent input timestamp (ms since start), used by the UIA worker to skip
         // tree captures during/just after user input when prioritize_input_latency is on.
@@ -326,6 +331,7 @@ impl UiRecorder {
         let focused_element1 = focused_element.clone();
         let keyboard_privacy1 = keyboard_privacy.clone();
         let last_input_at_ms1 = last_input_at_ms.clone();
+        let entered_text_signals1 = entered_text_signals.clone();
         threads.push(thread::spawn(move || {
             run_native_hooks(
                 tx1,
@@ -340,6 +346,7 @@ impl UiRecorder {
                 keyboard_privacy1,
                 last_input_at_ms1,
                 content_tx,
+                entered_text_signals1,
             );
         }));
 
@@ -368,8 +375,18 @@ impl UiRecorder {
         let stop3 = stop.clone();
         let config3 = self.config.clone();
         let keyboard_privacy3 = keyboard_privacy.clone();
+        let entered_text3 = entered_text_signals.map(|signals| windows_uia::EnteredTextCapture {
+            signals,
+            events: tx.clone(),
+            start: start_time,
+        });
         threads.push(thread::spawn(move || {
-            windows_uia::run_keyboard_privacy_thread(keyboard_privacy3, stop3, config3);
+            windows_uia::run_keyboard_privacy_thread(
+                keyboard_privacy3,
+                stop3,
+                config3,
+                entered_text3,
+            );
         }));
 
         // Thread 4: UI Automation worker (tree capture and element context)
@@ -705,6 +722,8 @@ struct HookState {
     keyboard_privacy: Arc<KeyboardPrivacy>,
     /// Nonblocking handoff; no clipboard read or PII work on this thread.
     content_tx: Sender<InputContentWork>,
+    /// Entered-text signal counters (atomics only; `None` when off).
+    entered_text: Option<Arc<crate::entered_text::EditSignals>>,
     /// Shared timestamp (ms since start) of the most recent input event.
     /// Updated unconditionally at the top of mouse_hook_proc / keyboard_hook_proc so the UIA
     /// worker can defer tree captures while the user is actively typing/clicking/scrolling.
@@ -815,6 +834,7 @@ fn run_native_hooks(
     keyboard_privacy: Arc<KeyboardPrivacy>,
     last_input_at_ms: Arc<AtomicU64>,
     content_tx: Sender<InputContentWork>,
+    entered_text: Option<Arc<crate::entered_text::EditSignals>>,
 ) {
     debug!("Starting native Windows hooks");
     input_accounting::set_origin(start);
@@ -852,6 +872,7 @@ fn run_native_hooks(
             focused_element,
             keyboard_privacy,
             content_tx,
+            entered_text,
             last_input_at_ms,
             scroll_aggregator: None,
             key_tally: KeyAdmissionTally::default(),
@@ -2321,6 +2342,11 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 }
 
                 let mods = get_modifier_state();
+                if let Some(signals) = &s.entered_text {
+                    if let Some(signal) = crate::entered_text::classify_key(vk_code, mods) {
+                        signals.note(signal);
+                    }
+                }
                 // These keys can move focus before the asynchronous UIA focus
                 // callback arrives (including between controls in one HWND).
                 // The key itself still reaches the field focused now, so it is
@@ -2375,6 +2401,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     drop_pending_text(s);
                     s.scroll_aggregator = None;
                     return;
+                }
+                // A released left button placed the caret or a selection.
+                if msg == WM_LBUTTONUP {
+                    if let Some(signals) = &s.entered_text {
+                        signals.note(crate::entered_text::Signal::Caret);
+                    }
                 }
 
                 // Fast path for WM_MOUSEMOVE — no mutex locks to avoid blocking
@@ -3753,6 +3785,7 @@ mod tests {
                 focused_element: Arc::new(parking_lot::Mutex::new(None)),
                 keyboard_privacy: Arc::new(KeyboardPrivacy::default()),
                 content_tx,
+                entered_text: None,
                 last_input_at_ms: Arc::new(AtomicU64::new(0)),
                 scroll_aggregator: None,
                 key_tally: KeyAdmissionTally::default(),

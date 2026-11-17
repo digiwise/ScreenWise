@@ -24,11 +24,12 @@
 //!    new home. The "is processed" timestamp is prefixed
 //!    (`accessibility_redacted_at`) so the same `frames` row can carry
 //!    independent state for accessibility text vs. image redaction.
-//! 4. **`ui_events`** — user input events. The same table holds both
-//!    typed/keystroke text (`event_type IN ('text', 'key')`) and
-//!    clipboard contents (`event_type = 'clipboard'`). Source column
-//!    `text_content`. Split into two variants so the row-fetch SQL
-//!    can filter by `event_type`.
+//! 4. **`ui_events`** — user input events. The same table holds
+//!    typed/keystroke and entered text (`event_type IN ('text', 'key',
+//!    'text_edit')`) and clipboard contents (`event_type = 'clipboard'`).
+//!    Source column `text_content`. Split into variants so the row-fetch
+//!    SQL can filter by `event_type`. An entered-text edit's earlier text
+//!    (`text_before`) is a third variant with its own timestamp column.
 //! 5. **`meeting_transcript_segments`** — local live-meeting transcript
 //!    finals. Source column `transcript`.
 //!
@@ -55,12 +56,15 @@ pub enum TargetTable {
     /// column is prefixed (`accessibility_redacted_at`) so it doesn't
     /// collide with `frames.image_redacted_at` (image PII worker).
     Accessibility,
-    /// Typed text + keystrokes captured via UI events
-    /// (`ui_events.text_content` filtered to `event_type IN ('text','key')`).
+    /// Typed text, keystrokes and entered text captured via UI events
+    /// (`ui_events.text_content` filtered to
+    /// `event_type IN ('text','key','text_edit')`).
     UiEventsKeyboard,
     /// Clipboard payloads captured via UI events
     /// (`ui_events.text_content` filtered to `event_type='clipboard'`).
     UiEventsClipboard,
+    /// The text before an entered-text edit (`ui_events.text_before`).
+    UiEventsTextBefore,
 }
 
 pub const ALL_TARGET_TABLES: &[TargetTable] = &[
@@ -70,6 +74,7 @@ pub const ALL_TARGET_TABLES: &[TargetTable] = &[
     TargetTable::Accessibility,
     TargetTable::UiEventsKeyboard,
     TargetTable::UiEventsClipboard,
+    TargetTable::UiEventsTextBefore,
 ];
 
 /// One row to redact.
@@ -89,7 +94,9 @@ impl TargetTable {
             // accessibility_text lives on frames after the 2026-03-12
             // consolidation; see the variant docs above.
             Self::Accessibility => "frames",
-            Self::UiEventsKeyboard | Self::UiEventsClipboard => "ui_events",
+            Self::UiEventsKeyboard | Self::UiEventsClipboard | Self::UiEventsTextBefore => {
+                "ui_events"
+            }
         }
     }
 
@@ -101,6 +108,7 @@ impl TargetTable {
             Self::MeetingTranscript => "transcript",
             Self::Accessibility => "accessibility_text",
             Self::UiEventsKeyboard | Self::UiEventsClipboard => "text_content",
+            Self::UiEventsTextBefore => "text_before",
         }
     }
 
@@ -111,6 +119,7 @@ impl TargetTable {
     pub fn redacted_at_col(&self) -> &'static str {
         match self {
             Self::Accessibility => "accessibility_redacted_at",
+            Self::UiEventsTextBefore => "text_before_redacted_at",
             _ => "redacted_at",
         }
     }
@@ -129,8 +138,9 @@ impl TargetTable {
     /// Used to slice the `ui_events` table by `event_type`.
     pub fn extra_filter(&self) -> Option<&'static str> {
         match self {
-            Self::UiEventsKeyboard => Some("event_type IN ('text','key')"),
+            Self::UiEventsKeyboard => Some("event_type IN ('text','key','text_edit')"),
             Self::UiEventsClipboard => Some("event_type = 'clipboard'"),
+            Self::UiEventsTextBefore => Some("event_type = 'text_edit'"),
             _ => None,
         }
     }
@@ -144,6 +154,7 @@ impl TargetTable {
             Self::Accessibility => "frames:accessibility_text",
             Self::UiEventsKeyboard => "ui_events:keyboard",
             Self::UiEventsClipboard => "ui_events:clipboard",
+            Self::UiEventsTextBefore => "ui_events:text_before",
         }
     }
 }
@@ -245,7 +256,8 @@ pub async fn write_redacted(
         | TargetTable::AudioTranscription
         | TargetTable::MeetingTranscript
         | TargetTable::UiEventsKeyboard
-        | TargetTable::UiEventsClipboard => {}
+        | TargetTable::UiEventsClipboard
+        | TargetTable::UiEventsTextBefore => {}
     }
 
     tx.commit().await
@@ -407,7 +419,9 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
                 text_content TEXT,
-                redacted_at INTEGER
+                redacted_at INTEGER,
+                text_before TEXT,
+                text_before_redacted_at INTEGER
             );
             CREATE TABLE meeting_transcript_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

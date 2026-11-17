@@ -44,6 +44,11 @@ pub struct UiCaptureConfig {
     /// Capture clipboard content (privacy risk - disabled by default)
     pub capture_clipboard_content: bool,
 
+    /// Capture entered text: the focused field's text at the caret before
+    /// and after each edit, read on typing pauses and boundaries (Windows;
+    /// see `docs/ENTERED_TEXT_CAPTURE.md`). Off by default.
+    pub capture_entered_text: bool,
+
     /// Capture element context on clicks (slower but richer)
     pub capture_context: bool,
 
@@ -192,6 +197,7 @@ impl Default for UiCaptureConfig {
             capture_scroll: false, // Very high volume
             capture_clipboard: true,
             capture_clipboard_content: true,
+            capture_entered_text: false,
             capture_context: true,
             capture_mouse_move: false, // High volume
             capture_tree: true,

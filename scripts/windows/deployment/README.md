@@ -284,6 +284,19 @@ startup passes only manifest values to the GUI child, removing inherited ones. B
 reduce a privacy check for the listed processes, so list only processes the owner has
 approved.
 
+`-EnteredTextRelaxedProcesses` (same format and handling, default `none`) lists the
+relaxed processes whose decisions may also authorise entered-text reads
+(`enteredTextCapture`; see [entered-text capture](../../../docs/ENTERED_TEXT_CAPTURE.md)).
+A read takes a whole field or paragraph, not one key, so a decision made under either
+relaxation reads nothing unless its process is also on this list.
+
+`-EnteredTextCapture` (default off) turns entered-text capture on for this
+deployment: it is recorded in the manifest, and startup passes
+`SCREENWISE_ENTERED_TEXT_CAPTURE=1` to the GUI child only when the manifest says so
+(an inherited value is removed). It adds to the `enteredTextCapture` setting and can
+never turn that setting off. Like the lists, it is stated explicitly at each
+deployment.
+
 ## Firewall scope: what the deployment rules do not cover
 
 `Set-ScreenWiseDeploymentFirewall.ps1` blocks non-loopback outbound traffic

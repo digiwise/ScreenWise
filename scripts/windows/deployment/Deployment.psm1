@@ -199,18 +199,35 @@ function ConvertTo-DeploymentProcessList {
     return (($names | ForEach-Object { if ($_.EndsWith('.exe')) { $_ } else { "$_.exe" } }) -join ',')
 }
 
-# Owner-authorised keyboard privacy relaxations: only a manifest value reaches
-# the GUI child; inherited values are always removed first.
+# Owner-authorised process lists: the GUI child's environment variable and the
+# manifest field that holds each. The two keyboard privacy relaxations, and the
+# relaxed processes whose decisions may also authorise entered-text reads.
+$script:DeploymentProcessListVariables = @(
+    @('SCREENWISE_UIA_PASSWORD_STATE_UNSUPPORTED_PROCESSES', 'uia_password_state_unsupported_processes'),
+    @('SCREENWISE_UIA_FOCUS_WITHOUT_KEYBOARD_FOCUS_PROCESSES', 'uia_focus_without_keyboard_focus_processes'),
+    @('SCREENWISE_ENTERED_TEXT_RELAXED_PROCESSES', 'entered_text_relaxed_processes'))
+
+# Only a manifest value reaches the GUI child; inherited values are always
+# removed first.
 function Set-DeploymentKeyboardRelaxations {
     param([Parameter(Mandatory)][Diagnostics.ProcessStartInfo]$StartInfo, [Parameter(Mandatory)]$Manifest)
-    foreach ($pair in @(
-            @('SCREENWISE_UIA_PASSWORD_STATE_UNSUPPORTED_PROCESSES', 'uia_password_state_unsupported_processes'),
-            @('SCREENWISE_UIA_FOCUS_WITHOUT_KEYBOARD_FOCUS_PROCESSES', 'uia_focus_without_keyboard_focus_processes'))) {
+    foreach ($pair in $script:DeploymentProcessListVariables) {
         $StartInfo.EnvironmentVariables.Remove($pair[0])
         if ($Manifest.PSObject.Properties[$pair[1]]) {
             $value = ConvertTo-DeploymentProcessList $Manifest.($pair[1])
             if ($value -ne 'none') { $StartInfo.EnvironmentVariables[$pair[0]] = $value }
         }
+    }
+}
+
+# Entered-text capture reaches the GUI child only when the manifest turns it on
+# (a JSON true); an inherited value is always removed first.
+function Set-DeploymentEnteredTextCapture {
+    param([Parameter(Mandatory)][Diagnostics.ProcessStartInfo]$StartInfo, [Parameter(Mandatory)]$Manifest)
+    $StartInfo.EnvironmentVariables.Remove('SCREENWISE_ENTERED_TEXT_CAPTURE')
+    if ($Manifest.PSObject.Properties['entered_text_capture'] -and $Manifest.entered_text_capture -is [bool] -and
+        $Manifest.entered_text_capture) {
+        $StartInfo.EnvironmentVariables['SCREENWISE_ENTERED_TEXT_CAPTURE'] = '1'
     }
 }
 
@@ -223,7 +240,10 @@ function Read-DeploymentManifest {
     if ($m.PSObject.Properties['sensitive_debug_logging'] -and $m.sensitive_debug_logging -isnot [bool]) {
         throw 'Sensitive debug logging must be a boolean.'
     }
-    foreach ($name in @('uia_password_state_unsupported_processes', 'uia_focus_without_keyboard_focus_processes')) {
+    if ($m.PSObject.Properties['entered_text_capture'] -and $m.entered_text_capture -isnot [bool]) {
+        throw 'Entered-text capture must be a boolean.'
+    }
+    foreach ($name in @($script:DeploymentProcessListVariables | ForEach-Object { $_[1] })) {
         if ($m.PSObject.Properties[$name] -and (ConvertTo-DeploymentProcessList $m.$name) -cne $m.$name) {
             throw "Invalid keyboard privacy relaxation list: $name"
         }
@@ -502,7 +522,7 @@ function Invoke-DeploymentStartup {
     }
 }
 
-Export-ModuleMember -Function Assert-DeploymentPath, ConvertTo-DeploymentProcessList, Set-DeploymentKeyboardRelaxations, Assert-DeploymentBackupDirectory, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
+Export-ModuleMember -Function Assert-DeploymentPath, ConvertTo-DeploymentProcessList, Set-DeploymentKeyboardRelaxations, Set-DeploymentEnteredTextCapture, Assert-DeploymentBackupDirectory, Get-DeploymentRemoteAddresses, Get-DeploymentRules,
     Get-DeploymentRuleIfPresent, Assert-DeploymentRule, Assert-DeploymentFiles, Assert-DeploymentPiRuntime,
     Read-DeploymentManifest, Publish-DeploymentFiles, Invoke-DeploymentStartup, Set-DeploymentUiaComparisonMode, New-DeploymentStaging,
     Test-DeploymentQuitCapability, Get-DeploymentSourceState, Get-DeploymentProcesses, Stop-DeploymentInstance, Assert-DeploymentDataConfiguration

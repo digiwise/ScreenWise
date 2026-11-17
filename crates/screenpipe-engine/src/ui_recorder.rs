@@ -35,7 +35,7 @@ fn live_input_channel(
     use screenpipe_config::capture_diagnostics::CaptureChannel as C;
     use screenpipe_db::UiEventType as E;
     match event_type {
-        E::Key | E::Text => Some(C::Keyboard),
+        E::Key | E::Text | E::TextEdit => Some(C::Keyboard),
         E::Clipboard => Some(C::Clipboard),
         E::Click | E::Move | E::Scroll => Some(C::Pointer),
         // Focus/activity metadata alone does not prove interface-text capture.
@@ -191,6 +191,12 @@ pub struct UiRecorderConfig {
     /// still wake event-driven capture, but clipboard payloads/operation rows
     /// are not written.
     pub record_clipboard_events: bool,
+    /// Capture and persist entered text (`text_edit` rows; see
+    /// `docs/ENTERED_TEXT_CAPTURE.md`).
+    pub capture_entered_text: bool,
+    /// Content screening of every input event at the database-admission
+    /// boundary, before Basic PII removal (`None`: content screening is off).
+    pub input_screening: Option<Arc<screenpipe_redact::rescreen::RescreenRules>>,
     /// Apply deterministic Basic PII redaction to every text-bearing UI-event
     /// field at the final database-admission boundary.
     pub apply_pii_removal: bool,
@@ -233,6 +239,8 @@ impl Default for UiRecorderConfig {
             record_pointer_events: true,
             record_keyboard_events: true,
             record_clipboard_events: true,
+            capture_entered_text: false,
+            input_screening: None,
             apply_pii_removal: true,
             prioritize_input_latency: false,
             extraction_thread_priority: ExtractionThreadPriority::BelowNormal,
@@ -262,6 +270,7 @@ impl UiRecorderConfig {
         config.capture_scroll = self.capture_scroll;
         config.capture_context = self.capture_context;
         config.apply_pii_removal = self.apply_pii_removal;
+        config.capture_entered_text = self.capture_entered_text;
         config.prioritize_input_latency = self.prioritize_input_latency;
         config.extraction_thread_priority = self.extraction_thread_priority;
         config.pause_extraction_on_input_ms = self.pause_extraction_on_input_ms;
@@ -626,6 +635,7 @@ pub async fn start_ui_recording(
     let record_pointer_events = config.record_pointer_events;
     let record_keyboard_events = config.record_keyboard_events;
     let record_clipboard_events = config.record_clipboard_events;
+    let record_entered_text = config.capture_entered_text;
     let trigger_gates = TriggerGates;
 
     // Start the recording
@@ -777,7 +787,7 @@ pub async fn start_ui_recording(
                     // original metadata, then sanitize a separate insert at
                     // the persistence boundary. Redaction must not turn an
                     // excluded title/URL into a non-match.
-                    let routing_event = event.to_db_insert(Some(session_id.clone()), false);
+                    let routing_event = event.to_db_insert(Some(session_id.clone()));
                     let app_lower = routing_event
                         .app_name
                         .as_deref()
@@ -842,6 +852,7 @@ pub async fn start_ui_recording(
                             &routing_event,
                             record_keyboard_events,
                             record_clipboard_events,
+                            record_entered_text,
                         );
 
                     // Decide whether this event warrants a capture and, if so,
@@ -913,15 +924,33 @@ pub async fn start_ui_recording(
                         );
                     }
                     if should_record_event {
-                        let db_event =
-                            event.to_db_insert(Some(session_id.clone()), config.apply_pii_removal);
-                        if let Some(channel) = live_input_channel(&db_event.event_type) {
-                            screenpipe_config::live_capture_status::captured(
-                                channel,
-                                screenpipe_config::capture_diagnostics::CaptureScope::Global,
-                            );
+                        match admit_for_storage(
+                            routing_event,
+                            config.input_screening.as_deref(),
+                            config.apply_pii_removal,
+                        ) {
+                            Some(db_event) => {
+                                if let Some(channel) = live_input_channel(&db_event.event_type) {
+                                    screenpipe_config::live_capture_status::captured(
+                                        channel,
+                                        screenpipe_config::capture_diagnostics::CaptureScope::Global,
+                                    );
+                                }
+                                batch.push_accounted(
+                                    db_event,
+                                    correlation_id,
+                                    event.accounting.clone(),
+                                );
+                            }
+                            // Withheld by content screening: an intended block.
+                            None => {
+                                settle_event_lost(&event, LostCause::RecorderExcluded);
+                                report_events_discarded(
+                                    linker_tx.as_ref(),
+                                    correlation_id.into_iter().collect(),
+                                );
+                            }
                         }
-                        batch.push_accounted(db_event, correlation_id, event.accounting.clone());
                     }
 
                     // Flush if batch is full
@@ -1068,14 +1097,40 @@ fn should_record_input_event(
     db_event: &InsertUiEvent,
     record_keyboard_events: bool,
     record_clipboard_events: bool,
+    record_entered_text: bool,
 ) -> bool {
     match db_event.event_type {
         screenpipe_db::UiEventType::Key | screenpipe_db::UiEventType::Text => {
             record_keyboard_events
         }
         screenpipe_db::UiEventType::Clipboard => record_clipboard_events,
+        screenpipe_db::UiEventType::TextEdit => record_entered_text,
         _ => true,
     }
+}
+
+/// The row to store for an event the recorder keeps: content screening on the
+/// text exactly as captured, then Basic PII removal. `None` when screening
+/// refuses the event (counted by fixed reason code only).
+fn admit_for_storage(
+    mut event: InsertUiEvent,
+    screening: Option<&screenpipe_redact::rescreen::RescreenRules>,
+    apply_pii_removal: bool,
+) -> Option<InsertUiEvent> {
+    if let Some(rules) = screening {
+        if let Err(reason) = crate::input_screening::screen_insert(&mut event, rules) {
+            debug!(
+                event_type = %event.event_type,
+                reason = reason.code(),
+                "input event withheld by content screening"
+            );
+            return None;
+        }
+    }
+    if apply_pii_removal {
+        screenpipe_a11y::events::remove_pii_from_insert(&mut event);
+    }
+    Some(event)
 }
 
 async fn flush_batch(
@@ -1429,6 +1484,8 @@ mod event_batch_tests {
             element_automation_id: None,
             element_bounds: None,
             frame_id: None,
+            text_before: None,
+            edit_detail: None,
         }
     }
 
@@ -1584,6 +1641,8 @@ mod capture_trigger_kind_tests {
             element_automation_id: None,
             element_bounds: None,
             frame_id: None,
+            text_before: None,
+            edit_detail: None,
         }
     }
 
@@ -1631,50 +1690,95 @@ mod capture_trigger_kind_tests {
         assert!(!should_record_input_event(
             &evt(UiEventType::Key),
             false,
-            true
+            true,
+            false
         ));
         assert!(!should_record_input_event(
             &evt(UiEventType::Text),
             false,
-            true
+            true,
+            false
         ));
         assert!(!should_record_input_event(
             &evt(UiEventType::Clipboard),
             true,
+            false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Key),
             true,
+            false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Text),
             true,
+            false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Clipboard),
             false,
-            true
+            true,
+            false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::WindowFocus),
+            false,
             false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Click),
             false,
+            false,
             false
         ));
+    }
+
+    #[test]
+    fn entered_text_is_stored_only_when_switched_on() {
+        let edit = evt(UiEventType::TextEdit);
+        assert!(!should_record_input_event(&edit, true, true, false));
+        assert!(should_record_input_event(&edit, false, false, true));
+        assert_eq!(
+            live_input_channel(&edit.event_type),
+            Some(screenpipe_config::capture_diagnostics::CaptureChannel::Keyboard)
+        );
+    }
+
+    #[test]
+    fn stored_input_is_screened_before_pii_removal() {
+        let rules = screenpipe_redact::rescreen::RescreenRules::new(
+            &[],
+            &[],
+            &["falcon".to_string()],
+            false,
+        );
+        let typed = |text: &str| InsertUiEvent {
+            text_content: Some(text.to_string()),
+            app_name: Some("notepad.exe".to_string()),
+            window_title: Some("notes.txt - Notepad".to_string()),
+            ..evt(UiEventType::Text)
+        };
+        assert!(admit_for_storage(typed("about project falcon"), Some(&rules), true).is_none());
+        // Screening off: kept, with Basic PII removal still applied.
+        let kept = admit_for_storage(typed("mail person@example.com"), None, true)
+            .expect("kept without screening");
+        assert!(!kept
+            .text_content
+            .unwrap_or_default()
+            .contains("person@example.com"));
+        let kept = admit_for_storage(typed("hello"), Some(&rules), false).expect("kept");
+        assert_eq!(kept.text_content.as_deref(), Some("hello"));
     }
 
     #[test]
     fn key_event_can_trigger_without_being_stored() {
         let event = evt(UiEventType::Key);
 
-        assert!(!should_record_input_event(&event, false, true));
+        assert!(!should_record_input_event(&event, false, true, false));
         assert!(matches!(
             capture_trigger_kind(&event, &[], gates(true, true)),
             Some(CaptureTrigger::KeyPress)
@@ -1715,7 +1819,7 @@ mod capture_trigger_kind_tests {
     fn clipboard_event_can_trigger_without_being_stored() {
         let event = evt(UiEventType::Clipboard);
 
-        assert!(!should_record_input_event(&event, true, false));
+        assert!(!should_record_input_event(&event, true, false, false));
         assert!(matches!(
             capture_trigger_kind(&event, &[], gates(true, true)),
             Some(CaptureTrigger::Clipboard)

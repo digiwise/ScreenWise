@@ -500,10 +500,11 @@ them out of public documents except as sanitized numeric summaries.
 - Every persisted frame with a screenshot runs OCR (an estimated 50–300 ms of
   Windows OCR CPU, not yet measured) plus text screening, including frames that
   previously skipped OCR.
-- Only the screenshot path is screened. `ui_events`, clipboard, keyboard rows and
-  the macOS HD recorder are not (input rows in credential-file windows are not
-  recorded at all; stored rows can be re-screened with `screenpipe privacy
-  rescreen`).
+- Input events (`ui_events`: typed text, keys, clipboard, entered text and the
+  text fields of other events) are screened at the recorder's persistence
+  boundary since 2026-11-16, with the shared input-event decision that
+  `screenpipe privacy rescreen` uses (`screenpipe-engine/src/input_screening.rs`);
+  a refused event is not stored. The macOS HD recorder is not screened.
 - Non-Windows code paths are not compiled or tested on the development machine;
   macOS/Tesseract OCR errors may look like empty text and pass as blank frames.
 - The in-memory frame comparer still sees original pixels (internal only).
@@ -544,7 +545,7 @@ them out of public documents except as sanitized numeric summaries.
 
 ## Future considerations
 
-- Screen the other text channels (`ui_events`, clipboard, keyboard, macOS HD).
+- Screen the macOS HD recorder.
 - Replace `screenpipe-core::pii_removal` (inline PII removal) with `redact_one`
   (behaviour change; owner decision).
 - Use the always-OCR metrics to decide a per-app forced-OCR policy.

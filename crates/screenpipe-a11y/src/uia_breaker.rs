@@ -39,6 +39,11 @@
 //! (`PROBE_PACE_AFTER`): it starts no sooner than the answer's own duration
 //! after it, so probing occupies at most about half of the target's UI
 //! thread.
+//! `Read` (the entered-text read of the focused field, a step after a probe)
+//! is keyed by process like `Probe`, with the probe's schedule and its own
+//! pacing gap: a slow text provider paces and stops reads, never probes, so
+//! it never costs keystroke admission. A read also waits out a probe's
+//! pacing gap.
 //! Keys are process ids and window handles only; the tables are bounded.
 
 use std::collections::HashMap;
@@ -61,6 +66,7 @@ pub(crate) enum Scope {
     Walk,
     Text,
     Probe,
+    Read,
 }
 
 /// What one UIA call cost its target.
@@ -104,7 +110,7 @@ pub(crate) fn backoff(failures: u32) -> Duration {
 fn scope_backoff(scope: Scope, failures: u32) -> Duration {
     match scope {
         Scope::Walk | Scope::Text => backoff(failures),
-        Scope::Probe => {
+        Scope::Probe | Scope::Read => {
             let doublings = failures.saturating_sub(1).min(5);
             PROBE_BASE_BACKOFF
                 .saturating_mul(1 << doublings)
@@ -153,9 +159,13 @@ struct Entry {
     walk: Gate,
     text: Gate,
     probe: Gate,
-    /// No probe of this process starts before this (process targets only):
+    read: Gate,
+    /// No probe or read of this process starts before this (process targets only):
     /// set after a probe whose provider work exceeded `PROBE_PACE_AFTER`.
     probe_paced_until: Option<Instant>,
+    /// No read of this process starts before this: set after a read whose
+    /// provider work exceeded `PROBE_PACE_AFTER`.
+    read_paced_until: Option<Instant>,
     /// Window area at its last costly outcome (window targets only).
     failure_area: Option<u64>,
     last_seen: Option<Instant>,
@@ -167,6 +177,7 @@ impl Entry {
             Scope::Walk => &self.walk,
             Scope::Text => &self.text,
             Scope::Probe => &self.probe,
+            Scope::Read => &self.read,
         }
     }
     fn gate_mut(&mut self, scope: Scope) -> &mut Gate {
@@ -174,16 +185,37 @@ impl Entry {
             Scope::Walk => &mut self.walk,
             Scope::Text => &mut self.text,
             Scope::Probe => &mut self.probe,
+            Scope::Read => &mut self.read,
         }
     }
     fn paced(&self, now: Instant) -> bool {
         self.probe_paced_until.is_some_and(|until| now < until)
     }
+    fn read_paced(&self, now: Instant) -> bool {
+        self.read_paced_until.is_some_and(|until| now < until)
+    }
+    /// The pacing gap a `Probe` or `Read` sets.
+    fn pacing_mut(&mut self, scope: Scope) -> &mut Option<Instant> {
+        match scope {
+            Scope::Read => &mut self.read_paced_until,
+            _ => &mut self.probe_paced_until,
+        }
+    }
     fn all_allow(&self, now: Instant) -> bool {
-        self.walk.allows(now) && self.text.allows(now) && self.probe.allows(now) && !self.paced(now)
+        self.walk.allows(now)
+            && self.text.allows(now)
+            && self.probe.allows(now)
+            && self.read.allows(now)
+            && !self.paced(now)
+            && !self.read_paced(now)
     }
     fn idle(&self, now: Instant) -> bool {
-        self.walk.idle(now) && self.text.idle(now) && self.probe.idle(now) && !self.paced(now)
+        self.walk.idle(now)
+            && self.text.idle(now)
+            && self.probe.idle(now)
+            && self.read.idle(now)
+            && !self.paced(now)
+            && !self.read_paced(now)
     }
 }
 
@@ -296,17 +328,40 @@ impl Breaker {
     /// outcome (if any) and its pacing. Provider work over
     /// `PROBE_PACE_AFTER` holds the next probe for that long after `now`.
     fn record_probe(&mut self, target: Target, cost: ProbeCost, budget: Duration, now: Instant) {
+        self.record_paced(target, Scope::Probe, cost, budget, now);
+    }
+
+    /// Whether an entered-text read may call `target` now: its read breaker
+    /// is not open and neither a probe's nor a read's pacing gap runs.
+    fn read_allowed(&self, target: Target, now: Instant) -> bool {
+        self.entries.get(&target).is_none_or(|entry| {
+            entry.read.allows(now) && !entry.paced(now) && !entry.read_paced(now)
+        })
+    }
+
+    /// Record a `Probe` or `Read` of `target` that called its provider: its
+    /// breaker outcome and its own scope's pacing gap.
+    fn record_paced(
+        &mut self,
+        target: Target,
+        scope: Scope,
+        cost: ProbeCost,
+        budget: Duration,
+        now: Instant,
+    ) {
         if let Some(outcome) = probe_outcome(cost, budget) {
-            self.record(target, Scope::Probe, outcome, None, now);
+            self.record(target, scope, outcome, None, now);
         }
         if cost.provider_work > PROBE_PACE_AFTER {
             self.evict(now);
             let entry = self.entries.entry(target).or_default();
             entry.last_seen = Some(now);
-            entry.probe_paced_until = Some(now + cost.provider_work);
-            PROBE_PACINGS.fetch_add(1, Ordering::Relaxed);
+            *entry.pacing_mut(scope) = Some(now + cost.provider_work);
+            if scope == Scope::Probe {
+                PROBE_PACINGS.fetch_add(1, Ordering::Relaxed);
+            }
         } else if let Some(entry) = self.entries.get_mut(&target) {
-            entry.probe_paced_until = None;
+            *entry.pacing_mut(scope) = None;
             if entry.idle(now) {
                 self.entries.remove(&target);
             }
@@ -545,6 +600,28 @@ pub(crate) fn probe_gate(pid: u32) -> ProbeGate {
     with_breaker(|breaker| breaker.probe_gate(Target { pid, hwnd: 0 }, Instant::now()))
 }
 
+/// Whether an entered-text read may call the provider of process `pid` now.
+pub(crate) fn read_allowed(pid: u32) -> bool {
+    pid != 0
+        && with_breaker(|breaker| breaker.read_allowed(Target { pid, hwnd: 0 }, Instant::now()))
+}
+
+/// Record an entered-text read that called the provider of process `pid`,
+/// against its `budget` (its own breaker gate and pacing gap).
+pub(crate) fn record_read(pid: u32, cost: ProbeCost, budget: Duration) {
+    if pid != 0 {
+        with_breaker(|breaker| {
+            breaker.record_paced(
+                Target { pid, hwnd: 0 },
+                Scope::Read,
+                cost,
+                budget,
+                Instant::now(),
+            )
+        });
+    }
+}
+
 /// Record a probe that called the provider of process `pid`, against its
 /// total `budget`. Returns whether it was costly (the breaker is now open).
 pub(crate) fn record_probe(pid: u32, cost: ProbeCost, budget: Duration) -> bool {
@@ -578,11 +655,12 @@ pub(crate) fn note_exclusion_skip() {
 /// Numeric counters only (no process ids or handles).
 pub(crate) fn metrics_snapshot() -> serde_json::Value {
     let now = Instant::now();
-    let (open_walk, open_text, open_probe) = with_breaker(|breaker| {
+    let (open_walk, open_text, open_probe, open_read) = with_breaker(|breaker| {
         (
             breaker.open_count(Scope::Walk, now),
             breaker.open_count(Scope::Text, now),
             breaker.open_count(Scope::Probe, now),
+            breaker.open_count(Scope::Read, now),
         )
     });
     serde_json::json!({
@@ -598,6 +676,7 @@ pub(crate) fn metrics_snapshot() -> serde_json::Value {
         "breaker_open_walk_windows": open_walk,
         "breaker_open_text_windows": open_text,
         "breaker_open_probe_processes": open_probe,
+        "breaker_open_read_processes": open_read,
     })
 }
 
@@ -989,5 +1068,30 @@ mod tests {
             probe_gate(0) == ProbeGate::Allowed,
             "pid 0 is never tracked"
         );
+    }
+
+    #[test]
+    fn a_costly_or_slow_read_stops_reads_but_never_probes() {
+        let mut breaker = Breaker::default();
+        let process = window(60, 0);
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        breaker.record_paced(process, Scope::Read, cost(30, true, false), ms(100), t0);
+        assert!(!breaker.read_allowed(process, t0 + ms(999)));
+        assert!(breaker.read_allowed(process, t0 + ms(1000)));
+        assert_eq!(breaker.probe_gate(process, t0), ProbeGate::Allowed);
+
+        // A slow read answer paces the next read, never a probe.
+        let t1 = t0 + ms(2000);
+        breaker.record_paced(process, Scope::Read, cost(80, false, true), ms(100), t1);
+        assert_eq!(breaker.probe_gate(process, t1), ProbeGate::Allowed);
+        assert!(!breaker.read_allowed(process, t1 + ms(79)));
+        assert!(breaker.read_allowed(process, t1 + ms(80)));
+
+        // A slow probe answer paces reads as well as probes.
+        let t2 = t1 + ms(1000);
+        breaker.record_probe(process, cost(70, false, true), ms(250), t2);
+        assert_eq!(breaker.probe_gate(process, t2), ProbeGate::Paced);
+        assert!(!breaker.read_allowed(process, t2 + ms(69)));
     }
 }

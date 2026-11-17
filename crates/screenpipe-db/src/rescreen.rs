@@ -45,6 +45,7 @@ pub struct RescreenUiEventRow {
     pub element_name: Option<String>,
     pub element_value: Option<String>,
     pub element_description: Option<String>,
+    pub text_before: Option<String>,
 }
 
 /// Replacement text columns for one input event (`None` keeps the column).
@@ -56,6 +57,7 @@ pub struct UiEventTextUpdate {
     pub element_name: Option<String>,
     pub element_value: Option<String>,
     pub element_description: Option<String>,
+    pub text_before: Option<String>,
 }
 
 /// Content-free counts of [`DatabaseManager::delete_frames_for_rescreen`].
@@ -205,7 +207,7 @@ impl DatabaseManager {
     ) -> Result<Vec<RescreenUiEventRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, app_name, window_title, browser_url, text_content, element_name,
-                    element_value, element_description
+                    element_value, element_description, text_before
              FROM ui_events WHERE id > ?1 AND id <= ?2 ORDER BY id LIMIT ?3",
         )
         .bind(after)
@@ -224,6 +226,7 @@ impl DatabaseManager {
                 element_name: row.get("element_name"),
                 element_value: row.get("element_value"),
                 element_description: row.get("element_description"),
+                text_before: row.get("text_before"),
             })
             .collect())
     }
@@ -384,8 +387,9 @@ impl DatabaseManager {
                     browser_url = COALESCE(?3, browser_url),
                     element_name = COALESCE(?4, element_name),
                     element_value = COALESCE(?5, element_value),
-                    element_description = COALESCE(?6, element_description)
-                 WHERE id = ?7",
+                    element_description = COALESCE(?6, element_description),
+                    text_before = COALESCE(?7, text_before)
+                 WHERE id = ?8",
             )
             .bind(&update.text_content)
             .bind(&update.window_title)
@@ -393,6 +397,7 @@ impl DatabaseManager {
             .bind(&update.element_name)
             .bind(&update.element_value)
             .bind(&update.element_description)
+            .bind(&update.text_before)
             .bind(id)
             .execute(&mut **tx.conn())
             .await?
