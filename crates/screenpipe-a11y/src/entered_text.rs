@@ -17,11 +17,19 @@ use serde::{Serialize, Serializer};
 
 /// A read window keeps at most this many bytes of text.
 pub const MAX_READ_BYTES: usize = 4096;
-/// A read window keeps at most this many lines.
-pub const MAX_READ_LINES: usize = 16;
+/// A read window keeps at most this many lines; a line window (see
+/// [`prompt_lines`]) looks this many lines up for a prompt.
+pub const MAX_READ_LINES: usize = 50;
+
+/// What a read splits lines at (`\r\n` is one break).
+const LINE_BREAKS: [char; 5] = ['\r', '\n', '\u{2028}', '\u{2029}', '\u{000B}'];
 
 /// Read this long after the last edit key.
 const PAUSE_DELAY: Duration = Duration::from_millis(300);
+/// While typing goes on without a pause, read at most this often, so an edit
+/// ended soon after its last key (Enter in a chat box or a terminal) still
+/// has an "after".
+const TYPING_READ_EVERY: Duration = Duration::from_secs(1);
 /// Read this long after Enter (time for a chat box to clear).
 const ENTER_DELAY: Duration = Duration::from_millis(150);
 /// Read this long after a caret key or click (time for it to settle).
@@ -151,6 +159,9 @@ pub enum ReadKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextSource {
     TextPattern,
+    /// A line window through the text pattern, cut to its prompt
+    /// ([`prompt_lines`]).
+    TextPatternLines,
     Value,
 }
 
@@ -158,6 +169,7 @@ impl TextSource {
     pub fn code(self) -> &'static str {
         match self {
             Self::TextPattern => "text_pattern",
+            Self::TextPatternLines => "text_pattern_lines",
             Self::Value => "value",
         }
     }
@@ -199,11 +211,7 @@ impl CaretText {
             end -= 1;
         }
         let mut truncated = truncated || end < text.len();
-        let mut lines: Vec<String> = text[..end]
-            .replace("\r\n", "\n")
-            .split(['\r', '\n', '\u{2028}', '\u{2029}', '\u{000B}'])
-            .map(str::to_string)
-            .collect();
+        let mut lines = lines_of(&text[..end]);
         if lines.len() > MAX_READ_LINES {
             lines.truncate(MAX_READ_LINES);
             truncated = true;
@@ -222,6 +230,98 @@ impl CaretText {
     fn is_blank(&self) -> bool {
         self.lines.iter().all(|line| line.trim().is_empty())
     }
+
+    /// This read as the next edit's "before". A line window qualifies only
+    /// with the caret on its prompt line: otherwise (output still being
+    /// written after Enter, a click into the output) its lines may be output,
+    /// not entered text.
+    fn into_baseline(self) -> Option<Self> {
+        let at_prompt = matches!(self.lines.as_slice(), [line] if is_prompt_line(line));
+        (self.source != TextSource::TextPatternLines || at_prompt).then_some(self)
+    }
+}
+
+/// `text` split into lines at every kind of line break, `\r\n` once.
+fn lines_of(text: &str) -> Vec<String> {
+    text.replace("\r\n", "\n")
+        .split(LINE_BREAKS)
+        .map(str::to_string)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Line windows
+// ---------------------------------------------------------------------------
+
+/// Most lines a paragraph read covering its whole field may hold: two short
+/// paragraphs with a few soft line breaks. More means the provider's
+/// "paragraph" is the whole field (a terminal's buffer).
+const MAX_WHOLE_FIELD_PARAGRAPH_LINES: usize = 8;
+
+/// Whether a paragraph read (`paragraphs`; `too_long`: over the read limit;
+/// `whole_field`: it spans the element's whole text) is replaced by a line
+/// window: it holds more than a read keeps, or it is the whole field and
+/// more lines than two paragraphs hold. A field with real paragraphs keeps
+/// paragraph reads, so a multi-paragraph selection is still read whole.
+pub fn needs_line_window(paragraphs: &str, too_long: bool, whole_field: bool) -> bool {
+    too_long || (whole_field && lines_of(paragraphs).len() > MAX_WHOLE_FIELD_PARAGRAPH_LINES)
+}
+
+/// The entered text in a line window: the lines up to and including the
+/// caret's, read when the paragraphs around the caret hold more than a read
+/// keeps (a terminal's whole buffer, or one very long paragraph). Keeps the
+/// nearest prompt line above the caret and the lines after it, so a command
+/// or a long pasted prompt is kept and the output above it is not. With no
+/// prompt line among the last [`MAX_READ_LINES`] lines, keeps only the
+/// caret's line.
+pub fn prompt_lines(window: &str) -> &str {
+    // The window ends after the caret's line break, when it has one.
+    let window = window
+        .strip_suffix("\r\n")
+        .or_else(|| window.strip_suffix(LINE_BREAKS))
+        .unwrap_or(window);
+    let mut starts = vec![0];
+    let mut chars = window.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if LINE_BREAKS.contains(&c) {
+            if c == '\r' {
+                chars.next_if(|&(_, next)| next == '\n');
+            }
+            starts.push(chars.peek().map_or(window.len(), |&(at, _)| at));
+        }
+    }
+    let line_at = |at: usize| window[at..].split(LINE_BREAKS).next().unwrap_or("");
+    let caret_line = starts[starts.len() - 1];
+    let start = starts
+        .iter()
+        .rev()
+        .take(MAX_READ_LINES)
+        .copied()
+        .find(|&at| is_prompt_line(line_at(at)))
+        .unwrap_or(caret_line);
+    &window[start..]
+}
+
+/// A shell or chat prompt line. The first `>` ends the prompt, so a command
+/// may contain `>` after it: PowerShell (`PS C:\…> `; a line starting `>>`
+/// continues the one above), cmd (`C:\…>`), and a prompt that is only `>`
+/// (a terminal chat app's input, often drawn inside a box).
+fn is_prompt_line(line: &str) -> bool {
+    let box_drawing = '\u{2500}'..='\u{257F}';
+    let line = line.trim_start_matches(|c: char| c.is_whitespace() || box_drawing.contains(&c));
+    let Some(end) = line.find('>') else {
+        return false;
+    };
+    let prefix = &line[..end];
+    let drive_path = |text: &str| {
+        let bytes = text.as_bytes();
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":\\"
+    };
+    match prefix {
+        "" => !line[1..].starts_with('>'),
+        "PS" => true,
+        _ => prefix.starts_with("PS ") || drive_path(prefix),
+    }
 }
 
 /// Why a read produced no text (fixed codes for content-free diagnostics).
@@ -237,6 +337,8 @@ pub enum ReadFailure {
     Changed,
     /// The text provider did not answer within the read budget.
     Timeout,
+    /// Even the line window around the caret held more than a read takes.
+    TooLarge,
     /// Any other provider error.
     Failed,
 }
@@ -249,6 +351,7 @@ impl ReadFailure {
             Self::Relaxed => "relaxed",
             Self::Changed => "changed",
             Self::Timeout => "timeout",
+            Self::TooLarge => "too_large",
             Self::Failed => "failed",
         }
     }
@@ -371,7 +474,10 @@ struct OpenEdit {
 #[derive(Clone, Copy, Debug)]
 struct PendingRead {
     kind: ReadKind,
+    /// The latest request (key) for this read.
     since: Instant,
+    /// The first request since the last read of this kind.
+    first: Instant,
 }
 
 /// The entered-text state machine (see the module documentation). It holds
@@ -382,6 +488,9 @@ pub struct EditTracker {
     pending: Option<PendingRead>,
     baseline: Option<CaretText>,
     open: Option<OpenEdit>,
+    /// How edits ended that were dropped for having no "after" (they ended
+    /// before any read), since the last [`Self::take_lost`].
+    lost: Vec<Ended>,
 }
 
 impl EditTracker {
@@ -429,10 +538,17 @@ impl EditTracker {
         {
             finished.extend(self.finish(Ended::Idle, counts.edits));
         }
-        let due = self
-            .pending
-            .filter(|pending| now - pending.since >= delay(pending.kind));
+        let due = self.pending.filter(|pending| {
+            now - pending.since >= delay(pending.kind)
+                || (pending.kind == ReadKind::Pause && now - pending.first >= TYPING_READ_EVERY)
+        });
         (finished, due.map(|pending| pending.kind))
+    }
+
+    /// How the edits dropped since the last call ended (content-free
+    /// diagnostics).
+    pub fn take_lost(&mut self) -> Vec<Ended> {
+        std::mem::take(&mut self.lost)
     }
 
     /// Report the outcome of the read [`Self::poll`] asked for.
@@ -445,11 +561,14 @@ impl EditTracker {
         let edits = self.seen.unwrap_or_default().edits;
         let text = match outcome {
             ReadOutcome::NotNow => {
-                if self
-                    .pending
-                    .is_some_and(|pending| now - pending.since >= READ_GIVE_UP)
-                {
-                    self.discard();
+                if let Some(pending) = &mut self.pending {
+                    if now - pending.since >= READ_GIVE_UP {
+                        self.discard();
+                    } else if pending.kind == ReadKind::Pause && now - pending.since < PAUSE_DELAY {
+                        // A typing read that cannot start waits for the
+                        // next one (or the pause read), not the next poll.
+                        pending.first = now;
+                    }
                 }
                 return Vec::new();
             }
@@ -485,13 +604,13 @@ impl EditTracker {
             }
         }
         match kind {
-            ReadKind::Settle => self.baseline = Some(text),
+            ReadKind::Settle => self.baseline = text.into_baseline(),
             ReadKind::Pause => match &mut self.open {
                 Some(open) => {
                     open.after = Some(text);
                     open.edits_at_after = edits;
                 }
-                None => self.baseline = Some(text),
+                None => self.baseline = text.into_baseline(),
             },
             ReadKind::Enter => {
                 let ended = if text.is_blank() {
@@ -500,7 +619,7 @@ impl EditTracker {
                     Ended::Enter
                 };
                 finished.extend(self.finish(ended, edits));
-                self.baseline = Some(text);
+                self.baseline = text.into_baseline();
             }
         }
         finished
@@ -533,17 +652,33 @@ impl EditTracker {
         {
             return;
         }
-        self.pending = Some(PendingRead { kind, since: now });
+        let first = self
+            .pending
+            .filter(|pending| pending.kind == kind)
+            .map_or(now, |pending| pending.first);
+        self.pending = Some(PendingRead {
+            kind,
+            since: now,
+            first,
+        });
     }
 
     /// End the open edit, if it has an "after" that differs from its "before".
     fn finish(&mut self, ended: Ended, edits: u64) -> Option<FinishedEdit> {
         let open = self.open.take()?;
-        let after = open.after?;
+        let Some(after) = open.after else {
+            self.lost.push(ended);
+            return None;
+        };
         if ended == Ended::Idle {
-            self.baseline = Some(after.clone());
+            self.baseline = after.clone().into_baseline();
         }
-        let before = open.before.filter(|before| before.target == after.target);
+        // A "before" from another field, or read another way (a paragraph
+        // read of a terminal's whole buffer before it grew into line
+        // windows), is not this edit's.
+        let before = open
+            .before
+            .filter(|before| before.target == after.target && before.source == after.source);
         let (before_lines, after_lines) = match &before {
             Some(before) => {
                 let (b, a) = changed_lines(&before.lines, &after.lines);
@@ -595,6 +730,18 @@ mod tests {
             TextSource::TextPattern,
             "editor.exe".to_string(),
             Some("Doc".to_string()),
+        ))
+    }
+
+    /// A line-window read, cut to its prompt as the platform does.
+    fn window(target: u64, text: &str) -> ReadOutcome {
+        ReadOutcome::Text(CaretText::new(
+            target,
+            prompt_lines(text),
+            false,
+            TextSource::TextPatternLines,
+            "terminal.exe".to_string(),
+            None,
         ))
     }
 
@@ -728,6 +875,198 @@ mod tests {
                     .before
                     .as_deref()
                     .is_some_and(|b| b.contains("command output"))));
+    }
+
+    #[test]
+    fn continuous_typing_is_read_each_second_so_a_quick_enter_keeps_it() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, ""));
+        let mut keys = 0;
+        loop {
+            sim.signal(Signal::Edit);
+            keys += 1;
+            if sim.tick(Duration::from_millis(25)) == Some(ReadKind::Pause) {
+                break;
+            }
+            assert!(keys <= 41, "no read within a second of typing");
+        }
+        assert!(keys >= 40, "read before a second of typing");
+        let finished = sim
+            .tracker
+            .read_done(ReadKind::Pause, read(FIELD, "hello wor"), sim.now);
+        assert!(finished.is_empty());
+        sim.type_keys(2);
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        let edit = &sim.finished[0];
+        assert_eq!(edit.after, "hello wor");
+        assert_eq!(edit.detail.ended, Ended::Submitted);
+        assert_eq!(edit.detail.keys_after_read, 2);
+        assert!(sim.tracker.take_lost().is_empty());
+    }
+
+    #[test]
+    fn an_edit_ended_before_any_read_is_counted_as_lost() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, ""));
+        sim.type_keys(3);
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        assert!(sim.finished.is_empty());
+        assert_eq!(sim.tracker.take_lost(), [Ended::Submitted]);
+        assert!(sim.tracker.take_lost().is_empty());
+    }
+
+    #[test]
+    fn a_line_window_keeps_the_prompt_line_and_what_follows() {
+        // PowerShell: the output above is dropped; a redirection's `>`
+        // belongs to the command.
+        assert_eq!(
+            prompt_lines("PS C:\\> ls\r\nfile.txt\r\nPS C:\\> echo a > b.txt\r\n"),
+            "PS C:\\> echo a > b.txt"
+        );
+        // A command over several lines: continuation lines start with `>>`.
+        assert_eq!(
+            prompt_lines("out\nPS C:\\x> if ($a) {\n>> b\n>> }"),
+            "PS C:\\x> if ($a) {\n>> b\n>> }"
+        );
+        assert_eq!(prompt_lines("x\nC:\\Users>dir"), "C:\\Users>dir");
+        // A chat prompt drawn in a box, the caret on its pasted second line.
+        assert_eq!(
+            prompt_lines("answer\n╭───╮\n│ > summarise this │\n│ pasted line │\r\n"),
+            "│ > summarise this │\n│ pasted line │"
+        );
+        // No prompt: only the caret's line.
+        assert_eq!(prompt_lines("line one\nline two\n"), "line two");
+        assert_eq!(prompt_lines("a\rb\u{2028}c"), "c");
+        assert_eq!(prompt_lines(""), "");
+        // The caret on an empty row below the prompt.
+        assert_eq!(prompt_lines("out\r\nPS C:\\> \r\n\r\n"), "PS C:\\> \r\n");
+        // A prompt further up than the window's lines is not looked for.
+        let far = format!("PS C:\\> cmd\n{}last", "out\n".repeat(MAX_READ_LINES));
+        assert_eq!(prompt_lines(&far), "last");
+    }
+
+    #[test]
+    fn only_lines_shaped_like_a_prompt_are_prompt_lines() {
+        for prompt in ["PS C:\\> ", "PS> x", "C:\\>dir", "> hi", "  │ > hi", ">"] {
+            assert!(is_prompt_line(prompt), "{prompt}");
+        }
+        for other in [
+            ">> continued",
+            ">>> python",
+            "$ ls",
+            "❯ ls",
+            "a > b",
+            "",
+            "PS",
+        ] {
+            assert!(!is_prompt_line(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn only_a_whole_field_read_with_many_lines_needs_a_line_window() {
+        let many = "row\n".repeat(MAX_WHOLE_FIELD_PARAGRAPH_LINES + 1);
+        assert!(needs_line_window(&many, false, true));
+        // A selection over many paragraphs of a longer document.
+        assert!(!needs_line_window(&many, false, false));
+        assert!(!needs_line_window("one\rtwo\r", false, true));
+        assert!(needs_line_window("short", true, false));
+    }
+
+    #[test]
+    fn a_before_read_another_way_is_not_kept() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        // A small terminal buffer, read whole as paragraphs.
+        sim.answer(ReadKind::Settle, read(FIELD, "output\nPS C:\\> "));
+        sim.type_keys(2);
+        sim.answer(ReadKind::Pause, window(FIELD, "output\r\nPS C:\\> ab\r\n"));
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[0].before, None);
+        assert_eq!(sim.finished[0].after, "PS C:\\> ab");
+    }
+
+    #[test]
+    fn an_idle_line_window_becomes_a_before_only_at_its_prompt() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, window(FIELD, "PS C:\\> \r\n"));
+        sim.type_keys(1);
+        // Type-ahead: output below the prompt.
+        sim.answer(
+            ReadKind::Pause,
+            window(FIELD, "PS C:\\> build\r\nb\r\ncompiling\r\n"),
+        );
+        sim.tick(IDLE_END);
+        assert_eq!(sim.finished.len(), 1);
+        sim.type_keys(1);
+        sim.answer(ReadKind::Pause, window(FIELD, "PS C:\\> x\r\n"));
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[1].before, None);
+    }
+
+    #[test]
+    fn typing_reads_come_a_second_apart_and_a_busy_provider_waits_for_the_next() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, ""));
+        // Polls (25 ms apart, a key each) until the next typing read is due.
+        let next_read = |sim: &mut Sim| {
+            (1..=80)
+                .find(|_| {
+                    sim.signal(Signal::Edit);
+                    sim.tick(Duration::from_millis(25)) == Some(ReadKind::Pause)
+                })
+                .expect("a typing read")
+        };
+        assert!(next_read(&mut sim) >= 40);
+        sim.tracker
+            .read_done(ReadKind::Pause, read(FIELD, "a"), sim.now);
+        assert!(next_read(&mut sim) >= 40);
+        // The provider is busy: retried with the next typing read, not the
+        // next poll.
+        sim.tracker
+            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.now);
+        assert!(next_read(&mut sim) >= 40);
+        // After a pause the pause read is due at once.
+        sim.tracker
+            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.now);
+        assert_eq!(sim.tick(PAUSE_DELAY), Some(ReadKind::Pause));
+    }
+
+    #[test]
+    fn a_line_window_is_a_before_only_with_the_caret_on_its_prompt() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        // Read while a command still writes output: the caret is in it.
+        sim.answer(
+            ReadKind::Settle,
+            window(FIELD, "PS C:\\> build\r\ncompiling a\r\ncompiling b\r\n"),
+        );
+        sim.type_keys(3);
+        sim.answer(
+            ReadKind::Pause,
+            window(FIELD, "PS C:\\> build\r\ndone\r\nPS C:\\> abc\r\n"),
+        );
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[0].before, None);
+        assert_eq!(sim.finished[0].after, "PS C:\\> abc");
+        assert_eq!(sim.finished[0].detail.source, TextSource::TextPatternLines);
+
+        sim.answer(ReadKind::Settle, window(FIELD, "done\r\nPS C:\\> abc\r\n"));
+        sim.type_keys(1);
+        sim.answer(ReadKind::Pause, window(FIELD, "done\r\nPS C:\\> abcd\r\n"));
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[1].before.as_deref(), Some("PS C:\\> abc"));
+        assert_eq!(sim.finished[1].after, "PS C:\\> abcd");
     }
 
     #[test]
@@ -892,7 +1231,7 @@ mod tests {
         let text = CaretText::new(FIELD, &long, false, TextSource::Value, String::new(), None);
         assert!(text.truncated);
         assert!(text.lines.concat().len() <= MAX_READ_BYTES);
-        let many = "x\n".repeat(40);
+        let many = "x\n".repeat(MAX_READ_LINES * 2);
         let text = CaretText::new(FIELD, &many, false, TextSource::Value, String::new(), None);
         assert!(text.truncated);
         assert_eq!(text.lines.len(), MAX_READ_LINES);

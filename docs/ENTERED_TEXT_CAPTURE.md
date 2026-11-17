@@ -40,6 +40,25 @@ they move on, store it.**
   caret's (or the selection's last) paragraph, clamped to the element's own
   text. A single-line field is one paragraph, so a read of a chat or search
   box is the whole field. The text is kept as lines.
+- A **line window** replaces that read when it is no paragraph read: it
+  spans the whole field and holds more than 8 lines (a provider without
+  paragraphs, such as a terminal, whose "paragraph" is its whole buffer), or
+  it holds more than a read keeps (4,096 UTF-16 units: one very long
+  paragraph or selection). A multi-paragraph selection in a longer document
+  is still a paragraph read.
+  It reads up to 50 lines ending with the caret's line, and keeps the nearest
+  **prompt line** above the caret and the lines after it, so a command or a
+  long pasted prompt is kept and the output above it is not. A prompt line
+  ends at its first `>` (so a command may contain `>`): PowerShell
+  (`PS C:\…> `; lines starting `>>` continue a command), cmd (`C:\…>`, which
+  also matches lines a batch file echoes), or only `>` (a terminal chat app's
+  input, box-drawing characters ignored). With no prompt line in the window
+  only the caret's line is kept. A line window is a "before" only when the
+  caret is on its prompt line, never while output may still be below the
+  prompt; and a "before" read another way (a paragraph read of a small
+  terminal buffer) is never paired with a line window's "after". Source code
+  `text_pattern_lines`; a window over 32 K UTF-16 units is discarded
+  (`too_large`).
 - Reads are bound to an **identity**: the verified UIA element (runtime id
   hash) and the native focus (foreground window, focus window, processes).
 - The **baseline** is the latest read taken while no edit was open and after
@@ -47,7 +66,7 @@ they move on, store it.**
   its settle read.
 - An **open edit** starts at the first edit key. Its "before" is the
   baseline (none when the edit began before a baseline existed: `baseline:
-  false`). Each later pause read replaces its "after".
+  false`). Each later pause or typing read replaces its "after".
 - An edit **ends**:
   - at a caret key or click (`moved`), with its last pause read as "after";
   - after Enter, with its last pause read as "after": `submitted` if the
@@ -61,15 +80,17 @@ they move on, store it.**
   - when capture stops (`stopped`), with its last read.
 - A read that fails discards the open edit and the baseline (counted). A read
   that cannot start (provider paced or busy, no decision this time) is retried
-  on the next poll for up to 2 s, then given up.
+  on the next poll, or with the next typing read while typing goes on, and
+  given up 2 s after the last key or caret move that asked for it.
 - An edit is stored only if it has an "after" read that differs from
-  "before". Stored "before"/"after" keep only the lines that differ (the
+  "before". One that ends before any read is dropped and counted as `lost`. Stored "before"/"after" keep only the lines that differ (the
   common leading and trailing lines are removed).
 - Signals seen in the same 25 ms poll are taken as caret first, then editing.
 
 Reads happen 300 ms after the last edit key, 150 ms after Enter and 250 ms
-after a caret key or click. None happen while the user is not typing or moving
-the caret, and there is no periodic read during continuous typing.
+after a caret key or click, and once a second while typing goes on without a
+pause (so a prompt sent right after its last key still has an "after"). None
+happen while the user is not typing or moving the caret.
 
 ### Worked examples (unit-tested)
 
@@ -159,8 +180,13 @@ the caret, and there is no periodic read during continuous typing.
   page, and the clamp keeps a chat box's read out of the conversation around
   it. `GetText` is called with the size limit. The `Value` fallback is used
   only for `Edit` controls under an unrelaxed decision. In multi-line editors
-  and terminals the paragraph before the caret can hold text the user did not
-  type.
+  the paragraph before the caret can hold text the user did not type; in a
+  terminal the line window keeps only the prompt onwards, but text below the
+  prompt (output of a command still running while the user types ahead, or a
+  chat app's hint lines) can remain, and an output line that looks like a
+  prompt (starting `> `, as `diff` or a quoted text prints) within 50 lines
+  above the caret is taken as the prompt, so the output after it is kept as
+  "after". A small terminal buffer (8 lines or fewer) is still read whole.
 - **Relaxed decisions read only for listed processes** (owner decision 1).
 - **Password fields** are never read. A provider can expose a value the screen
   masks (styled PIN fields), so the explicit `IsPassword` gate is the defence,
@@ -170,15 +196,16 @@ the caret, and there is no periodic read during continuous typing.
 - **Pause, lock, DRM, schedule**: no reads; the baseline and open edit are
   discarded, never stored later.
 - **Before-write screening** (component 5), then Basic PII removal.
-- **Bounds**: 4,096 bytes and 16 lines per read window, truncation flagged;
+- **Bounds**: 4,096 bytes and 50 lines per read window, truncation flagged
+  (a line window is cut to its prompt first);
   at most one baseline and one open edit in memory.
 - **Content-free logs**: counts and fixed codes only.
 
 ## Robustness
 
 - Hooks touch atomics only; UIA work stays on the keyboard privacy worker.
-- A read makes at most twelve provider requests plus the two of the focus
-  recheck, within a 150 ms budget, and has its own per-process breaker scope
+- A read makes at most thirteen provider requests (twenty with a line window)
+  plus the two of the focus recheck, within a 150 ms budget, and has its own per-process breaker scope
   and pacing gap (`uia_breaker::Scope::Read`, the probe's 1 s to 30 s
   schedule), so a slow text provider paces and stops reads, never probes.
   Reads are skipped while a process's probes or reads are paced, its read
@@ -193,9 +220,10 @@ the caret, and there is no periodic read during continuous typing.
 ## Diagnostics
 
 The worker logs `entered_text_summary` at most once a minute: reads by outcome
-(`text_pattern`, `value`, `no_text_source`, `denied`, `relaxed`, `changed`,
-`timeout`, `failed`, `not_now`) and emitted edits by `ended` (the recorder
-can still refuse them). Read latency and
+(`text_pattern`, `text_pattern_lines`, `value`, `no_text_source`, `denied`,
+`relaxed`, `changed`, `timeout`, `too_large`, `failed`, `not_now`), emitted
+edits by `ended` (the recorder can still refuse them), and `lost` edits (ended
+before any read) by `ended`. Read latency and
 per-process counts are not recorded yet. `breaker_open_read_processes` is in
 the UIA breaker metrics.
 
@@ -204,7 +232,12 @@ the UIA breaker metrics.
 - Tracker (`entered_text::tests`): the worked examples, a caret move before
   the settle read, another field, idle and stop endings, keys after the last
   read, failed and retried reads, pause discard, bounds and line breaks, key
-  classification.
+  classification, the typing read and a quick Enter, lost edits, prompt
+  lines (PowerShell, redirection, continuation, cmd, a boxed chat prompt, no
+  prompt, other line breaks, an empty caret row, the 50-line reach, non-prompt
+  shapes), when a line window replaces a paragraph read, line windows as
+  "before" only at the prompt (also after an idle end), no "before" read
+  another way, typing reads a second apart and a busy provider during typing.
 - Breaker: a costly or slow read stops and paces reads but not probes; a
   slow probe paces reads too.
 - Storage and screening: `decide_ui_event` with a secret only in
@@ -217,9 +250,10 @@ the UIA breaker metrics.
 
 - Paste or cut through a right-click or menu sends no edit key: the edit is
   not seen until a later key.
-- Text typed after the last pause read is missing from "after" when the user
+- Text typed after the last read is missing from "after" when the user
   moves on or presses Enter within 300 ms (`keys_after_read` counts those
-  keys); a prompt sent with no pause at all stores nothing. Text typed within
+  keys); a prompt typed and sent within a second with no pause stores
+  nothing (counted as `lost`). Text typed within
   150 ms after Enter lands in the Enter read, so it appears as existing text
   in the next edit's "before" (or nowhere, if typing stops there).
 - A chat box that clears more than 150 ms after Enter ends the edit as
@@ -227,6 +261,10 @@ the UIA breaker metrics.
   replaces it unseen).
 - Apps without a text pattern on the focused element store nothing
   (`no_text_source`).
+- Line windows: a prompt not matching the rule (`$`, `❯`, `>>>`) keeps only
+  the caret's line; a pasted or output line that looks like a prompt
+  (`> quote`) starts the kept text there; a very long word-processor
+  paragraph is read as its caret line (visual line) with no "before".
 - While a process's read breaker is open (1 s to 30 s), reads there cannot
   start; after 2 s the open edit and baseline are given up, counted only as
   `not_now`.

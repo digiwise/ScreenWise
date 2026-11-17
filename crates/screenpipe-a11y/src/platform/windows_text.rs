@@ -9,22 +9,30 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use windows::Win32::UI::Accessibility::{
-    IUIAutomationElement, IUIAutomationTextPattern, TextPatternRangeEndpoint_End,
-    TextPatternRangeEndpoint_Start, TextUnit_Paragraph, UIA_TextPatternId,
-    UIA_ValueValuePropertyId, UIA_E_TIMEOUT,
+    IUIAutomationElement, IUIAutomationTextPattern, IUIAutomationTextRange,
+    TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, TextUnit_Line,
+    TextUnit_Paragraph, UIA_TextPatternId, UIA_ValueValuePropertyId, UIA_E_TIMEOUT,
 };
 
 use super::budget::{UiaLimits, UiaStop, WalkBudget};
-use crate::entered_text::{ReadFailure, TextSource, MAX_READ_BYTES};
+use crate::entered_text::{
+    needs_line_window, prompt_lines, ReadFailure, TextSource, MAX_READ_BYTES, MAX_READ_LINES,
+};
 
-/// A read's total budget (up to twelve provider requests, then the two of the
-/// focus recheck): under the probe's, because the keyboard privacy worker
-/// probes nothing while it runs.
+/// A read's total budget (up to thirteen provider requests, twenty with a
+/// line window, then the two of the focus recheck): under the probe's,
+/// because the keyboard privacy worker probes nothing while it runs.
 pub(super) const READ_BUDGET: Duration = Duration::from_millis(150);
 
-/// Characters requested from a text range: one more than a read keeps, so a
-/// longer text is known to be truncated.
+/// UTF-16 code units requested from a text range: one more than a read keeps,
+/// so a longer text is known to be truncated.
 const MAX_READ_CHARS: i32 = MAX_READ_BYTES as i32 + 1;
+
+/// UTF-16 code units requested for a line window: room for [`MAX_READ_LINES`]
+/// wide terminal lines. The window is cut to its prompt before the read's
+/// bounds apply; a longer one is discarded (its caret's line would be cut
+/// off).
+const MAX_WINDOW_CHARS: i32 = 32 * 1024;
 
 /// The text one read returned, before the tracker's bounds.
 pub(super) struct FieldText {
@@ -118,7 +126,10 @@ impl<'a> ProviderCalls<'a> {
 ///
 /// The text runs from the start of the paragraph before the caret's (or the
 /// selection's) to the end of the caret's (or the selection's last)
-/// paragraph, within the element, at most [`MAX_READ_BYTES`] characters.
+/// paragraph, within the element. When that is no paragraph read
+/// ([`needs_line_window`]), a line window of up to [`MAX_READ_LINES`] lines
+/// ending with the caret's line is read instead and cut to its prompt
+/// ([`prompt_lines`]).
 ///
 /// # Safety
 /// COM must be initialized on this thread and `element` must be a live
@@ -148,26 +159,55 @@ pub(super) unsafe fn read_field_text(
         {
             return Err(ReadFailure::NoTextSource);
         }
-        calls.call(|| {
-            range.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Paragraph, -2)
-        })?;
-        calls.call(|| {
-            range.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Paragraph, 1)
-        })?;
-        for (endpoint, outside) in [
-            (TextPatternRangeEndpoint_Start, -1),
-            (TextPatternRangeEndpoint_End, 1),
-        ] {
-            if compare(endpoint)?.signum() == outside {
-                calls.call(|| range.MoveEndpointByRange(endpoint, &document, endpoint))?;
+        // Kept at the caret for a line window.
+        let lines = calls.call(|| range.Clone())?;
+        // Widen `range` by `before` units back and to the end of the caret's
+        // unit, clamped to the element's text, and read at most `max` UTF-16
+        // code units. Also says whether it spans the element's whole text.
+        let read_around = |range: &IUIAutomationTextRange, unit, before, max| {
+            calls
+                .call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, unit, before))?;
+            calls.call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_End, unit, 1))?;
+            let mut whole_field = true;
+            for (endpoint, outside) in [
+                (TextPatternRangeEndpoint_Start, -1),
+                (TextPatternRangeEndpoint_End, 1),
+            ] {
+                let side = calls.call(|| range.CompareEndpoints(endpoint, &document, endpoint))?;
+                if side.signum() == outside {
+                    calls.call(|| range.MoveEndpointByRange(endpoint, &document, endpoint))?;
+                }
+                whole_field &= side == 0 || side.signum() == outside;
             }
+            let text = calls.call(|| range.GetText(max))?;
+            let too_long = text.len() >= max as usize;
+            Ok::<_, ReadFailure>((too_long, whole_field, text.to_string()))
+        };
+        let (too_long, whole_field, text) =
+            read_around(&range, TextUnit_Paragraph, -2, MAX_READ_CHARS)?;
+        if !needs_line_window(&text, too_long, whole_field) {
+            return Ok(FieldText {
+                text,
+                truncated: false,
+                source: TextSource::TextPattern,
+            });
         }
-        let text = calls.call(|| range.GetText(MAX_READ_CHARS))?;
-        let truncated = text.len() >= MAX_READ_CHARS as usize;
+        // The provider's paragraphs are not paragraphs (a terminal's whole
+        // buffer) or hold more than a read keeps: read the lines up to the
+        // caret's and keep its prompt onwards.
+        let (too_long, _, window) = read_around(
+            &lines,
+            TextUnit_Line,
+            -(MAX_READ_LINES as i32 - 1),
+            MAX_WINDOW_CHARS,
+        )?;
+        if too_long {
+            return Err(ReadFailure::TooLarge);
+        }
         return Ok(FieldText {
-            text: text.to_string(),
-            truncated,
-            source: TextSource::TextPattern,
+            text: prompt_lines(&window).to_string(),
+            truncated: false,
+            source: TextSource::TextPatternLines,
         });
     }
     if value_allowed {

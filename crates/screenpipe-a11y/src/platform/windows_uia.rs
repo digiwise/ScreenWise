@@ -3766,6 +3766,8 @@ pub(crate) struct EnteredTextCapture {
 struct EnteredTextTally {
     reads: std::collections::BTreeMap<&'static str, u64>,
     edits: std::collections::BTreeMap<&'static str, u64>,
+    /// Edits dropped for having no "after" read, by how they ended.
+    lost: std::collections::BTreeMap<&'static str, u64>,
     reported_at: Option<Instant>,
 }
 
@@ -3777,7 +3779,9 @@ impl EnteredTextTally {
         let due = self
             .reported_at
             .is_none_or(|at| now.duration_since(at) >= Self::INTERVAL);
-        if !(force || due) || (self.reads.is_empty() && self.edits.is_empty()) {
+        if !(force || due)
+            || (self.reads.is_empty() && self.edits.is_empty() && self.lost.is_empty())
+        {
             return;
         }
         self.reported_at = Some(now);
@@ -3785,7 +3789,8 @@ impl EnteredTextTally {
             reason_code = "entered_text_summary",
             reads = %fixed_counts(std::mem::take(&mut self.reads)),
             edits = %fixed_counts(std::mem::take(&mut self.edits)),
-            "entered-text reads and emitted edits (counts only)"
+            lost = %fixed_counts(std::mem::take(&mut self.lost)),
+            "entered-text reads, emitted edits and edits lost without a read (counts only)"
         );
     }
 }
@@ -3852,6 +3857,9 @@ impl EnteredText {
 
     fn emit(&mut self, edits: Vec<crate::entered_text::FinishedEdit>) {
         use crate::events::{EventData, UiEvent};
+        for ended in self.tracker.take_lost() {
+            *self.tally.lost.entry(ended.code()).or_default() += 1;
+        }
         for edit in edits {
             *self
                 .tally
