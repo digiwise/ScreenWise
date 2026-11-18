@@ -141,9 +141,13 @@ pub struct InputContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_before: Option<String>,
     /// `text_edit` only: fixed-code details (`ended`, `source`, `baseline`,
-    /// `truncated`, `keys_after_read`)
+    /// `truncated`, `keys_after_read`, `keys_added`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit_detail: Option<serde_json::Value>,
+    /// `text_edit` only: when the edit's first key was seen (`timestamp` is
+    /// when its last key, or the Enter that ended it, was seen)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     /// Position for mouse events
     pub x: Option<i32>,
     pub y: Option<i32>,

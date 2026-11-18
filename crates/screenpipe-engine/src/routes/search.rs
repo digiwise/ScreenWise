@@ -285,6 +285,7 @@ pub fn search_result_to_content_item(
                 .edit_detail
                 .as_deref()
                 .and_then(|detail| serde_json::from_str(detail).ok()),
+            started_at: input.started_at,
             x: input.x,
             y: input.y,
             key_code: input.key_code,

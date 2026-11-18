@@ -23,6 +23,9 @@ pub const MAX_READ_LINES: usize = 50;
 
 /// What a read splits lines at (`\r\n` is one break).
 const LINE_BREAKS: [char; 5] = ['\r', '\n', '\u{2028}', '\u{2029}', '\u{000B}'];
+/// Those of [`LINE_BREAKS`] that end a paragraph (the others break a line
+/// within one).
+const PARAGRAPH_BREAKS: [char; 3] = ['\r', '\n', '\u{2029}'];
 
 /// Read this long after the last edit key.
 const PAUSE_DELAY: Duration = Duration::from_millis(300);
@@ -273,7 +276,9 @@ impl CaretText {
     /// One read: `text` with the caret at `caret`. A line window
     /// ([`TextSource::TextPatternLines`]) is first cut to the input at its
     /// prompt ([`cut_window`]; `prompt` is the open edit's, if it has one),
-    /// and is kept only around a known caret. Then the read bounds apply
+    /// and is kept only around a known caret. Any other read with a known
+    /// caret starts at the paragraph before the caret's
+    /// ([`previous_paragraph`]). Then the read bounds apply
     /// ([`MAX_READ_BYTES`], [`MAX_READ_LINES`]); `truncated` reports that
     /// the reader already cut the text short.
     #[allow(clippy::too_many_arguments)]
@@ -300,8 +305,9 @@ impl CaretText {
                 None => (String::new(), None, None, false),
             }
         } else {
-            let caret = caret.filter(|at| !at.selection).map(|at| at.offset);
-            (text.to_string(), caret, None, false)
+            let start = caret.map_or(0, |at| previous_paragraph(&text[..at.offset]));
+            let caret = caret.filter(|at| !at.selection).map(|at| at.offset - start);
+            (text[start..].to_string(), caret, None, false)
         };
         let mut end = text.len().min(MAX_READ_BYTES);
         while !text.is_char_boundary(end) {
@@ -378,6 +384,31 @@ fn lines_of(text: &str) -> Vec<String> {
         .split(LINE_BREAKS)
         .map(str::to_string)
         .collect()
+}
+
+/// Where the paragraph before the one `head` (a text up to its caret) ends
+/// in begins: the start of a paragraph read. The provider's read reaches one
+/// paragraph further back when the caret is at the start of its paragraph
+/// (moving back from a paragraph's start passes the previous one), so reads
+/// before and after typing on a new line would otherwise cover different
+/// paragraphs, and none of their lines would match.
+fn previous_paragraph(head: &str) -> usize {
+    let after_last_break = |text: &str| {
+        text.rfind(PARAGRAPH_BREAKS).map_or(0, |at| {
+            at + text[at..].chars().next().map_or(0, char::len_utf8)
+        })
+    };
+    let own = after_last_break(head);
+    if own == 0 {
+        return 0;
+    }
+    // The text above the caret's paragraph, without the break ending it.
+    let above = &head[..own];
+    let above = match above.strip_suffix('\n') {
+        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+        None => &above[..own - above.chars().next_back().map_or(0, char::len_utf8)],
+    };
+    after_last_break(above)
 }
 
 /// The line and byte column, in [`lines_of`]'s lines, of the end of `head`
@@ -606,6 +637,10 @@ pub struct FinishedEdit {
     pub detail: EditDetail,
     pub app_name: String,
     pub window_title: Option<String>,
+    /// When its first edit key was seen.
+    pub started: Instant,
+    /// When its last edit key (or the Enter that ended it) was seen.
+    pub finished: Instant,
 }
 
 impl FinishedEdit {
@@ -635,13 +670,14 @@ fn changed_lines<'a>(before: &'a [String], after: &'a [String]) -> (&'a [String]
 // Tracker
 // ---------------------------------------------------------------------------
 
-/// The edit being typed: its "before", its latest "after", and the prompt
-/// its line windows are cut at.
+/// The edit being typed: its "before", its latest "after", the prompt its
+/// line windows are cut at, and when its first and last keys were seen.
 #[derive(Debug)]
 struct OpenEdit {
     before: Option<CaretText>,
     after: Option<CaretText>,
     prompt: Option<Prompt>,
+    started_at: Instant,
     last_edit_at: Instant,
 }
 
@@ -665,6 +701,9 @@ pub struct EditTracker {
     /// The edit count when the latest Enter was seen: edit keys after it
     /// belong to the next edit.
     enter_edits: Option<u64>,
+    /// When the first and last edit keys after that Enter were seen, while
+    /// its read was pending: the next edit, opened by that read.
+    after_enter: Option<(Instant, Instant)>,
     /// Characters typed since the latest read started (bounded).
     typed: Vec<TypedChar>,
     /// How edits ended that were dropped for having no "after" (they ended
@@ -692,14 +731,24 @@ impl EditTracker {
             // The edit stays as last read; the caret's new place is read
             // once it settles, as the next edit's "before".
             finished.extend(self.finish(Ended::Moved, seen.edits));
+            // The settle read replaces a pending Enter read: keys typed
+            // after that Enter are never read.
+            if self.after_enter.take().is_some() {
+                self.lost.push(Ended::Moved);
+            }
+            self.enter_edits = None;
             self.baseline = None;
             self.request(ReadKind::Settle, now);
         }
-        if counts.edits != seen.edits {
+        if counts.edits != seen.edits && self.enter_pending() {
+            let (_, last) = self.after_enter.get_or_insert((now, now));
+            *last = now;
+        } else if counts.edits != seen.edits {
             let open = self.open.get_or_insert_with(|| OpenEdit {
                 before: None,
                 after: None,
                 prompt: None,
+                started_at: now,
                 last_edit_at: now,
             });
             if open.before.is_none() && open.after.is_none() {
@@ -713,7 +762,25 @@ impl EditTracker {
             self.request(ReadKind::Pause, now);
         }
         if counts.enters != seen.enters {
+            // Keys after an earlier Enter whose read is still pending end
+            // with this one, in the open edit (or as one, never read).
+            if let Some((started_at, last_edit_at)) = self.after_enter.take() {
+                self.open.get_or_insert(OpenEdit {
+                    before: None,
+                    after: None,
+                    prompt: None,
+                    started_at,
+                    last_edit_at,
+                });
+            }
             self.enter_edits = Some(counts.enter_edits);
+            if let Some(open) = &mut self.open {
+                open.last_edit_at = now;
+            }
+            // Keys typed after the Enter key but seen in this poll.
+            if counts.edits > counts.enter_edits {
+                self.after_enter = Some((now, now));
+            }
             self.request(ReadKind::Enter, now);
         }
         if self
@@ -803,6 +870,7 @@ impl EditTracker {
                     before: None,
                     prompt: text.prompt.clone(),
                     after: Some(text),
+                    started_at: now,
                     last_edit_at: now,
                 });
                 self.typed.retain(|typed| typed.edit > edits);
@@ -828,7 +896,23 @@ impl EditTracker {
                 };
                 let enter_edits = self.enter_edits.take().unwrap_or(edits);
                 finished.extend(self.finish(ended, enter_edits));
-                self.baseline = text.into_baseline();
+                match self.after_enter.take() {
+                    // Typing went on during the Enter read: the next edit,
+                    // from its first key. The read may show some of it, so
+                    // it has no "before"; a pause read gives its "after".
+                    Some((started_at, last_edit_at)) => {
+                        self.baseline = None;
+                        self.open = Some(OpenEdit {
+                            before: None,
+                            after: None,
+                            prompt: None,
+                            started_at,
+                            last_edit_at,
+                        });
+                        self.request(ReadKind::Pause, now);
+                    }
+                    None => self.baseline = text.into_baseline(),
+                }
             }
         }
         // What this read shows needs no typed characters any more.
@@ -843,6 +927,7 @@ impl EditTracker {
         self.baseline = None;
         self.open = None;
         self.enter_edits = None;
+        self.after_enter = None;
         self.typed.clear();
     }
 
@@ -854,15 +939,17 @@ impl EditTracker {
         finished
     }
 
+    /// An Enter's read is pending: edit keys now belong to the edit after
+    /// it.
+    fn enter_pending(&self) -> bool {
+        self.pending
+            .is_some_and(|pending| pending.kind == ReadKind::Enter)
+    }
+
     fn request(&mut self, kind: ReadKind, now: Instant) {
         // A pending Enter read is not delayed by typing right after Enter:
-        // it still runs 150 ms after the Enter, and its read becomes the
-        // "before" of what is typed next.
-        if kind == ReadKind::Pause
-            && self
-                .pending
-                .is_some_and(|pending| pending.kind == ReadKind::Enter)
-        {
+        // it still runs 150 ms after the Enter.
+        if kind == ReadKind::Pause && self.enter_pending() {
             return;
         }
         let first = self
@@ -932,6 +1019,8 @@ impl EditTracker {
             },
             app_name: after.app_name,
             window_title: after.window_title,
+            started: open.started_at,
+            finished: open.last_edit_at,
         })
     }
 }
@@ -1838,6 +1927,164 @@ mod tests {
             None,
         );
         assert_eq!(text.lines, ["a", "", "b"]);
+    }
+
+    #[test]
+    fn a_paragraph_read_starts_at_the_paragraph_before_the_carets() {
+        let start = |text: &str| {
+            let (text, caret) = with_caret(text);
+            previous_paragraph(&text[..caret.expect("a caret mark").offset])
+        };
+        assert_eq!(start("one\ntwo\nthr\u{2038}ee"), 4);
+        assert_eq!(start("one\ntwo\n\u{2038}"), 4);
+        assert_eq!(start("one\r\ntwo\r\n\u{2038}three"), 5);
+        assert_eq!(start("one\rtwo\r\u{2038}"), 4);
+        assert_eq!(start("one\u{2029}two\u{2029}\u{2038}"), 6);
+        // A soft line break is within its paragraph.
+        assert_eq!(start("one\ntwo\u{2028}two b\n\u{2038}x"), 4);
+        assert_eq!(start("one\n\u{2038}"), 0);
+        assert_eq!(start("on\u{2038}e"), 0);
+    }
+
+    #[test]
+    fn a_new_line_after_enter_is_stored_without_the_line_above() {
+        // The provider's read at the start of a new line reaches two lines
+        // back; the read while typing on it, one.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "First\n\n\u{2038}"));
+        sim.type_keys(3);
+        sim.answer(ReadKind::Pause, read(FIELD, "\nNew\u{2038}"));
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, "\nNew\n\u{2038}"));
+        let edit = &sim.finished[0];
+        assert_eq!(edit.before.as_deref(), Some(""));
+        assert_eq!(edit.after, "New");
+        // The next line: the Enter read's "before" is the lines above it.
+        sim.type_keys(4);
+        sim.answer(ReadKind::Pause, read(FIELD, "New\nNext\u{2038}"));
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, "New\nNext\n\u{2038}"));
+        let edit = &sim.finished[1];
+        assert_eq!(edit.before.as_deref(), Some(""));
+        assert_eq!(edit.after, "Next");
+    }
+
+    #[test]
+    fn an_edit_spans_its_first_key_to_its_last_or_its_enter() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, ""));
+        sim.signal(Signal::Edit);
+        sim.tick(Duration::from_millis(25));
+        let first = sim.now;
+        sim.type_keys(2);
+        let last = sim.now;
+        sim.answer(ReadKind::Pause, read(FIELD, "abc"));
+        sim.tick(IDLE_END);
+        assert_eq!(sim.finished[0].detail.ended, Ended::Idle);
+        assert_eq!(sim.finished[0].started, first);
+        assert_eq!(sim.finished[0].finished, last);
+        // Ended by Enter: keys typed after it are the next edit's.
+        sim.type_keys(1);
+        let first = sim.now;
+        sim.answer(ReadKind::Pause, read(FIELD, "abcd"));
+        sim.tick(Duration::from_secs(1));
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        let enter = sim.now;
+        sim.type_keys(1);
+        sim.answer(ReadKind::Enter, read(FIELD, "abcd\n"));
+        assert_eq!(sim.finished[1].detail.ended, Ended::Enter);
+        assert_eq!(sim.finished[1].started, first);
+        assert_eq!(sim.finished[1].finished, enter);
+    }
+
+    #[test]
+    fn keys_typed_while_enter_is_read_open_the_next_edit_from_its_first_key() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_keys(2);
+        sim.answer(ReadKind::Pause, read(FIELD, "hi\u{2038}"));
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        sim.type_keys(1);
+        let first = sim.now;
+        sim.answer(ReadKind::Enter, read(FIELD, "x\u{2038}"));
+        assert_eq!(sim.finished[0].after, "hi");
+        sim.type_keys(1);
+        let last = sim.now;
+        sim.answer(ReadKind::Pause, read(FIELD, "xy\u{2038}"));
+        sim.tick(IDLE_END);
+        let edit = &sim.finished[1];
+        assert_eq!(edit.after, "xy");
+        assert_eq!(edit.before, None);
+        assert_eq!((edit.started, edit.finished), (first, last));
+
+        // With no edit open at the Enter, they are not dropped with it.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        sim.type_keys(1);
+        sim.answer(ReadKind::Enter, read(FIELD, "\nz\u{2038}"));
+        sim.answer(ReadKind::Pause, read(FIELD, "\nz\u{2038}"));
+        sim.tick(IDLE_END);
+        assert_eq!(sim.finished.len(), 1);
+        assert_eq!(sim.finished[0].after, "\nz");
+        assert!(sim.tracker.take_lost().is_empty());
+    }
+
+    #[test]
+    fn keys_between_two_quick_enters_are_stored_once() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_keys(2);
+        sim.answer(ReadKind::Pause, read(FIELD, "hi\u{2038}"));
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        sim.type_keys(2);
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        sim.answer(ReadKind::Enter, read(FIELD, "hi\nwo\n\u{2038}"));
+        assert_eq!(sim.tick(Duration::from_secs(1)), None);
+        sim.tick(IDLE_END);
+        assert_eq!(sim.finished.len(), 1);
+    }
+
+    #[test]
+    fn a_move_that_replaces_an_enter_read_does_not_freeze_later_edits() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, ""));
+        sim.type_keys(2);
+        sim.answer(ReadKind::Pause, read(FIELD, "hi"));
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        sim.signal(Signal::Caret); // before the Enter read
+        sim.answer(ReadKind::Settle, read(FIELD, ""));
+        // Continuous typing for longer than the idle end.
+        sim.signal(Signal::Edit);
+        sim.tick(Duration::from_millis(25));
+        let first = sim.now;
+        for _ in 0..60 {
+            sim.signal(Signal::Edit);
+            if let Some(kind) = sim.tick(Duration::from_millis(200)) {
+                let finished =
+                    sim.tracker
+                        .read_done(kind, read(FIELD, "typing"), sim.counts, sim.now);
+                sim.finished.extend(finished);
+            }
+        }
+        let last = sim.now;
+        assert_eq!(sim.finished.len(), 1, "no idle end while typing");
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        let edit = &sim.finished[1];
+        assert_eq!((edit.started, edit.finished), (first, last));
     }
 
     #[test]

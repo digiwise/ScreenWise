@@ -1486,6 +1486,7 @@ mod event_batch_tests {
             frame_id: None,
             text_before: None,
             edit_detail: None,
+            started_at: None,
         }
     }
 
@@ -1643,6 +1644,7 @@ mod capture_trigger_kind_tests {
             frame_id: None,
             text_before: None,
             edit_detail: None,
+            started_at: None,
         }
     }
 

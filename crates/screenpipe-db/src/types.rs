@@ -669,6 +669,10 @@ pub struct UiEventRecord {
     /// `text_edit` only: fixed-code JSON details of the edit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit_detail: Option<String>,
+    /// `text_edit` only: when the edit's first key was seen (`timestamp`
+    /// is when its last key, or the Enter that ended it, was seen).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     // App context
     pub app_name: Option<String>,
     pub app_pid: Option<i32>,
@@ -711,6 +715,7 @@ pub struct UiEventRow {
     pub frame_id: Option<i64>,
     pub text_before: Option<String>,
     pub edit_detail: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 impl From<UiEventRow> for UiEventRecord {
@@ -749,6 +754,7 @@ impl From<UiEventRow> for UiEventRecord {
             text_length: row.text_length,
             text_before: row.text_before,
             edit_detail: row.edit_detail,
+            started_at: row.started_at,
             app_name: row.app_name,
             app_pid: row.app_pid,
             window_title: row.window_title,
@@ -790,6 +796,8 @@ pub struct InsertUiEvent {
     pub text_before: Option<String>,
     /// `text_edit` only (see [`UiEventRecord::edit_detail`]).
     pub edit_detail: Option<String>,
+    /// `text_edit` only (see [`UiEventRecord::started_at`]).
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 // ============================================================================

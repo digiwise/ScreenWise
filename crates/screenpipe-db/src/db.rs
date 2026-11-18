@@ -6447,7 +6447,7 @@ impl DatabaseManager {
                 app_name, app_pid, window_title, browser_url,
                 element_role, element_name, element_value,
                 element_description, element_automation_id, element_bounds,
-                frame_id, text_before, edit_detail
+                frame_id, text_before, edit_detail, started_at
             FROM ui_events
             WHERE {where_clause}
                 {time_range}
@@ -9366,6 +9366,7 @@ LIMIT ? OFFSET ?
             frame_id: event.frame_id,
             text_before: event.text_before.clone(),
             edit_detail: event.edit_detail.clone(),
+            started_at: event.started_at.map(|at| at.to_rfc3339()),
         }
     }
 

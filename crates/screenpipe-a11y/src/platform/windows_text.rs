@@ -130,7 +130,9 @@ impl<'a> ProviderCalls<'a> {
 ///
 /// The text runs from the start of the paragraph before the caret's (or the
 /// selection's) to the end of the caret's (or the selection's last)
-/// paragraph, within the element. When that is no paragraph read
+/// paragraph, within the element. With the caret at a paragraph's start the
+/// provider reaches one paragraph further back; the tracker cuts that off
+/// (`crate::entered_text::CaretText::new`). When that is no paragraph read
 /// ([`needs_line_window`]), a line window of up to [`MAX_READ_LINES`] lines
 /// before the caret's, the caret's and as many after it is read instead, for
 /// the tracker to cut to the input at its prompt

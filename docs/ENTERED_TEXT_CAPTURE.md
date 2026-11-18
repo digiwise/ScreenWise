@@ -43,7 +43,17 @@ they move on, store it.**
   of the paragraph before the caret's (or the selection's) to the end of the
   caret's (or the selection's last) paragraph, clamped to the element's own
   text. A single-line field is one paragraph, so a read of a chat or search
-  box is the whole field. The text is kept as lines.
+  box is the whole field. The text is kept as lines. With the caret at the
+  start of a paragraph (a new line after Enter), a provider's paragraph
+  moves reach one paragraph further back, so the text read is cut to start
+  at the paragraph before the caret's: otherwise the reads before and after
+  typing on a new line cover different paragraphs, and the line above is
+  stored as if it had been replaced.
+- An edit's **span** runs from its first edit key to its last, or to the
+  Enter that ended it, as the tracker saw them. Keys typed after that Enter
+  while it is read open the next edit, from the first of them, with no
+  "before" (the Enter read may already show some of them); a caret move
+  before the Enter read drops them as lost.
 - A **line window** replaces that read when it is no paragraph read: it
   spans the whole field and holds more than 8 lines (a provider without
   paragraphs, such as a terminal, whose "paragraph" is its whole buffer), or
@@ -173,10 +183,13 @@ happen while the user is not typing or moving the caret.
 4. **Event and storage.** Input event type `text_edit`: `text_content` = after;
    nullable columns `text_before`, `edit_detail` (fixed-code JSON: `ended`,
    `source`, `baseline`, `truncated`, `keys_after_read`, `keys_added`) and
-   `text_before_redacted_at` (migration `20261116000000`). App name and window
+   `text_before_redacted_at` (migration `20261116000000`), and `started_at`
+   (migration `20261118000000`): the edit's span runs from `started_at` to
+   `timestamp`. `started_at` is set for every edit stored since that migration
+   and null for other event types and for earlier edits. App name and window
    title come from the verified native focus. `text_before` is deliberately not
-   full-text indexed. `/search?content_type=input` returns `text_before` and
-   `edit_detail`.
+   full-text indexed. `/search?content_type=input` returns `text_before`,
+   `edit_detail` and `started_at`.
 5. **Write-time screening** (`screenpipe-engine/src/input_screening.rs`). At
    the recorder's persistence boundary, every input event is screened with
    `screenpipe_redact::rescreen::decide_ui_event` before Basic PII removal:
@@ -297,7 +310,9 @@ the UIA breaker metrics.
   read, and not added (a key without a character, another focus, a key during
   the read), keys after Enter, when a line window replaces a paragraph read, line windows as
   "before" only at the prompt (also after an idle end), no "before" read
-  another way, typing reads a second apart and a busy provider during typing.
+  another way, typing reads a second apart and a busy provider during typing,
+  paragraph reads cut to the paragraph before the caret's (a new line after
+  Enter), and an edit's span from its first key to its last or its Enter.
 - Breaker: a costly or slow read stops and paces reads but not probes; a
   slow probe paces reads too.
 - Storage and screening: `decide_ui_event` with a secret only in

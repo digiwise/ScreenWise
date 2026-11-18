@@ -224,6 +224,7 @@ fn notice_row(event: impl Into<SafeNoticeEvent>, timestamp: DateTime<Utc>) -> In
         frame_id: None,
         text_before: None,
         edit_detail: None,
+        started_at: None,
     }
 }
 

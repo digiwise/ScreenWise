@@ -3895,14 +3895,25 @@ impl EnteredText {
                 .entry(edit.detail.ended.code())
                 .or_default() += 1;
             let detail = edit.detail_json();
+            // The edit's span on the wall clock: its first key to its last.
+            let (now, wall_now) = (Instant::now(), Utc::now());
+            let wall = |at: Instant| {
+                wall_now
+                    - chrono::Duration::from_std(now.saturating_duration_since(at))
+                        .unwrap_or_default()
+            };
             let event = UiEvent {
                 id: None,
-                timestamp: Utc::now(),
-                relative_ms: self.capture.start.elapsed().as_millis() as u64,
+                timestamp: wall(edit.finished),
+                relative_ms: edit
+                    .finished
+                    .saturating_duration_since(self.capture.start)
+                    .as_millis() as u64,
                 data: EventData::TextEdit {
                     before: edit.before,
                     after: edit.after,
                     detail,
+                    started_at: wall(edit.started),
                 },
                 app_name: Some(edit.app_name),
                 window_title: edit.window_title,

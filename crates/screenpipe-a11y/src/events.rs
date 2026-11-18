@@ -139,6 +139,9 @@ pub enum EventData {
         after: String,
         /// Fixed-code JSON details (`entered_text::EditDetail`).
         detail: String,
+        /// When the edit's first key was seen (the event's `timestamp` is
+        /// when its last key, or the Enter that ended it, was seen).
+        started_at: DateTime<Utc>,
     },
 }
 
@@ -735,6 +738,7 @@ impl UiEvent {
             frame_id: self.frame_id,
             text_before: None,
             edit_detail: None,
+            started_at: None,
         };
         match &self.data {
             EventData::Click {
@@ -803,11 +807,13 @@ impl UiEvent {
                 before,
                 after,
                 detail,
+                started_at,
             } => {
                 insert.event_type = UiEventType::TextEdit;
                 insert.text_content = Some(after.clone());
                 insert.text_before = before.clone();
                 insert.edit_detail = Some(detail.clone());
+                insert.started_at = Some(*started_at);
             }
         }
         if let Some(elem) = &self.element {
