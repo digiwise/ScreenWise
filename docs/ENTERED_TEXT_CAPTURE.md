@@ -46,16 +46,24 @@ they move on, store it.**
   it holds more than a read keeps (4,096 UTF-16 units: one very long
   paragraph or selection). A multi-paragraph selection in a longer document
   is still a paragraph read.
-  It reads up to 50 lines ending with the caret's line, and keeps the nearest
-  **prompt line** above the caret and the lines after it, so a command or a
-  long pasted prompt is kept and the output above it is not. A prompt line
-  ends at its first `>` (so a command may contain `>`): PowerShell
-  (`PS C:\…> `; lines starting `>>` continue a command), cmd (`C:\…>`, which
-  also matches lines a batch file echoes), or only `>` (a terminal chat app's
-  input, box-drawing characters ignored). With no prompt line in the window
-  only the caret's line is kept. A line window is a "before" only when the
-  caret is on its prompt line, never while output may still be below the
-  prompt; and a "before" read another way (a paragraph read of a small
+  It reads up to 50 lines ending with the caret's line, and keeps the
+  nearest **prompt line** above the caret and the lines after it, so a
+  command or a long pasted prompt is kept and the output above it is not. A
+  prompt line ends at its first `>` or `❯` (so a command may contain `>`):
+  a shell's, PowerShell (`PS C:\…> `; lines starting `>>` continue a
+  command) or cmd (`C:\…>`, which also matches lines a batch file echoes),
+  or a chat prompt, only `>` or `❯` (a terminal chat app's input,
+  box-drawing characters ignored). After a chat prompt it also reads up to
+  50 lines after the caret's and keeps the input's rows there, down to the
+  first row that is blank, only box-drawing characters or another prompt, so
+  a wrapped prompt is kept whole with the caret inside it; below a shell's
+  caret nothing is read (a terminal can draw rows there the user did not
+  type, such as a prediction list). With no prompt line in the window only
+  the caret's line is kept. Every kept line loses its trailing whitespace
+  (terminals pad rows to their width). A line window is a "before" only
+  when it is a shell prompt line alone or starts at a chat prompt, never
+  while output may still be below a shell prompt; and a "before" read
+  another way (a paragraph read of a small
   terminal buffer) is never paired with a line window's "after". Source code
   `text_pattern_lines`; a window over 32 K UTF-16 units is discarded
   (`too_large`).
@@ -175,7 +183,10 @@ happen while the user is not typing or moving the caret.
 - **Only the focused element's text.** The text pattern is the verified
   element's own (never an ancestor's, descendant's or a search result's). The
   caret or selection must lie inside the pattern's document range (the
-  element's own text) or nothing is read, and the range read is clamped to
+  element's own text) or nothing is read; a caret Chromium places just
+  outside a field's edge (the same visible place in a neighbouring node, as
+  in VS Code webview inputs) is moved onto that edge only when no text lies
+  between them. The range read is clamped to
   it: Chromium, WebView2 and Electron move range endpoints through the whole
   page, and the clamp keeps a chat box's read out of the conversation around
   it. `GetText` is called with the size limit. The `Value` fallback is used
@@ -183,8 +194,10 @@ happen while the user is not typing or moving the caret.
   the paragraph before the caret can hold text the user did not type; in a
   terminal the line window keeps only the prompt onwards, but text below the
   prompt (output of a command still running while the user types ahead, or a
-  chat app's hint lines) can remain, and an output line that looks like a
-  prompt (starting `> `, as `diff` or a quoted text prints) within 50 lines
+  chat app's hint lines not set off by a border or blank line) can remain,
+  and an output line that looks like a
+  prompt (starting `> ` or `❯ `, as `diff` or a quoted text prints) within
+  50 lines
   above the caret is taken as the prompt, so the output after it is kept as
   "after". A small terminal buffer (8 lines or fewer) is still read whole.
 - **Relaxed decisions read only for listed processes** (owner decision 1).
@@ -204,8 +217,11 @@ happen while the user is not typing or moving the caret.
 ## Robustness
 
 - Hooks touch atomics only; UIA work stays on the keyboard privacy worker.
-- A read makes at most thirteen provider requests (twenty with a line window)
-  plus the two of the focus recheck, within a 150 ms budget, and has its own per-process breaker scope
+- A read makes at most thirteen provider requests (six more for each
+  selection end moved onto the field's edge, seven
+  more for a line window and eight for the lines below a chat prompt's
+  caret) plus the two of the focus recheck, within a 150 ms budget, and has
+  its own per-process breaker scope
   and pacing gap (`uia_breaker::Scope::Read`, the probe's 1 s to 30 s
   schedule), so a slow text provider paces and stops reads, never probes.
   Reads are skipped while a process's probes or reads are paced, its read
@@ -234,8 +250,11 @@ the UIA breaker metrics.
   read, failed and retried reads, pause discard, bounds and line breaks, key
   classification, the typing read and a quick Enter, lost edits, prompt
   lines (PowerShell, redirection, continuation, cmd, a boxed chat prompt, no
-  prompt, other line breaks, an empty caret row, the 50-line reach, non-prompt
-  shapes), when a line window replaces a paragraph read, line windows as
+  prompt, other line breaks, an empty caret row, the 50-line reach, padded
+  rows, a wrapped `❯` prompt with the caret inside it and the input's end
+  below, rows below a shell's caret neither kept nor read, shell and chat
+  shapes, non-prompt shapes), the empty and the wrapped `❯` prompt as
+  "before", when a line window replaces a paragraph read, line windows as
   "before" only at the prompt (also after an idle end), no "before" read
   another way, typing reads a second apart and a busy provider during typing.
 - Breaker: a costly or slow read stops and paces reads but not probes; a
@@ -261,8 +280,12 @@ the UIA breaker metrics.
   replaces it unseen).
 - Apps without a text pattern on the focused element store nothing
   (`no_text_source`).
-- Line windows: a prompt not matching the rule (`$`, `❯`, `>>>`) keeps only
-  the caret's line; a pasted or output line that looks like a prompt
+- Line windows: a prompt not matching the rule (`$`, `path ❯`, `>>>`) keeps
+  only the caret's line; a blank line inside a chat input below the caret ends
+  the kept text there; a shell command wrapped below the caret keeps only
+  its rows up to the caret's; a chat app's menu drawn with `❯` (an option
+  picker) is taken as its prompt; a pasted or output line that looks like a
+  prompt
   (`> quote`) starts the kept text there; a very long word-processor
   paragraph is read as its caret line (visual line) with no "before".
 - While a process's read breaker is open (1 s to 30 s), reads there cannot

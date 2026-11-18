@@ -232,11 +232,16 @@ impl CaretText {
     }
 
     /// This read as the next edit's "before". A line window qualifies only
-    /// with the caret on its prompt line: otherwise (output still being
-    /// written after Enter, a click into the output) its lines may be output,
-    /// not entered text.
+    /// when it is a shell prompt line alone, or starts at a chat prompt (whose
+    /// input can wrap over rows): otherwise (output still being written after
+    /// Enter, a click into the output) its lines may be output, not entered
+    /// text.
     fn into_baseline(self) -> Option<Self> {
-        let at_prompt = matches!(self.lines.as_slice(), [line] if is_prompt_line(line));
+        let at_prompt = match self.lines.as_slice() {
+            [line] => is_prompt_line(line),
+            [first, ..] => prompt_of(first) == Some(Prompt::Chat),
+            [] => false,
+        };
         (self.source != TextSource::TextPatternLines || at_prompt).then_some(self)
     }
 }
@@ -267,61 +272,92 @@ pub fn needs_line_window(paragraphs: &str, too_long: bool, whole_field: bool) ->
     too_long || (whole_field && lines_of(paragraphs).len() > MAX_WHOLE_FIELD_PARAGRAPH_LINES)
 }
 
-/// The entered text in a line window: the lines up to and including the
-/// caret's, read when the paragraphs around the caret hold more than a read
-/// keeps (a terminal's whole buffer, or one very long paragraph). Keeps the
-/// nearest prompt line above the caret and the lines after it, so a command
-/// or a long pasted prompt is kept and the output above it is not. With no
-/// prompt line among the last [`MAX_READ_LINES`] lines, keeps only the
-/// caret's line.
-pub fn prompt_lines(window: &str) -> &str {
-    // The window ends after the caret's line break, when it has one.
-    let window = window
+/// Box-drawing characters: a terminal app's borders around and below its
+/// input.
+const BOX_DRAWING: std::ops::RangeInclusive<char> = '\u{2500}'..='\u{257F}';
+
+/// A chat prompt mark some terminal apps draw instead of `>`.
+const PROMPT_MARK: char = '\u{276F}';
+
+/// The entered text in a line window, read when the paragraphs around the
+/// caret hold more than a read keeps (a terminal's whole buffer, or one very
+/// long paragraph): `above` holds the lines up to and including the caret's.
+/// Keeps the nearest prompt line above the caret and the lines after it, so a
+/// command or a long pasted prompt is kept and the output above it is not.
+/// After a chat prompt it also keeps the input's rows below the caret, from
+/// `below` (called only then: the lines after the caret's), down to the
+/// first row that is blank, only borders or another prompt; below a shell's
+/// caret a terminal can draw rows the user did not type (prediction lists).
+/// With no prompt line among the last [`MAX_READ_LINES`] lines above, keeps
+/// only the caret's line. Every line loses its trailing whitespace (including
+/// the no-break space after a bare prompt): a terminal pads its rows to its
+/// width.
+pub fn prompt_lines<E>(
+    above: &str,
+    below: impl FnOnce() -> Result<String, E>,
+) -> Result<String, E> {
+    // `above` ends after the caret's line break, when it has one.
+    let above = above
         .strip_suffix("\r\n")
-        .or_else(|| window.strip_suffix(LINE_BREAKS))
-        .unwrap_or(window);
-    let mut starts = vec![0];
-    let mut chars = window.char_indices().peekable();
-    while let Some((_, c)) = chars.next() {
-        if LINE_BREAKS.contains(&c) {
-            if c == '\r' {
-                chars.next_if(|&(_, next)| next == '\n');
-            }
-            starts.push(chars.peek().map_or(window.len(), |&(at, _)| at));
-        }
-    }
-    let line_at = |at: usize| window[at..].split(LINE_BREAKS).next().unwrap_or("");
-    let caret_line = starts[starts.len() - 1];
-    let start = starts
-        .iter()
+        .or_else(|| above.strip_suffix(LINE_BREAKS))
+        .unwrap_or(above);
+    let above = lines_of(above);
+    let caret_line = above.len() - 1;
+    let prompt = (0..above.len())
         .rev()
         .take(MAX_READ_LINES)
-        .copied()
-        .find(|&at| is_prompt_line(line_at(at)))
-        .unwrap_or(caret_line);
-    &window[start..]
+        .find_map(|at| prompt_of(&above[at]).map(|prompt| (at, prompt)));
+    let below = match prompt {
+        Some((_, Prompt::Chat)) => lines_of(&below()?),
+        _ => Vec::new(),
+    };
+    let input_end = |line: &&String| {
+        line.chars()
+            .all(|c| c.is_whitespace() || BOX_DRAWING.contains(&c))
+            || is_prompt_line(line)
+    };
+    Ok(above[prompt.map_or(caret_line, |(at, _)| at)..]
+        .iter()
+        .chain(below.iter().take_while(|line| !input_end(line)))
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
-/// A shell or chat prompt line. The first `>` ends the prompt, so a command
-/// may contain `>` after it: PowerShell (`PS C:\…> `; a line starting `>>`
-/// continues the one above), cmd (`C:\…>`), and a prompt that is only `>`
-/// (a terminal chat app's input, often drawn inside a box).
-fn is_prompt_line(line: &str) -> bool {
-    let box_drawing = '\u{2500}'..='\u{257F}';
-    let line = line.trim_start_matches(|c: char| c.is_whitespace() || box_drawing.contains(&c));
-    let Some(end) = line.find('>') else {
-        return false;
-    };
+/// What a prompt line opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Prompt {
+    /// A shell's command line.
+    Shell,
+    /// A terminal chat app's input, which can wrap over several rows.
+    Chat,
+}
+
+/// Whether `line` is a shell or chat prompt line. The first `>` or `❯` ends
+/// the prompt, so a command may contain `>` after it: PowerShell
+/// (`PS C:\…> `; a line starting `>>` continues the one above) and cmd
+/// (`C:\…>`) are shells; a prompt that is only `>` or `❯` is a terminal chat
+/// app's input, often drawn inside a box.
+fn prompt_of(line: &str) -> Option<Prompt> {
+    let line = line.trim_start_matches(|c: char| c.is_whitespace() || BOX_DRAWING.contains(&c));
+    let end = line.find(['>', PROMPT_MARK])?;
     let prefix = &line[..end];
     let drive_path = |text: &str| {
         let bytes = text.as_bytes();
         bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":\\"
     };
-    match prefix {
-        "" => !line[1..].starts_with('>'),
-        "PS" => true,
-        _ => prefix.starts_with("PS ") || drive_path(prefix),
+    if line[end..].starts_with(PROMPT_MARK) {
+        prefix.is_empty().then_some(Prompt::Chat)
+    } else if prefix.is_empty() {
+        (!line[1..].starts_with('>')).then_some(Prompt::Chat)
+    } else {
+        (prefix == "PS" || prefix.starts_with("PS ") || drive_path(prefix)).then_some(Prompt::Shell)
     }
+}
+
+/// Whether `line` is a prompt line of either kind.
+fn is_prompt_line(line: &str) -> bool {
+    prompt_of(line).is_some()
 }
 
 /// Why a read produced no text (fixed codes for content-free diagnostics).
@@ -733,11 +769,17 @@ mod tests {
         ))
     }
 
-    /// A line-window read, cut to its prompt as the platform does.
+    /// [`prompt_lines`] with the lines below the caret already read.
+    fn cut(above: &str, below: &str) -> String {
+        prompt_lines(above, || Ok::<_, ()>(below.to_string())).unwrap()
+    }
+
+    /// A line-window read with the caret on its last line, cut to its prompt
+    /// as the platform does.
     fn window(target: u64, text: &str) -> ReadOutcome {
         ReadOutcome::Text(CaretText::new(
             target,
-            prompt_lines(text),
+            &cut(text, ""),
             false,
             TextSource::TextPatternLines,
             "terminal.exe".to_string(),
@@ -924,41 +966,138 @@ mod tests {
         // PowerShell: the output above is dropped; a redirection's `>`
         // belongs to the command.
         assert_eq!(
-            prompt_lines("PS C:\\> ls\r\nfile.txt\r\nPS C:\\> echo a > b.txt\r\n"),
+            cut("PS C:\\> ls\r\nfile.txt\r\nPS C:\\> echo a > b.txt\r\n", ""),
             "PS C:\\> echo a > b.txt"
         );
         // A command over several lines: continuation lines start with `>>`.
         assert_eq!(
-            prompt_lines("out\nPS C:\\x> if ($a) {\n>> b\n>> }"),
+            cut("out\nPS C:\\x> if ($a) {\n>> b\n>> }", ""),
             "PS C:\\x> if ($a) {\n>> b\n>> }"
         );
-        assert_eq!(prompt_lines("x\nC:\\Users>dir"), "C:\\Users>dir");
+        assert_eq!(cut("x\nC:\\Users>dir", ""), "C:\\Users>dir");
         // A chat prompt drawn in a box, the caret on its pasted second line.
         assert_eq!(
-            prompt_lines("answer\n╭───╮\n│ > summarise this │\n│ pasted line │\r\n"),
+            cut(
+                "answer\n╭───╮\n│ > summarise this │\n│ pasted line │\r\n",
+                "╰───╯\n"
+            ),
             "│ > summarise this │\n│ pasted line │"
         );
-        // No prompt: only the caret's line.
-        assert_eq!(prompt_lines("line one\nline two\n"), "line two");
-        assert_eq!(prompt_lines("a\rb\u{2028}c"), "c");
-        assert_eq!(prompt_lines(""), "");
+        // No prompt: only the caret's line, never the lines below it.
+        assert_eq!(cut("line one\nline two\n", "line three"), "line two");
+        assert_eq!(cut("a\rb\u{2028}c", ""), "c");
+        assert_eq!(cut("", ""), "");
         // The caret on an empty row below the prompt.
-        assert_eq!(prompt_lines("out\r\nPS C:\\> \r\n\r\n"), "PS C:\\> \r\n");
+        assert_eq!(cut("out\r\nPS C:\\> \r\n\r\n", ""), "PS C:\\>\n");
         // A prompt further up than the window's lines is not looked for.
         let far = format!("PS C:\\> cmd\n{}last", "out\n".repeat(MAX_READ_LINES));
-        assert_eq!(prompt_lines(&far), "last");
+        assert_eq!(cut(&far, ""), "last");
+        // Rows padded to the terminal's width.
+        assert_eq!(cut("PS C:\\> ab      \r\n", "        \r\n"), "PS C:\\> ab");
+    }
+
+    #[test]
+    fn a_line_window_keeps_a_wrapped_prompt_whole_with_the_caret_inside_it() {
+        // A chat app's `❯` prompt over three rows, the caret on the second;
+        // a border and a status row below the input.
+        let above = "answer\r\n\u{276F}\u{a0}first row of a long   \r\n  second row   \r\n";
+        let below = "  third row   \r\n──────────\r\n  ? for shortcuts\r\n";
+        assert_eq!(
+            cut(above, below),
+            "\u{276F}\u{a0}first row of a long\n  second row\n  third row"
+        );
+        // The empty input box: just its prompt, a "before" the next edit can
+        // use.
+        assert_eq!(
+            cut("answer\r\n\u{276F}\u{a0}    \r\n", "──────────\r\n"),
+            "\u{276F}"
+        );
+        // The next prompt below ends the input.
+        assert_eq!(cut("> a\r\n", "\u{276F}\u{a0}b"), "> a");
+        // A shell: rows below its caret (a prediction list) are never kept,
+        // nor read.
+        assert_eq!(
+            cut("PS C:\\> git p\r\n", "  git pull   [History]\r\n"),
+            "PS C:\\> git p"
+        );
+        let unread = prompt_lines("PS C:\\> a\r\n", || Err("read below"));
+        assert_eq!(unread, Ok("PS C:\\> a".to_string()));
+        let unread = prompt_lines("no prompt\r\n", || Err("read below"));
+        assert_eq!(unread, Ok("no prompt".to_string()));
+    }
+
+    #[test]
+    fn a_wrapped_chat_prompt_becomes_the_next_before() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        // The caret on the first of the prompt's two rows.
+        let settle = cut("out\r\n\u{276F}\u{a0}first\r\n", "  second\r\n───\r\n");
+        sim.answer(
+            ReadKind::Settle,
+            ReadOutcome::Text(CaretText::new(
+                FIELD,
+                &settle,
+                false,
+                TextSource::TextPatternLines,
+                "terminal.exe".to_string(),
+                None,
+            )),
+        );
+        sim.type_keys(1);
+        sim.answer(
+            ReadKind::Pause,
+            window(FIELD, "out\r\n\u{276F}\u{a0}firstx\r\n  second\r\n"),
+        );
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(
+            sim.finished[0].before.as_deref(),
+            Some("\u{276F}\u{a0}first")
+        );
+        assert_eq!(sim.finished[0].after, "\u{276F}\u{a0}firstx");
+    }
+
+    #[test]
+    fn the_empty_chat_prompt_becomes_the_next_before() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(
+            ReadKind::Settle,
+            window(FIELD, "out\r\n\u{276F}\u{a0}  \r\n"),
+        );
+        sim.type_keys(2);
+        sim.answer(
+            ReadKind::Pause,
+            window(FIELD, "out\r\n\u{276F}\u{a0}hi  \r\n"),
+        );
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[0].before.as_deref(), Some("\u{276F}"));
+        assert_eq!(sim.finished[0].after, "\u{276F}\u{a0}hi");
     }
 
     #[test]
     fn only_lines_shaped_like_a_prompt_are_prompt_lines() {
-        for prompt in ["PS C:\\> ", "PS> x", "C:\\>dir", "> hi", "  │ > hi", ">"] {
-            assert!(is_prompt_line(prompt), "{prompt}");
+        for shell in ["PS C:\\> ", "PS> x", "C:\\>dir"] {
+            assert_eq!(prompt_of(shell), Some(Prompt::Shell), "{shell}");
+        }
+        for chat in [
+            "> hi",
+            "  │ > hi",
+            ">",
+            "❯ ls",
+            "❯",
+            "\u{276F}\u{a0}hi",
+            "  │ ❯",
+        ] {
+            assert_eq!(prompt_of(chat), Some(Prompt::Chat), "{chat}");
         }
         for other in [
             ">> continued",
             ">>> python",
             "$ ls",
-            "❯ ls",
+            "~/repo ❯ ls",
+            "a ❯ b",
             "a > b",
             "",
             "PS",

@@ -19,8 +19,10 @@ use crate::entered_text::{
     needs_line_window, prompt_lines, ReadFailure, TextSource, MAX_READ_BYTES, MAX_READ_LINES,
 };
 
-/// A read's total budget (up to thirteen provider requests, twenty with a
-/// line window, then the two of the focus recheck): under the probe's,
+/// A read's total budget (up to thirteen provider requests, six more for
+/// each selection end moved onto the element's edge,
+/// seven more for a line window and eight for the lines below a chat
+/// prompt's caret, then the two of the focus recheck): under the probe's,
 /// because the keyboard privacy worker probes nothing while it runs.
 pub(super) const READ_BUDGET: Duration = Duration::from_millis(150);
 
@@ -120,7 +122,8 @@ impl<'a> ProviderCalls<'a> {
 /// `Value` when `value_allowed` (an `Edit` control under an unrelaxed
 /// decision). Never an ancestor's, descendant's or another element's text:
 /// the caret must lie inside the element's own text (its pattern's document
-/// range), and the range read is clamped to it. Some providers (Chromium,
+/// range, or just outside its edge with no text between), and the range read
+/// is clamped to it. Some providers (Chromium,
 /// WebView2, Electron) move range endpoints through the whole page, so the
 /// clamp is what keeps a chat box's read out of the conversation around it.
 ///
@@ -128,8 +131,8 @@ impl<'a> ProviderCalls<'a> {
 /// selection's) to the end of the caret's (or the selection's last)
 /// paragraph, within the element. When that is no paragraph read
 /// ([`needs_line_window`]), a line window of up to [`MAX_READ_LINES`] lines
-/// ending with the caret's line is read instead and cut to its prompt
-/// ([`prompt_lines`]).
+/// up to and including the caret's (and as many after it, after a chat
+/// prompt) is read instead and cut to its prompt's input ([`prompt_lines`]).
 ///
 /// # Safety
 /// COM must be initialized on this thread and `element` must be a live
@@ -150,32 +153,67 @@ pub(super) unsafe fn read_field_text(
             return Err(ReadFailure::NoTextSource);
         }
         let range = selection.GetElement(0).map_err(|_| ReadFailure::Failed)?;
-        // Compare one endpoint of `range` with the same endpoint of the
-        // element's text: negative before it, positive after it.
-        let compare =
-            |endpoint| calls.call(|| range.CompareEndpoints(endpoint, &document, endpoint));
-        if compare(TextPatternRangeEndpoint_Start)? < 0
-            || compare(TextPatternRangeEndpoint_End)? > 0
-        {
-            return Err(ReadFailure::NoTextSource);
+        // Each endpoint of a range and the side beyond which it lies outside
+        // the element's text: compared with the same endpoint of the
+        // element's text, negative is before its start, positive after its end.
+        let edges = [
+            (TextPatternRangeEndpoint_Start, -1),
+            (TextPatternRangeEndpoint_End, 1),
+        ];
+        let side_of = |range: &IUIAutomationTextRange, endpoint| {
+            calls.call(|| range.CompareEndpoints(endpoint, &document, endpoint))
+        };
+        let onto_edge = |range: &IUIAutomationTextRange, endpoint| {
+            calls.call(|| range.MoveEndpointByRange(endpoint, &document, endpoint))
+        };
+        // The selection must lie inside the element's own text. Chromium may
+        // place a caret at the edge of a field just outside its text (the same
+        // visible place, in a neighbouring node): such an endpoint is moved
+        // onto the edge, but only when no text lies between them.
+        for (endpoint, outside) in edges {
+            if side_of(&range, endpoint)?.signum() != outside {
+                continue;
+            }
+            let other = if outside < 0 {
+                TextPatternRangeEndpoint_End
+            } else {
+                TextPatternRangeEndpoint_Start
+            };
+            // From the endpoint to the element's edge.
+            let gap = calls.call(|| range.Clone())?;
+            calls.call(|| gap.MoveEndpointByRange(other, &document, endpoint))?;
+            if !calls.call(|| gap.GetText(1))?.is_empty() {
+                return Err(ReadFailure::NoTextSource);
+            }
+            onto_edge(&range, endpoint)?;
+            // A caret outside leaves its other endpoint beyond the moved one:
+            // collapse the range there rather than rely on the provider.
+            if calls
+                .call(|| range.CompareEndpoints(other, &range, endpoint))?
+                .signum()
+                == outside
+            {
+                calls.call(|| range.MoveEndpointByRange(other, &range, endpoint))?;
+            }
         }
         // Kept at the caret for a line window.
         let lines = calls.call(|| range.Clone())?;
-        // Widen `range` by `before` units back and to the end of the caret's
-        // unit, clamped to the element's text, and read at most `max` UTF-16
-        // code units. Also says whether it spans the element's whole text.
-        let read_around = |range: &IUIAutomationTextRange, unit, before, max| {
-            calls
-                .call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, unit, before))?;
-            calls.call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_End, unit, 1))?;
+        // Move the start of `range` by `before` units and its end by `after`
+        // (from the end of the caret's unit), clamped to the element's text,
+        // and read at most `max` UTF-16 code units. Also says whether it spans
+        // the element's whole text.
+        let read_around = |range: &IUIAutomationTextRange, unit, before, after, max| {
+            if before != 0 {
+                calls.call(|| {
+                    range.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, unit, before)
+                })?;
+            }
+            calls.call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_End, unit, after))?;
             let mut whole_field = true;
-            for (endpoint, outside) in [
-                (TextPatternRangeEndpoint_Start, -1),
-                (TextPatternRangeEndpoint_End, 1),
-            ] {
-                let side = calls.call(|| range.CompareEndpoints(endpoint, &document, endpoint))?;
+            for (endpoint, outside) in edges {
+                let side = side_of(range, endpoint)?;
                 if side.signum() == outside {
-                    calls.call(|| range.MoveEndpointByRange(endpoint, &document, endpoint))?;
+                    onto_edge(range, endpoint)?;
                 }
                 whole_field &= side == 0 || side.signum() == outside;
             }
@@ -184,7 +222,7 @@ pub(super) unsafe fn read_field_text(
             Ok::<_, ReadFailure>((too_long, whole_field, text.to_string()))
         };
         let (too_long, whole_field, text) =
-            read_around(&range, TextUnit_Paragraph, -2, MAX_READ_CHARS)?;
+            read_around(&range, TextUnit_Paragraph, -2, 1, MAX_READ_CHARS)?;
         if !needs_line_window(&text, too_long, whole_field) {
             return Ok(FieldText {
                 text,
@@ -194,18 +232,40 @@ pub(super) unsafe fn read_field_text(
         }
         // The provider's paragraphs are not paragraphs (a terminal's whole
         // buffer) or hold more than a read keeps: read the lines up to the
-        // caret's and keep its prompt onwards.
-        let (too_long, _, window) = read_around(
+        // caret's and keep its prompt's input, with the lines after the
+        // caret's when that is a chat prompt's.
+        let (too_long, _, above) = read_around(
             &lines,
             TextUnit_Line,
             -(MAX_READ_LINES as i32 - 1),
+            1,
             MAX_WINDOW_CHARS,
         )?;
         if too_long {
             return Err(ReadFailure::TooLarge);
         }
+        let below = || {
+            let below = calls.call(|| lines.Clone())?;
+            calls.call(|| {
+                below.MoveEndpointByRange(
+                    TextPatternRangeEndpoint_Start,
+                    &lines,
+                    TextPatternRangeEndpoint_End,
+                )
+            })?;
+            match read_around(
+                &below,
+                TextUnit_Line,
+                0,
+                MAX_READ_LINES as i32,
+                MAX_WINDOW_CHARS,
+            )? {
+                (true, _, _) => Err(ReadFailure::TooLarge),
+                (false, _, text) => Ok(text),
+            }
+        };
         return Ok(FieldText {
-            text: prompt_lines(&window).to_string(),
+            text: prompt_lines(&above, below)?,
             truncated: false,
             source: TextSource::TextPatternLines,
         });
