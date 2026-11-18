@@ -67,14 +67,25 @@ they move on, store it.**
   whatever precedes the mark (`PS C:\Users\me>`, `C:\>`, `>`, `❯`,
   `~/repo ❯`, `me@host:~$`), so a command may contain marks after it. It is
   learnt from the read with the caret right after a prompt and no input (the
-  edit's "before"), or failing that from the edit's first read, or the read's
-  own caret line. The input runs from the nearest line above the caret that
-  starts with the prompt (within 50 lines; else the caret's line) through
-  the caret's line, so a wrapped or pasted command over several lines or a
-  long pasted prompt is kept and the output above it is not. An open edit's
-  prompt is only used for reads of its own field. Rows below the caret are kept only
-  down to the prompt's **footer**: the first non-blank row below the empty
-  input when the prompt was learnt (a chat app's border); a shell normally
+  edit's "before"), or failing that the latest one learnt that way in the
+  same field (so an edit begun with the caret inside a wrapped input, after a
+  caret move, still keeps all its rows), or the edit's first read, or the
+  read's own caret line. That remembered prompt (one, in memory only) is
+  forgotten at every Enter (the field may now run another program) and
+  learnt again by a read at an empty prompt, and forgotten when capture
+  pauses, a read fails or is given up, or capture stops. It is never used
+  for a caret line with a prompt mark of its own before the caret that
+  differs from it (another program's, such as the shell after a chat app
+  exits on Ctrl+D, but also a wrapped row holding `>`, `$` or `->` before
+  the caret, which then keeps only that row). An edit that starts from it
+  keeps that rule for all its reads. The input runs from the nearest line
+  above the caret that starts with the prompt (within 50 lines; else the caret's line)
+  through the caret's line, so a wrapped or pasted command over several
+  lines or a long pasted prompt is kept and the output above it is not. A
+  prompt, the open edit's or remembered, is only used for reads of the field
+  it was learnt in. Rows below the caret are kept only down to the prompt's
+  **footer**: the first non-blank row below the empty input when the prompt
+  was learnt (a chat app's border); a shell normally
   has none, so rows a terminal draws below its caret (a prediction list) are
   never kept, and when the footer is gone (the window was resized) none are.
   A multiplexer's status row below an empty shell prompt (tmux, zellij)
@@ -117,14 +128,18 @@ they move on, store it.**
   that key's place among the edit keys and the native focus it was typed
   into. When an edit ends, the characters of the edit keys after its last
   read are inserted at that read's caret, only when no edit key arrived while
-  the read ran, the caret was bare (no selection), and every one of those
+  the read ran, the caret was bare (no selection) with nothing but
+  whitespace after it on its line, and every one of those
   keys typed exactly one character into the read's native focus; a
   Backspace, Delete, paste, `VK_PROCESSKEY` or `VK_PACKET` key among them, a
   character typed elsewhere, or one the queue dropped adds nothing. The hook
   sees raw keys, so keys composed by an IME or a dead key are added as the
   plain characters keystroke capture maps them to. Keys after Enter (by the
   edit count taken at the Enter key) belong to the next edit, and an edit
-  ended by another field's read gets none.
+  ended by another field's read gets none. Text after the caret may be an
+  app's inline suggestion (ghost text) that the keys overtype rather than
+  push along, so keys are never added in front of it; that edit keeps its
+  last read.
   `keys_added` records how many were added (all or none of
   `keys_after_read`).
 - An edit is stored only if its "after" differs from its "before". With no
@@ -306,9 +321,13 @@ the UIA breaker metrics.
   breaks, the 50-line reach, padding but not a typed space, rows below a
   shell's caret, an empty prompt learnt with its footer, a wrapped prompt
   with the caret inside it, a missing footer), the learnt prompt cutting its
-  edit, keys added after the last read, in the middle and to an edit never
-  read, and not added (a key without a character, another focus, a key during
-  the read), keys after Enter, when a line window replaces a paragraph read, line windows as
+  edit, an edit begun inside a wrapped input (on its prompt row or a row
+  below), the remembered prompt forgotten at Enter and relearnt, and not
+  used for a caret line with another prompt (a shell after Ctrl+D, a row
+  with `>`), keys added after the last read and to an edit never read, and
+  not added (a key without a character, another focus, a key during the
+  read, text after the caret such as an inline suggestion), keys after
+  Enter, when a line window replaces a paragraph read, line windows as
   "before" only at the prompt (also after an idle end), no "before" read
   another way, typing reads a second apart and a busy provider during typing,
   paragraph reads cut to the paragraph before the caret's (a new line after
@@ -326,12 +345,14 @@ the UIA breaker metrics.
 - Paste or cut through a right-click or menu sends no edit key: the edit is
   not seen until a later key.
 - Text typed after the last read is added from keystroke capture only when
-  every key typed one character (see the model); otherwise it is missing from
-  "after" (`keys_after_read` counts those keys, `keys_added` is 0), and an
-  edit with no read and no "before" is dropped (`lost`). The characters come
-  from keystroke capture's own key mapping, so they are only as right as its
-  text. Text typed within
-  150 ms after Enter lands in the Enter read, so it appears as existing text
+  every key typed one character at the end of its line (see the model);
+  typing in the middle of a line after the last read is not added, and an
+  inline suggestion the user had not accepted is stored as the last read
+  showed it (a suggestion over several lines is not recognised). Otherwise
+  it is missing from "after" (`keys_after_read` counts those keys,
+  `keys_added` is 0), and an edit with no read and no "before" is dropped
+  (`lost`). The characters come from keystroke capture's own key mapping,
+  so they are only as right as its text. Text typed within 150 ms after Enter lands in the Enter read, so it appears as existing text
   in the next edit's "before" (or nowhere, if typing stops there).
 - A chat box that clears more than 150 ms after Enter ends the edit as
   `enter`; the prompt then becomes the next edit's "before" (or a new message
@@ -339,10 +360,15 @@ the UIA breaker metrics.
 - Apps without a text pattern on the focused element store nothing
   (`no_text_source`).
 - Line windows: a prompt without `>`, `❯` or `$` (`%`, `#`) keeps only the
-  caret's line; an edit whose typing began without an empty-prompt read
-  learns its prompt from its first read's caret line, so a multi-line input
-  typed that way keeps only its rows from the caret's, and none below it; a
-  shell command wrapped below the caret keeps only its rows up to the
+  caret's line; an edit whose typing began without an empty-prompt read,
+  in a field with no prompt remembered since the last Enter, learns its
+  prompt from its first read's caret line, so a multi-line input typed that
+  way keeps only its rows from the caret's, and none below it; a program
+  that exits without an Enter key (Ctrl+D, Ctrl+C) leaves its prompt
+  remembered: an edit begun on a shell line with no prompt mark of its own
+  (a wrapped command's second row) before the next Enter is cut at the
+  nearest line starting with the old prompt and may keep that program's
+  output; a shell command wrapped below the caret keeps only its rows up to the
   caret's; a chat app's menu row drawn with its prompt mark (an option
   picker) is taken as the prompt; a pasted or output line that starts with
   the prompt's text (`> quote` under a bare `>` prompt) starts the kept text

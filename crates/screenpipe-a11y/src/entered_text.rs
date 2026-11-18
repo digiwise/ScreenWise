@@ -353,14 +353,16 @@ impl CaretText {
 
     /// This read with the characters typed after it inserted at its caret
     /// (`typed`, for edit keys up to the count `edits`), and how many. Only
-    /// when no edit key arrived while it was read, it has a bare caret, and
-    /// every edit key since typed exactly one character into its native
-    /// focus: a Backspace, Delete, paste or IME input among them (no
-    /// character), or one typed elsewhere, adds nothing.
+    /// when no edit key arrived while it was read, it has a bare caret with
+    /// nothing but whitespace after it on its line, and every edit key since
+    /// typed exactly one character into its native focus: a Backspace,
+    /// Delete, paste or IME input among them (no character), or one typed
+    /// elsewhere, adds nothing. Text after the caret may be an app's inline
+    /// suggestion that the keys overtype, not text they push along.
     fn with_typed(&self, typed: &[TypedChar], edits: u64) -> Option<(Self, u64)> {
         let (started, ended) = self.edits;
         let (row, column) = self.caret?;
-        if started != ended || edits <= ended {
+        if started != ended || edits <= ended || !self.lines[row][column..].trim().is_empty() {
             return None;
         }
         let keys = (ended + 1..=edits)
@@ -451,6 +453,10 @@ pub struct Prompt {
     /// app's border), trimmed: the input's rows below the caret end above
     /// it. `None` (a shell): no row below the caret is the input's.
     footer: Option<String>,
+    /// Remembered from an earlier edit in the field, not learnt for this
+    /// one: another program may have its prompt there now, so it is not
+    /// used for a caret line with a different prompt of its own.
+    remembered: bool,
 }
 
 /// A line window cut to the input at its prompt.
@@ -492,10 +498,20 @@ fn cut_window(text: &str, caret: usize, prompt: Option<&Prompt>) -> Window {
                 .map(|row| row.trim())
                 .find(|row| !row.is_empty())
                 .map(str::to_string),
+            remembered: false,
         }),
         own => prompt
+            .filter(|prompt| {
+                !prompt.remembered || own.as_ref().is_none_or(|(text, _)| *text == prompt.text)
+            })
             .cloned()
-            .or_else(|| own.map(|(text, _)| Prompt { text, footer: None })),
+            .or_else(|| {
+                own.map(|(text, _)| Prompt {
+                    text,
+                    footer: None,
+                    remembered: false,
+                })
+            }),
     };
     let start = prompt
         .as_ref()
@@ -681,6 +697,13 @@ struct OpenEdit {
     last_edit_at: Instant,
 }
 
+impl OpenEdit {
+    /// Its latest read: its "after", or else its "before".
+    fn read(&self) -> Option<&CaretText> {
+        self.after.as_ref().or(self.before.as_ref())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingRead {
     kind: ReadKind,
@@ -704,6 +727,11 @@ pub struct EditTracker {
     /// When the first and last edit keys after that Enter were seen, while
     /// its read was pending: the next edit, opened by that read.
     after_enter: Option<(Instant, Instant)>,
+    /// The latest prompt learnt at an empty prompt, with its footer, and the
+    /// field it was learnt in: for reads of an edit that began elsewhere
+    /// than there (a caret moved into a wrapped input). Forgotten at every
+    /// Enter, and learnt again by a read at an empty prompt.
+    learnt: Option<(u64, Prompt)>,
     /// Characters typed since the latest read started (bounded).
     typed: Vec<TypedChar>,
     /// How edits ended that were dropped for having no "after" (they ended
@@ -774,6 +802,10 @@ impl EditTracker {
                 });
             }
             self.enter_edits = Some(counts.enter_edits);
+            // After Enter the field may run another program (a chat app
+            // exited to its shell, a shell started one): a prompt is only
+            // remembered again from a read at that program's empty prompt.
+            self.learnt = None;
             if let Some(open) = &mut self.open {
                 open.last_edit_at = now;
             }
@@ -805,13 +837,19 @@ impl EditTracker {
         self.typed.drain(..excess);
     }
 
-    /// The prompt the open edit's line windows are cut at, with the target it
-    /// was learnt in: for its next read there ([`CaretText::new`]), never a
-    /// read of another field.
+    /// The prompt line windows are cut at, with the target it was learnt in:
+    /// the open edit's, or else the latest learnt at an empty prompt. For the
+    /// next read there ([`CaretText::new`]), never a read of another field.
     pub fn prompt(&self) -> Option<(u64, &Prompt)> {
-        let open = self.open.as_ref()?;
-        let known = open.after.as_ref().or(open.before.as_ref())?;
-        Some((known.target, open.prompt.as_ref()?))
+        let open = self
+            .open
+            .as_ref()
+            .and_then(|open| Some((open.read()?.target, open.prompt.as_ref()?)));
+        open.or_else(|| {
+            self.learnt
+                .as_ref()
+                .map(|(target, prompt)| (*target, prompt))
+        })
     }
 
     /// How the edits dropped since the last call ended (content-free
@@ -852,6 +890,13 @@ impl EditTracker {
             ReadOutcome::Text(text) => text,
         };
         text.edits = (edits, counts.edits);
+        if let Some(prompt) = text.prompt.as_ref().filter(|_| text.at_empty_prompt) {
+            let prompt = Prompt {
+                remembered: true,
+                ..prompt.clone()
+            };
+            self.learnt = Some((text.target, prompt));
+        }
         if self.pending.is_some_and(|pending| pending.kind == kind) {
             self.pending = None;
         }
@@ -860,7 +905,7 @@ impl EditTracker {
         let other_field = self
             .open
             .as_ref()
-            .and_then(|open| open.after.as_ref().or(open.before.as_ref()))
+            .and_then(OpenEdit::read)
             .is_some_and(|known| known.target != text.target);
         if other_field {
             finished.extend(self.finish(Ended::FocusChanged, edits));
@@ -928,6 +973,7 @@ impl EditTracker {
         self.open = None;
         self.enter_edits = None;
         self.after_enter = None;
+        self.learnt = None;
         self.typed.clear();
     }
 
@@ -973,7 +1019,7 @@ impl EditTracker {
         if ended == Ended::Idle {
             self.baseline = open.after.clone().and_then(CaretText::into_baseline);
         }
-        let Some(read) = open.after.as_ref().or(open.before.as_ref()) else {
+        let Some(read) = open.read() else {
             self.lost.push(ended);
             return None;
         };
@@ -1105,6 +1151,15 @@ mod tests {
         Prompt {
             text: text.to_string(),
             footer: footer.map(str::to_string),
+            remembered: false,
+        }
+    }
+
+    /// `prompt` as the tracker remembers it for later edits.
+    fn remembered(prompt: Prompt) -> Prompt {
+        Prompt {
+            remembered: true,
+            ..prompt
         }
     }
 
@@ -1423,6 +1478,111 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_begun_inside_a_wrapped_input_keeps_all_its_rows() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        let empty = "out\r\n\u{276F}\u{a0}\u{2038}\r\n──────\r\nstatus";
+        sim.answer(ReadKind::Settle, window_with(FIELD, empty, None));
+        sim.type_keys(1);
+        let typed = "out\r\n\u{276F}\u{a0}a long first row\r\n  b\u{2038}\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, typed, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Pause, outcome);
+        // The caret moved up into the first row: that edit has no "before",
+        // but its rows are still cut at the prompt learnt when it was empty.
+        sim.signal(Signal::Caret);
+        let moved = "out\r\n\u{276F}\u{a0}a long\u{2038} first row\r\n  b\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, moved, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Settle, outcome);
+        sim.type_keys(1);
+        let learnt = remembered(prompt("\u{276F}", Some("──────")));
+        assert_eq!(sim.tracker.prompt(), Some((FIELD, &learnt)));
+        let edited = "out\r\n\u{276F}\u{a0}a long,\u{2038} first row\r\n  b\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, edited, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Pause, outcome);
+        sim.signal(Signal::Enter);
+        sim.answer(
+            ReadKind::Enter,
+            window(FIELD, "out\r\n\u{276F}\u{a0}\u{2038}"),
+        );
+        assert_eq!(sim.finished.len(), 2);
+        assert_eq!(sim.finished[1].before, None);
+        assert_eq!(
+            sim.finished[1].after,
+            "\u{276F}\u{a0}a long, first row\n  b"
+        );
+        assert_eq!(sim.finished[1].detail.ended, Ended::Enter);
+        // A pause forgets it.
+        sim.tracker.discard();
+        assert_eq!(sim.tracker.prompt(), None);
+    }
+
+    #[test]
+    fn an_edit_begun_on_a_wrapped_row_keeps_its_input_from_the_prompt() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        let empty = "out\r\n\u{276F}\u{a0}\u{2038}\r\n──────\r\nstatus";
+        sim.answer(ReadKind::Settle, window_with(FIELD, empty, None));
+        // Clicked onto the second row of a wrapped input, which has no mark.
+        sim.signal(Signal::Caret);
+        let moved = "out\r\n\u{276F}\u{a0}first row\r\n  sec\u{2038}ond\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, moved, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Settle, outcome);
+        sim.type_keys(1);
+        let edited = "out\r\n\u{276F}\u{a0}first row\r\n  secx\u{2038}ond\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, edited, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Pause, outcome);
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[0].before, None);
+        assert_eq!(sim.finished[0].after, "\u{276F}\u{a0}first row\n  secxond");
+    }
+
+    #[test]
+    fn a_prompt_learnt_before_enter_is_forgotten_unless_enter_shows_one() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        let chat = "answer\r\n\u{276F}\u{a0}\u{2038}\r\n──────\r\nstatus";
+        sim.answer(ReadKind::Settle, window_with(FIELD, chat, None));
+        sim.type_keys(5);
+        let typed = "answer\r\n\u{276F}\u{a0}/exit\u{2038}\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, typed, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Pause, outcome);
+        // The chat app exits: the Enter read shows its goodbye, no prompt.
+        sim.signal(Signal::Enter);
+        sim.answer(
+            ReadKind::Enter,
+            window(FIELD, "\u{276F}\u{a0}/exit\r\nGoodbye\u{2038}"),
+        );
+        assert_eq!(sim.tracker.prompt(), None);
+        // The shell's empty prompt is learnt at the next Enter read there.
+        sim.signal(Signal::Enter);
+        sim.answer(
+            ReadKind::Enter,
+            window(FIELD, "Goodbye\r\nPS C:\\> \u{2038}"),
+        );
+        assert_eq!(
+            sim.tracker.prompt(),
+            Some((FIELD, &remembered(prompt("PS C:\\>", None))))
+        );
+        // A program that exited without Enter (Ctrl+D) leaves its prompt
+        // remembered: a caret line with another prompt of its own is cut at
+        // that one, and the program's output above it is not kept.
+        let chat = remembered(prompt("\u{276F}", Some("──────")));
+        let shell = "\u{276F}\u{a0}question\r\nreply\r\nPS C:\\> ls\u{2038}\r\nmore";
+        assert_eq!(cut(shell, Some(&chat)).text, "PS C:\\> ls");
+        // So is a wrapped row of the chat's own input with a mark before
+        // the caret: only that row is kept.
+        let wrapped = "\u{276F}\u{a0}a\r\n  echo x > y\u{2038}\r\n──────";
+        assert_eq!(cut(wrapped, Some(&chat)).text, "  echo x > y");
+        // A prompt learnt for the open edit itself is still used.
+        let open = prompt("\u{276F}", None);
+        assert_eq!(
+            cut(shell, Some(&open)).text,
+            "\u{276F}\u{a0}question\nreply\nPS C:\\> ls"
+        );
+    }
+
+    #[test]
     fn keys_typed_after_the_last_read_are_added_at_its_caret() {
         let mut sim = Sim::new();
         sim.signal(Signal::Caret);
@@ -1442,19 +1602,49 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_added_in_the_middle_and_to_an_edit_never_read() {
+    fn keys_are_added_to_an_edit_never_read() {
         let mut sim = Sim::new();
         sim.signal(Signal::Caret);
-        sim.answer(ReadKind::Settle, read(FIELD, "say \u{2038}there"));
+        sim.answer(ReadKind::Settle, read(FIELD, "first\nsay \u{2038}  "));
         // Typed and sent before any read: its "before" with the keys.
-        sim.type_chars("hi ");
+        sim.type_chars("hi");
         sim.signal(Signal::Enter);
         sim.answer(ReadKind::Enter, read(FIELD, ""));
         let edit = &sim.finished[0];
-        assert_eq!(edit.before.as_deref(), Some("say there"));
-        assert_eq!(edit.after, "say hi there");
-        assert_eq!(edit.detail.keys_added, 3);
+        assert_eq!(edit.before.as_deref(), Some("say   "));
+        assert_eq!(edit.after, "say hi  ");
+        assert_eq!(edit.detail.keys_added, 2);
         assert!(sim.tracker.take_lost().is_empty());
+    }
+
+    #[test]
+    fn keys_are_never_added_before_text_on_the_carets_line() {
+        // An inline suggestion after the caret, overtyped by the keys: the
+        // edit stays as last read.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("Kind regar");
+        sim.answer(ReadKind::Pause, read(FIELD, "Kind regar\u{2038}ds"));
+        sim.type_chars("ds,");
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, "Kind regards,\n\u{2038}"));
+        let edit = &sim.finished[0];
+        assert_eq!(edit.after, "Kind regards");
+        assert_eq!(
+            (edit.detail.keys_after_read, edit.detail.keys_added),
+            (3, 0)
+        );
+
+        // Typed in the middle and sent before any read: nothing to store.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "say \u{2038}there"));
+        sim.type_chars("hi ");
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        assert!(sim.finished.is_empty());
+        assert_eq!(sim.tracker.take_lost(), [Ended::Submitted]);
     }
 
     #[test]
