@@ -2848,13 +2848,31 @@ impl UiaContext {
     }
 
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
+    /// It waits at most 250 ms for another client's creation (a capture
+    /// attempt's deadline must not wait longer).
     pub(crate) fn new() -> windows::core::Result<Self> {
-        Self::with_entered_text(false)
+        Self::create(false, Duration::from_millis(250))
     }
 
     /// As [`Self::new`]; `entered_text` adds the text-pattern availability
     /// the keyboard privacy worker's entered-text reads need to its probe.
+    /// It waits at most 2 s for another client's creation.
     pub(crate) fn with_entered_text(entered_text: bool) -> windows::core::Result<Self> {
+        Self::create(entered_text, Duration::from_secs(2))
+    }
+
+    fn create(entered_text: bool, wait: Duration) -> windows::core::Result<Self> {
+        // The tree and keyboard privacy workers start together, and at every
+        // start one of them failed its first attempt with E_FAIL, probably by
+        // creating its client at the same moment as the other: create them
+        // one at a time. A creation that hangs fails the other's attempt
+        // after `wait` instead of blocking it, so its retries and stop checks
+        // still run.
+        static CREATING: Mutex<()> = Mutex::new(());
+        const E_PENDING: windows::core::HRESULT = windows::core::HRESULT(0x8000_000A_u32 as i32);
+        let _creating = CREATING
+            .try_lock_for(wait)
+            .ok_or_else(|| windows::core::Error::from(E_PENDING))?;
         unsafe {
             // Do not fall back to the old class with its long default waits.
             let timeouts: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_ALL)?;

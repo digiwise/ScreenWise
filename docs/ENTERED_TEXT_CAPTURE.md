@@ -48,7 +48,11 @@ they move on, store it.**
   moves reach one paragraph further back, so the text read is cut to start
   at the paragraph before the caret's: otherwise the reads before and after
   typing on a new line cover different paragraphs, and the line above is
-  stored as if it had been replaced.
+  stored as if it had been replaced. The text is also cut at the end of the
+  caret's paragraph (its next `\r`, `\n` or U+2029), or of the selection's
+  end when the read finds it: a provider whose paragraph runs on past the
+  field's text (a chat app's buttons after its message box) adds nothing
+  after it.
 - An edit's **span** runs from its first edit key to its last, or to the
   Enter that ended it, as the tracker saw them. Keys typed after that Enter
   while it is read open the next edit, from the first of them, with no
@@ -99,7 +103,9 @@ they move on, store it.**
   `text_pattern_lines`; a window over 64 K UTF-16 units is discarded
   (`too_large`).
 - A read also returns where its **caret** is, by the text from the caret to
-  the end of the range read (a selection's start, flagged as a selection).
+  the end of the range read (a selection's start, flagged as a selection;
+  a paragraph read also places the selection's end the same way, when it
+  can).
 - Reads are bound to an **identity**: the verified UIA element (runtime id
   hash) and the native focus (foreground window, focus window, processes).
 - The **baseline** is the latest read taken while no edit was open and after
@@ -146,7 +152,15 @@ they move on, store it.**
   read since it began, its "after" is its "before" with the keys typed since
   added as above; one that cannot be completed that way is dropped and
   counted as `lost`. Stored "before"/"after" keep only the lines that differ
-  (the common leading and trailing lines are removed).
+  (the common leading and trailing lines are removed). Paragraph reads are
+  first lined up: each starts at the paragraph before its caret's, so after
+  the caret moved down a line (a new line typed, or an Enter read taken
+  before the new line showed) the "after" starts a line below the "before",
+  and the other way round after it moved up. When one read's first line
+  (not blank) is a later line of the other, the lines above it, which only
+  one read covers, are dropped rather than stored as changed; not when
+  either first line is repeated in the reads (a repeated line, not a moved
+  start), nor for an "after" that is the "before" with keys added.
 - Signals seen in the same 25 ms poll are taken as caret first, then editing.
 
 Reads happen 300 ms after the last edit key, 150 ms after Enter and 250 ms
@@ -285,8 +299,9 @@ happen while the user is not typing or moving the caret.
 - Hooks touch atomics and a preallocated lock-free channel only; UIA work
   stays on the keyboard privacy worker. The app of keystroke text is
   resolved by the input content worker, not the hook.
-- A read makes at most eighteen provider requests (six more for each
-  selection end moved onto the field's edge, seven more for a line window)
+- A read makes at most eighteen provider requests (three more for a
+  selection's end, six more for each selection end moved onto the field's
+  edge, seven more for a line window)
   plus the two of the focus recheck, within a 150 ms budget, and has
   its own per-process breaker scope
   and pacing gap (`uia_breaker::Scope::Read`, the probe's 1 s to 30 s
@@ -331,7 +346,10 @@ the UIA breaker metrics.
   "before" only at the prompt (also after an idle end), no "before" read
   another way, typing reads a second apart and a busy provider during typing,
   paragraph reads cut to the paragraph before the caret's (a new line after
-  Enter), and an edit's span from its first key to its last or its Enter.
+  Enter) and at the end of the caret's paragraph, or a selection's with a
+  known end (a chat app's buttons), reads starting at different paragraphs lined up (a line
+  typed below, an Enter read taken before the new line showed), and an
+  edit's span from its first key to its last or its Enter.
 - Breaker: a costly or slow read stops and paces reads but not probes; a
   slow probe paces reads too.
 - Storage and screening: `decide_ui_event` with a secret only in
@@ -374,6 +392,15 @@ the UIA breaker metrics.
   the prompt's text (`> quote` under a bare `>` prompt) starts the kept text
   there; a very long word-processor paragraph is read as its caret line
   (visual line) with no "before".
+- Paragraph reads: a chat app that draws its buttons on the caret's own line
+  after the text still adds them; an edit that moved the caret more than a
+  paragraph (several lines typed between reads) is not lined up, so the
+  paragraph above the first read is stored as changed; paragraphs after the
+  caret's are not read, so deleting them (Ctrl+Shift+End, then Delete) is
+  not seen, a line deleted forward (Delete at a line's end) shows as the
+  joined line typed, and a Backspace at a paragraph's start shows the
+  paragraph above the joined one as changed; a selection whose end the read
+  cannot place keeps the text after it (a chat app's buttons).
 - While a process's read breaker is open (1 s to 30 s), reads there cannot
   start; after 2 s the open edit and baseline are given up, counted only as
   `not_now`.

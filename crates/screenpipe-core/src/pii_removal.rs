@@ -1,7 +1,8 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 lazy_static! {
     static ref PII_PATTERNS: Vec<(Regex, &'static str)> = vec![
@@ -134,9 +135,10 @@ lazy_static! {
         // IBAN (International Bank Account Number)
         (Regex::new(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}(?:[A-Z0-9]?){0,16}\b").unwrap(), "IBAN"),
 
-        // Crypto seed phrases (12-24 BIP39 words - detect common patterns)
-        // This detects sequences of 12+ lowercase words that could be seed phrases
-        (Regex::new(r"(?i)\b(?:seed|recovery|mnemonic|backup)\s*(?:phrase|words?)?\s*[:\s]\s*(?:[a-z]+\s+){11,23}[a-z]+").unwrap(), "SEED_PHRASE"),
+        // Crypto seed phrases: a keyword, then 12 or more words. Only a run of
+        // at least 12 BIP39 English words among them is redacted
+        // (`seed_phrase_in`), so a sentence after "backup" is not.
+        (Regex::new(r"(?i)\b(?:seed|recovery|mnemonic|backup)\s*(?:phrase|words?)?\s*[:\s]\s*((?:[a-z]+\s+){11,}[a-z]+)").unwrap(), SEED_PHRASE),
 
         // 2FA backup codes (common formats: XXXX-XXXX, XXXXXXXX, etc.)
         (Regex::new(r"(?i)(?:backup|recovery|2fa|totp)\s*(?:code|key)s?\s*[:\s]\s*(?:[A-Z0-9]{4,8}[-\s]?){2,}").unwrap(), "BACKUP_CODE"),
@@ -165,6 +167,54 @@ lazy_static! {
     static ref PII_REGEX_SET: RegexSet = RegexSet::new(
         PII_PATTERNS.iter().map(|(re, _)| re.as_str())
     ).unwrap();
+
+    /// The BIP39 English word list (bitcoin/bips `bip-0039/english.txt`).
+    static ref BIP39_WORDS: HashSet<&'static str> =
+        include_str!("../assets/bip39-english.txt").lines().collect();
+
+    static ref WORD: Regex = Regex::new(r"(?i)[a-z]+").unwrap();
+}
+
+const SEED_PHRASE: &str = "SEED_PHRASE";
+
+/// Where the `SEED_PHRASE` pattern (`pattern`) finds a seed phrase in `text`
+/// from byte `from`: its keyword through the first run of at least 12
+/// consecutive BIP39 words among its words (any words before the run, such
+/// as "my new wallet", are redacted with it). A match without such a run is
+/// searched again from its next character, so a later keyword inside it
+/// still counts.
+fn seed_phrase_in(pattern: &Regex, text: &str, mut from: usize) -> Option<Range<usize>> {
+    while let Some(found) = pattern.captures_at(text, from) {
+        let (whole, words) = (found.get(0)?, found.get(1)?);
+        let (mut run, mut end) = (0, None);
+        for word in WORD.find_iter(words.as_str()) {
+            if BIP39_WORDS.contains(word.as_str().to_lowercase().as_str()) {
+                run += 1;
+                if run >= 12 {
+                    end = Some(words.start() + word.end());
+                }
+            } else if end.is_some() {
+                break;
+            } else {
+                run = 0;
+            }
+        }
+        if let Some(end) = end {
+            return Some(whole.start()..end);
+        }
+        from = whole.start() + text[whole.start()..].chars().next()?.len_utf8();
+    }
+    None
+}
+
+/// Whether pattern `idx` of [`PII_PATTERNS`] finds PII in `text`.
+fn pattern_finds(idx: usize, text: &str) -> bool {
+    let (pattern, pii_type) = &PII_PATTERNS[idx];
+    if *pii_type == SEED_PHRASE {
+        seed_phrase_in(pattern, text, 0).is_some()
+    } else {
+        pattern.is_match(text)
+    }
 }
 
 /// Represents a region in an image that contains PII and should be redacted
@@ -185,7 +235,11 @@ pub struct PiiRegion {
 pub fn remove_pii(text: &str) -> String {
     // Fast path: single RegexSet DFA pass checks all patterns at once.
     // Most captured text has zero PII, so we avoid 27 individual replace_all calls.
-    let matches: Vec<usize> = PII_REGEX_SET.matches(text).into_iter().collect();
+    let matches: Vec<usize> = PII_REGEX_SET
+        .matches(text)
+        .into_iter()
+        .filter(|&idx| pattern_finds(idx, text))
+        .collect();
     if matches.is_empty() {
         return text.to_string();
     }
@@ -202,6 +256,14 @@ pub fn remove_pii(text: &str) -> String {
             continue; // Already handled above
         }
         let replacement_bracketed = format!("[{}]", replacement);
+        if *replacement == SEED_PHRASE {
+            let mut from = 0;
+            while let Some(found) = seed_phrase_in(pattern, &sanitized, from) {
+                sanitized.replace_range(found.clone(), &replacement_bracketed);
+                from = found.start + replacement_bracketed.len();
+            }
+            continue;
+        }
         sanitized = pattern
             .replace_all(&sanitized, replacement_bracketed.as_str())
             .to_string();
@@ -230,17 +292,17 @@ pub fn remove_pii_from_text_json(
 
 /// Check if a given text contains PII
 pub fn contains_pii(text: &str) -> bool {
-    PII_REGEX_SET.is_match(text)
+    PII_REGEX_SET
+        .matches(text)
+        .into_iter()
+        .any(|idx| pattern_finds(idx, text))
 }
 
 /// Get the PII type for a given text, if any
 pub fn get_pii_type(text: &str) -> Option<String> {
-    for (pattern, pii_type) in PII_PATTERNS.iter() {
-        if pattern.is_match(text) {
-            return Some(pii_type.to_string());
-        }
-    }
-    None
+    (0..PII_PATTERNS.len())
+        .find(|&idx| pattern_finds(idx, text))
+        .map(|idx| PII_PATTERNS[idx].1.to_string())
 }
 
 /// Detect PII regions from OCR text_json output with bounding boxes.
@@ -1161,11 +1223,40 @@ mod tests {
         let seed = "seed phrase: abandon ability able about above absent absorb abstract absurd abuse access accident";
         assert!(contains_pii(seed));
 
-        let recovery = "recovery words: witch collapse practice feed shame open despair creek road again ice least";
+        let recovery = "recovery words: wisdom collect practice feed share open despair creek road again ice lecture";
         assert!(contains_pii(recovery));
 
         let result = remove_pii(seed);
         assert!(result.contains("[SEED_PHRASE]"));
+    }
+
+    #[test]
+    fn test_seed_phrase_needs_bip39_words() {
+        // Ordinary sentences after a keyword are kept.
+        let question = "Do we have a backup of the database from last week before the migration ran on the server?";
+        assert!(!contains_pii(question));
+        assert_eq!(remove_pii(question), question);
+        assert_eq!(get_pii_type(question), None);
+
+        // A seed phrase's words are redacted; words after it are kept.
+        let seed = "Recovery phrase: WISDOM collect practice feed share open despair creek road again ice lecture and we left";
+        assert_eq!(get_pii_type(seed).as_deref(), Some("SEED_PHRASE"));
+        assert_eq!(remove_pii(seed), "[SEED_PHRASE] and we left");
+
+        // A keyword inside a rejected match still finds the phrase after it.
+        let later = "backup of the old plan is on the shared drive and the new seed phrase: abandon ability able about above absent absorb abstract absurd abuse access accident";
+        assert_eq!(
+            remove_pii(later),
+            "backup of the old plan is on the shared drive and the new [SEED_PHRASE]"
+        );
+
+        // Words before the phrase are redacted with it.
+        let filler = "Backup words: my new wallet abandon ability able about above absent absorb abstract absurd abuse access accident.";
+        assert_eq!(remove_pii(filler), "[SEED_PHRASE].");
+
+        // Eleven BIP39 words are not a seed phrase.
+        let short = "seed phrase: abandon ability able about above absent absorb abstract absurd abuse access and more";
+        assert!(!contains_pii(short));
     }
 
     #[test]

@@ -245,6 +245,8 @@ pub struct CaretAt {
     pub offset: usize,
     /// A selection, not a bare caret: typed characters cannot be placed.
     pub selection: bool,
+    /// Byte offset of a selection's end in the text, when known.
+    pub selection_end: Option<usize>,
 }
 
 /// The focused field's text at the caret, as one read returned it.
@@ -306,8 +308,28 @@ impl CaretText {
             }
         } else {
             let start = caret.map_or(0, |at| previous_paragraph(&text[..at.offset]));
-            let caret = caret.filter(|at| !at.selection).map(|at| at.offset - start);
-            (text[start..].to_string(), caret, None, false)
+            // A read ends with the paragraph of the caret (or of a selection's
+            // end, when known): a provider whose paragraph runs on past the
+            // field's text (a chat app's buttons after its message box) adds
+            // nothing after it.
+            let last = caret.and_then(|at| match at.selection {
+                false => Some(at.offset),
+                true => at
+                    .selection_end
+                    .filter(|&end| end >= at.offset && text.is_char_boundary(end)),
+            });
+            let end = last.map_or(text.len(), |at| {
+                text[at..]
+                    .find(PARAGRAPH_BREAKS)
+                    .map_or(text.len(), |len| at + len)
+            });
+            let caret = caret.filter(|at| !at.selection).map(|at| at.offset);
+            (
+                text[start..end].to_string(),
+                caret.map(|at| at - start),
+                None,
+                false,
+            )
         };
         let mut end = text.len().min(MAX_READ_BYTES);
         while !text.is_char_boundary(end) {
@@ -663,6 +685,28 @@ impl FinishedEdit {
     pub fn detail_json(&self) -> String {
         serde_json::to_string(&self.detail).unwrap_or_default()
     }
+}
+
+/// Paragraph reads of one edit with their first lines lined up. Each starts
+/// at the paragraph before its caret's ([`CaretText::new`]), so a caret moved
+/// down a line (a new line typed) starts the "after" a line below the
+/// "before", and a caret moved up the other way round: the lines above the
+/// other read's first line, which only one read covers, are dropped rather
+/// than stored as changed. Not when either first line is repeated (in its own
+/// read or the other), which may be a repeated line rather than a moved
+/// start, and a blank first line is too common to line up by.
+fn aligned<'a>(before: &'a [String], after: &'a [String]) -> (&'a [String], &'a [String]) {
+    // `lines` from `other`'s first line on, when that is a later line of it.
+    let below = |lines: &'a [String], other: &'a [String]| {
+        let first = other.first().filter(|line| !line.trim().is_empty())?;
+        let at = lines.iter().position(|line| line == first)?;
+        let repeated = other[1..].contains(first) || other.contains(&lines[0]);
+        (at > 0 && !repeated).then(|| &lines[at..])
+    };
+    if let Some(before) = below(before, after) {
+        return (before, after);
+    }
+    (before, below(after, before).unwrap_or(after))
 }
 
 /// Remove the lines `before` and `after` share at the start and at the end,
@@ -1028,6 +1072,8 @@ impl EditTracker {
         let added = (ended != Ended::FocusChanged)
             .then(|| read.with_typed(&self.typed, edits))
             .flatten();
+        // The "before" itself with keys added: one read, nothing to line up.
+        let one_read = open.after.is_none();
         let (after, keys_added) = match (added, open.after) {
             (Some(added), _) => added,
             (None, Some(after)) => (after, 0),
@@ -1044,7 +1090,12 @@ impl EditTracker {
             .filter(|before| before.target == after.target && before.source == after.source);
         let (before_lines, after_lines) = match &before {
             Some(before) => {
-                let (b, a) = changed_lines(&before.lines, &after.lines);
+                let (b, a) = if one_read || after.source == TextSource::TextPatternLines {
+                    (before.lines.as_slice(), after.lines.as_slice())
+                } else {
+                    aligned(&before.lines, &after.lines)
+                };
+                let (b, a) = changed_lines(b, a);
                 if b == a {
                     return None;
                 }
@@ -1096,6 +1147,7 @@ mod tests {
         let caret = text.find(CARET).map(|offset| CaretAt {
             offset,
             selection: false,
+            selection_end: None,
         });
         (text.replacen(CARET, "", 1), caret)
     }
@@ -1122,6 +1174,7 @@ mod tests {
         let caret = caret.or(Some(CaretAt {
             offset: text.trim_end_matches(['\r', '\n']).len(),
             selection: false,
+            selection_end: None,
         }));
         ReadOutcome::Text(CaretText::new(
             target,
@@ -1754,6 +1807,7 @@ mod tests {
             Some(CaretAt {
                 offset: 0,
                 selection: true,
+                selection_end: Some(8),
             }),
             false,
             TextSource::TextPattern,
@@ -2286,6 +2340,110 @@ mod tests {
         let (cb, ca) = changed_lines(&b, &a);
         assert!(cb.is_empty());
         assert_eq!(ca, &a[2..]);
+    }
+
+    #[test]
+    fn reads_starting_at_different_paragraphs_are_lined_up() {
+        let lines = |s: &str| s.split('\n').map(str::to_string).collect::<Vec<_>>();
+        // Caret moved down: the "before" starts a line higher.
+        let (b, a) = (lines("intro\nKind regards,"), lines("Kind regards,\nName"));
+        assert_eq!(aligned(&b, &a), (&b[1..], &a[..]));
+        // Caret moved up: the "after" starts a line higher.
+        let (b, a) = (lines("two\nthree"), lines("one\ntwo\nthree!"));
+        assert_eq!(aligned(&b, &a), (&b[..], &a[1..]));
+        // Same start, or a blank first line: left as read.
+        let (b, a) = (lines("one\ntwo\none"), lines("one\nTWO"));
+        assert_eq!(aligned(&b, &a), (&b[..], &a[..]));
+        let (b, a) = (lines("x\n"), lines("\ny"));
+        assert_eq!(aligned(&b, &a), (&b[..], &a[..]));
+        // A repeated line is not a moved start (keys added to the first of
+        // two equal rows).
+        let (b, a) = (lines("ab\nab"), lines("abc\nab"));
+        assert_eq!(aligned(&b, &a), (&b[..], &a[..]));
+        let (b, a) = (lines("abc\nab"), lines("ab\nab"));
+        assert_eq!(aligned(&b, &a), (&b[..], &a[..]));
+    }
+
+    #[test]
+    fn a_line_typed_below_is_stored_without_the_paragraph_above() {
+        // The read at Enter still had its caret on the line above, so the
+        // next edit's "before" starts a paragraph higher than its "after".
+        let mut sim = Sim::new();
+        let signed = "We can give you an estimate.\nKind regards,\u{2038}";
+        sim.signal(Signal::Caret);
+        sim.answer(
+            ReadKind::Settle,
+            read(FIELD, "We can give you an estimate.\nKind regards\u{2038}"),
+        );
+        sim.type_keys(1);
+        sim.answer(ReadKind::Pause, read(FIELD, signed));
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, signed));
+        assert_eq!(sim.finished[0].after, "Kind regards,");
+        sim.type_keys(6);
+        sim.answer(
+            ReadKind::Pause,
+            read(FIELD, "Kind regards,\nClancy\u{2038}"),
+        );
+        sim.signal(Signal::Caret); // click elsewhere
+        sim.tick(Duration::from_millis(25));
+        let edit = &sim.finished[1];
+        assert_eq!(edit.before.as_deref(), Some(""));
+        assert_eq!(edit.after, "Clancy");
+    }
+
+    #[test]
+    fn a_bare_carets_paragraph_read_ends_with_its_paragraph() {
+        let lines = |text: &str, selection: bool| {
+            let (text, caret) = with_caret(text);
+            let caret = caret.map(|at| CaretAt { selection, ..at });
+            let text = CaretText::new(
+                FIELD,
+                0,
+                &text,
+                caret,
+                false,
+                TextSource::TextPattern,
+                None,
+                String::new(),
+                None,
+            );
+            text.lines
+        };
+        // A chat app's buttons after its message box's text.
+        assert_eq!(
+            lines("Hello there\u{2038}\nAdd files\n\u{FFFC}\nSend", false),
+            ["Hello there"]
+        );
+        assert_eq!(lines("one\ntw\u{2038}o\r\nthree", false), ["one", "two"]);
+        // A soft line break is within its paragraph.
+        assert_eq!(
+            lines("on\u{2038}e\u{2028}more\nnext", false),
+            ["one", "more"]
+        );
+        // A selection ends with the paragraph of its end, when known.
+        let selection = |end: Option<usize>| {
+            let caret = CaretAt {
+                offset: 1,
+                selection: true,
+                selection_end: end,
+            };
+            CaretText::new(
+                FIELD,
+                0,
+                "one\ntwo\nSend",
+                Some(caret),
+                false,
+                TextSource::TextPattern,
+                None,
+                String::new(),
+                None,
+            )
+            .lines
+        };
+        assert_eq!(selection(Some(5)), ["one", "two"]);
+        assert_eq!(selection(None), ["one", "two", "Send"]);
+        assert_eq!(lines("on\u{2038}e\ntwo", true), ["one", "two"]);
     }
 
     #[test]

@@ -19,9 +19,9 @@ use crate::entered_text::{
     needs_line_window, CaretAt, ReadFailure, TextSource, MAX_READ_BYTES, MAX_READ_LINES,
 };
 
-/// A read's total budget (up to eighteen provider requests, six more for
-/// each selection end moved onto the element's edge and seven more for a
-/// line window, then the two of the focus recheck): under the probe's,
+/// A read's total budget (up to eighteen provider requests, three more for a
+/// selection's end, six more for each selection end moved onto the element's
+/// edge and seven more for a line window, then the two of the focus recheck): under the probe's,
 /// because the keyboard privacy worker probes nothing while it runs.
 pub(super) const READ_BUDGET: Duration = Duration::from_millis(150);
 
@@ -233,27 +233,36 @@ pub(super) unsafe fn read_field_text(
             let too_long = text.len() >= max as usize;
             Ok::<_, ReadFailure>((too_long, whole_field, text.to_string()))
         };
-        // Where the caret is in `text`, read from `range`: by the text from
-        // the caret to the range's end, which `text` must end with.
-        let caret_in = |range: &IUIAutomationTextRange, text: &str, max| {
+        // Where an endpoint of the caret is in `text`, read from `range`: by
+        // the text from it to the range's end, which `text` must end with.
+        let offset_of = |range: &IUIAutomationTextRange, text: &str, endpoint, max| {
             let tail = calls.call(|| range.Clone())?;
             calls.call(|| {
-                tail.MoveEndpointByRange(
-                    TextPatternRangeEndpoint_Start,
-                    &caret,
-                    TextPatternRangeEndpoint_Start,
-                )
+                tail.MoveEndpointByRange(TextPatternRangeEndpoint_Start, &caret, endpoint)
             })?;
             let tail = calls.call(|| tail.GetText(max))?.to_string();
-            Ok::<_, ReadFailure>(text.ends_with(&tail).then(|| CaretAt {
-                offset: text.len() - tail.len(),
+            Ok::<_, ReadFailure>(text.ends_with(&tail).then(|| text.len() - tail.len()))
+        };
+        // Where the caret is in `text`, and with `with_end` a selection's
+        // end, for a paragraph read to end with its paragraph.
+        let caret_in = |range: &IUIAutomationTextRange, text: &str, max, with_end: bool| {
+            let Some(offset) = offset_of(range, text, TextPatternRangeEndpoint_Start, max)? else {
+                return Ok(None);
+            };
+            let selection_end = match selection && with_end {
+                true => offset_of(range, text, TextPatternRangeEndpoint_End, max)?,
+                false => None,
+            };
+            Ok::<_, ReadFailure>(Some(CaretAt {
+                offset,
                 selection,
+                selection_end,
             }))
         };
         let (too_long, whole_field, text) =
             read_around(&range, TextUnit_Paragraph, -2, 1, MAX_READ_CHARS)?;
         if !needs_line_window(&text, too_long, whole_field) {
-            let caret = caret_in(&range, &text, MAX_READ_CHARS)?;
+            let caret = caret_in(&range, &text, MAX_READ_CHARS, true)?;
             return Ok(FieldText {
                 text,
                 caret,
@@ -275,7 +284,7 @@ pub(super) unsafe fn read_field_text(
         if too_long {
             return Err(ReadFailure::TooLarge);
         }
-        let Some(caret) = caret_in(&lines, &text, MAX_WINDOW_CHARS)? else {
+        let Some(caret) = caret_in(&lines, &text, MAX_WINDOW_CHARS, false)? else {
             return Err(ReadFailure::NoTextSource);
         };
         return Ok(FieldText {
