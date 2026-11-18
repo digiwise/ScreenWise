@@ -16,13 +16,12 @@ use windows::Win32::UI::Accessibility::{
 
 use super::budget::{UiaLimits, UiaStop, WalkBudget};
 use crate::entered_text::{
-    needs_line_window, prompt_lines, ReadFailure, TextSource, MAX_READ_BYTES, MAX_READ_LINES,
+    needs_line_window, CaretAt, ReadFailure, TextSource, MAX_READ_BYTES, MAX_READ_LINES,
 };
 
-/// A read's total budget (up to thirteen provider requests, six more for
-/// each selection end moved onto the element's edge,
-/// seven more for a line window and eight for the lines below a chat
-/// prompt's caret, then the two of the focus recheck): under the probe's,
+/// A read's total budget (up to eighteen provider requests, six more for
+/// each selection end moved onto the element's edge and seven more for a
+/// line window, then the two of the focus recheck): under the probe's,
 /// because the keyboard privacy worker probes nothing while it runs.
 pub(super) const READ_BUDGET: Duration = Duration::from_millis(150);
 
@@ -30,15 +29,17 @@ pub(super) const READ_BUDGET: Duration = Duration::from_millis(150);
 /// so a longer text is known to be truncated.
 const MAX_READ_CHARS: i32 = MAX_READ_BYTES as i32 + 1;
 
-/// UTF-16 code units requested for a line window: room for [`MAX_READ_LINES`]
-/// wide terminal lines. The window is cut to its prompt before the read's
-/// bounds apply; a longer one is discarded (its caret's line would be cut
-/// off).
-const MAX_WINDOW_CHARS: i32 = 32 * 1024;
+/// UTF-16 code units requested for a line window: room for twice
+/// [`MAX_READ_LINES`] wide terminal lines. The window is cut to its input
+/// before the read's bounds apply; a longer one is discarded (its caret's
+/// line could be cut off).
+const MAX_WINDOW_CHARS: i32 = 64 * 1024;
 
 /// The text one read returned, before the tracker's bounds.
 pub(super) struct FieldText {
     pub text: String,
+    /// Where the caret is in `text`, when known.
+    pub caret: Option<CaretAt>,
     pub truncated: bool,
     pub source: TextSource,
 }
@@ -131,8 +132,10 @@ impl<'a> ProviderCalls<'a> {
 /// selection's) to the end of the caret's (or the selection's last)
 /// paragraph, within the element. When that is no paragraph read
 /// ([`needs_line_window`]), a line window of up to [`MAX_READ_LINES`] lines
-/// up to and including the caret's (and as many after it, after a chat
-/// prompt) is read instead and cut to its prompt's input ([`prompt_lines`]).
+/// before the caret's, the caret's and as many after it is read instead, for
+/// the tracker to cut to the input at its prompt
+/// (`crate::entered_text::CaretText::new`). The caret's place in the text is
+/// returned with it.
 ///
 /// # Safety
 /// COM must be initialized on this thread and `element` must be a live
@@ -196,6 +199,16 @@ pub(super) unsafe fn read_field_text(
                 calls.call(|| range.MoveEndpointByRange(other, &range, endpoint))?;
             }
         }
+        // The caret (the selection's start), kept for its place in the text
+        // read, and whether a selection replaces it.
+        let caret = calls.call(|| range.Clone())?;
+        let selection = calls.call(|| {
+            range.CompareEndpoints(
+                TextPatternRangeEndpoint_Start,
+                &range,
+                TextPatternRangeEndpoint_End,
+            )
+        })? != 0;
         // Kept at the caret for a line window.
         let lines = calls.call(|| range.Clone())?;
         // Move the start of `range` by `before` units and its end by `after`
@@ -203,11 +216,8 @@ pub(super) unsafe fn read_field_text(
         // and read at most `max` UTF-16 code units. Also says whether it spans
         // the element's whole text.
         let read_around = |range: &IUIAutomationTextRange, unit, before, after, max| {
-            if before != 0 {
-                calls.call(|| {
-                    range.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, unit, before)
-                })?;
-            }
+            calls
+                .call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, unit, before))?;
             calls.call(|| range.MoveEndpointByUnit(TextPatternRangeEndpoint_End, unit, after))?;
             let mut whole_field = true;
             for (endpoint, outside) in edges {
@@ -221,51 +231,54 @@ pub(super) unsafe fn read_field_text(
             let too_long = text.len() >= max as usize;
             Ok::<_, ReadFailure>((too_long, whole_field, text.to_string()))
         };
+        // Where the caret is in `text`, read from `range`: by the text from
+        // the caret to the range's end, which `text` must end with.
+        let caret_in = |range: &IUIAutomationTextRange, text: &str, max| {
+            let tail = calls.call(|| range.Clone())?;
+            calls.call(|| {
+                tail.MoveEndpointByRange(
+                    TextPatternRangeEndpoint_Start,
+                    &caret,
+                    TextPatternRangeEndpoint_Start,
+                )
+            })?;
+            let tail = calls.call(|| tail.GetText(max))?.to_string();
+            Ok::<_, ReadFailure>(text.ends_with(&tail).then(|| CaretAt {
+                offset: text.len() - tail.len(),
+                selection,
+            }))
+        };
         let (too_long, whole_field, text) =
             read_around(&range, TextUnit_Paragraph, -2, 1, MAX_READ_CHARS)?;
         if !needs_line_window(&text, too_long, whole_field) {
+            let caret = caret_in(&range, &text, MAX_READ_CHARS)?;
             return Ok(FieldText {
                 text,
+                caret,
                 truncated: false,
                 source: TextSource::TextPattern,
             });
         }
         // The provider's paragraphs are not paragraphs (a terminal's whole
-        // buffer) or hold more than a read keeps: read the lines up to the
-        // caret's and keep its prompt's input, with the lines after the
-        // caret's when that is a chat prompt's.
-        let (too_long, _, above) = read_around(
+        // buffer) or hold more than a read keeps: read the lines around the
+        // caret's, for the tracker to cut to the input at its prompt. Kept
+        // only around a known caret.
+        let (too_long, _, text) = read_around(
             &lines,
             TextUnit_Line,
             -(MAX_READ_LINES as i32 - 1),
-            1,
+            MAX_READ_LINES as i32 + 1,
             MAX_WINDOW_CHARS,
         )?;
         if too_long {
             return Err(ReadFailure::TooLarge);
         }
-        let below = || {
-            let below = calls.call(|| lines.Clone())?;
-            calls.call(|| {
-                below.MoveEndpointByRange(
-                    TextPatternRangeEndpoint_Start,
-                    &lines,
-                    TextPatternRangeEndpoint_End,
-                )
-            })?;
-            match read_around(
-                &below,
-                TextUnit_Line,
-                0,
-                MAX_READ_LINES as i32,
-                MAX_WINDOW_CHARS,
-            )? {
-                (true, _, _) => Err(ReadFailure::TooLarge),
-                (false, _, text) => Ok(text),
-            }
+        let Some(caret) = caret_in(&lines, &text, MAX_WINDOW_CHARS)? else {
+            return Err(ReadFailure::NoTextSource);
         };
         return Ok(FieldText {
-            text: prompt_lines(&above, below)?,
+            text,
+            caret: Some(caret),
             truncated: false,
             source: TextSource::TextPatternLines,
         });
@@ -278,6 +291,7 @@ pub(super) unsafe fn read_field_text(
             String::from_utf16_lossy(&value.as_wide()[..value.len().min(MAX_READ_CHARS as usize)]);
         return Ok(FieldText {
             text: value,
+            caret: None,
             truncated,
             source: TextSource::Value,
         });

@@ -17,8 +17,8 @@ use serde::{Serialize, Serializer};
 
 /// A read window keeps at most this many bytes of text.
 pub const MAX_READ_BYTES: usize = 4096;
-/// A read window keeps at most this many lines; a line window (see
-/// [`prompt_lines`]) looks this many lines up for a prompt.
+/// A read window keeps at most this many lines; a line window reads this
+/// many lines above and below the caret's ([`cut_window`]).
 pub const MAX_READ_LINES: usize = 50;
 
 /// What a read splits lines at (`\r\n` is one break).
@@ -102,13 +102,46 @@ pub fn classify_key(vk: u16, modifiers: u8) -> Option<Signal> {
     }
 }
 
-/// Counters written by the input hooks. Atomics only: no locks, allocation
-/// or key identity, so noting a signal never delays the input queue.
-#[derive(Debug, Default)]
+/// A character an admitted edit key typed ([`EditSignals::note_char`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypedChar {
+    /// The edit count with this key: its place among the edit keys.
+    edit: u64,
+    ch: char,
+    /// The native focus it was typed into ([`CaretText::new`]'s `focus`).
+    focus: u64,
+}
+
+/// Typed characters held for the tracker; more are dropped (the edits they
+/// belong to then get none added).
+const MAX_TYPED_CHARS: usize = 256;
+
+/// Written by the input hooks: counters, and the characters keystroke
+/// capture admitted for edit keys. Atomics and a preallocated lock-free
+/// channel only: no locks or allocation, so noting never delays the input
+/// queue.
+#[derive(Debug)]
 pub struct EditSignals {
     edits: AtomicU64,
     carets: AtomicU64,
     enters: AtomicU64,
+    enter_edits: AtomicU64,
+    typed: (
+        crossbeam_channel::Sender<TypedChar>,
+        crossbeam_channel::Receiver<TypedChar>,
+    ),
+}
+
+impl Default for EditSignals {
+    fn default() -> Self {
+        Self {
+            edits: AtomicU64::default(),
+            carets: AtomicU64::default(),
+            enters: AtomicU64::default(),
+            enter_edits: AtomicU64::default(),
+            typed: crossbeam_channel::bounded(MAX_TYPED_CHARS),
+        }
+    }
 }
 
 /// One reading of [`EditSignals`].
@@ -117,24 +150,45 @@ pub struct SignalCounts {
     pub edits: u64,
     pub carets: u64,
     pub enters: u64,
+    /// The edit count when the latest Enter was pressed.
+    pub enter_edits: u64,
 }
 
 impl EditSignals {
     pub fn note(&self, signal: Signal) {
-        let counter = match signal {
-            Signal::Edit => &self.edits,
-            Signal::Caret => &self.carets,
-            Signal::Enter => &self.enters,
+        match signal {
+            Signal::Edit => self.edits.fetch_add(1, Ordering::Relaxed),
+            Signal::Caret => self.carets.fetch_add(1, Ordering::Relaxed),
+            Signal::Enter => {
+                // At the key: edit keys after it are the next edit's.
+                self.enter_edits
+                    .store(self.edits.load(Ordering::Relaxed), Ordering::Relaxed);
+                self.enters.fetch_add(1, Ordering::Release)
+            }
         };
-        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn counts(&self) -> SignalCounts {
+        // An Enter seen comes with its own edit count.
+        let enters = self.enters.load(Ordering::Acquire);
         SignalCounts {
             edits: self.edits.load(Ordering::Relaxed),
             carets: self.carets.load(Ordering::Relaxed),
-            enters: self.enters.load(Ordering::Relaxed),
+            enters,
+            enter_edits: self.enter_edits.load(Ordering::Relaxed),
         }
+    }
+
+    /// The character the edit key just noted typed into the native focus
+    /// `focus`, once keystroke capture admitted it there.
+    pub fn note_char(&self, ch: char, focus: u64) {
+        let edit = self.edits.load(Ordering::Relaxed);
+        let _ = self.typed.0.try_send(TypedChar { edit, ch, focus });
+    }
+
+    /// The characters noted since the last call.
+    pub fn take_typed(&self) -> Vec<TypedChar> {
+        self.typed.1.try_iter().collect()
     }
 }
 
@@ -159,8 +213,8 @@ pub enum ReadKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextSource {
     TextPattern,
-    /// A line window through the text pattern, cut to its prompt
-    /// ([`prompt_lines`]).
+    /// A line window through the text pattern, cut to the input at its
+    /// prompt ([`cut_window`]).
     TextPatternLines,
     Value,
 }
@@ -181,31 +235,74 @@ impl Serialize for TextSource {
     }
 }
 
+/// Where the caret is in a read's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaretAt {
+    /// Byte offset of the caret (a selection's start) in the text.
+    pub offset: usize,
+    /// A selection, not a bare caret: typed characters cannot be placed.
+    pub selection: bool,
+}
+
 /// The focused field's text at the caret, as one read returned it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaretText {
     /// Opaque identity of the field and native focus the text belongs to.
     pub target: u64,
+    /// Opaque identity of the native focus alone, as typed characters carry
+    /// it ([`EditSignals::note_char`]).
+    focus: u64,
     lines: Vec<String>,
     truncated: bool,
     pub source: TextSource,
+    /// The bare caret's line and byte column in `lines`, when known.
+    caret: Option<(usize, usize)>,
+    /// A line window's prompt ([`Prompt`]).
+    prompt: Option<Prompt>,
+    /// A line window with its caret right after its prompt and no input: the
+    /// only kind that may be a "before".
+    at_empty_prompt: bool,
+    /// Edit counts when the read started and ended (set by the tracker).
+    edits: (u64, u64),
     /// The app and window the text was read from (verified native focus).
     pub app_name: String,
     pub window_title: Option<String>,
 }
 
 impl CaretText {
-    /// Split `text` into lines and apply the read bounds
-    /// ([`MAX_READ_BYTES`], [`MAX_READ_LINES`]). `truncated` reports that the
-    /// reader already cut the text short.
+    /// One read: `text` with the caret at `caret`. A line window
+    /// ([`TextSource::TextPatternLines`]) is first cut to the input at its
+    /// prompt ([`cut_window`]; `prompt` is the open edit's, if it has one),
+    /// and is kept only around a known caret. Then the read bounds apply
+    /// ([`MAX_READ_BYTES`], [`MAX_READ_LINES`]); `truncated` reports that
+    /// the reader already cut the text short.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         target: u64,
+        focus: u64,
         text: &str,
+        caret: Option<CaretAt>,
         truncated: bool,
         source: TextSource,
+        prompt: Option<&Prompt>,
         app_name: String,
         window_title: Option<String>,
     ) -> Self {
+        let caret = caret.filter(|at| text.is_char_boundary(at.offset));
+        let (text, caret, prompt, at_empty_prompt) = if source == TextSource::TextPatternLines {
+            match caret.map(|at| (at.selection, cut_window(text, at.offset, prompt))) {
+                Some((selection, window)) => (
+                    window.text,
+                    (!selection).then_some(window.caret),
+                    window.prompt,
+                    window.at_empty_prompt,
+                ),
+                None => (String::new(), None, None, false),
+            }
+        } else {
+            let caret = caret.filter(|at| !at.selection).map(|at| at.offset);
+            (text.to_string(), caret, None, false)
+        };
         let mut end = text.len().min(MAX_READ_BYTES);
         while !text.is_char_boundary(end) {
             end -= 1;
@@ -216,11 +313,20 @@ impl CaretText {
             lines.truncate(MAX_READ_LINES);
             truncated = true;
         }
+        let caret = caret
+            .filter(|&at| at <= end)
+            .map(|at| locate(&text[..at]))
+            .filter(|&(row, _)| row < lines.len());
         Self {
             target,
+            focus,
             lines,
             truncated,
             source,
+            caret,
+            prompt,
+            at_empty_prompt,
+            edits: (0, 0),
             app_name,
             window_title,
         }
@@ -232,17 +338,37 @@ impl CaretText {
     }
 
     /// This read as the next edit's "before". A line window qualifies only
-    /// when it is a shell prompt line alone, or starts at a chat prompt (whose
-    /// input can wrap over rows): otherwise (output still being written after
-    /// Enter, a click into the output) its lines may be output, not entered
-    /// text.
+    /// with its caret right after its prompt and no input: otherwise (output
+    /// still being written after Enter, a click into the output) its lines
+    /// may be output, not entered text.
     fn into_baseline(self) -> Option<Self> {
-        let at_prompt = match self.lines.as_slice() {
-            [line] => is_prompt_line(line),
-            [first, ..] => prompt_of(first) == Some(Prompt::Chat),
-            [] => false,
-        };
-        (self.source != TextSource::TextPatternLines || at_prompt).then_some(self)
+        (self.source != TextSource::TextPatternLines || self.at_empty_prompt).then_some(self)
+    }
+
+    /// This read with the characters typed after it inserted at its caret
+    /// (`typed`, for edit keys up to the count `edits`), and how many. Only
+    /// when no edit key arrived while it was read, it has a bare caret, and
+    /// every edit key since typed exactly one character into its native
+    /// focus: a Backspace, Delete, paste or IME input among them (no
+    /// character), or one typed elsewhere, adds nothing.
+    fn with_typed(&self, typed: &[TypedChar], edits: u64) -> Option<(Self, u64)> {
+        let (started, ended) = self.edits;
+        let (row, column) = self.caret?;
+        if started != ended || edits <= ended {
+            return None;
+        }
+        let keys = (ended + 1..=edits)
+            .map(|edit| {
+                typed
+                    .iter()
+                    .find(|typed| typed.edit == edit && typed.focus == self.focus)
+                    .map(|typed| typed.ch)
+            })
+            .collect::<Option<String>>()?;
+        let mut text = self.clone();
+        text.lines[row].insert_str(column, &keys);
+        text.caret = Some((row, column + keys.len()));
+        Some((text, edits - ended))
     }
 }
 
@@ -252,6 +378,13 @@ fn lines_of(text: &str) -> Vec<String> {
         .split(LINE_BREAKS)
         .map(str::to_string)
         .collect()
+}
+
+/// The line and byte column, in [`lines_of`]'s lines, of the end of `head`
+/// (a text up to its caret).
+fn locate(head: &str) -> (usize, usize) {
+    let lines = lines_of(head);
+    (lines.len() - 1, lines[lines.len() - 1].len())
 }
 
 // ---------------------------------------------------------------------------
@@ -272,92 +405,94 @@ pub fn needs_line_window(paragraphs: &str, too_long: bool, whole_field: bool) ->
     too_long || (whole_field && lines_of(paragraphs).len() > MAX_WHOLE_FIELD_PARAGRAPH_LINES)
 }
 
-/// Box-drawing characters: a terminal app's borders around and below its
-/// input.
-const BOX_DRAWING: std::ops::RangeInclusive<char> = '\u{2500}'..='\u{257F}';
+/// What ends a prompt: the first of these before the caret on its line.
+const PROMPT_MARKS: [char; 3] = ['>', '\u{276F}', '$'];
 
-/// A chat prompt mark some terminal apps draw instead of `>`.
-const PROMPT_MARK: char = '\u{276F}';
-
-/// The entered text in a line window, read when the paragraphs around the
-/// caret hold more than a read keeps (a terminal's whole buffer, or one very
-/// long paragraph): `above` holds the lines up to and including the caret's.
-/// Keeps the nearest prompt line above the caret and the lines after it, so a
-/// command or a long pasted prompt is kept and the output above it is not.
-/// After a chat prompt it also keeps the input's rows below the caret, from
-/// `below` (called only then: the lines after the caret's), down to the
-/// first row that is blank, only borders or another prompt; below a shell's
-/// caret a terminal can draw rows the user did not type (prediction lists).
-/// With no prompt line among the last [`MAX_READ_LINES`] lines above, keeps
-/// only the caret's line. Every line loses its trailing whitespace (including
-/// the no-break space after a bare prompt): a terminal pads its rows to its
-/// width.
-pub fn prompt_lines<E>(
-    above: &str,
-    below: impl FnOnce() -> Result<String, E>,
-) -> Result<String, E> {
-    // `above` ends after the caret's line break, when it has one.
-    let above = above
-        .strip_suffix("\r\n")
-        .or_else(|| above.strip_suffix(LINE_BREAKS))
-        .unwrap_or(above);
-    let above = lines_of(above);
-    let caret_line = above.len() - 1;
-    let prompt = (0..above.len())
-        .rev()
-        .take(MAX_READ_LINES)
-        .find_map(|at| prompt_of(&above[at]).map(|prompt| (at, prompt)));
-    let below = match prompt {
-        Some((_, Prompt::Chat)) => lines_of(&below()?),
-        _ => Vec::new(),
-    };
-    let input_end = |line: &&String| {
-        line.chars()
-            .all(|c| c.is_whitespace() || BOX_DRAWING.contains(&c))
-            || is_prompt_line(line)
-    };
-    Ok(above[prompt.map_or(caret_line, |(at, _)| at)..]
-        .iter()
-        .chain(below.iter().take_while(|line| !input_end(line)))
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n"))
+/// A terminal input's prompt, learnt from the caret's line where typing
+/// starts: that line up to and including its first prompt mark before the
+/// caret. Any shell's or chat app's prompt has this shape whatever precedes
+/// the mark (`PS C:\Users\me>`, `C:\>`, `>`, `❯`, `me@host:~$`), and a
+/// command may contain marks after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prompt {
+    text: String,
+    /// The first non-blank row below the input while it was empty (a chat
+    /// app's border), trimmed: the input's rows below the caret end above
+    /// it. `None` (a shell): no row below the caret is the input's.
+    footer: Option<String>,
 }
 
-/// What a prompt line opens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Prompt {
-    /// A shell's command line.
-    Shell,
-    /// A terminal chat app's input, which can wrap over several rows.
-    Chat,
+/// A line window cut to the input at its prompt.
+#[derive(Debug, PartialEq, Eq)]
+struct Window {
+    text: String,
+    /// The caret's byte offset in `text`.
+    caret: usize,
+    prompt: Option<Prompt>,
+    at_empty_prompt: bool,
 }
 
-/// Whether `line` is a shell or chat prompt line. The first `>` or `❯` ends
-/// the prompt, so a command may contain `>` after it: PowerShell
-/// (`PS C:\…> `; a line starting `>>` continues the one above) and cmd
-/// (`C:\…>`) are shells; a prompt that is only `>` or `❯` is a terminal chat
-/// app's input, often drawn inside a box.
-fn prompt_of(line: &str) -> Option<Prompt> {
-    let line = line.trim_start_matches(|c: char| c.is_whitespace() || BOX_DRAWING.contains(&c));
-    let end = line.find(['>', PROMPT_MARK])?;
-    let prefix = &line[..end];
-    let drive_path = |text: &str| {
-        let bytes = text.as_bytes();
-        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":\\"
+/// Cut a line window to the input at its prompt. `text` holds up to
+/// [`MAX_READ_LINES`] lines above the caret's, the caret's and up to as many
+/// below, the caret at byte `caret`. With the caret right after a prompt and
+/// no input, that prompt is learnt, with its footer; otherwise the open
+/// edit's `prompt` is used, or failing that the caret line's own. The input
+/// runs from the nearest line above the caret that starts with the prompt
+/// (the caret's line when there is none) through the caret's line, and on
+/// down to the row above the prompt's footer, when it has one and it is
+/// there. Every line loses its trailing whitespace (a terminal pads its rows
+/// to its width), but never text before the caret.
+fn cut_window(text: &str, caret: usize, prompt: Option<&Prompt>) -> Window {
+    let rows = lines_of(text);
+    let (row, column) = locate(&text[..caret]);
+    let line = &rows[row];
+    let head = &line[..column];
+    let own = head.find(PROMPT_MARKS).map(|mark| {
+        let end = mark + head[mark..].chars().next().map_or(0, char::len_utf8);
+        let empty = head[end..].trim().is_empty() && line[column..].trim().is_empty();
+        (head[..end].to_string(), empty)
+    });
+    let at_empty_prompt = own.as_ref().is_some_and(|&(_, empty)| empty);
+    let prompt = match own {
+        Some((text, true)) => Some(Prompt {
+            text,
+            footer: rows[row + 1..]
+                .iter()
+                .map(|row| row.trim())
+                .find(|row| !row.is_empty())
+                .map(str::to_string),
+        }),
+        own => prompt
+            .cloned()
+            .or_else(|| own.map(|(text, _)| Prompt { text, footer: None })),
     };
-    if line[end..].starts_with(PROMPT_MARK) {
-        prefix.is_empty().then_some(Prompt::Chat)
-    } else if prefix.is_empty() {
-        (!line[1..].starts_with('>')).then_some(Prompt::Chat)
-    } else {
-        (prefix == "PS" || prefix.starts_with("PS ") || drive_path(prefix)).then_some(Prompt::Shell)
+    let start = prompt
+        .as_ref()
+        .and_then(|prompt| {
+            (row.saturating_sub(MAX_READ_LINES - 1)..=row)
+                .rev()
+                .find(|&at| rows[at].starts_with(&prompt.text))
+        })
+        .unwrap_or(row);
+    let below = &rows[row + 1..];
+    let below = prompt
+        .as_ref()
+        .and_then(|prompt| prompt.footer.as_deref())
+        .and_then(|footer| below.iter().position(|row| row.trim() == footer))
+        .map_or(&below[..0], |end| &below[..end]);
+    let mut kept: Vec<&str> = rows[start..row].iter().map(|row| row.trim_end()).collect();
+    let caret = kept.iter().map(|row| row.len() + 1).sum::<usize>() + column;
+    kept.push(&line[..line.trim_end().len().max(column)]);
+    kept.extend(below.iter().map(|row| row.trim_end()));
+    while kept.len() > row - start + 1 && kept.last().is_some_and(|row| row.is_empty()) {
+        kept.pop();
     }
-}
-
-/// Whether `line` is a prompt line of either kind.
-fn is_prompt_line(line: &str) -> bool {
-    prompt_of(line).is_some()
+    Window {
+        text: kept.join("\n"),
+        caret,
+        prompt,
+        at_empty_prompt,
+    }
 }
 
 /// Why a read produced no text (fixed codes for content-free diagnostics).
@@ -456,6 +591,9 @@ pub struct EditDetail {
     /// Edit keys pressed after the read that supplied "after" (their effect
     /// may be missing from it).
     pub keys_after_read: u64,
+    /// Of those, the keys whose characters were added at the caret from
+    /// keystroke capture (all of them or none).
+    pub keys_added: u64,
 }
 
 /// One edit, ready to be stored.
@@ -497,13 +635,13 @@ fn changed_lines<'a>(before: &'a [String], after: &'a [String]) -> (&'a [String]
 // Tracker
 // ---------------------------------------------------------------------------
 
-/// The edit being typed: its "before" and its latest "after".
+/// The edit being typed: its "before", its latest "after", and the prompt
+/// its line windows are cut at.
 #[derive(Debug)]
 struct OpenEdit {
     before: Option<CaretText>,
     after: Option<CaretText>,
-    /// Edit count when the latest "after" was read.
-    edits_at_after: u64,
+    prompt: Option<Prompt>,
     last_edit_at: Instant,
 }
 
@@ -524,8 +662,14 @@ pub struct EditTracker {
     pending: Option<PendingRead>,
     baseline: Option<CaretText>,
     open: Option<OpenEdit>,
+    /// The edit count when the latest Enter was seen: edit keys after it
+    /// belong to the next edit.
+    enter_edits: Option<u64>,
+    /// Characters typed since the latest read started (bounded).
+    typed: Vec<TypedChar>,
     /// How edits ended that were dropped for having no "after" (they ended
-    /// before any read), since the last [`Self::take_lost`].
+    /// before any read, and their keys could not be added to the "before"),
+    /// since the last [`Self::take_lost`].
     lost: Vec<Ended>,
 }
 
@@ -555,16 +699,21 @@ impl EditTracker {
             let open = self.open.get_or_insert_with(|| OpenEdit {
                 before: None,
                 after: None,
-                edits_at_after: seen.edits,
+                prompt: None,
                 last_edit_at: now,
             });
             if open.before.is_none() && open.after.is_none() {
                 open.before = self.baseline.take();
+                open.prompt = open
+                    .before
+                    .as_ref()
+                    .and_then(|before| before.prompt.clone());
             }
             open.last_edit_at = now;
             self.request(ReadKind::Pause, now);
         }
         if counts.enters != seen.enters {
+            self.enter_edits = Some(counts.enter_edits);
             self.request(ReadKind::Enter, now);
         }
         if self
@@ -581,21 +730,40 @@ impl EditTracker {
         (finished, due.map(|pending| pending.kind))
     }
 
+    /// Take in the characters typed since the last call
+    /// ([`EditSignals::take_typed`]).
+    pub fn note_typed(&mut self, typed: Vec<TypedChar>) {
+        self.typed.extend(typed);
+        let excess = self.typed.len().saturating_sub(MAX_TYPED_CHARS);
+        self.typed.drain(..excess);
+    }
+
+    /// The prompt the open edit's line windows are cut at, with the target it
+    /// was learnt in: for its next read there ([`CaretText::new`]), never a
+    /// read of another field.
+    pub fn prompt(&self) -> Option<(u64, &Prompt)> {
+        let open = self.open.as_ref()?;
+        let known = open.after.as_ref().or(open.before.as_ref())?;
+        Some((known.target, open.prompt.as_ref()?))
+    }
+
     /// How the edits dropped since the last call ended (content-free
     /// diagnostics).
     pub fn take_lost(&mut self) -> Vec<Ended> {
         std::mem::take(&mut self.lost)
     }
 
-    /// Report the outcome of the read [`Self::poll`] asked for.
+    /// Report the outcome of the read [`Self::poll`] asked for, with the
+    /// signal counts once it ended.
     pub fn read_done(
         &mut self,
         kind: ReadKind,
         outcome: ReadOutcome,
+        counts: SignalCounts,
         now: Instant,
     ) -> Vec<FinishedEdit> {
         let edits = self.seen.unwrap_or_default().edits;
-        let text = match outcome {
+        let mut text = match outcome {
             ReadOutcome::NotNow => {
                 if let Some(pending) = &mut self.pending {
                     if now - pending.since >= READ_GIVE_UP {
@@ -616,6 +784,7 @@ impl EditTracker {
             }
             ReadOutcome::Text(text) => text,
         };
+        text.edits = (edits, counts.edits);
         if self.pending.is_some_and(|pending| pending.kind == kind) {
             self.pending = None;
         }
@@ -632,10 +801,11 @@ impl EditTracker {
                 // Typing in the newly focused field: no "before" for it.
                 self.open = Some(OpenEdit {
                     before: None,
+                    prompt: text.prompt.clone(),
                     after: Some(text),
-                    edits_at_after: edits,
                     last_edit_at: now,
                 });
+                self.typed.retain(|typed| typed.edit > edits);
                 return finished;
             }
         }
@@ -643,8 +813,10 @@ impl EditTracker {
             ReadKind::Settle => self.baseline = text.into_baseline(),
             ReadKind::Pause => match &mut self.open {
                 Some(open) => {
+                    if open.prompt.is_none() {
+                        open.prompt = text.prompt.clone();
+                    }
                     open.after = Some(text);
-                    open.edits_at_after = edits;
                 }
                 None => self.baseline = text.into_baseline(),
             },
@@ -654,19 +826,24 @@ impl EditTracker {
                 } else {
                     Ended::Enter
                 };
-                finished.extend(self.finish(ended, edits));
+                let enter_edits = self.enter_edits.take().unwrap_or(edits);
+                finished.extend(self.finish(ended, enter_edits));
                 self.baseline = text.into_baseline();
             }
         }
+        // What this read shows needs no typed characters any more.
+        self.typed.retain(|typed| typed.edit > edits);
         finished
     }
 
-    /// Forget everything read, without storing it: visual capture is paused
-    /// (lock, schedule, DRM), or a read failed.
+    /// Forget everything read and typed, without storing it: visual capture
+    /// is paused (lock, schedule, DRM), or a read failed.
     pub fn discard(&mut self) {
         self.pending = None;
         self.baseline = None;
         self.open = None;
+        self.enter_edits = None;
+        self.typed.clear();
     }
 
     /// Capture is stopping: store the open edit as last read.
@@ -699,16 +876,33 @@ impl EditTracker {
         });
     }
 
-    /// End the open edit, if it has an "after" that differs from its "before".
+    /// End the open edit, if its "after" differs from its "before". Edit
+    /// keys up to the count `edits` after its last read have their
+    /// characters added at that read's caret when keystroke capture saw them
+    /// all ([`CaretText::with_typed`]); with no read since the edit began,
+    /// that read is its "before".
     fn finish(&mut self, ended: Ended, edits: u64) -> Option<FinishedEdit> {
         let open = self.open.take()?;
-        let Some(after) = open.after else {
+        if ended == Ended::Idle {
+            self.baseline = open.after.clone().and_then(CaretText::into_baseline);
+        }
+        let Some(read) = open.after.as_ref().or(open.before.as_ref()) else {
             self.lost.push(ended);
             return None;
         };
-        if ended == Ended::Idle {
-            self.baseline = after.clone().into_baseline();
-        }
+        let keys_after_read = edits.saturating_sub(read.edits.0);
+        // Keys after another field's read was seen are not this edit's.
+        let added = (ended != Ended::FocusChanged)
+            .then(|| read.with_typed(&self.typed, edits))
+            .flatten();
+        let (after, keys_added) = match (added, open.after) {
+            (Some(added), _) => added,
+            (None, Some(after)) => (after, 0),
+            (None, None) => {
+                self.lost.push(ended);
+                return None;
+            }
+        };
         // A "before" from another field, or read another way (a paragraph
         // read of a terminal's whole buffer before it grew into line
         // windows), is not this edit's.
@@ -733,7 +927,8 @@ impl EditTracker {
                 source: after.source,
                 baseline: before.is_some(),
                 truncated: after.truncated || before.as_ref().is_some_and(|b| b.truncated),
-                keys_after_read: edits.saturating_sub(open.edits_at_after),
+                keys_after_read,
+                keys_added,
             },
             app_name: after.app_name,
             window_title: after.window_title,
@@ -758,33 +953,70 @@ mod tests {
     const SHIFT: u8 = 0x01;
     const ALT: u8 = 0x04;
 
+    /// Marks the caret in a test text.
+    const CARET: char = '\u{2038}';
+
+    /// `text` without its caret mark, and the caret there.
+    fn with_caret(text: &str) -> (String, Option<CaretAt>) {
+        let caret = text.find(CARET).map(|offset| CaretAt {
+            offset,
+            selection: false,
+        });
+        (text.replacen(CARET, "", 1), caret)
+    }
+
     fn read(target: u64, text: &str) -> ReadOutcome {
+        let (text, caret) = with_caret(text);
         ReadOutcome::Text(CaretText::new(
             target,
-            text,
+            0,
+            &text,
+            caret,
             false,
             TextSource::TextPattern,
+            None,
             "editor.exe".to_string(),
             Some("Doc".to_string()),
         ))
     }
 
-    /// [`prompt_lines`] with the lines below the caret already read.
-    fn cut(above: &str, below: &str) -> String {
-        prompt_lines(above, || Ok::<_, ()>(below.to_string())).unwrap()
-    }
-
-    /// A line-window read with the caret on its last line, cut to its prompt
-    /// as the platform does.
-    fn window(target: u64, text: &str) -> ReadOutcome {
+    /// A line window cut as the platform's read does, with `prompt`; the
+    /// caret at its mark, or else at the end of its last line.
+    fn window_with(target: u64, text: &str, prompt: Option<&Prompt>) -> ReadOutcome {
+        let (text, caret) = with_caret(text);
+        let caret = caret.or(Some(CaretAt {
+            offset: text.trim_end_matches(['\r', '\n']).len(),
+            selection: false,
+        }));
         ReadOutcome::Text(CaretText::new(
             target,
-            &cut(text, ""),
+            0,
+            &text,
+            caret,
             false,
             TextSource::TextPatternLines,
+            prompt,
             "terminal.exe".to_string(),
             None,
         ))
+    }
+
+    /// A line window cut without an open edit's prompt.
+    fn window(target: u64, text: &str) -> ReadOutcome {
+        window_with(target, text, None)
+    }
+
+    /// [`cut_window`] of a text with its caret marked.
+    fn cut(text: &str, prompt: Option<&Prompt>) -> Window {
+        let (text, caret) = with_caret(text);
+        cut_window(&text, caret.expect("a caret mark").offset, prompt)
+    }
+
+    fn prompt(text: &str, footer: Option<&str>) -> Prompt {
+        Prompt {
+            text: text.to_string(),
+            footer: footer.map(str::to_string),
+        }
     }
 
     /// Drives a tracker with simulated time and signals.
@@ -811,7 +1043,10 @@ mod tests {
             match signal {
                 Signal::Edit => self.counts.edits += 1,
                 Signal::Caret => self.counts.carets += 1,
-                Signal::Enter => self.counts.enters += 1,
+                Signal::Enter => {
+                    self.counts.enter_edits = self.counts.edits;
+                    self.counts.enters += 1;
+                }
             }
         }
 
@@ -833,8 +1068,26 @@ mod tests {
                 }
             }
             assert_eq!(due, Some(expected));
-            let finished = self.tracker.read_done(expected, outcome, self.now);
+            let finished = self
+                .tracker
+                .read_done(expected, outcome, self.counts, self.now);
             self.finished.extend(finished);
+        }
+
+        /// Type `text`: a key and its character each poll.
+        fn type_chars(&mut self, text: &str) {
+            for ch in text.chars() {
+                self.type_char_unpolled(ch);
+                self.tick(Duration::from_millis(25));
+            }
+        }
+
+        /// One key typing `ch`, not polled yet.
+        fn type_char_unpolled(&mut self, ch: char) {
+            self.signal(Signal::Edit);
+            let edit = self.counts.edits;
+            self.tracker
+                .note_typed(vec![TypedChar { edit, ch, focus: 0 }]);
         }
 
         fn type_keys(&mut self, keys: usize) {
@@ -934,9 +1187,12 @@ mod tests {
             assert!(keys <= 41, "no read within a second of typing");
         }
         assert!(keys >= 40, "read before a second of typing");
-        let finished = sim
-            .tracker
-            .read_done(ReadKind::Pause, read(FIELD, "hello wor"), sim.now);
+        let finished = sim.tracker.read_done(
+            ReadKind::Pause,
+            read(FIELD, "hello wor"),
+            sim.counts,
+            sim.now,
+        );
         assert!(finished.is_empty());
         sim.type_keys(2);
         sim.signal(Signal::Enter);
@@ -962,148 +1218,285 @@ mod tests {
     }
 
     #[test]
-    fn a_line_window_keeps_the_prompt_line_and_what_follows() {
+    fn a_line_window_keeps_the_input_from_its_prompt() {
         // PowerShell: the output above is dropped; a redirection's `>`
         // belongs to the command.
-        assert_eq!(
-            cut("PS C:\\> ls\r\nfile.txt\r\nPS C:\\> echo a > b.txt\r\n", ""),
-            "PS C:\\> echo a > b.txt"
+        let cut1 = cut(
+            "PS C:\\> ls\r\nfile.txt\r\nPS C:\\> echo a > b.txt\u{2038}\r\n",
+            None,
         );
-        // A command over several lines: continuation lines start with `>>`.
+        assert_eq!(cut1.text, "PS C:\\> echo a > b.txt");
+        assert_eq!(cut1.prompt, Some(prompt("PS C:\\>", None)));
+        assert!(!cut1.at_empty_prompt);
+        // Any prompt ending in a mark, whatever precedes it.
+        for (window, kept) in [
+            ("out\nme@host:~$ ls -la\u{2038}", "me@host:~$ ls -la"),
+            (
+                "out\n~/repo \u{276F} git st\u{2038}",
+                "~/repo \u{276F} git st",
+            ),
+            ("x\nC:\\Users>dir\u{2038}", "C:\\Users>dir"),
+            (
+                "answer\n│ > summarise this\u{2038} │",
+                "│ > summarise this │",
+            ),
+        ] {
+            assert_eq!(cut(window, None).text, kept, "{window}");
+        }
+        // A command over several lines, cut at the prompt learnt where
+        // typing started (continuation lines start `>>`).
+        let ps = prompt("PS C:\\x>", None);
+        let window = "out\nPS C:\\x> if ($a) {\n>> b\n>> }\u{2038}";
         assert_eq!(
-            cut("out\nPS C:\\x> if ($a) {\n>> b\n>> }", ""),
+            cut(window, Some(&ps)).text,
             "PS C:\\x> if ($a) {\n>> b\n>> }"
         );
-        assert_eq!(cut("x\nC:\\Users>dir", ""), "C:\\Users>dir");
-        // A chat prompt drawn in a box, the caret on its pasted second line.
-        assert_eq!(
-            cut(
-                "answer\n╭───╮\n│ > summarise this │\n│ pasted line │\r\n",
-                "╰───╯\n"
-            ),
-            "│ > summarise this │\n│ pasted line │"
-        );
+        // Without it, the caret line's own prompt.
+        assert_eq!(cut(window, None).text, ">> }");
         // No prompt: only the caret's line, never the lines below it.
-        assert_eq!(cut("line one\nline two\n", "line three"), "line two");
-        assert_eq!(cut("a\rb\u{2028}c", ""), "c");
-        assert_eq!(cut("", ""), "");
-        // The caret on an empty row below the prompt.
-        assert_eq!(cut("out\r\nPS C:\\> \r\n\r\n", ""), "PS C:\\>\n");
+        assert_eq!(
+            cut("line one\nline two\u{2038}\nline three", None).text,
+            "line two"
+        );
+        assert_eq!(cut("a\rb\u{2028}c\u{2038}", None).text, "c");
+        assert_eq!(cut("\u{2038}", None).text, "");
         // A prompt further up than the window's lines is not looked for.
-        let far = format!("PS C:\\> cmd\n{}last", "out\n".repeat(MAX_READ_LINES));
-        assert_eq!(cut(&far, ""), "last");
-        // Rows padded to the terminal's width.
-        assert_eq!(cut("PS C:\\> ab      \r\n", "        \r\n"), "PS C:\\> ab");
-    }
-
-    #[test]
-    fn a_line_window_keeps_a_wrapped_prompt_whole_with_the_caret_inside_it() {
-        // A chat app's `❯` prompt over three rows, the caret on the second;
-        // a border and a status row below the input.
-        let above = "answer\r\n\u{276F}\u{a0}first row of a long   \r\n  second row   \r\n";
-        let below = "  third row   \r\n──────────\r\n  ? for shortcuts\r\n";
-        assert_eq!(
-            cut(above, below),
-            "\u{276F}\u{a0}first row of a long\n  second row\n  third row"
+        let far = format!(
+            "PS C:\\> cmd\n{}last\u{2038}",
+            "out\n".repeat(MAX_READ_LINES)
         );
-        // The empty input box: just its prompt, a "before" the next edit can
-        // use.
+        assert_eq!(cut(&far, Some(&prompt("PS C:\\>", None))).text, "last");
+        // Rows padded to the terminal's width lose the padding, but not a
+        // space typed before the caret.
         assert_eq!(
-            cut("answer\r\n\u{276F}\u{a0}    \r\n", "──────────\r\n"),
-            "\u{276F}"
+            cut("PS C:\\> ab \u{2038}     \r\n", None).text,
+            "PS C:\\> ab "
         );
-        // The next prompt below ends the input.
-        assert_eq!(cut("> a\r\n", "\u{276F}\u{a0}b"), "> a");
-        // A shell: rows below its caret (a prediction list) are never kept,
-        // nor read.
+        // A shell's prompt has no footer: rows below its caret (a prediction
+        // list) are never kept.
+        let window = "PS C:\\> git p\u{2038}\r\n  git pull   [History]\r\n";
         assert_eq!(
-            cut("PS C:\\> git p\r\n", "  git pull   [History]\r\n"),
+            cut(window, Some(&prompt("PS C:\\>", None))).text,
             "PS C:\\> git p"
         );
-        let unread = prompt_lines("PS C:\\> a\r\n", || Err("read below"));
-        assert_eq!(unread, Ok("PS C:\\> a".to_string()));
-        let unread = prompt_lines("no prompt\r\n", || Err("read below"));
-        assert_eq!(unread, Ok("no prompt".to_string()));
     }
 
     #[test]
-    fn a_wrapped_chat_prompt_becomes_the_next_before() {
-        let mut sim = Sim::new();
-        sim.signal(Signal::Caret);
-        // The caret on the first of the prompt's two rows.
-        let settle = cut("out\r\n\u{276F}\u{a0}first\r\n", "  second\r\n───\r\n");
-        sim.answer(
-            ReadKind::Settle,
-            ReadOutcome::Text(CaretText::new(
-                FIELD,
-                &settle,
-                false,
-                TextSource::TextPatternLines,
-                "terminal.exe".to_string(),
-                None,
-            )),
+    fn an_empty_prompt_is_learnt_with_the_row_that_ends_its_input() {
+        let empty = cut(
+            "answer\r\n\u{276F}\u{a0}\u{2038}   \r\n──────\r\n  ? for shortcuts",
+            None,
         );
-        sim.type_keys(1);
-        sim.answer(
-            ReadKind::Pause,
-            window(FIELD, "out\r\n\u{276F}\u{a0}firstx\r\n  second\r\n"),
+        assert_eq!(empty.text, "\u{276F}\u{a0}");
+        assert!(empty.at_empty_prompt);
+        assert_eq!(empty.prompt, Some(prompt("\u{276F}", Some("──────"))));
+        // A shell's empty prompt: nothing below it, so no footer.
+        let shell = cut("out\r\nPS C:\\Users\\me> \u{2038}\r\n", None);
+        assert_eq!(shell.prompt, Some(prompt("PS C:\\Users\\me>", None)));
+        assert!(shell.at_empty_prompt);
+        // A wrapped chat prompt with the caret inside it: its rows down to
+        // the footer, and the caret's place in them.
+        let chat = prompt("\u{276F}", Some("──────"));
+        let wrapped = cut(
+            "answer\r\n\u{276F}\u{a0}first row   \r\n  sec\u{2038}ond row  \r\n  third row \r\n──────\r\n  ? for shortcuts",
+            Some(&chat),
         );
-        sim.signal(Signal::Caret);
-        sim.tick(Duration::from_millis(25));
         assert_eq!(
-            sim.finished[0].before.as_deref(),
-            Some("\u{276F}\u{a0}first")
+            wrapped.text,
+            "\u{276F}\u{a0}first row\n  second row\n  third row"
         );
-        assert_eq!(sim.finished[0].after, "\u{276F}\u{a0}firstx");
+        assert_eq!(
+            &wrapped.text[..wrapped.caret],
+            "\u{276F}\u{a0}first row\n  sec"
+        );
+        // A footer that is not there (the window was resized): nothing below.
+        let gone = cut("\u{276F}\u{a0}a\u{2038}\r\n  b\r\n────────", Some(&chat));
+        assert_eq!(gone.text, "\u{276F}\u{a0}a");
     }
 
     #[test]
-    fn the_empty_chat_prompt_becomes_the_next_before() {
+    fn the_prompt_learnt_where_typing_starts_cuts_its_edit() {
         let mut sim = Sim::new();
         sim.signal(Signal::Caret);
-        sim.answer(
-            ReadKind::Settle,
-            window(FIELD, "out\r\n\u{276F}\u{a0}  \r\n"),
-        );
-        sim.type_keys(2);
-        sim.answer(
-            ReadKind::Pause,
-            window(FIELD, "out\r\n\u{276F}\u{a0}hi  \r\n"),
-        );
+        let empty = "out\r\n\u{276F}\u{a0}\u{2038}\r\n──────\r\nstatus";
+        sim.answer(ReadKind::Settle, window_with(FIELD, empty, None));
+        sim.type_keys(1);
+        let learnt = prompt("\u{276F}", Some("──────"));
+        assert_eq!(sim.tracker.prompt(), Some((FIELD, &learnt)));
+        // The caret back on the first of two rows: both are kept.
+        let typed = "out\r\n\u{276F}\u{a0}a\u{2038}b\r\n  c\r\n──────\r\nstatus";
+        let outcome = window_with(FIELD, typed, sim.tracker.prompt().map(|(_, p)| p));
+        sim.answer(ReadKind::Pause, outcome);
         sim.signal(Signal::Caret);
         sim.tick(Duration::from_millis(25));
-        assert_eq!(sim.finished[0].before.as_deref(), Some("\u{276F}"));
-        assert_eq!(sim.finished[0].after, "\u{276F}\u{a0}hi");
+        assert_eq!(sim.finished[0].before.as_deref(), Some("\u{276F}\u{a0}"));
+        assert_eq!(sim.finished[0].after, "\u{276F}\u{a0}ab\n  c");
     }
 
     #[test]
-    fn only_lines_shaped_like_a_prompt_are_prompt_lines() {
-        for shell in ["PS C:\\> ", "PS> x", "C:\\>dir"] {
-            assert_eq!(prompt_of(shell), Some(Prompt::Shell), "{shell}");
-        }
-        for chat in [
-            "> hi",
-            "  │ > hi",
-            ">",
-            "❯ ls",
-            "❯",
-            "\u{276F}\u{a0}hi",
-            "  │ ❯",
-        ] {
-            assert_eq!(prompt_of(chat), Some(Prompt::Chat), "{chat}");
-        }
-        for other in [
-            ">> continued",
-            ">>> python",
-            "$ ls",
-            "~/repo ❯ ls",
-            "a ❯ b",
-            "a > b",
-            "",
-            "PS",
-        ] {
-            assert!(!is_prompt_line(other), "{other}");
-        }
+    fn keys_typed_after_the_last_read_are_added_at_its_caret() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("hel");
+        sim.answer(ReadKind::Pause, read(FIELD, "hel\u{2038}"));
+        sim.type_chars("lo");
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        let edit = &sim.finished[0];
+        assert_eq!(edit.after, "hello");
+        assert_eq!(edit.detail.ended, Ended::Submitted);
+        assert_eq!(
+            (edit.detail.keys_after_read, edit.detail.keys_added),
+            (2, 2)
+        );
+    }
+
+    #[test]
+    fn keys_are_added_in_the_middle_and_to_an_edit_never_read() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "say \u{2038}there"));
+        // Typed and sent before any read: its "before" with the keys.
+        sim.type_chars("hi ");
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        let edit = &sim.finished[0];
+        assert_eq!(edit.before.as_deref(), Some("say there"));
+        assert_eq!(edit.after, "say hi there");
+        assert_eq!(edit.detail.keys_added, 3);
+        assert!(sim.tracker.take_lost().is_empty());
+    }
+
+    #[test]
+    fn keys_are_added_only_when_each_typed_one_character_there() {
+        // A key without a character (Backspace) among them.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("hel");
+        sim.answer(ReadKind::Pause, read(FIELD, "hel\u{2038}"));
+        sim.type_keys(1);
+        sim.type_chars("p");
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        let edit = &sim.finished[0];
+        assert_eq!(edit.after, "hel");
+        assert_eq!(
+            (edit.detail.keys_after_read, edit.detail.keys_added),
+            (2, 0)
+        );
+
+        // A character typed into another native focus.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("ab");
+        sim.answer(ReadKind::Pause, read(FIELD, "ab\u{2038}"));
+        sim.signal(Signal::Edit);
+        let edit = sim.counts.edits;
+        sim.tracker.note_typed(vec![TypedChar {
+            edit,
+            ch: 'c',
+            focus: 9,
+        }]);
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        assert_eq!(sim.finished[0].after, "ab");
+
+        // A key that arrived while the read ran: it may already show.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("ab");
+        while sim.tick(Duration::from_millis(25)) != Some(ReadKind::Pause) {}
+        sim.type_char_unpolled('c');
+        let finished = sim.tracker.read_done(
+            ReadKind::Pause,
+            read(FIELD, "abc\u{2038}"),
+            sim.counts,
+            sim.now,
+        );
+        assert!(finished.is_empty());
+        sim.type_chars("d");
+        sim.signal(Signal::Enter);
+        sim.answer(ReadKind::Enter, read(FIELD, ""));
+        assert_eq!(sim.finished[0].after, "abc");
+        assert_eq!(sim.finished[0].detail.keys_added, 0);
+    }
+
+    #[test]
+    fn keys_after_enter_belong_to_the_next_edit() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("hi");
+        sim.answer(ReadKind::Pause, read(FIELD, "hi\u{2038}"));
+        sim.signal(Signal::Enter);
+        sim.tick(Duration::from_millis(25));
+        sim.type_chars("x");
+        sim.answer(ReadKind::Enter, read(FIELD, "x\u{2038}"));
+        assert_eq!(sim.finished[0].after, "hi");
+        assert_eq!(sim.finished[0].detail.keys_after_read, 0);
+
+        // A key typed after Enter but before the next poll: still the next
+        // edit's, by the count taken at the Enter key.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("hi");
+        sim.answer(ReadKind::Pause, read(FIELD, "hi\u{2038}"));
+        sim.type_char_unpolled('!');
+        sim.signal(Signal::Enter);
+        sim.type_char_unpolled('x');
+        sim.answer(ReadKind::Enter, read(FIELD, "x\u{2038}"));
+        assert_eq!(sim.finished[0].after, "hi!");
+        assert_eq!(sim.finished[0].detail.keys_added, 1);
+    }
+
+    #[test]
+    fn keys_are_added_when_capture_stops_but_never_at_a_selection() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, read(FIELD, "\u{2038}"));
+        sim.type_chars("ab");
+        sim.answer(ReadKind::Pause, read(FIELD, "ab\u{2038}"));
+        sim.type_chars("c");
+        let stopped = sim.tracker.stop();
+        assert_eq!(stopped[0].after, "abc");
+
+        // Typing replaces a selection: where the characters go is unknown.
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        let selected = CaretText::new(
+            FIELD,
+            0,
+            "old text",
+            Some(CaretAt {
+                offset: 0,
+                selection: true,
+            }),
+            false,
+            TextSource::TextPattern,
+            None,
+            "editor.exe".to_string(),
+            None,
+        );
+        sim.answer(ReadKind::Settle, ReadOutcome::Text(selected));
+        sim.type_chars("new");
+        let stopped = sim.tracker.stop();
+        assert!(stopped.is_empty());
+        assert_eq!(sim.tracker.take_lost(), [Ended::Stopped]);
+    }
+
+    #[test]
+    fn the_open_edits_prompt_is_given_with_its_field() {
+        let mut sim = Sim::new();
+        sim.signal(Signal::Caret);
+        sim.answer(ReadKind::Settle, window(FIELD, "PS C:\\> \u{2038}"));
+        sim.type_keys(1);
+        let (target, learnt) = sim.tracker.prompt().expect("a prompt");
+        assert_eq!((target, learnt), (FIELD, &prompt("PS C:\\>", None)));
     }
 
     #[test]
@@ -1166,16 +1559,16 @@ mod tests {
         };
         assert!(next_read(&mut sim) >= 40);
         sim.tracker
-            .read_done(ReadKind::Pause, read(FIELD, "a"), sim.now);
+            .read_done(ReadKind::Pause, read(FIELD, "a"), sim.counts, sim.now);
         assert!(next_read(&mut sim) >= 40);
         // The provider is busy: retried with the next typing read, not the
         // next poll.
         sim.tracker
-            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.now);
+            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.counts, sim.now);
         assert!(next_read(&mut sim) >= 40);
         // After a pause the pause read is due at once.
         sim.tracker
-            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.now);
+            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.counts, sim.now);
         assert_eq!(sim.tick(PAUSE_DELAY), Some(ReadKind::Pause));
     }
 
@@ -1199,13 +1592,23 @@ mod tests {
         assert_eq!(sim.finished[0].after, "PS C:\\> abc");
         assert_eq!(sim.finished[0].detail.source, TextSource::TextPatternLines);
 
+        // Back on the command line after typed text: not an empty prompt.
         sim.answer(ReadKind::Settle, window(FIELD, "done\r\nPS C:\\> abc\r\n"));
         sim.type_keys(1);
         sim.answer(ReadKind::Pause, window(FIELD, "done\r\nPS C:\\> abcd\r\n"));
         sim.signal(Signal::Caret);
         sim.tick(Duration::from_millis(25));
-        assert_eq!(sim.finished[1].before.as_deref(), Some("PS C:\\> abc"));
+        assert_eq!(sim.finished[1].before, None);
         assert_eq!(sim.finished[1].after, "PS C:\\> abcd");
+
+        // At the empty prompt again.
+        sim.answer(ReadKind::Settle, window(FIELD, "done\r\nPS C:\\> \r\n"));
+        sim.type_keys(1);
+        sim.answer(ReadKind::Pause, window(FIELD, "done\r\nPS C:\\> x\r\n"));
+        sim.signal(Signal::Caret);
+        sim.tick(Duration::from_millis(25));
+        assert_eq!(sim.finished[2].before.as_deref(), Some("PS C:\\> "));
+        assert_eq!(sim.finished[2].after, "PS C:\\> x");
     }
 
     #[test]
@@ -1334,9 +1737,9 @@ mod tests {
 
         sim.type_keys(1);
         sim.tick(READ_GIVE_UP);
-        let finished = sim
-            .tracker
-            .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.now);
+        let finished =
+            sim.tracker
+                .read_done(ReadKind::Pause, ReadOutcome::NotNow, sim.counts, sim.now);
         assert!(finished.is_empty());
         assert_eq!(sim.tick(Duration::from_millis(25)), None);
     }
@@ -1367,19 +1770,42 @@ mod tests {
     #[test]
     fn reads_are_bounded_and_flag_truncation() {
         let long = "word ".repeat(2000);
-        let text = CaretText::new(FIELD, &long, false, TextSource::Value, String::new(), None);
+        let text = CaretText::new(
+            FIELD,
+            0,
+            &long,
+            None,
+            false,
+            TextSource::Value,
+            None,
+            String::new(),
+            None,
+        );
         assert!(text.truncated);
         assert!(text.lines.concat().len() <= MAX_READ_BYTES);
         let many = "x\n".repeat(MAX_READ_LINES * 2);
-        let text = CaretText::new(FIELD, &many, false, TextSource::Value, String::new(), None);
+        let text = CaretText::new(
+            FIELD,
+            0,
+            &many,
+            None,
+            false,
+            TextSource::Value,
+            None,
+            String::new(),
+            None,
+        );
         assert!(text.truncated);
         assert_eq!(text.lines.len(), MAX_READ_LINES);
         let multibyte = "é".repeat(MAX_READ_BYTES);
         let text = CaretText::new(
             FIELD,
+            0,
             &multibyte,
+            None,
             false,
             TextSource::Value,
+            None,
             String::new(),
             None,
         );
@@ -1390,18 +1816,24 @@ mod tests {
     fn line_breaks_of_every_kind_split_lines_once() {
         let text = CaretText::new(
             FIELD,
+            0,
             "a\r\nb\rc\nd\u{2029}e",
+            None,
             false,
             TextSource::TextPattern,
+            None,
             String::new(),
             None,
         );
         assert_eq!(text.lines, ["a", "b", "c", "d", "e"]);
         let text = CaretText::new(
             FIELD,
+            0,
             "a\r\n\r\nb",
+            None,
             false,
             TextSource::TextPattern,
+            None,
             String::new(),
             None,
         );

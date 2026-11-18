@@ -484,8 +484,12 @@ const CLIPBOARD_REQUEST_MAX_AGE: Duration = Duration::from_secs(1);
 enum InputContentWork {
     Clipboard(PendingClipboard),
     // Text was admitted in its source field before focus invalidation.
-    Text(UiEvent),
+    Text(PermittedText),
 }
+
+/// Admitted keystroke text and the native focus it was verified under (the
+/// content worker records its app from that focus).
+type PermittedText = (UiEvent, Option<NativeKeyboardFocus>);
 
 impl PendingClipboard {
     fn into_event(self, content: Option<String>) -> UiEvent {
@@ -511,7 +515,7 @@ impl InputContentWork {
     fn accounting(&self) -> Option<&KeystrokeTag> {
         match self {
             Self::Clipboard(pending) => pending.accounting.as_ref(),
-            Self::Text(event) => event.accounting.as_ref(),
+            Self::Text((event, _)) => event.accounting.as_ref(),
         }
     }
 }
@@ -527,7 +531,7 @@ fn queue_input_content(state: &HookState, work: InputContentWork) {
             InputContentWork::Clipboard(pending) => {
                 try_send_ui_event(&state.tx, pending.into_event(None));
             }
-            InputContentWork::Text(event) => note_event_lost(&event, LostCause::QueueFull),
+            InputContentWork::Text((event, _)) => note_event_lost(&event, LostCause::QueueFull),
         }
     }
 }
@@ -587,7 +591,8 @@ fn process_input_content(
             };
             pending.into_event(content)
         }
-        InputContentWork::Text(mut event) => {
+        InputContentWork::Text((mut event, focus)) => {
+            event.app_name = focus.map(NativeKeyboardFocus::app_name);
             if let EventData::Text {
                 content,
                 char_count,
@@ -713,7 +718,7 @@ struct HookState {
     shadow_rules: input_admission::ProofRules,
     /// Buffers confirmed permissible immediately before navigation changes
     /// focus. PII processing is deferred out of the low-level hook.
-    pending_text: Vec<UiEvent>,
+    pending_text: Vec<PermittedText>,
     current_app: Arc<Mutex<Option<String>>>,
     current_window: Arc<Mutex<Option<String>>>,
     activity_feed: Option<ActivityFeed>,
@@ -927,8 +932,8 @@ fn run_native_hooks(
                 // fire synchronously during DispatchMessageW above
                 if let Ok(mut guard) = state.try_borrow_mut() {
                     if let Some(ref mut s) = *guard {
-                        for event in std::mem::take(&mut s.pending_text) {
-                            emit_text(s, event);
+                        for text in std::mem::take(&mut s.pending_text) {
+                            emit_text(s, text);
                         }
                         drain_focus_events(s);
                         expire_pending_discards(s, false);
@@ -980,12 +985,12 @@ fn run_native_hooks(
         // so input buffered when recording stops isn't dropped.
         HOOK_STATE.with(|state| {
             if let Some(ref mut s) = *state.borrow_mut() {
-                for event in std::mem::take(&mut s.pending_text) {
-                    emit_text(s, event);
+                for text in std::mem::take(&mut s.pending_text) {
+                    emit_text(s, text);
                 }
                 // No waiting for re-verification at shutdown.
-                if let Some(event) = take_permitted_text_buffer(s, DiscardCause::FlushUnverified) {
-                    emit_text(s, event);
+                if let Some(text) = take_permitted_text_buffer(s, DiscardCause::FlushUnverified) {
+                    emit_text(s, text);
                 }
                 if let Some(agg) = s.scroll_aggregator.take() {
                     emit_aggregated_scroll(&s.tx, agg);
@@ -1037,14 +1042,14 @@ fn flush_text_buffer_at(state: &mut HookState, focus: Option<NativeKeyboardFocus
         discard_text_buffer(state, DiscardCause::HoldExpired);
         return;
     }
-    if let Some(event) =
+    if let Some(text) =
         take_text_buffer_with_permit(state, permit, focus, DiscardCause::FlushUnverified)
     {
-        emit_text(state, event);
+        emit_text(state, text);
     }
 }
 
-fn take_permitted_text_buffer(state: &mut HookState, cause: DiscardCause) -> Option<UiEvent> {
+fn take_permitted_text_buffer(state: &mut HookState, cause: DiscardCause) -> Option<PermittedText> {
     if !has_buffered_text(state) {
         return None;
     }
@@ -1144,7 +1149,7 @@ fn take_text_buffer_with_permit(
     permit: Option<u64>,
     focus: Option<NativeKeyboardFocus>,
     cause: DiscardCause,
-) -> Option<UiEvent> {
+) -> Option<PermittedText> {
     // Diagnostics: classify focus events against this text before it goes.
     drain_focus_events(state);
     let same_focus = !state.config.skip_password_fields || focus == state.text_focus;
@@ -1153,6 +1158,9 @@ fn take_text_buffer_with_permit(
         return None;
     }
     note_text_ended(state);
+    // The focus its characters were verified under (with the password gate
+    // off, its last key's: such a buffer is not bound to one field).
+    let text_focus = state.text_focus.or(focus);
     let content = std::mem::take(&mut state.text_buf);
     let accounting = std::mem::take(&mut state.text_tag);
     clear_text_identity(state);
@@ -1167,14 +1175,14 @@ fn take_text_buffer_with_permit(
         content,
     );
     event.accounting = (!accounting.is_empty()).then_some(accounting);
-    Some(event)
+    Some((event, text_focus))
 }
 
-fn emit_text(state: &HookState, event: UiEvent) {
+fn emit_text(state: &HookState, text: PermittedText) {
     if screenpipe_config::audio_privacy::visual_capture_allowed() {
-        queue_input_content(state, InputContentWork::Text(event));
+        queue_input_content(state, InputContentWork::Text(text));
     } else {
-        note_event_lost(&event, LostCause::RecorderPrivacyPause);
+        note_event_lost(&text.0, LostCause::RecorderPrivacyPause);
     }
 }
 
@@ -1184,7 +1192,7 @@ fn has_buffered_text(state: &HookState) -> bool {
 }
 
 fn drop_pending_text(state: &mut HookState) {
-    for event in std::mem::take(&mut state.pending_text) {
+    for (event, _) in std::mem::take(&mut state.pending_text) {
         note_event_lost(&event, LostCause::RecorderPrivacyPause);
     }
 }
@@ -1862,8 +1870,8 @@ fn invalidate_keyboard_focus(state: &mut HookState) {
     if state.config.skip_password_fields {
         // Preserve text that is still permitted in the source field before a
         // click/Tab/Enter moves focus. Never run PII regex in the input hook.
-        if let Some(event) = take_permitted_text_buffer(state, DiscardCause::NavigationUnverified) {
-            state.pending_text.push(event);
+        if let Some(text) = take_permitted_text_buffer(state, DiscardCause::NavigationUnverified) {
+            state.pending_text.push(text);
         }
     }
     state
@@ -2260,6 +2268,14 @@ fn process_key_down(s: &mut HookState, vk_code: u16, mods: u8, keystroke: bool) 
                     s.text_buf.pop();
                 } else {
                     s.text_buf.push(c);
+                    // Entered text may add it to an edit no read saw it in.
+                    if let (Some(signals), Some(focus)) = (&s.entered_text, focus) {
+                        if crate::entered_text::classify_key(vk_code, mods)
+                            == Some(crate::entered_text::Signal::Edit)
+                        {
+                            signals.note_char(c, focus.key());
+                        }
+                    }
                 }
                 if key_tag.take().is_some() {
                     s.text_tag.push(key_pid, epoch, c == '\x08');
@@ -3382,7 +3398,7 @@ mod tests {
         state.text_tag.push(7, 0, false);
         state.text_tag.push(7, 0, false);
         // Emitted text carries its keystrokes to the recorder.
-        let event =
+        let (event, _) =
             take_text_buffer_with_permit(&mut state, Some(0), None, DiscardCause::FlushUnverified)
                 .unwrap();
         assert_eq!(
@@ -3411,7 +3427,7 @@ mod tests {
         let mut refused = UiEvent::text(Utc::now(), 1, "x".into());
         refused.accounting = Some(KeystrokeTag::key(7, 0));
         assert!(process_input_content(
-            InputContentWork::Text(refused),
+            InputContentWork::Text((refused, None)),
             &state.config,
             &mut || Ok(None),
             &|| Some(0),
@@ -3639,10 +3655,9 @@ mod tests {
             .try_send(clipboard_work(Some(0)))
             .unwrap_or_else(|_| panic!("queue full"));
         content_tx
-            .try_send(InputContentWork::Text(UiEvent::text(
-                Utc::now(),
-                0,
-                "synthetic.person@example.com".into(),
+            .try_send(InputContentWork::Text((
+                UiEvent::text(Utc::now(), 0, "synthetic.person@example.com".into()),
+                None,
             )))
             .unwrap_or_else(|_| panic!("queue full"));
         drop(content_tx);

@@ -285,6 +285,23 @@ impl NativeKeyboardFocus {
         self.foreground
     }
 
+    /// The app input under this focus is recorded for: the foreground
+    /// window's (effective) process. Entered text and keystroke text both
+    /// take it from the focus their content was verified under.
+    pub(crate) fn app_name(self) -> String {
+        super::windows::get_effective_app_name(
+            HWND(self.foreground as *mut std::ffi::c_void),
+            self.pid,
+        )
+    }
+
+    /// Opaque identity of this focus (windows and processes).
+    pub(crate) fn key(self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (self.foreground, self.control, self.pid, self.control_pid).hash(&mut hasher);
+        hasher.finish()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(foreground: isize, control: isize, pid: u32) -> Self {
         Self {
@@ -2284,14 +2301,7 @@ impl ProviderRequests for text::ProviderCalls<'_> {
 /// native focus (windows and processes) it was verified under.
 fn entered_text_target(focus: NativeKeyboardFocus, element_id: u64) -> u64 {
     let mut hasher = DefaultHasher::new();
-    (
-        element_id,
-        focus.foreground,
-        focus.control,
-        focus.pid,
-        focus.control_pid,
-    )
-        .hash(&mut hasher);
+    (element_id, focus.key()).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -2758,6 +2768,7 @@ impl UiaContext {
         privacy: &KeyboardPrivacy,
         config: &UiCaptureConfig,
         relaxations: &ProbeRelaxations,
+        prompt: Option<(u64, &crate::entered_text::Prompt)>,
     ) -> crate::entered_text::ReadOutcome {
         use crate::entered_text::{CaretText, ReadFailure, ReadOutcome};
         let focus = verified.focus;
@@ -2819,13 +2830,19 @@ impl UiaContext {
             return ReadOutcome::Failed(ReadFailure::Denied);
         }
         let foreground = HWND(focus.foreground as *mut std::ffi::c_void);
-        let (_, window_title, pid) = get_window_info(foreground);
+        let (_, window_title, _) = get_window_info(foreground);
+        let target = entered_text_target(focus, element_id);
+        // The open edit's prompt applies only to its own field.
+        let prompt = prompt.and_then(|(at, prompt)| (at == target).then_some(prompt));
         ReadOutcome::Text(CaretText::new(
-            entered_text_target(focus, element_id),
+            target,
+            focus.key(),
             &text.text,
+            text.caret,
             text.truncated,
             text.source,
-            super::windows::get_effective_app_name(foreground, pid),
+            prompt,
+            focus.app_name(),
             window_title,
         ))
     }
@@ -3816,6 +3833,7 @@ impl EnteredText {
     ) {
         use crate::entered_text::{ReadFailure, ReadOutcome};
         use input_admission::{ProbeOutcome, ProbeSkip};
+        self.tracker.note_typed(self.capture.signals.take_typed());
         let (finished, due) = self
             .tracker
             .poll(self.capture.signals.counts(), Instant::now());
@@ -3825,7 +3843,13 @@ impl EnteredText {
             return;
         };
         let outcome = match (verified, probe) {
-            (Some(verified), _) => uia.read_entered_text(verified, privacy, config, relaxations),
+            (Some(verified), _) => uia.read_entered_text(
+                verified,
+                privacy,
+                config,
+                relaxations,
+                self.tracker.prompt(),
+            ),
             // Intended blocks: never read.
             (None, ProbeOutcome::Password | ProbeOutcome::Skipped(ProbeSkip::Excluded)) => {
                 ReadOutcome::Failed(ReadFailure::Denied)
@@ -3839,7 +3863,9 @@ impl EnteredText {
             ReadOutcome::NotNow => "not_now",
         };
         *self.tally.reads.entry(code).or_default() += 1;
-        let finished = self.tracker.read_done(kind, outcome, Instant::now());
+        let finished =
+            self.tracker
+                .read_done(kind, outcome, self.capture.signals.counts(), Instant::now());
         self.emit(finished);
         self.tally.report(false);
     }
@@ -3847,6 +3873,8 @@ impl EnteredText {
     /// Visual capture is paused: nothing read so far is stored.
     fn discard(&mut self) {
         self.tracker.discard();
+        // Characters typed before the pause are never added later.
+        let _ = self.capture.signals.take_typed();
     }
 
     fn stop(&mut self) {

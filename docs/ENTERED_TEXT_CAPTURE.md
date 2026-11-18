@@ -17,8 +17,12 @@ selected words were deleted is recorded with those words in "before" and
 without them in "after". "Before" therefore stores text the user then removed;
 it was displayed, but the keystroke stream never stored such text.
 
-It is a separate stream from the keystroke capture (`text` and `key` events),
-which is unchanged; whether to keep that stream is a later owner decision.
+It is a separate stream from the keystroke capture (`text` and `key` events);
+whether to keep that stream is a later owner decision. The two meet in one
+place: characters keystroke capture admitted are added to an edit when no
+read saw them (see the model). Keystroke `text` events record the app of the
+native focus their characters were verified under (the same app name entered
+text records), resolved off the hook thread by the input content worker.
 
 ## Non-goals (phase 1)
 
@@ -46,27 +50,35 @@ they move on, store it.**
   it holds more than a read keeps (4,096 UTF-16 units: one very long
   paragraph or selection). A multi-paragraph selection in a longer document
   is still a paragraph read.
-  It reads up to 50 lines ending with the caret's line, and keeps the
-  nearest **prompt line** above the caret and the lines after it, so a
-  command or a long pasted prompt is kept and the output above it is not. A
-  prompt line ends at its first `>` or `❯` (so a command may contain `>`):
-  a shell's, PowerShell (`PS C:\…> `; lines starting `>>` continue a
-  command) or cmd (`C:\…>`, which also matches lines a batch file echoes),
-  or a chat prompt, only `>` or `❯` (a terminal chat app's input,
-  box-drawing characters ignored). After a chat prompt it also reads up to
-  50 lines after the caret's and keeps the input's rows there, down to the
-  first row that is blank, only box-drawing characters or another prompt, so
-  a wrapped prompt is kept whole with the caret inside it; below a shell's
-  caret nothing is read (a terminal can draw rows there the user did not
-  type, such as a prediction list). With no prompt line in the window only
-  the caret's line is kept. Every kept line loses its trailing whitespace
-  (terminals pad rows to their width). A line window is a "before" only
-  when it is a shell prompt line alone or starts at a chat prompt, never
-  while output may still be below a shell prompt; and a "before" read
-  another way (a paragraph read of a small
-  terminal buffer) is never paired with a line window's "after". Source code
-  `text_pattern_lines`; a window over 32 K UTF-16 units is discarded
+  It reads up to 50 lines before the caret's line, that line and up to 50
+  after it, with the caret's place in them, and keeps the **input at its
+  prompt**. The prompt is learnt from the caret's line where typing starts:
+  that line up to and including its first `>`, `❯` or `$` before the caret,
+  whatever precedes the mark (`PS C:\Users\me>`, `C:\>`, `>`, `❯`,
+  `~/repo ❯`, `me@host:~$`), so a command may contain marks after it. It is
+  learnt from the read with the caret right after a prompt and no input (the
+  edit's "before"), or failing that from the edit's first read, or the read's
+  own caret line. The input runs from the nearest line above the caret that
+  starts with the prompt (within 50 lines; else the caret's line) through
+  the caret's line, so a wrapped or pasted command over several lines or a
+  long pasted prompt is kept and the output above it is not. An open edit's
+  prompt is only used for reads of its own field. Rows below the caret are kept only
+  down to the prompt's **footer**: the first non-blank row below the empty
+  input when the prompt was learnt (a chat app's border); a shell normally
+  has none, so rows a terminal draws below its caret (a prediction list) are
+  never kept, and when the footer is gone (the window was resized) none are.
+  A multiplexer's status row below an empty shell prompt (tmux, zellij)
+  becomes its footer, and rows above it are then kept. Every
+  kept line loses its trailing whitespace (terminals pad rows to their
+  width), but never text before the caret. A line window is a "before" only
+  with its caret right after its prompt and no input, never while output may
+  still be below a prompt; and a "before" read another way (a paragraph read
+  of a small terminal buffer) is never paired with a line window's "after".
+  A window without a known caret is not kept. Source code
+  `text_pattern_lines`; a window over 64 K UTF-16 units is discarded
   (`too_large`).
+- A read also returns where its **caret** is, by the text from the caret to
+  the end of the range read (a selection's start, flagged as a selection).
 - Reads are bound to an **identity**: the verified UIA element (runtime id
   hash) and the native focus (foreground window, focus window, processes).
 - The **baseline** is the latest read taken while no edit was open and after
@@ -90,9 +102,26 @@ they move on, store it.**
   that cannot start (provider paced or busy, no decision this time) is retried
   on the next poll, or with the next typing read while typing goes on, and
   given up 2 s after the last key or caret move that asked for it.
-- An edit is stored only if it has an "after" read that differs from
-  "before". One that ends before any read is dropped and counted as `lost`. Stored "before"/"after" keep only the lines that differ (the
-  common leading and trailing lines are removed).
+- **Keys typed after the last read** are added at its caret from keystroke
+  capture: the hook queues each character it admitted for an edit key, with
+  that key's place among the edit keys and the native focus it was typed
+  into. When an edit ends, the characters of the edit keys after its last
+  read are inserted at that read's caret, only when no edit key arrived while
+  the read ran, the caret was bare (no selection), and every one of those
+  keys typed exactly one character into the read's native focus; a
+  Backspace, Delete, paste, `VK_PROCESSKEY` or `VK_PACKET` key among them, a
+  character typed elsewhere, or one the queue dropped adds nothing. The hook
+  sees raw keys, so keys composed by an IME or a dead key are added as the
+  plain characters keystroke capture maps them to. Keys after Enter (by the
+  edit count taken at the Enter key) belong to the next edit, and an edit
+  ended by another field's read gets none.
+  `keys_added` records how many were added (all or none of
+  `keys_after_read`).
+- An edit is stored only if its "after" differs from its "before". With no
+  read since it began, its "after" is its "before" with the keys typed since
+  added as above; one that cannot be completed that way is dropped and
+  counted as `lost`. Stored "before"/"after" keep only the lines that differ
+  (the common leading and trailing lines are removed).
 - Signals seen in the same 25 ms poll are taken as caret first, then editing.
 
 Reads happen 300 ms after the last edit key, 150 ms after Enter and 250 ms
@@ -107,6 +136,7 @@ happen while the user is not typing or moving the caret.
 | Click into a chat box, type a prompt, pause, press Enter, box clears | the empty box | the prompt | submitted |
 | Select words with the mouse, press Delete, pause, click elsewhere | the paragraph with the words | the paragraph without them | moved |
 | Type a command in a terminal, pause, press Enter | the empty prompt line | the prompt line with the command (not its output) | enter |
+| Type, pause, type two more characters and press Enter at once | the empty box | the prompt with the last two characters added from keystroke capture | submitted |
 | Type in a paragraph, pause, press Enter | the paragraph | the paragraph as typed (the split shows in the next edit's "before") | enter |
 | Type, pause, then switch to another app and type there | first field's text | first field's text as last read | focus_changed |
 
@@ -122,7 +152,10 @@ happen while the user is not typing or moving the caret.
    different question from the hook's admission classifications (what changes
    or moves the text, not what may move focus), so it is a separate pure
    function. Counters carry no key identity; a held key's auto-repeat counts
-   each repeat.
+   each repeat. For an edit key whose character keystroke capture admitted
+   into its text buffer, the hook also queues that character, its edit count
+   and a hash of the native focus on a preallocated lock-free channel
+   (`EditSignals::note_char`; 256 at most, more are dropped).
 2. **Edit tracker** (`entered_text.rs`, platform independent, pure). Consumes
    counter snapshots and read results, produces read requests and finished
    edits. Owns timing, identity binding, the edit lifecycle, line trimming
@@ -139,7 +172,7 @@ happen while the user is not typing or moving the caret.
    is unchanged.
 4. **Event and storage.** Input event type `text_edit`: `text_content` = after;
    nullable columns `text_before`, `edit_detail` (fixed-code JSON: `ended`,
-   `source`, `baseline`, `truncated`, `keys_after_read`) and
+   `source`, `baseline`, `truncated`, `keys_after_read`, `keys_added`) and
    `text_before_redacted_at` (migration `20261116000000`). App name and window
    title come from the verified native focus. `text_before` is deliberately not
    full-text indexed. `/search?content_type=input` returns `text_before` and
@@ -192,14 +225,19 @@ happen while the user is not typing or moving the caret.
   it. `GetText` is called with the size limit. The `Value` fallback is used
   only for `Edit` controls under an unrelaxed decision. In multi-line editors
   the paragraph before the caret can hold text the user did not type; in a
-  terminal the line window keeps only the prompt onwards, but text below the
-  prompt (output of a command still running while the user types ahead, or a
-  chat app's hint lines not set off by a border or blank line) can remain,
-  and an output line that looks like a
-  prompt (starting `> ` or `❯ `, as `diff` or a quoted text prints) within
-  50 lines
-  above the caret is taken as the prompt, so the output after it is kept as
-  "after". A small terminal buffer (8 lines or fewer) is still read whole.
+  terminal the line window keeps only the input from its prompt, but text
+  below the prompt above the caret (output of a command still running while
+  the user types ahead) can remain, and an output line that starts with the
+  prompt's text (a bare `>` prompt and a quoted text, or a listing of earlier
+  commands) within 50 lines above the caret is taken as the prompt, so the
+  output after it is kept as "after". Rows below the caret are read but only
+  kept above a footer learnt at an empty prompt. A small terminal buffer
+  (8 lines or fewer) is still read whole.
+- **Typed characters** reach entered text only as keystroke capture admitted
+  them (under the same keyboard privacy decision, never while paused), and
+  only into an edit read in the same native focus. Characters wait in a
+  bounded queue and in the tracker only until a read shows them or the edit
+  ends; a pause, a failed read or a stop discards them.
 - **Relaxed decisions read only for listed processes** (owner decision 1).
 - **Password fields** are never read. A provider can expose a value the screen
   masks (styled PIN fields), so the explicit `IsPassword` gate is the defence,
@@ -216,11 +254,12 @@ happen while the user is not typing or moving the caret.
 
 ## Robustness
 
-- Hooks touch atomics only; UIA work stays on the keyboard privacy worker.
-- A read makes at most thirteen provider requests (six more for each
-  selection end moved onto the field's edge, seven
-  more for a line window and eight for the lines below a chat prompt's
-  caret) plus the two of the focus recheck, within a 150 ms budget, and has
+- Hooks touch atomics and a preallocated lock-free channel only; UIA work
+  stays on the keyboard privacy worker. The app of keystroke text is
+  resolved by the input content worker, not the hook.
+- A read makes at most eighteen provider requests (six more for each
+  selection end moved onto the field's edge, seven more for a line window)
+  plus the two of the focus recheck, within a 150 ms budget, and has
   its own per-process breaker scope
   and pacing gap (`uia_breaker::Scope::Read`, the probe's 1 s to 30 s
   schedule), so a slow text provider paces and stops reads, never probes.
@@ -239,7 +278,7 @@ The worker logs `entered_text_summary` at most once a minute: reads by outcome
 (`text_pattern`, `text_pattern_lines`, `value`, `no_text_source`, `denied`,
 `relaxed`, `changed`, `timeout`, `too_large`, `failed`, `not_now`), emitted
 edits by `ended` (the recorder can still refuse them), and `lost` edits (ended
-before any read) by `ended`. Read latency and
+before any read, with no keys that could be added to a "before") by `ended`. Read latency and
 per-process counts are not recorded yet. `breaker_open_read_processes` is in
 the UIA breaker metrics.
 
@@ -248,13 +287,15 @@ the UIA breaker metrics.
 - Tracker (`entered_text::tests`): the worked examples, a caret move before
   the settle read, another field, idle and stop endings, keys after the last
   read, failed and retried reads, pause discard, bounds and line breaks, key
-  classification, the typing read and a quick Enter, lost edits, prompt
-  lines (PowerShell, redirection, continuation, cmd, a boxed chat prompt, no
-  prompt, other line breaks, an empty caret row, the 50-line reach, padded
-  rows, a wrapped `❯` prompt with the caret inside it and the input's end
-  below, rows below a shell's caret neither kept nor read, shell and chat
-  shapes, non-prompt shapes), the empty and the wrapped `❯` prompt as
-  "before", when a line window replaces a paragraph read, line windows as
+  classification, the typing read and a quick Enter, lost edits, line
+  windows (PowerShell with redirection, `$`, `path ❯`, cmd and boxed
+  prompts, a multi-line command at the learnt prompt, no prompt, other line
+  breaks, the 50-line reach, padding but not a typed space, rows below a
+  shell's caret, an empty prompt learnt with its footer, a wrapped prompt
+  with the caret inside it, a missing footer), the learnt prompt cutting its
+  edit, keys added after the last read, in the middle and to an edit never
+  read, and not added (a key without a character, another focus, a key during
+  the read), keys after Enter, when a line window replaces a paragraph read, line windows as
   "before" only at the prompt (also after an idle end), no "before" read
   another way, typing reads a second apart and a busy provider during typing.
 - Breaker: a costly or slow read stops and paces reads but not probes; a
@@ -269,10 +310,12 @@ the UIA breaker metrics.
 
 - Paste or cut through a right-click or menu sends no edit key: the edit is
   not seen until a later key.
-- Text typed after the last read is missing from "after" when the user
-  moves on or presses Enter within 300 ms (`keys_after_read` counts those
-  keys); a prompt typed and sent within a second with no pause stores
-  nothing (counted as `lost`). Text typed within
+- Text typed after the last read is added from keystroke capture only when
+  every key typed one character (see the model); otherwise it is missing from
+  "after" (`keys_after_read` counts those keys, `keys_added` is 0), and an
+  edit with no read and no "before" is dropped (`lost`). The characters come
+  from keystroke capture's own key mapping, so they are only as right as its
+  text. Text typed within
   150 ms after Enter lands in the Enter read, so it appears as existing text
   in the next edit's "before" (or nowhere, if typing stops there).
 - A chat box that clears more than 150 ms after Enter ends the edit as
@@ -280,14 +323,16 @@ the UIA breaker metrics.
   replaces it unseen).
 - Apps without a text pattern on the focused element store nothing
   (`no_text_source`).
-- Line windows: a prompt not matching the rule (`$`, `path ❯`, `>>>`) keeps
-  only the caret's line; a blank line inside a chat input below the caret ends
-  the kept text there; a shell command wrapped below the caret keeps only
-  its rows up to the caret's; a chat app's menu drawn with `❯` (an option
-  picker) is taken as its prompt; a pasted or output line that looks like a
-  prompt
-  (`> quote`) starts the kept text there; a very long word-processor
-  paragraph is read as its caret line (visual line) with no "before".
+- Line windows: a prompt without `>`, `❯` or `$` (`%`, `#`) keeps only the
+  caret's line; an edit whose typing began without an empty-prompt read
+  learns its prompt from its first read's caret line, so a multi-line input
+  typed that way keeps only its rows from the caret's, and none below it; a
+  shell command wrapped below the caret keeps only its rows up to the
+  caret's; a chat app's menu row drawn with its prompt mark (an option
+  picker) is taken as the prompt; a pasted or output line that starts with
+  the prompt's text (`> quote` under a bare `>` prompt) starts the kept text
+  there; a very long word-processor paragraph is read as its caret line
+  (visual line) with no "before".
 - While a process's read breaker is open (1 s to 30 s), reads there cannot
   start; after 2 s the open edit and baseline are given up, counted only as
   `not_now`.
